@@ -858,7 +858,7 @@ impl<'a> Evaluator<'a> {
                         Box::new(right_value),
                     )
                 }
-                TokenType::Equals => {
+                TokenType::Equals | TokenType::Iff => {
                     AcornType::Bool.check_eq(expected_type, token)?;
                     let left_value = self.evaluate_value_with_stack(stack, left, None)?;
                     let right_value =
