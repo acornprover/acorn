@@ -898,7 +898,8 @@ fn parse_partial_expressions(
 
 // Find the index of the operator that should operate last. (Ie, the root of the tree.)
 // If there are no operators, return None.
-fn find_last_operator(partials: &VecDeque<PartialExpression>) -> Result<Option<usize>> {
+fn find_last_operator(partials: &mut VecDeque<PartialExpression>) -> Result<Option<usize>> {
+    group_type_parameters(partials)?; 
     let operators = partials.iter().enumerate().filter_map(|(i, partial)| {
         match partial {
             PartialExpression::Unary(token) => {
@@ -941,13 +942,25 @@ fn find_last_operator(partials: &VecDeque<PartialExpression>) -> Result<Option<u
 // index is the index of the first partial expression after a '<'.
 // If so, returns the index of the closing '>'.
 fn looks_like_type_params(partials: &VecDeque<PartialExpression>, index: usize) -> Option<usize> {
+    let mut type_params_nested_level: usize = 1;
     for (i, partial) in partials.iter().enumerate().skip(index) {
         match partial {
             PartialExpression::Binary(token) => match token.token_type {
                 TokenType::Comma | TokenType::RightArrow | TokenType::Dot | TokenType::Colon => {
                     continue
                 }
-                TokenType::GreaterThan => return Some(i),
+                TokenType::LessThan => {
+                    type_params_nested_level = type_params_nested_level + 1;
+                    continue
+                }
+                TokenType::GreaterThan => {
+                    if type_params_nested_level == 1 {
+                        return Some(i)
+                    } else {
+                        type_params_nested_level = type_params_nested_level - 1;
+                        continue
+                    }
+                    }
                 _ => {
                     return None;
                 }
@@ -1075,7 +1088,7 @@ fn combine_partial_expressions(
 
     // If there are operators, find the operator that should operate last,
     // and recurse on each of the two sides.
-    if let Some(index) = find_last_operator(&partials)? {
+    if let Some(index) = find_last_operator(&mut partials)? {
         if index == 0 {
             let partial = partials.pop_front().unwrap();
             if let PartialExpression::Unary(token) = partial {
