@@ -33,6 +33,10 @@ pub struct Environment {
     /// Each node depends only on the nodes before it.
     pub nodes: Vec<Node>,
 
+    /// Theorems consist of theorem statements that need to be proven.
+    /// Used to check for duplicate theorems
+    pub theorems: HashSet<AcornValue>,
+
     /// Whether a plain "false" is anywhere in this environment.
     /// This indicates that the environment is supposed to have contradictory facts.
     pub includes_explicit_false: bool,
@@ -76,6 +80,7 @@ impl Environment {
             module_id,
             bindings: BindingMap::new(module_id),
             nodes: Vec::new(),
+            theorems: HashSet::new(),
             includes_explicit_false: false,
             first_line: 0,
             line_types: Vec::new(),
@@ -95,6 +100,7 @@ impl Environment {
             module_id: self.module_id,
             bindings: self.bindings.clone(),
             nodes: Vec::new(),
+            theorems: HashSet::new(),
             includes_explicit_false: false,
             first_line,
             line_types: Vec::new(),

@@ -489,6 +489,15 @@ impl Environment {
             return Err(ts.claim.error(&message));
         }
 
+        let duplicate;
+
+        if self.theorems.contains(&external_claim) {
+            duplicate = true;
+        }else {
+            duplicate = false;
+            self.theorems.insert(external_claim.clone());
+        }
+
         let (premise, goal) = match &unbound_claim {
             AcornValue::Binary(BinaryOp::Implies, left, right) => {
                 let premise_range = match ts.claim.premise() {
@@ -552,6 +561,7 @@ impl Environment {
                     range,
                     premise,
                     goal,
+                    duplicate
                 ),
                 statement.first_line(),
                 statement.last_line(),

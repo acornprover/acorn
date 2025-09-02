@@ -9,7 +9,7 @@ use crate::names::{ConstantName, DefinedName, InstanceName};
 use crate::token::TokenType;
 
 /// Represents a function application with a function and its arguments.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Hash, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FunctionApplication {
     /// The function being applied
     pub function: Box<AcornValue>,
@@ -65,7 +65,7 @@ impl FunctionApplication {
 }
 
 /// Represents binary operators used in Acorn
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Hash, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BinaryOp {
     Implies,
     Equals,
@@ -218,7 +218,7 @@ impl ConstantInstance {
 
 /// Two AcornValue compare to equal if they are structurally identical.
 /// Comparison doesn't do any evaluations.
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Hash, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum AcornValue {
     /// A variable that is bound to a value on the stack.
     /// Represented by (stack index, type).

@@ -44,6 +44,9 @@ pub struct Block {
 
     /// Whether this block is a todo block (goals inside should not be collected)
     pub is_todo: bool,
+
+    /// Whether this block is a duplicate theorem (should return an error)
+    pub is_duplicate_theorem: bool,
 }
 
 /// The different ways to construct a block.
@@ -51,7 +54,7 @@ pub struct Block {
 /// I should probably rename this object.
 #[derive(Debug)]
 pub enum BlockParams<'a> {
-    /// (theorem name, theorem range, premise, goal)
+    /// (theorem name, theorem range, premise, goal, duplicate)
     ///
     /// The premise and goal are unbound, to be proved based on the args of the theorem.
     ///
@@ -67,6 +70,7 @@ pub enum BlockParams<'a> {
         Range,
         Option<(AcornValue, Range)>,
         AcornValue,
+        bool
     ),
 
     /// The assumption to be used by the block, and the range of this assumption.
@@ -142,6 +146,7 @@ impl Block {
         }
 
         let is_todo = matches!(params, BlockParams::Todo);
+        let mut is_duplicate_theorem = false;
         let goal = match params {
             BlockParams::Conditional(condition, range) => {
                 let source = Source::premise(env.module_id, range, subenv.depth);
@@ -149,7 +154,7 @@ impl Block {
                 subenv.add_node(Node::structural(project, &subenv, prop));
                 None
             }
-            BlockParams::Theorem(theorem_name, theorem_range, premise, unbound_goal) => {
+            BlockParams::Theorem(theorem_name, theorem_range, premise, unbound_goal, duplicate) => {
                 if let Some(name) = theorem_name {
                     // Within the theorem block, the theorem is treated like a function,
                     // with propositions to define its identity.
@@ -165,6 +170,8 @@ impl Block {
                     let prop = Proposition::monomorphic(bound, source);
                     subenv.add_node(Node::structural(project, &subenv, prop));
                 }
+
+                is_duplicate_theorem = duplicate;
 
                 let bound_goal = unbound_goal
                     .bind_values(0, 0, &internal_args)
@@ -251,6 +258,7 @@ impl Block {
             env: subenv,
             goal,
             is_todo,
+            is_duplicate_theorem
         })
     }
 

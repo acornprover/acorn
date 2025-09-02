@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 use crate::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::acorn_value::AcornValue;
 use crate::binding_map::BindingMap;
-use crate::block::NodeCursor;
+use crate::block::{Node, NodeCursor};
 use crate::build_cache::BuildCache;
 use crate::builder::{BuildEvent, BuildStatus, Builder};
 use crate::code_generator::{self, CodeGenerator};
@@ -606,6 +606,19 @@ impl Project {
         loop {
             if cursor.requires_verification() {
                 let block_name = cursor.block_name();
+                // println!("{} at {} to {}", cursor.node(), cursor.node().first_line(), cursor.node().last_line());
+                match cursor.node() {
+                    Node::Block(b, _f) => {
+                        if b.is_duplicate_theorem {
+                            if cursor.node().has_goal() {
+                                // println!("Is a duplicate");
+                                let goalcontext = cursor.goal_context().unwrap();
+                                builder.log_proving_info(&goalcontext, "Duplicate Theorem");
+                            }
+                        }
+                    },
+                    _ => {},
+                }
                 if self.check_hashes
                     && module_hash
                         .matches_through_line(&old_module_cache, cursor.node().last_line())
