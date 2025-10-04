@@ -306,7 +306,7 @@ impl CodeGenerator<'_> {
 
     /// Check if we can infer a function's type parameters from its argument types.
     ///
-    /// The key insight: if a function foo<P, Q> takes argument of type P,
+    /// The key insight: if a function foo[P, Q] takes argument of type P,
     /// we can't infer Q from just the argument. So we need explicit parameters.
     fn can_infer_type_params_from_args(&self, function: &AcornValue, args: &[AcornValue]) -> bool {
         // Get the constant and its parameters
@@ -706,7 +706,7 @@ impl CodeGenerator<'_> {
                                     let datatype_attr_name =
                                         DefinedName::datatype_attr(datatype, &attr);
                                     if !self.bindings.constant_name_in_use(&datatype_attr_name) {
-                                        // Generate DataType.attribute instead of Typeclass.attribute<DataType>
+                                        // Generate DataType.attribute instead of Typeclass.attribute[DataType]
                                         // only if the datatype doesn't override this attribute
                                         let lhs = self.type_to_expr(&c.params[0])?;
                                         let rhs = Expression::generate_identifier(&attr);
@@ -1068,7 +1068,7 @@ mod tests {
         p.mock(
             "/mock/pair.ac",
             r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
@@ -1080,7 +1080,7 @@ mod tests {
             from pair import Pair
             "#,
         );
-        p.check_code("main", "forall(x0: Pair<Bool, Bool>) { true }");
+        p.check_code("main", "forall(x0: Pair[Bool, Bool]) { true }");
         p.check_code(
             "main",
             "forall(x0: Bool, x1: Bool) { Pair.new(x0, x1).second = x1 }",
@@ -1093,7 +1093,7 @@ mod tests {
         p.mock(
             "/mock/pair.ac",
             r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
@@ -1105,7 +1105,7 @@ mod tests {
             import pair
             "#,
         );
-        p.check_code("main", "forall(x0: pair.Pair<Bool, Bool>) { true }");
+        p.check_code("main", "forall(x0: pair.Pair[Bool, Bool]) { true }");
     }
 
     #[test]
@@ -1114,12 +1114,12 @@ mod tests {
         p.mock(
             "/mock/pair.ac",
             r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
 
-            let pbbn: (Bool, Bool) -> Pair<Bool, Bool> = Pair<Bool, Bool>.new
+            let pbbn: (Bool, Bool) -> Pair[Bool, Bool] = Pair[Bool, Bool].new
             "#,
         );
         p.expect_ok("pair");
@@ -1132,12 +1132,12 @@ mod tests {
         p.mock(
             "/mock/pair.ac",
             r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
 
-            define double<T>(x: T) -> Pair<T, T> {
+            define double[T](x: T) -> Pair[T, T] {
                 Pair.new(x, x)
             }
             "#,
@@ -1157,12 +1157,12 @@ mod tests {
         p.mock(
             "/mock/pair.ac",
             r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
 
-            define double<T>(x: T) -> Pair<T, T> {
+            define double[T](x: T) -> Pair[T, T] {
                 Pair.new(x, x)
             }
             "#,
@@ -1246,7 +1246,7 @@ mod tests {
                 mul: (M, M) -> M
             }
 
-            theorem goal<M: Magma>(x: M) {
+            theorem goal[M: Magma](x: M) {
                 x * x = x
             }
             "#,
@@ -1268,7 +1268,7 @@ mod tests {
                 thing_property: Bool
             }
 
-            theorem goal<T: Thing>(x: T) {
+            theorem goal[T: Thing](x: T) {
                 x * x = x
             }
             "#,
@@ -1298,7 +1298,7 @@ mod tests {
                 bar_property: Bool
             }
 
-            theorem goal<B: Bar>(x: B) {
+            theorem goal[B: Bar](x: B) {
                 x + -x = B.zero + B.zero
             }
             "#,
@@ -1316,9 +1316,9 @@ mod tests {
                 item: F
             }
 
-            inductive List<T> {
+            inductive List[T] {
                 nil
-                cons(T, List<T>)
+                cons(T, List[T])
             }
 
             structure Bar {
@@ -1332,13 +1332,13 @@ mod tests {
             }
 
             theorem goal2 {
-                exists(a: List<Bool>) {
+                exists(a: List[Bool]) {
                     true
                 }
             }
 
-            theorem goal3<F: Foo> {
-                exists(a: List<F>) {
+            theorem goal3[F: Foo] {
+                exists(a: List[F]) {
                     true
                 }
             }
@@ -1351,8 +1351,8 @@ mod tests {
             "#,
         );
         p.check_goal_code("main", "goal1", "exists(k0: Bar) { true }");
-        p.check_goal_code("main", "goal2", "exists(k0: List<Bool>) { true }");
-        p.check_goal_code("main", "goal3", "exists(k0: List<F>) { true }");
+        p.check_goal_code("main", "goal2", "exists(k0: List[Bool]) { true }");
+        p.check_goal_code("main", "goal3", "exists(k0: List[F]) { true }");
         p.check_goal_code("main", "goal4", "exists(k0: Bool) { k0 }");
     }
 
@@ -1484,15 +1484,15 @@ mod tests {
             }
 
             theorem const_attr(b: Bar) {
-                Foo.flag<Bar>
+                Foo.flag[Bar]
             }
 
             theorem fn_attr(b: Bar) {
-                Foo.foo<Bar>(b)
+                Foo.foo[Bar](b)
             }
             "#,
         );
-        p.check_goal_code("main", "const_attr", "Foo.flag<Bar>");
-        p.check_goal_code("main", "fn_attr", "Foo.foo<Bar>(b)");
+        p.check_goal_code("main", "const_attr", "Foo.flag[Bar]");
+        p.check_goal_code("main", "fn_attr", "Foo.foo[Bar](b)");
     }
 }

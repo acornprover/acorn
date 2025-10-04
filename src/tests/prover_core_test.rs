@@ -559,7 +559,7 @@ fn test_templated_proof() {
             let t2: Thing = axiom
             let t3: Thing = axiom
             
-            define foo<T>(x: T) -> Bool { axiom }
+            define foo[T](x: T) -> Bool { axiom }
 
             axiom a12 { foo(t1) implies foo(t2) }
             axiom a23 { foo(t2) implies foo(t3) }
@@ -839,10 +839,10 @@ fn test_code_gen_not_losing_conclusion() {
 #[test]
 fn test_proving_identity_is_surjective() {
     // To prove this, the monomorphizer needs to instantiate the definitions of:
-    // is_surjective<V, V>
-    // identity<V>
+    // is_surjective[V, V]
+    // identity[V]
     let text = r#"
-            define is_surjective<T, U>(f: T -> U) -> Bool {
+            define is_surjective[T, U](f: T -> U) -> Bool {
                 forall(y: U) {
                     exists(x: T) {
                         f(x) = y
@@ -850,12 +850,12 @@ fn test_proving_identity_is_surjective() {
                 }
             }
 
-            define identity<T>(x: T) -> T {
+            define identity[T](x: T) -> T {
                 x
             }
 
-            theorem identity_is_surjective<V> {
-                is_surjective(identity<V>)
+            theorem identity_is_surjective[V] {
+                is_surjective(identity[V])
             }
         "#;
     verify_succeeds(text);
@@ -1729,7 +1729,7 @@ fn test_proving_with_inheritance() {
             bar_property: Bool
         }
 
-        axiom bar_has_foo_property<B: Bar> {
+        axiom bar_has_foo_property[B: Bar] {
             B.foo_property
         }
 
@@ -1737,7 +1737,7 @@ fn test_proving_with_inheritance() {
             baz_property: Bool
         }
 
-        theorem goal<B: Baz> {
+        theorem goal[B: Baz] {
             B.foo_property
         }
         "#,
@@ -1765,7 +1765,7 @@ fn test_proving_with_theorem_arg() {
             }
         }
 
-        theorem goal<T: Thing>(a: T, b: T, c: T) {
+        theorem goal[T: Thing](a: T, b: T, c: T) {
             a + b + c = b + c + a
         }
         "#,
@@ -1853,13 +1853,13 @@ fn test_proving_with_type_param() {
     p.mock(
         "/mock/main.ac",
         r#"
-        inductive List<T> {
+        inductive List[T] {
             nil
-            cons(T, List<T>)
+            cons(T, List[T])
         }
 
-        attributes List<T> {
-            define add(self, other: List<T>) -> List<T> {
+        attributes List[T] {
+            define add(self, other: List[T]) -> List[T] {
                 match self {
                     List.nil {
                         other
@@ -1871,8 +1871,8 @@ fn test_proving_with_type_param() {
             }
         }
 
-        theorem goal<T>(list: List<T>) {
-            list + List.nil<T> = list
+        theorem goal[T](list: List[T]) {
+            list + List.nil[T] = list
         }
         "#,
     );
@@ -1940,12 +1940,12 @@ fn test_proving_list_contains() {
     p.mock(
         "/mock/main.ac",
         r#"
-        inductive List<T> {
+        inductive List[T] {
             nil
-            cons(T, List<T>)
+            cons(T, List[T])
         }
 
-        attributes List<T> {
+        attributes List[T] {
             define contains(self, elem: T) -> Bool {
                 match self {
                     List.nil {
@@ -1962,15 +1962,15 @@ fn test_proving_list_contains() {
             }
         }
 
-        define finite_constraint<T>(contains: T -> Bool) -> Bool {
-            exists(superset: List<T>) {
+        define finite_constraint[T](contains: T -> Bool) -> Bool {
+            exists(superset: List[T]) {
                 forall(x: T) {
                     contains(x) implies superset.contains(x)
                 }
             }
         }
 
-        theorem goal<T>(ts: List<T>) {
+        theorem goal[T](ts: List[T]) {
             finite_constraint(ts.contains)
         }
         "#,
@@ -1989,18 +1989,18 @@ fn test_proving_needing_templates() {
             origin: P
         }
 
-        define foo<P: Pointed, Q: Pointed>(x: P) -> Q {
+        define foo[P: Pointed, Q: Pointed](x: P) -> Q {
             Q.origin
         }
 
-        define is_const<T, U>(f: T -> U) -> Bool {
+        define is_const[T, U](f: T -> U) -> Bool {
             forall(x: T, y: T) {
                 f(x) = f(y)
             }
         }
 
-        theorem goal<P: Pointed, Q: Pointed> {
-            is_const(foo<P, Q>)
+        theorem goal[P: Pointed, Q: Pointed] {
+            is_const(foo[P, Q])
         }
         "#,
     );

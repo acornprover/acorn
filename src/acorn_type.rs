@@ -126,7 +126,7 @@ impl PotentialType {
 
     /// If this potential type represents a base datatype, ie with no type parameters,
     /// return a reference to the datatype.
-    /// Thus, Nat is a base datatype, and List<T> is a base datatype, but List<Bool> is not.
+    /// Thus, Nat is a base datatype, and List[T] is a base datatype, but List[Bool] is not.
     pub fn as_base_datatype(&self) -> Option<&Datatype> {
         match self {
             PotentialType::Resolved(AcornType::Data(datatype, params)) => {
@@ -239,14 +239,14 @@ impl fmt::Display for TypeParam {
 impl TypeParam {
     /// Converts a list of type parameters to a string representation.
     pub fn params_to_str(params: &[TypeParam]) -> String {
-        let mut result = "<".to_string();
+        let mut result = "[".to_string();
         for (i, param) in params.iter().enumerate() {
             if i > 0 {
                 result.push_str(", ");
             }
             result.push_str(&format!("{}", param));
         }
-        result.push('>');
+        result.push(']');
         result
     }
 }
@@ -276,7 +276,7 @@ pub enum AcornType {
     /// For example, in:
     ///
     /// ```acorn
-    /// theorem reverse_twice<T>(list: List<T>) {
+    /// theorem reverse_twice[T](list: List[T]) {
     ///     // Imagine some proof here.
     ///     list.reverse.reverse = list
     /// }
@@ -560,7 +560,7 @@ impl fmt::Display for AcornType {
             AcornType::Data(datatype, params) => {
                 write!(f, "{}", datatype.name)?;
                 if !params.is_empty() {
-                    write!(f, "<{}>", AcornType::types_to_str(params))?;
+                    write!(f, "[{}]", AcornType::types_to_str(params))?;
                 }
                 Ok(())
             }

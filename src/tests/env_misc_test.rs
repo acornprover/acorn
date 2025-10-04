@@ -181,7 +181,7 @@ fn test_forall_block_ending_with_exists() {
 #[test]
 fn test_type_params_cleaned_up() {
     let mut env = Environment::test();
-    env.add("define foo<T>(a: T) -> Bool { axiom }");
+    env.add("define foo[T](a: T) -> Bool { axiom }");
     assert!(env.bindings.get_type_for_typename("T").is_none());
 }
 

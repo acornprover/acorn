@@ -32,7 +32,7 @@ fn test_env_typeclass_in_define_template() {
             typeclass M: Magma {
                 mul: (M, M) -> M
             }
-            define true_fn<T: Magma>(a: T) -> Bool {
+            define true_fn[T: Magma](a: T) -> Bool {
                 true
             }
             "#,
@@ -47,7 +47,7 @@ fn test_env_typeclass_attributes() {
             typeclass M: Magma {
                 mul: (M, M) -> M
             }
-            define squared<T: Magma>(a: T) -> T {
+            define squared[T: Magma](a: T) -> T {
                 Magma.mul(a, a)
             }
             "#,
@@ -62,7 +62,7 @@ fn test_env_typeclass_instance_methods() {
             typeclass M: Magma {
                 mul: (M, M) -> M
             }
-            define squared<T: Magma>(a: T) -> T {
+            define squared[T: Magma](a: T) -> T {
                 a.mul(a)
             }
             "#,
@@ -77,7 +77,7 @@ fn test_env_typeclass_in_theorem_template() {
             typeclass M: Magma {
                 mul: (M, M) -> M
             }
-            theorem wrong_but_syntactic<Q: Magma>(a: Q, b: Q) {
+            theorem wrong_but_syntactic[Q: Magma](a: Q, b: Q) {
                 a.mul(b) = b.mul(a)
             }
             "#,
@@ -96,7 +96,7 @@ fn test_env_typechecking_with_typeclasses() {
     );
     env.bad(
         r#"
-            theorem wrong_by_typecheck<Q: Magma>(a: Q, b: Q) {
+            theorem wrong_by_typecheck[Q: Magma](a: Q, b: Q) {
                 a.mul(b) = b.mul
             }
             "#,
@@ -112,12 +112,12 @@ fn test_env_typeclass_in_structure() {
                 mul: (M, M) -> M
             }
             
-            structure MagmaPair<T: Magma> {
+            structure MagmaPair[T: Magma] {
                 first: T
                 second: T
             }
 
-            attributes MagmaPair<T: Magma> {
+            attributes MagmaPair[T: Magma] {
                 define prod(self) -> T {
                     self.first.mul(self.second)
                 }
@@ -135,7 +135,7 @@ fn test_env_typeclasses_match_between_structure_and_class() {
                 mul: (M, M) -> M
             }
             
-            structure MagmaPair<T> {
+            structure MagmaPair[T] {
                 first: T
                 second: T
             }
@@ -143,7 +143,7 @@ fn test_env_typeclasses_match_between_structure_and_class() {
     );
     env.bad(
         r#"
-            attributes MagmaPair<T: Magma> {
+            attributes MagmaPair[T: Magma] {
                 define prod(self) -> T {
                     self.first.mul(self.second)
                 }
@@ -162,7 +162,7 @@ fn test_env_operator_on_typeclass() {
             }
             
             // Not true but syntactically valid
-            theorem commutative<T: Magma>(a: T, b: T) {
+            theorem commutative[T: Magma](a: T, b: T) {
                 a * b = b * a
             }
             "#,
@@ -399,7 +399,7 @@ fn test_env_parametrizing_typeclass_constant() {
             }
 
             theorem goal {
-                Z2.zero = PointedSet.basepoint<Z2>
+                Z2.zero = PointedSet.basepoint[Z2]
             }
             "#,
     );
@@ -434,7 +434,7 @@ fn test_env_arbitrary_type_attributes() {
             typeclass F: Flagged {
                 flag: Bool
             }
-            theorem goal<F: Flagged> {
+            theorem goal[F: Flagged] {
                 F.flag or not F.flag
             }
             "#,
@@ -453,7 +453,7 @@ fn test_env_bool_not_instance_of_anything() {
         instance Foo: Flagged {
             let flag: Bool = true
         }
-        define get_flag<F: Flagged>(x: F) -> Bool {
+        define get_flag[F: Flagged](x: F) -> Bool {
             F.flag
         }
         "#,
@@ -480,7 +480,7 @@ fn test_env_typechecking_captures_instance_relationships() {
         instance Bar: Flagged {
             let flag: Bool = true
         }
-        define get_flag<F: Flagged>(x: F) -> Bool {
+        define get_flag[F: Flagged](x: F) -> Bool {
             F.flag
         }
         theorem goal_bar(b: Bar) {
@@ -510,7 +510,7 @@ fn test_env_typeclasses_can_have_conditions() {
             }
         }
 
-        theorem are_equal<S: Singleton>(a: S, b: S) {
+        theorem are_equal[S: Singleton](a: S, b: S) {
             a = b
         } by {
             Singleton.unique(a)
@@ -576,10 +576,10 @@ fn test_env_let_statements_with_params() {
             zero: P
         }
 
-        let z<P: PointedSet>: P = P.zero
+        let z[P: PointedSet]: P = P.zero
 
-        define is_zero<P: PointedSet>(x: P) -> Bool {
-            z<P> = x
+        define is_zero[P: PointedSet](x: P) -> Bool {
+            z[P] = x
         }
         "#,
     );
@@ -596,9 +596,9 @@ fn test_typeclass_codegen() {
                 bar: F
             }
 
-            let qux<F: Foo>: Bool = axiom
+            let qux[F: Foo]: Bool = axiom
 
-            theorem goal<F: Foo>(f: F) {
+            theorem goal[F: Foo](f: F) {
                 true
             }
         "#,
@@ -608,7 +608,7 @@ fn test_typeclass_codegen() {
     env.get_bindings("goal").expect_good_code("f + f");
     env.get_bindings("goal").expect_good_code("F.bar");
     env.get_bindings("goal").expect_good_code("F.add");
-    env.get_bindings("goal").expect_good_code("qux<F>");
+    env.get_bindings("goal").expect_good_code("qux[F]");
 }
 
 #[test]
@@ -644,7 +644,7 @@ fn test_env_handles_bad_typeclass_name_in_theorem() {
     let mut env = Environment::test();
     env.bad(
         r#"
-            theorem goal<F: Foo> {
+            theorem goal[F: Foo] {
                 true
             }
         "#,
@@ -656,15 +656,15 @@ fn test_env_handles_bad_typeclass_name_in_class_param() {
     let mut env = Environment::test();
     env.add(
         r#"
-            inductive List<T> {
+            inductive List[T] {
                 nil
-                cons(T, List<T>)
+                cons(T, List[T])
             }
             "#,
     );
     env.bad(
         r#"
-            attributes List<F: Foo> {
+            attributes List[F: Foo] {
                 let b: Bool = true
             }
         "#,
@@ -897,8 +897,8 @@ fn test_env_typeclass_with_numeral_attributes() {
                 bar_property: B -> Bool
             }
 
-            theorem goal<B: Bar>(b: B) {
-                B.0 = Foo.0<B>
+            theorem goal[B: Bar](b: B) {
+                B.0 = Foo.0[B]
             }
         "#,
     );
@@ -966,7 +966,7 @@ fn test_env_basic_typeclass_attributes() {
             instance Bar: Foo
 
             theorem test_typeclass_attribute(b: Bar) {
-                Foo.flag<Bar> = false
+                Foo.flag[Bar] = false
             }
 
             theorem test_instance_attribute(b: Bar) {
@@ -1011,7 +1011,7 @@ fn test_env_typeclass_attributes_no_type_params() {
     );
     env.bad(
         r#"
-            attributes F: Foo<T> {
+            attributes F: Foo[T] {
                 let flag: Bool = false
             }
         "#,
@@ -1122,12 +1122,12 @@ fn test_env_typeclass_operators() {
             }
             
             // Test operator on generic type with Addable constraint
-            theorem test_generic_addable<T: Addable>(a: T, b: T) {
+            theorem test_generic_addable[T: Addable](a: T, b: T) {
                 a + b = a
             }
             
             // Test operator on generic type with MoreAddable constraint
-            theorem test_generic_more_addable<T: MoreAddable>(a: T) {
+            theorem test_generic_more_addable[T: MoreAddable](a: T) {
                 a + T.zero = a
             }
         "#,
@@ -1164,7 +1164,7 @@ fn test_env_constant_attributes_on_extensions() {
             }
             
             theorem test_bar_flag {
-                Bar.flag<TestType> = true
+                Bar.flag[TestType] = true
             }
             
             theorem test_instance_flag(t: TestType) {
@@ -1188,7 +1188,7 @@ fn test_accessing_inherited_required_attributes() {
                 bar_flag: Bool
             }
 
-            theorem goal<B: Bar>(b: B) {
+            theorem goal[B: Bar](b: B) {
                 b.foo = B.foo_flag
             }
         "#,

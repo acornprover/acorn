@@ -120,7 +120,7 @@ impl fmt::Display for ConstantInstance {
         write!(f, "{}", self.name)?;
         if !self.params.is_empty() {
             let types: Vec<_> = self.params.iter().map(|t| t.to_string()).collect();
-            write!(f, "<{}>", types.join(", "))?;
+            write!(f, "[{}]", types.join(", "))?;
         }
         Ok(())
     }

@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn test_theorem_with_type_parameter() {
         ok(indoc! {"
-        axiom recursion_base<T>(f: T -> T, a: T) {
+        axiom recursion_base[T](f: T -> T, a: T) {
             recursion(f, a, 0) = a
         }"});
     }
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn test_definition_with_type_parameter() {
         ok(indoc! {"
-        define recursion<T>(f: T -> T, a: T, n: Nat) -> Nat {
+        define recursion[T](f: T -> T, a: T, n: Nat) -> Nat {
             axiom
         }"});
     }
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn test_parsing_structure_with_type_params() {
         ok(indoc! {"
-        structure Pair<T, U> {
+        structure Pair[T, U] {
             first: T
             second: U
         }"});
@@ -511,8 +511,8 @@ mod tests {
     #[test]
     fn test_parsing_attributes_statement_with_type_params() {
         ok(indoc! {"
-        attributes Pair<T, U> {
-            define swap(self) -> Pair<U, T> {
+        attributes Pair[T, U] {
+            define swap(self) -> Pair[U, T] {
                 Pair.new(self.second, self.first)
             }
         }"});
@@ -560,16 +560,16 @@ mod tests {
 
     #[test]
     fn test_parsing_parametrized_let_statements() {
-        ok("let foo<T>: T = bar<T>");
-        ok("let foo<T: Thing>: T = bar<T>");
+        ok("let foo[T]: T = bar[T]");
+        ok("let foo[T: Thing]: T = bar[T]");
     }
 
     #[test]
     fn test_parsing_parametrized_inductive_statement() {
         ok(indoc! {"
-        inductive List<T> {
+        inductive List[T] {
             nil
-            cons(T, List<T>)
+            cons(T, List[T])
         }"});
     }
 
@@ -635,7 +635,7 @@ mod tests {
     fn test_function_must_have_arguments() {
         fail_with(
             indoc! {"
-            define foo<T> -> Bool {
+            define foo[T] -> Bool {
                 true
             }"},
             "must have at least one argument",

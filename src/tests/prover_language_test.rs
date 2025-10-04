@@ -142,7 +142,7 @@ fn test_prover_gets_structural_induction() {
 #[test]
 fn test_proving_parametric_theorem_basic() {
     let text = r#"
-            theorem goal<T>(a: T, b: T, c: T) {
+            theorem goal[T](a: T, b: T, c: T) {
                 a = b and b = c implies a = c
             } by {
                 if (a = b and b = c) {
@@ -156,7 +156,7 @@ fn test_proving_parametric_theorem_basic() {
 #[test]
 fn test_proving_parametric_theorem_no_block() {
     let text = r#"
-            theorem goal<T>(a: T, b: T, c: T) { a = b and b = c implies a = c }
+            theorem goal[T](a: T, b: T, c: T) { a = b and b = c implies a = c }
         "#;
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
@@ -167,7 +167,7 @@ fn test_citing_parametric_theorem() {
         r#"
             type Nat: axiom
             let zero: Nat = axiom
-            theorem foo<T>(a: T) { a = a }
+            theorem foo[T](a: T) { a = a }
             theorem goal { foo(zero) }
         "#,
     );
@@ -177,7 +177,7 @@ fn test_citing_parametric_theorem() {
 fn test_applying_parametric_function() {
     let text = r#"
             type Nat: axiom
-            define foo<T>(a: T) -> Bool { (a = a) }
+            define foo[T](a: T) -> Bool { (a = a) }
             let zero: Nat = axiom
             theorem goal { foo(zero) }
         "#;
@@ -187,8 +187,8 @@ fn test_applying_parametric_function() {
 #[test]
 fn test_parametric_definition_and_theorem() {
     let text = r#"
-            define foo<T>(a: T) -> Bool { axiom }
-            axiom foo_true<T>(a: T) { foo(a) }
+            define foo[T](a: T) -> Bool { axiom }
+            axiom foo_true[T](a: T) { foo(a) }
             type Nat: axiom
             let zero: Nat = axiom
             theorem goal { foo(zero) }
@@ -199,8 +199,8 @@ fn test_parametric_definition_and_theorem() {
 #[test]
 fn test_parameter_name_can_change() {
     let text = r#"
-            define foo<T>(a: T) -> Bool { axiom }
-            axiom foo_true<U>(a: U) { foo(a) }
+            define foo[T](a: T) -> Bool { axiom }
+            axiom foo_true[U](a: U) { foo(a) }
             type Nat: axiom
             let zero: Nat = axiom
             theorem goal { foo(zero) }
@@ -503,7 +503,7 @@ fn test_prove_with_recursive_function() {
             zero
             suc(Nat)
         }
-        define repeat<T>(n: Nat, f: T -> T, a: T) -> T {
+        define repeat[T](n: Nat, f: T -> T, a: T) -> T {
             match n {
                 Nat.zero {
                     a
@@ -656,18 +656,18 @@ fn test_proving_with_implies_keyword() {
 fn test_proving_with_generic_structure() {
     // Just testing that we can define something, then immediately prove the definition.
     let text = r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
 
-            attributes Pair<T, U> {
-                define swap(self) -> Pair<U, T> {
+            attributes Pair[T, U] {
+                define swap(self) -> Pair[U, T] {
                     Pair.new(self.second, self.first)
                 }
             }
 
-            theorem swap_def<T, U>(p: Pair<T, U>) {
+            theorem swap_def[T, U](p: Pair[T, U]) {
                 p.swap = Pair.new(p.second, p.first)
             }
         "#;
@@ -678,20 +678,20 @@ fn test_proving_with_generic_structure() {
 fn test_proving_with_generic_structure_definition() {
     // These theorems are direct implications of the structure definition.
     let text = r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
 
-            theorem check_first<T, U>(t: T, u: U) {
+            theorem check_first[T, U](t: T, u: U) {
                 Pair.new(t, u).first = t
             }
 
-            theorem check_second<T, U>(t: T, u: U) {
+            theorem check_second[T, U](t: T, u: U) {
                 Pair.new(t, u).second = u
             }
 
-            theorem check_new<T, U>(p: Pair<T, U>) {
+            theorem check_new[T, U](p: Pair[T, U]) {
                 Pair.new(p.first, p.second) = p
             }
         "#;
@@ -704,7 +704,7 @@ fn test_prove_with_imported_generic_structure() {
     p.mock(
         "/mock/pair.ac",
         r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
@@ -715,15 +715,15 @@ fn test_prove_with_imported_generic_structure() {
         r#"
             from pair import Pair
 
-            theorem check_first<T, U>(t: T, u: U) {
+            theorem check_first[T, U](t: T, u: U) {
                 Pair.new(t, u).first = t
             }
 
-            theorem check_second<T, U>(t: T, u: U) {
+            theorem check_second[T, U](t: T, u: U) {
                 Pair.new(t, u).second = u
             }
 
-            theorem check_new<T, U>(p: Pair<T, U>) {
+            theorem check_new[T, U](p: Pair[T, U]) {
                 Pair.new(p.first, p.second) = p
             }
         "#,
@@ -739,7 +739,7 @@ fn test_prove_with_imported_generic_structure() {
 #[test]
 fn test_proving_with_instance_of_generic_structure() {
     let text = r#"
-            structure Pair<T, U> {
+            structure Pair[T, U] {
                 first: T
                 second: U
             }
@@ -754,7 +754,7 @@ fn test_proving_with_instance_of_generic_structure() {
                 Pair.new(a, b).second = b
             }
 
-            theorem foo_pair_new(p: Pair<Foo, Foo>) {
+            theorem foo_pair_new(p: Pair[Foo, Foo]) {
                 Pair.new(p.first, p.second) = p
             }
         "#;
@@ -764,7 +764,7 @@ fn test_proving_with_instance_of_generic_structure() {
 #[test]
 fn test_proving_with_generic_constraint() {
     let text = r#"
-            structure EqCheckedPair<T> {
+            structure EqCheckedPair[T] {
                 first: T
                 second: T
                 eq: Bool
@@ -774,7 +774,7 @@ fn test_proving_with_generic_constraint() {
 
             type Foo: axiom
 
-            theorem check_constraint(p: EqCheckedPair<Foo>) {
+            theorem check_constraint(p: EqCheckedPair[Foo]) {
                 p.eq implies p.first = p.second
             }
         "#;
@@ -849,7 +849,7 @@ fn test_prover_handles_parametrized_constants() {
             }
 
             theorem goal {
-                Z1.zero = Singleton.value<Z1>
+                Z1.zero = Singleton.value[Z1]
             }
         "#;
     verify_succeeds(text);
@@ -909,7 +909,7 @@ fn test_prover_respects_typeclasses() {
                 one
             }
 
-            define is_equal<T>(x: T, y: T) -> Bool {
+            define is_equal[T](x: T, y: T) -> Bool {
                 x = y
             }
 
@@ -936,7 +936,7 @@ fn test_prover_can_use_typeclass_theorems() {
                 foo: F -> Bool
             }
 
-            axiom always_foo<F: Foo>(x: F) {
+            axiom always_foo[F: Foo](x: F) {
                 x.foo
             }
 
@@ -1015,7 +1015,7 @@ fn test_prover_handling_typeclasses() {
                 }
             }
 
-            theorem bar_true<G: FooTrue>(a: G) {
+            theorem bar_true[G: FooTrue](a: G) {
                 a.bar
             }
         "#;
@@ -1029,11 +1029,11 @@ fn test_use_typeclass_axiom_on_instance() {
                 b: Bool
             }
 
-            define foo<T>(t: T) -> Bool {
+            define foo[T](t: T) -> Bool {
                 axiom
             }
 
-            axiom foo_true<F: FooTrue>(a: F) {
+            axiom foo_true[F: FooTrue](a: F) {
                 foo(a)
             }
 
@@ -1059,11 +1059,11 @@ fn test_proving_with_parametrized_constant() {
                 point: P
             }
         
-            let get_point1<P: PointedSet>: P = P.point
-            let get_point2<P: PointedSet>: P = P.point
+            let get_point1[P: PointedSet]: P = P.point
+            let get_point2[P: PointedSet]: P = P.point
         
-            theorem goal<P: PointedSet> {
-                get_point1<P> = get_point2<P>
+            theorem goal[P: PointedSet] {
+                get_point1[P] = get_point2[P]
             }
         "#;
     verify_succeeds(text);
@@ -1072,12 +1072,12 @@ fn test_proving_with_parametrized_constant() {
 #[test]
 fn test_proving_with_parametrized_inductive() {
     let text = r#"
-            inductive List<T> {
+            inductive List[T] {
                 nil
-                cons(T, List<T>)
+                cons(T, List[T])
             }
 
-            define any(bs: List<Bool>) -> Bool {
+            define any(bs: List[Bool]) -> Bool {
                 match bs {
                     List.nil {
                         false
@@ -1089,7 +1089,7 @@ fn test_proving_with_parametrized_inductive() {
             }
 
             theorem goal {
-                exists(bs: List<Bool>) {
+                exists(bs: List[Bool]) {
                     any(bs)
                 }
             }
@@ -1100,12 +1100,12 @@ fn test_proving_with_parametrized_inductive() {
 #[test]
 fn test_proving_using_list_contains() {
     let text = r#"
-            inductive List<T> {
+            inductive List[T] {
                 nil
-                cons(T, List<T>)
+                cons(T, List[T])
             }
 
-            attributes List<T> {
+            attributes List[T] {
                 define contains(self, item: T) -> Bool {
                     match self {
                         List.nil {
@@ -1122,7 +1122,7 @@ fn test_proving_using_list_contains() {
                 }
             }
 
-            theorem tail_contains_imp_contains<T>(head: T, tail: List<T>, item: T) {
+            theorem tail_contains_imp_contains[T](head: T, tail: List[T], item: T) {
                 tail.contains(item) implies List.cons(head, tail).contains(item)
             }
         "#;
@@ -1132,10 +1132,10 @@ fn test_proving_using_list_contains() {
 #[test]
 fn test_proving_with_const_false() {
     let text = r#"
-            define const_false<T>(x: T) -> Bool {
+            define const_false[T](x: T) -> Bool {
                 false
             }
-            theorem goal<T>(x: T) {
+            theorem goal[T](x: T) {
                 not const_false(x)
             }
         "#;
@@ -1145,11 +1145,11 @@ fn test_proving_with_const_false() {
 #[test]
 fn test_proving_with_generic_let_attribute() {
     let text = r#"
-            structure Box<T> {
+            structure Box[T] {
                 item: T
             }
 
-            attributes Box<T> {
+            attributes Box[T] {
                 let const_false: T -> Bool = function(x: T) {
                     false
                 }
@@ -1165,16 +1165,16 @@ fn test_proving_with_generic_let_attribute() {
 #[test]
 fn test_proving_with_if_inside_match() {
     let text = r#"
-            inductive List<T> {
+            inductive List[T] {
                 nil
-                cons(T, List<T>)
+                cons(T, List[T])
             }
 
-            attributes List<T> {
-                define remove_all(self, item: T) -> List<T> {
+            attributes List[T] {
+                define remove_all(self, item: T) -> List[T] {
                     match self {
                         List.nil {
-                            List.nil<T>
+                            List.nil[T]
                         }
                         List.cons(head, tail) {
                             if head = item {
@@ -1187,8 +1187,8 @@ fn test_proving_with_if_inside_match() {
                 }
             }
 
-            theorem nil_remove_all<T>(item: T) {
-                List.nil<T>.remove_all(item) = List.nil<T>
+            theorem nil_remove_all[T](item: T) {
+                List.nil[T].remove_all(item) = List.nil[T]
             }
         "#;
     verify_succeeds(text);
@@ -1196,7 +1196,7 @@ fn test_proving_with_if_inside_match() {
 
 #[test]
 fn test_proving_with_typeclass_attribute_assigned_as_generic() {
-    // This requires us to monomorphize to match equals<Color>.
+    // This requires us to monomorphize to match equals[Color].
     let text = r#"
             typeclass F: Foo {
                 op: (F, F) -> Bool
@@ -1206,7 +1206,7 @@ fn test_proving_with_typeclass_attribute_assigned_as_generic() {
                 }
             }
 
-            define equals<T>(x: T, y: T) -> Bool {
+            define equals[T](x: T, y: T) -> Bool {
                 x = y
             }
 
@@ -1225,18 +1225,18 @@ fn test_proving_with_typeclass_attribute_assigned_as_generic() {
 #[test]
 fn test_proving_with_multiple_type_variables() {
     let text = r#"
-            inductive Nil<T> {
+            inductive Nil[T] {
                 nil
             }
 
-            let map<T, U>: (Nil<T>, T -> U) -> Nil<U> = axiom
-            let morph<T>: Nil<T> -> Nil<T> = axiom
+            let map[T, U]: (Nil[T], T -> U) -> Nil[U] = axiom
+            let morph[T]: Nil[T] -> Nil[T] = axiom
 
-            theorem goal<T, U>(items: Nil<T>, f: T -> U) {
+            theorem goal[T, U](items: Nil[T], f: T -> U) {
                 map(items, f) = morph(map(items, f))
             } by {
-                map(items, f) = Nil.nil<U>
-                morph(map(items, f)) = Nil.nil<U>
+                map(items, f) = Nil.nil[U]
+                morph(map(items, f)) = Nil.nil[U]
             }
         "#;
     verify_succeeds(text);
@@ -1251,7 +1251,7 @@ fn test_proving_with_mixin_instance() {
             inductive Foo {
                 foo
             }
-            let predicate<T>: T -> Bool = axiom
+            let predicate[T]: T -> Bool = axiom
 
             typeclass S: Stuff {
                 condition(s: S) {
@@ -1296,7 +1296,7 @@ fn test_proving_with_properties_of_base_typeclass() {
                 bar_property: Bool
             }
 
-            theorem goal<B: Bar> {
+            theorem goal[B: Bar] {
                 B.property
             }
         "#;
@@ -1322,7 +1322,7 @@ fn test_proving_with_deep_base_theorem() {
                 baz_property: Bool
             }
 
-            theorem goal<B: Baz>(a: B, b: B) {
+            theorem goal[B: Baz](a: B, b: B) {
                 a + b = b + a
             }
         "#;
@@ -1343,7 +1343,7 @@ fn test_typeclass_attribute_semantics() {
                 }
             }
             
-            theorem goal<A: Addable>(x: A) {
+            theorem goal[A: Addable](x: A) {
                 x.plus_zero = A.add(x, A.zero)
             }
         "#;
@@ -1399,10 +1399,10 @@ fn test_proving_with_default_required_attribute() {
 
             instance Foo: Arf
 
-            let diff<A: Arf> = (A.foo != A.bar)
+            let diff[A: Arf] = (A.foo != A.bar)
 
             theorem goal {
-                diff<Foo>
+                diff[Foo]
             }
         "#;
     verify_succeeds(text);

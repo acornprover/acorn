@@ -383,7 +383,7 @@ mod tests {
                 bar_property: Bool
             }
 
-            axiom bar_has_foo_property<B: Bar> {
+            axiom bar_has_foo_property[B: Bar] {
                 B.foo_property
             }
 
@@ -400,7 +400,7 @@ mod tests {
             from foo import Baz
 
             // To prove this, we need to know that Baz extends Bar.
-            theorem baz_has_foo_property<B: Baz> {
+            theorem baz_has_foo_property[B: Baz] {
                 B.foo_property
             }
         "#,
@@ -443,7 +443,7 @@ mod tests {
                 bar_property: Bool
             }
 
-            axiom bar_has_foo_property<B: Bar> {
+            axiom bar_has_foo_property[B: Bar] {
                 B.foo_property
             }
 
@@ -452,7 +452,7 @@ mod tests {
             }
 
             // To prove this, we need to know that Baz extends Bar.
-            theorem baz_has_foo_property<B: Baz> {
+            theorem baz_has_foo_property[B: Baz] {
                 B.foo_property
             }
         "#,

@@ -1797,14 +1797,14 @@ where
     if type_params.is_empty() {
         return doc;
     }
-    let mut result = doc.append(allocator.text("<"));
+    let mut result = doc.append(allocator.text("["));
     for (i, param) in type_params.iter().enumerate() {
         if i > 0 {
             result = result.append(allocator.text(", "));
         }
         result = result.append(param.pretty_ref(allocator));
     }
-    result.append(allocator.text(">"))
+    result.append(allocator.text("]"))
 }
 
 fn write_args_pretty<'a, D, A>(

@@ -631,7 +631,7 @@ fn test_instance_separate_from_class_and_typeclass() {
         from pointed import Pointed
         import relate
 
-        define get_point<P: Pointed>(p: P) -> P {
+        define get_point[P: Pointed](p: P) -> P {
             P.origin
         }
 
@@ -748,24 +748,24 @@ fn test_hover_basic() {
     instance Nat: HasZero {                   // line 19
         let 0 = Nat.0                         // line 20
     }
-    theorem eq_zero<Z: HasZero>(a: Z) {       // line 22
+    theorem eq_zero[Z: HasZero](a: Z) {       // line 22
         a = Z.0                               // line 23
     } by {
         let b: Z = a                          // line 25
     }
     /// equals_doc_comment
-    define equals<T>(x: T, y: T) -> Bool {    // line 28
+    define equals[T](x: T, y: T) -> Bool {    // line 28
         x = y                             
     }
     let z_eq_z = equals(Nat.0, Nat.0)         // line 31
     /// num_doc_comment
     let num: Nat = make_nat(true)             // line 33
     /// List_doc_comment
-    inductive List<T> {                       // line 35
+    inductive List[T] {                       // line 35
         nil
-        cons(T, List<T>)
+        cons(T, List[T])
     }
-    let l = List.cons(num, List.nil<Nat>)     // line 39
+    let l = List.cons(num, List.nil[Nat])     // line 39
     // 34567890123456789012345678901
     let m: Nat satisfy {                      // line 41
         m = m
@@ -1054,7 +1054,7 @@ fn test_deep_required_attribute_lookup() {
         r#"
         from group import Group
 
-        define closure_constraint<G: Group>(contains: G -> Bool) -> Bool {
+        define closure_constraint[G: Group](contains: G -> Bool) -> Bool {
             forall(a: G, b: G) {
                 contains(a) and contains(b) implies contains(a * b)
             }
@@ -1171,7 +1171,7 @@ fn test_hover_typeclass_method_with_doc_comment() {
     let result = foo_instance.do_something              // line 20
     // 34567890123456789012345678901234567890
 
-    theorem goal<T: Thing>(t: T) {
+    theorem goal[T: Thing](t: T) {
         t.do_something
     }
     "#},

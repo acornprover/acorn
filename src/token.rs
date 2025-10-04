@@ -15,6 +15,8 @@ pub enum TokenType {
     RightParen,
     LeftBrace,
     RightBrace,
+    LeftBracket,
+    RightBracket,
     NewLine,
     Comma,
     Colon,
@@ -325,6 +327,8 @@ impl TokenType {
             TokenType::RightParen => ")",
             TokenType::LeftBrace => "{",
             TokenType::RightBrace => "}",
+            TokenType::LeftBracket => "[",
+            TokenType::RightBracket => "]",
             TokenType::NewLine => "\n",
             TokenType::Comma => ",",
             TokenType::Colon => ":",
@@ -591,6 +595,8 @@ impl Token {
             | TokenType::RightParen
             | TokenType::LeftBrace
             | TokenType::RightBrace
+            | TokenType::LeftBracket
+            | TokenType::RightBracket
             | TokenType::Colon
             | TokenType::Dot => None,
         }
@@ -626,6 +632,8 @@ impl Token {
                     ')' => TokenType::RightParen,
                     '{' => TokenType::LeftBrace,
                     '}' => TokenType::RightBrace,
+                    '[' => TokenType::LeftBracket,
+                    ']' => TokenType::RightBracket,
                     '\n' => TokenType::NewLine,
                     ',' => TokenType::Comma,
                     ':' => TokenType::Colon,
