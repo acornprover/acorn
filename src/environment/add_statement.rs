@@ -754,12 +754,12 @@ impl Environment {
         for (field_name_token, field_type_expr, doc_comments) in &ss.fields {
             let field_type = self.evaluator(project).evaluate_type(&field_type_expr)?;
             field_types.push(field_type.clone());
-            if TokenType::is_magic_method_name(&field_name_token.text()) {
+            /* if TokenType::is_magic_method_name(&field_name_token.text()) {
                 return Err(field_name_token.error(&format!(
                     "'{}' is a reserved word. use a different name",
                     field_name_token.text()
                 )));
-            }
+            } */
             member_fn_names.push(field_name_token.text());
             field_doc_comments.push(doc_comments.clone());
         }

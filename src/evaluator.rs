@@ -738,32 +738,110 @@ impl<'a> Evaluator<'a> {
         let left_value = self.evaluate_value_with_stack(stack, left, None)?;
         let right_value = self.evaluate_value_with_stack(stack, right, None)?;
 
-        // Get the partial application to the left
-        let partial = self.evaluate_value_attr(left_value, name, expression)?;
-        let mut fa = match partial {
-            AcornValue::Application(fa) => fa,
-            _ => {
-                return Err(expression.error(&format!(
-                    "the '{}' operator requires a method named '{}'",
-                    token, name
-                )))
-            }
-        };
-        match fa.function.get_type() {
-            AcornType::Function(f) => {
-                if f.arg_types.len() != 2 {
-                    return Err(expression
-                        .error(&format!("expected a binary function for '{}' method", name)));
+        let result_value_of_infix_operation = match token.token_type {
+            TokenType::Union 
+            | TokenType::Intersection 
+            | TokenType::Subset 
+            | TokenType::Supset 
+            | TokenType::Without => {
+                if left_value.get_type() != right_value.get_type() {
+                    return Err(expression.error("need two sets to have elements of same type"))
                 }
-                right_value.check_type(Some(&f.arg_types[1]), expression)?;
+                let AcornType::Data(_, left_type) = left_value.get_type() else {
+                    return Err(expression.error("expected set"))
+                };      
+                let function_name = self.bindings.get_constant_value(&DefinedName::unqualified(self.bindings.module_id(), name), token)?;
+
+                let function = function_name.resolve_constant(&[left_type[0].clone()], expression)?;
+                if let AcornType::Function(f) = function.get_type() {
+                    if f.arg_types.len() != 2 {
+                        return Err(expression.error(&format!("expected two params for binary operator function '{}'", name)));
+                    }
+                }
+                AcornValue::apply(function, vec![left_value, right_value])
+            },
+            TokenType::Product 
+            | TokenType::Sum 
+            | TokenType::Map => {
+                let AcornType::Data(_, left_type) = left_value.get_type() else {
+                    return Err(expression.error("expected set"))
+                }; 
+                let AcornType::Data(_, right_type) = right_value.get_type() else {
+                    return Err(expression.error("expected set"))
+                };   
+                let function_name = self.bindings.get_constant_value(&DefinedName::unqualified(self.bindings.module_id(), name), token)?;
+
+                let function = function_name.resolve_constant(&[left_type[0].clone(), right_type[0].clone()], expression)?;
+
+                if let AcornType::Function(f) = function.get_type() {
+                    if f.arg_types.len() != 2 {
+                        return Err(expression.error(&format!("expected two params for binary operator function '{}'", name)));
+                    }
+                }
+                AcornValue::apply(function, vec![left_value, right_value])
+            },
+            TokenType::In | TokenType::NotIn => {
+                let AcornType::Data(_, right_type) = right_value.get_type() else {
+                    return Err(expression.error("expected set"))
+                };   
+                if left_value.get_type() != right_type[0] {
+                    return Err(expression.error("element and set base on different type"))
+                } 
+                let partial = self.evaluate_value_attr(right_value, name, expression)?;
+                let mut fa = match partial {
+                    AcornValue::Application(fa) => fa,
+                    _ => {
+                        return Err(expression.error(&format!(
+                            "the '{}' operator requires a method named '{}'",
+                            token, name
+                        )))
+                    }
+                };
+                match fa.function.get_type() {
+                    AcornType::Function(f) => {
+                        if f.arg_types.len() != 2 {
+                            return Err(expression
+                                .error(&format!("expected a binary function for '{}' method", name)));
+                        }
+                        left_value.check_type(Some(&f.arg_types[1]), expression)?;
+                    }
+                    _ => return Err(expression.error(&format!("unexpected type for '{}' method", name))),
+                };
+                fa.args.push(left_value);
+                AcornValue::apply(*fa.function, fa.args)             
             }
-            _ => return Err(expression.error(&format!("unexpected type for '{}' method", name))),
+            _ => {
+                // Get the partial application to the left
+                let partial = self.evaluate_value_attr(left_value, name, expression)?;
+                let mut fa = match partial {
+                    AcornValue::Application(fa) => fa,
+                    _ => {
+                        return Err(expression.error(&format!(
+                            "the '{}' operator requires a method named '{}'",
+                            token, name
+                        )))
+                    }
+                };
+                match fa.function.get_type() {
+                    AcornType::Function(f) => {
+                        if f.arg_types.len() != 2 {
+                            return Err(expression
+                                .error(&format!("expected a binary function for '{}' method", name)));
+                        }
+                        right_value.check_type(Some(&f.arg_types[1]), expression)?;
+                    }
+                    _ => return Err(expression.error(&format!("unexpected type for '{}' method", name))),
+                };
+
+                fa.args.push(right_value);
+                let value = AcornValue::apply(*fa.function, fa.args);
+                value.check_type(expected_type, expression)?;
+                value
+            }
         };
 
-        fa.args.push(right_value);
-        let value = AcornValue::apply(*fa.function, fa.args);
-        value.check_type(expected_type, expression)?;
-        Ok(value)
+        result_value_of_infix_operation.check_type(expected_type, expression)?;
+        Ok(result_value_of_infix_operation)
     }
 
     /// Evaluates an expression that describes a value, with a stack given as context.
