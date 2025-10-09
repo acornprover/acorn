@@ -71,6 +71,13 @@ pub enum TokenType {
     Extends,
     DocComment,
     Lib,
+    Union,
+    Intersection,
+    In,
+    NotIn,
+    Subset,
+    Superset,
+    Without,
 }
 
 // Add a new token here if there's an alphabetical name for it.
@@ -126,6 +133,28 @@ pub fn keywords_with_prefix(prefix: &str) -> impl Iterator<Item = &str> {
         .map(|(key, _)| *key)
 }
 
+pub fn unicode_symbol_map() -> &'static BTreeMap<&'static str, TokenType> {
+    static UNICODE_SYMBOL_MAP: OnceLock<BTreeMap<&'static str, TokenType>> = OnceLock::new();
+    UNICODE_SYMBOL_MAP.get_or_init(|| {
+        BTreeMap::from([
+            ("union", TokenType::Union),
+            ("intersection", TokenType::Intersection),
+            ("in", TokenType::In),
+            ("not in", TokenType::NotIn),
+            ("subset", TokenType::Subset),
+            ("superset", TokenType::Superset),
+            ("without", TokenType::Without),
+        ])
+    })
+}
+
+pub fn unicode_symbol_with_prefix(prefix: &str) -> impl Iterator<Item = &str> {
+    unicode_symbol_map()
+        .range(prefix..)
+        .take_while(move |(key, _)| key.starts_with(prefix))
+        .map(|(key, _)| *key)
+}
+
 // The token types that we export via the language server protocol
 pub const LSP_TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::VARIABLE,
@@ -148,6 +177,13 @@ const INFIX_MAGIC_METHODS: &[(&str, TokenType)] = &[
     ("mul", TokenType::Asterisk),
     ("mod", TokenType::Percent),
     ("div", TokenType::Slash),
+    ("union", TokenType::Union),
+    ("intersection", TokenType::Intersection),
+    ("contains", TokenType::In),
+    ("not_contains", TokenType::NotIn),
+    ("subset", TokenType::Subset),
+    ("superset", TokenType::Superset),
+    ("without", TokenType::Without),
 ];
 
 // Prefix operators.
@@ -183,6 +219,13 @@ impl TokenType {
             TokenType::Percent => true,
             TokenType::Slash => true,
             TokenType::Implies => true,
+            TokenType::Union => true,
+            TokenType::Intersection => true,
+            TokenType::In => true,
+            TokenType::NotIn => true,
+            TokenType::Subset => true,
+            TokenType::Superset => true,
+            TokenType::Without => true,
             _ => false,
         }
     }
@@ -216,10 +259,17 @@ impl TokenType {
             TokenType::NotEquals => 7,
             TokenType::Or => 5,
             TokenType::And => 5,
+            TokenType::Union => 11,
+            TokenType::Intersection => 11,
             TokenType::Iff => 4,
             TokenType::RightArrow => 3,
             TokenType::Implies => 3,
             TokenType::Colon => 2,
+            TokenType::In => 9,
+            TokenType::NotIn => 9,
+            TokenType::Subset => 9,
+            TokenType::Superset => 9,
+            TokenType::Without => 11,
             TokenType::Comma => 1,
             _ => 0,
         }
@@ -383,6 +433,13 @@ impl TokenType {
             TokenType::Extends => "extends",
             TokenType::DocComment => "///",
             TokenType::Lib => "lib",
+            TokenType::Union => "∪",
+            TokenType::Intersection => "∩",
+            TokenType::In => "∈",
+            TokenType::NotIn => "∉",
+            TokenType::Subset => "⊆",
+            TokenType::Superset => "⊇",
+            TokenType::Without => "∖"
         }
     }
 
@@ -538,7 +595,14 @@ impl Token {
             | TokenType::Minus
             | TokenType::Asterisk
             | TokenType::Percent
-            | TokenType::Slash => Some(SemanticTokenType::OPERATOR),
+            | TokenType::Slash 
+            | TokenType::Union
+            | TokenType::Intersection
+            | TokenType::In
+            | TokenType::NotIn
+            | TokenType::Subset 
+            | TokenType::Without 
+            | TokenType::Superset => Some(SemanticTokenType::OPERATOR),
 
             TokenType::Let
             | TokenType::Axiom
@@ -646,6 +710,13 @@ impl Token {
                     '+' => TokenType::Plus,
                     '*' => TokenType::Asterisk,
                     '%' => TokenType::Percent,
+                    '∪' => TokenType::Union,
+                    '∩' => TokenType::Intersection,
+                    '∈' => TokenType::In,
+                    '∉' => TokenType::NotIn,
+                    '⊆' => TokenType::Subset,
+                    '⊇' => TokenType::Superset,
+                    '∖' => TokenType::Without,
                     '-' => match char_indices.next_if_eq(&(char_index + 1, '>')) {
                         Some(_) => TokenType::RightArrow,
                         None => TokenType::Minus,

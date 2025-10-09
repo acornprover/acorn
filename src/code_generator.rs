@@ -566,6 +566,9 @@ impl CodeGenerator<'_> {
                             if let Some(op) = TokenType::from_infix_magic_method_name(&attr) {
                                 let right = arg_exprs.pop().unwrap();
                                 let left = arg_exprs.pop().unwrap();
+                                if op == TokenType::In || op == TokenType::NotIn {
+                                    return Ok(Expression::generate_binary(right, op, left));
+                                }
                                 return Ok(Expression::generate_binary(left, op, right));
                             }
 

@@ -17,7 +17,7 @@ use crate::project::Project;
 use crate::proposition::Proposition;
 use crate::stack::Stack;
 use crate::termination_checker::TerminationChecker;
-use crate::token::{self, Token};
+use crate::token::{self, unicode_symbol_map, Token};
 use crate::token_map::TokenMap;
 use crate::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::unresolved_constant::UnresolvedConstant;
@@ -1354,12 +1354,23 @@ impl BindingMap {
         let mut answer = vec![];
 
         if first_char.map(|c| c.is_lowercase()).unwrap_or(true) {
-            // Keywords
             if !importing {
+                // Keywords
                 for key in token::keywords_with_prefix(prefix) {
                     let completion = CompletionItem {
                         label: key.to_string(),
                         kind: Some(CompletionItemKind::KEYWORD),
+                        ..Default::default()
+                    };
+                    answer.push(completion);
+                }
+                // Unicode symbol
+                for key in token::unicode_symbol_with_prefix(prefix) {
+                    let unicode_symbol = unicode_symbol_map().get(key)?.to_str().to_string();
+                    let completion = CompletionItem {
+                        label: format!("{} ({})", key, unicode_symbol),
+                        kind: Some(CompletionItemKind::CONSTANT),
+                        insert_text: Some(unicode_symbol),
                         ..Default::default()
                     };
                     answer.push(completion);
