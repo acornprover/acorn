@@ -1185,19 +1185,22 @@ impl TypeStore {
             }
             for (local_idx, acorn_type) in module_types.iter().enumerate() {
                 let self_module = &mut self.ground_id_to_type[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(AcornType::Empty);
+                if local_idx < self_module.len() {
+                    self.ground_id_to_type[module_idx].set(local_idx, acorn_type.clone());
+                } else {
+                    // Entries should be contiguous, so we should be at exactly the end
+                    assert_eq!(local_idx, self_module.len());
+                    self.ground_id_to_type[module_idx].push_back(acorn_type.clone());
                 }
-                // Always set the value from other - if it was already present
-                // and correct, this is idempotent; if we added a placeholder, we need it
-                self.ground_id_to_type[module_idx].set(local_idx, acorn_type.clone());
             }
             for (local_idx, arity) in other.ground_id_to_arity[module_idx].iter().enumerate() {
                 let self_module = &mut self.ground_id_to_arity[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(0);
+                if local_idx < self_module.len() {
+                    self.ground_id_to_arity[module_idx].set(local_idx, *arity);
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.ground_id_to_arity[module_idx].push_back(*arity);
                 }
-                self.ground_id_to_arity[module_idx].set(local_idx, *arity);
             }
         }
 
@@ -1219,14 +1222,12 @@ impl TypeStore {
             }
             for (local_idx, typeclass) in module_typeclasses.iter().enumerate() {
                 let self_module = &mut self.id_to_typeclass[module_idx];
-                while self_module.len() <= local_idx {
-                    // Placeholder - shouldn't happen if processed in order
-                    self_module.push_back(Typeclass {
-                        module_id: ModuleId(0),
-                        name: String::new(),
-                    });
+                if local_idx < self_module.len() {
+                    self.id_to_typeclass[module_idx].set(local_idx, typeclass.clone());
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.id_to_typeclass[module_idx].push_back(typeclass.clone());
                 }
-                self.id_to_typeclass[module_idx].set(local_idx, typeclass.clone());
             }
         }
 
@@ -1237,13 +1238,15 @@ impl TypeStore {
             }
             for (local_idx, extends_set) in module_extends.iter().enumerate() {
                 let self_module = &mut self.typeclass_extends[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(StdHashSet::new());
+                if local_idx < self_module.len() {
+                    // Union the sets
+                    let existing = &self.typeclass_extends[module_idx][local_idx];
+                    let merged: StdHashSet<_> = existing.union(extends_set).cloned().collect();
+                    self.typeclass_extends[module_idx].set(local_idx, merged);
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.typeclass_extends[module_idx].push_back(extends_set.clone());
                 }
-                // Union the sets
-                let existing = &self.typeclass_extends[module_idx][local_idx];
-                let merged: StdHashSet<_> = existing.union(extends_set).cloned().collect();
-                self.typeclass_extends[module_idx].set(local_idx, merged);
             }
         }
 
@@ -1254,13 +1257,15 @@ impl TypeStore {
             }
             for (local_idx, instances_set) in module_instances.iter().enumerate() {
                 let self_module = &mut self.typeclass_instances[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(StdHashSet::new());
+                if local_idx < self_module.len() {
+                    // Union the sets
+                    let existing = &self.typeclass_instances[module_idx][local_idx];
+                    let merged: StdHashSet<_> = existing.union(instances_set).cloned().collect();
+                    self.typeclass_instances[module_idx].set(local_idx, merged);
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.typeclass_instances[module_idx].push_back(instances_set.clone());
                 }
-                // Union the sets
-                let existing = &self.typeclass_instances[module_idx][local_idx];
-                let merged: StdHashSet<_> = existing.union(instances_set).cloned().collect();
-                self.typeclass_instances[module_idx].set(local_idx, merged);
             }
         }
     }

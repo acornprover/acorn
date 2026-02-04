@@ -675,19 +675,23 @@ impl SymbolTable {
             }
             for (local_idx, constant_name) in module_constants.iter().enumerate() {
                 let self_module = &mut self.global_constants[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(None);
+                if local_idx < self_module.len() {
+                    self.global_constants[module_idx].set(local_idx, constant_name.clone());
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.global_constants[module_idx].push_back(constant_name.clone());
                 }
-                self.global_constants[module_idx].set(local_idx, constant_name.clone());
             }
             for (local_idx, constant_type) in
                 other.global_constant_types[module_idx].iter().enumerate()
             {
                 let self_module = &mut self.global_constant_types[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(Term::empty_type());
+                if local_idx < self_module.len() {
+                    self.global_constant_types[module_idx].set(local_idx, constant_type.clone());
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.global_constant_types[module_idx].push_back(constant_type.clone());
                 }
-                self.global_constant_types[module_idx].set(local_idx, constant_type.clone());
             }
         }
 
@@ -695,16 +699,20 @@ impl SymbolTable {
         // we should generally not have overlapping scoped constants when merging imports.
         // Just extend if other has more.
         for (idx, constant_name) in other.scoped_constants.iter().enumerate() {
-            while self.scoped_constants.len() <= idx {
-                self.scoped_constants.push_back(None);
+            if idx < self.scoped_constants.len() {
+                self.scoped_constants.set(idx, constant_name.clone());
+            } else {
+                assert_eq!(idx, self.scoped_constants.len());
+                self.scoped_constants.push_back(constant_name.clone());
             }
-            while self.scoped_constant_types.len() <= idx {
-                self.scoped_constant_types.push_back(Term::empty_type());
-            }
-            self.scoped_constants.set(idx, constant_name.clone());
         }
         for (idx, constant_type) in other.scoped_constant_types.iter().enumerate() {
-            self.scoped_constant_types.set(idx, constant_type.clone());
+            if idx < self.scoped_constant_types.len() {
+                self.scoped_constant_types.set(idx, constant_type.clone());
+            } else {
+                assert_eq!(idx, self.scoped_constant_types.len());
+                self.scoped_constant_types.push_back(constant_type.clone());
+            }
         }
 
         // Merge synthetic types
@@ -714,10 +722,12 @@ impl SymbolTable {
             }
             for (local_idx, synthetic_type) in module_synthetics.iter().enumerate() {
                 let self_module = &mut self.synthetic_types[module_idx];
-                while self_module.len() <= local_idx {
-                    self_module.push_back(Term::empty_type());
+                if local_idx < self_module.len() {
+                    self.synthetic_types[module_idx].set(local_idx, synthetic_type.clone());
+                } else {
+                    assert_eq!(local_idx, self_module.len());
+                    self.synthetic_types[module_idx].push_back(synthetic_type.clone());
                 }
-                self.synthetic_types[module_idx].set(local_idx, synthetic_type.clone());
             }
         }
 
