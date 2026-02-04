@@ -2194,14 +2194,23 @@ fn test_backward_rewrite_specialization_regression() {
     processor.add_module_facts(&node).unwrap();
     let normalized_goal = node.normalized_goal().expect("missing prenormalized goal");
     processor.set_normalized_goal(normalized_goal);
-    let outcome = processor.search(ProverMode::Interactive { timeout_secs: 5.0 });
+    let outcome = processor.search(
+        ProverMode::Interactive { timeout_secs: 5.0 },
+        &normalized_goal.normalizer,
+    );
     assert_eq!(outcome, Outcome::Success);
 
     let cert = processor
         .prover()
-        .make_cert(&goal_env.bindings, processor.normalizer(), false)
+        .make_cert(&goal_env.bindings, &normalized_goal.normalizer, false)
         .expect("make_cert failed");
     processor
-        .check_cert(&cert, None, &project, &goal_env.bindings)
+        .check_cert(
+            &cert,
+            None,
+            &normalized_goal.normalizer,
+            &project,
+            &goal_env.bindings,
+        )
         .expect("check_cert failed");
 }

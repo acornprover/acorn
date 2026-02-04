@@ -21,19 +21,25 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
     let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_normalized_goal(normalized_goal);
-    let outcome = processor.search(ProverMode::Test);
+    let outcome = processor.search(ProverMode::Test, &normalized_goal.normalizer);
 
     assert_eq!(outcome, Outcome::Success);
 
     let cert = match processor
         .prover()
-        .make_cert(&env.bindings, processor.normalizer(), true)
+        .make_cert(&env.bindings, &normalized_goal.normalizer, true)
     {
         Ok(cert) => cert,
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, project, &env.bindings) {
+    if let Err(e) = processor.check_cert(
+        &cert,
+        None,
+        &normalized_goal.normalizer,
+        project,
+        &env.bindings,
+    ) {
         panic!("check_cert failed: {}", e);
     }
     cert
@@ -67,7 +73,7 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
             };
             processor.set_normalized_goal(normalized_goal);
 
-            return processor.search(ProverMode::Test);
+            return processor.search(ProverMode::Test, &normalized_goal.normalizer);
         }
     }
     panic!("goal '{}' not found in text", goal_name);
@@ -108,15 +114,21 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         // This is a key difference between our verification tests, and our real verification.
         // This helps us test that verification fails in cases where we do have an
         // infinite rabbit hole we could go down.
-        let outcome = processor.search(ProverMode::Test);
+        let outcome = processor.search(ProverMode::Test, &normalized_goal.normalizer);
         if outcome != Outcome::Success {
             return Ok(outcome);
         }
         let cert = processor
             .prover()
-            .make_cert(&goal_env.bindings, processor.normalizer(), true)
+            .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
             .map_err(|e| e.to_string())?;
-        if let Err(e) = processor.check_cert(&cert, None, &project, &goal_env.bindings) {
+        if let Err(e) = processor.check_cert(
+            &cert,
+            None,
+            &normalized_goal.normalizer,
+            &project,
+            &goal_env.bindings,
+        ) {
             panic!("check_cert failed: {}", e);
         }
     }
@@ -127,12 +139,10 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
     // this check for test coverage.
     let first_unnormalized = last_goal_top_index.map_or(0, |i| i + 1);
     if first_unnormalized < env.nodes.len() {
-        let mut processor = Processor::with_imports(None, env)?;
-
-        // Add all facts from this module to normalize trailing ones
+        // Ensure all facts were pre-normalized during prenormalize.
         for node in &env.nodes {
-            if let Some(fact) = node.get_fact() {
-                processor.add_fact(&fact)?;
+            if node.get_fact().is_some() && node.get_normalized_fact().is_none() {
+                return Err("missing prenormalized fact".to_string());
             }
         }
     }
@@ -185,15 +195,21 @@ pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
                 .ok_or_else(|| "missing prenormalized goal".to_string())?;
             processor.set_normalized_goal(normalized_goal);
 
-            let outcome = processor.search(ProverMode::Test);
+            let outcome = processor.search(ProverMode::Test, &normalized_goal.normalizer);
             if outcome != Outcome::Success {
                 return Ok(outcome);
             }
             let cert = processor
                 .prover()
-                .make_cert(&goal_env.bindings, processor.normalizer(), true)
+                .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
                 .map_err(|e| e.to_string())?;
-            if let Err(e) = processor.check_cert(&cert, None, &project, &goal_env.bindings) {
+            if let Err(e) = processor.check_cert(
+                &cert,
+                None,
+                &normalized_goal.normalizer,
+                &project,
+                &goal_env.bindings,
+            ) {
                 panic!("check_cert failed: {}", e);
             }
             return Ok(Outcome::Success);

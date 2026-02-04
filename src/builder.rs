@@ -653,8 +653,13 @@ impl<'a> Builder<'a> {
         if let Some(ref cert) = self.cert_override {
             let pre_normalized = pre_normalized
                 .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
-            let result =
-                processor.check_cert(cert, Some(pre_normalized), self.project, &env.bindings);
+            let result = processor.check_cert(
+                cert,
+                Some(pre_normalized),
+                &pre_normalized.normalizer,
+                self.project,
+                &env.bindings,
+            );
             match result {
                 Ok(_steps) => {
                     self.metrics.goals_done += 1;
@@ -680,8 +685,13 @@ impl<'a> Builder<'a> {
             let pre_normalized = pre_normalized
                 .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
             let (cert_to_use, check_result) = if self.clean_certs {
-                match processor.clean_cert(cert, Some(pre_normalized), self.project, &env.bindings)
-                {
+                match processor.clean_cert(
+                    cert,
+                    Some(pre_normalized),
+                    &pre_normalized.normalizer,
+                    self.project,
+                    &env.bindings,
+                ) {
                     Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
                     Err(e) => {
                         return Err(BuildError::goal(
@@ -692,8 +702,13 @@ impl<'a> Builder<'a> {
                 }
             } else {
                 // Normal path: just check the certificate
-                let result =
-                    processor.check_cert(&cert, Some(pre_normalized), self.project, &env.bindings);
+                let result = processor.check_cert(
+                    &cert,
+                    Some(pre_normalized),
+                    &pre_normalized.normalizer,
+                    self.project,
+                    &env.bindings,
+                );
                 (cert, result)
             };
 
@@ -750,24 +765,39 @@ impl<'a> Builder<'a> {
         processor.set_normalized_goal(pre_normalized);
 
         let start = std::time::Instant::now();
-        let outcome = processor.search(ProverMode::Interactive {
-            timeout_secs: self.timeout_secs,
-        });
+        let outcome = processor.search(
+            ProverMode::Interactive {
+                timeout_secs: self.timeout_secs,
+            },
+            &pre_normalized.normalizer,
+        );
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, self.verbose) {
+            match processor.make_cert(&env.bindings, &pre_normalized.normalizer, self.verbose) {
                 Ok(cert) => {
                     #[cfg(feature = "validate")]
                     {
                         // Validate the cert immediately after generation.
                         processor
-                            .check_cert(&cert, Some(pre_normalized), self.project, &env.bindings)
+                            .check_cert(
+                                &cert,
+                                Some(pre_normalized),
+                                &pre_normalized.normalizer,
+                                self.project,
+                                &env.bindings,
+                            )
                             .expect("newly generated cert should be checkable");
                     }
                     #[cfg(not(feature = "validate"))]
                     if self.verbose {
                         // Since we aren't performance-sensitive, check the cert.
                         processor
-                            .check_cert(&cert, Some(pre_normalized), self.project, &env.bindings)
+                            .check_cert(
+                                &cert,
+                                Some(pre_normalized),
+                                &pre_normalized.normalizer,
+                                self.project,
+                                &env.bindings,
+                            )
                             .expect("newly generated cert should be checkable");
                     }
                     new_certs.push(cert);
@@ -817,7 +847,7 @@ impl<'a> Builder<'a> {
                             "missing prenormalized fact".to_string(),
                         )
                     })?;
-                    Rc::make_mut(&mut processor).add_normalized_fact_with_normalizer(normalized)?;
+                    Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
                 }
 
                 if cursor.has_next() {
@@ -929,7 +959,7 @@ impl<'a> Builder<'a> {
                             "missing prenormalized fact".to_string(),
                         )
                     })?;
-                    Rc::make_mut(&mut processor).add_normalized_fact_with_normalizer(normalized)?;
+                    Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
                 }
                 cursor.next();
             }

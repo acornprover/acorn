@@ -1052,14 +1052,21 @@ fn test_proving_with_mixin_instance() {
             .expect("missing prenormalized goal");
         processor.set_normalized_goal(normalized_goal);
 
-        let outcome = processor.search(crate::prover::ProverMode::Test);
+        let outcome =
+            processor.search(crate::prover::ProverMode::Test, &normalized_goal.normalizer);
         assert_eq!(outcome, Outcome::Success);
         let cert = processor
             .prover()
-            .make_cert(&goal_env.bindings, processor.normalizer(), true)
+            .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
             .expect("make_cert failed");
         processor
-            .check_cert(&cert, None, &p, &goal_env.bindings)
+            .check_cert(
+                &cert,
+                None,
+                &normalized_goal.normalizer,
+                &p,
+                &goal_env.bindings,
+            )
             .expect("check_cert failed");
     }
 }
@@ -1539,13 +1546,13 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
         .expect("missing prenormalized goal");
     processor.set_normalized_goal(normalized_goal);
 
-    let outcome = processor.search(crate::prover::ProverMode::Test);
+    let outcome = processor.search(crate::prover::ProverMode::Test, &normalized_goal.normalizer);
     assert_eq!(outcome, Outcome::Success);
 
     // Generate the certificate
     let cert = processor
         .prover()
-        .make_cert(&goal_env.bindings, processor.normalizer(), true)
+        .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
         .expect("make_cert failed");
 
     // Debug: print the certificate
@@ -1559,7 +1566,13 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
     // The certificate should verify successfully
     // (If the code generator correctly uses lib(monoid).Monoid format)
     processor
-        .check_cert(&cert, None, &p, &goal_env.bindings)
+        .check_cert(
+            &cert,
+            None,
+            &normalized_goal.normalizer,
+            &p,
+            &goal_env.bindings,
+        )
         .expect("check_cert should succeed");
 }
 
@@ -1812,7 +1825,7 @@ fn test_polymorphic_axiom_chain_needs_arbitrary_type() {
 fn test_dependently_typed_synthetic() {
     use crate::processor::Processor;
 
-    let (processor, bindings) = Processor::test_goal(
+    let (processor, bindings, normalized_goal) = Processor::test_goal(
         r#"
         typeclass T: Grp {
             1: T
@@ -1830,7 +1843,7 @@ fn test_dependently_typed_synthetic() {
     // s0 has type T0 where T0 is a type parameter constrained to Grp.
     let cert_line = "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }";
 
-    processor.test_parse_code(cert_line, &bindings);
+    processor.test_parse_code(cert_line, &bindings, &normalized_goal.normalizer);
 }
 
 // Reproduces a bug where a polymorphic synthetic causes
@@ -1844,7 +1857,7 @@ fn test_polymorphic_synthetic_claim() {
     use crate::project::Project;
     use std::borrow::Cow;
 
-    let (processor, bindings) = Processor::test_goal(
+    let (_processor, bindings, normalized_goal) = Processor::test_goal(
         r#"
         typeclass T: Grp {
             1: T
@@ -1859,7 +1872,7 @@ fn test_polymorphic_synthetic_claim() {
     );
 
     let project = Project::new_mock();
-    let normalizer = processor.normalizer().clone();
+    let normalizer = normalized_goal.normalizer.clone();
     let kernel_context = normalizer.kernel_context().clone();
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);

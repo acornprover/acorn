@@ -1537,14 +1537,14 @@ mod tests {
         use super::CodeGenerator;
         use crate::processor::Processor;
 
-        let (processor, bindings) = Processor::test_goal(
+        let (processor, bindings, normalized_goal) = Processor::test_goal(
             r#"
             let foo[T]: T -> Bool = axiom
             theorem goal[T] { exists(t: T) { foo(t) } }
             "#,
         );
 
-        let normalizer = processor.normalizer();
+        let normalizer = &normalized_goal.normalizer;
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -1558,7 +1558,7 @@ mod tests {
         let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings);
+        processor.test_parse_code(&codes[0], &bindings, normalizer);
     }
 
     #[test]
@@ -1567,7 +1567,7 @@ mod tests {
         use crate::processor::Processor;
 
         // Similar to test_polymorphic_synthetic_declaration but with a typeclass constraint
-        let (processor, bindings) = Processor::test_goal(
+        let (processor, bindings, normalized_goal) = Processor::test_goal(
             r#"
             typeclass M: Magma {
                 mul: (M, M) -> M
@@ -1577,7 +1577,7 @@ mod tests {
             "#,
         );
 
-        let normalizer = processor.normalizer();
+        let normalizer = &normalized_goal.normalizer;
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -1591,7 +1591,7 @@ mod tests {
         let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings);
+        processor.test_parse_code(&codes[0], &bindings, normalizer);
     }
 
     #[test]
@@ -1603,7 +1603,7 @@ mod tests {
         // The is_reflexive pattern has forall inside, which when negated becomes
         // exists(t: T) { not f(t, t) } where t depends on f, giving synthetic type
         // ((T, T) -> Bool) -> T
-        let (processor, bindings) = Processor::test_goal(
+        let (processor, bindings, normalized_goal) = Processor::test_goal(
             r#"
             define is_reflexive[T](f: (T, T) -> Bool) -> Bool {
                 forall(t: T) { f(t, t) }
@@ -1612,7 +1612,7 @@ mod tests {
             "#,
         );
 
-        let normalizer = processor.normalizer();
+        let normalizer = &normalized_goal.normalizer;
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -1625,7 +1625,7 @@ mod tests {
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings);
+        processor.test_parse_code(&codes[0], &bindings, normalizer);
     }
 
     #[test]

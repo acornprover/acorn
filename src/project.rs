@@ -1289,9 +1289,14 @@ impl Project {
         for cert in &cert_store.certs {
             if cert.goal == goal.name {
                 // Try to verify this certificate
-                if let Ok(steps) =
-                    processor.check_cert(cert, cursor.normalized_goal(), self, &goal_env.bindings)
-                {
+                let normalized_goal = cursor.normalized_goal()?;
+                if let Ok(steps) = processor.check_cert(
+                    cert,
+                    Some(normalized_goal),
+                    &normalized_goal.normalizer,
+                    self,
+                    &goal_env.bindings,
+                ) {
                     return Some((cert, steps));
                 }
             }
