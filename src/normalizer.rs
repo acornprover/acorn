@@ -255,6 +255,13 @@ impl Normalizer {
         self.kernel_context.merge(&other.kernel_context);
         self.synthetic_registry.merge(&other.synthetic_registry);
     }
+
+    /// Merges another Normalizer into this one, excluding scoped constants.
+    /// This is intended for merging import state only.
+    pub fn merge_imports(&mut self, other: &Normalizer) {
+        self.kernel_context.merge_imports(&other.kernel_context);
+        self.synthetic_registry.merge(&other.synthetic_registry);
+    }
 }
 
 // Represents a binding for a variable on the stack during normalization.

@@ -707,6 +707,46 @@ impl SymbolTable {
             self.inhabited_typeclasses.insert(*id);
         }
     }
+
+    /// Merges another SymbolTable into this one, excluding scoped constants.
+    /// This is intended for merging import state only.
+    pub fn merge_imports(&mut self, other: &SymbolTable) {
+        // Merge global constants and their types
+        merge_nested_vecs(&mut self.global_constants, &other.global_constants);
+        merge_nested_vecs(
+            &mut self.global_constant_types,
+            &other.global_constant_types,
+        );
+
+        // Skip scoped constants (locals are not mergeable across modules)
+
+        // Merge synthetic types
+        merge_nested_vecs(&mut self.synthetic_types, &other.synthetic_types);
+
+        // Merge hash maps
+        for (k, v) in other.name_to_symbol.iter() {
+            self.name_to_symbol.insert(k.clone(), *v);
+        }
+        for (k, v) in other.instance_to_symbol.iter() {
+            self.instance_to_symbol.insert(k.clone(), *v);
+        }
+        for (k, v) in other.polymorphic_info.iter() {
+            self.polymorphic_info.insert(k.clone(), v.clone());
+        }
+        for (k, v) in other.type_to_element.iter() {
+            if !self.type_to_element.contains_key(k) {
+                self.type_to_element.insert(k.clone(), *v);
+            }
+        }
+
+        // Merge inhabited sets
+        for id in other.inhabited_type_constructors.iter() {
+            self.inhabited_type_constructors.insert(*id);
+        }
+        for id in other.inhabited_typeclasses.iter() {
+            self.inhabited_typeclasses.insert(*id);
+        }
+    }
 }
 
 /// Merge entries from `source` into `target`, extending as needed.
@@ -722,7 +762,10 @@ fn merge_vec<T: Clone>(target: &mut ImVector<T>, source: &ImVector<T>) {
 }
 
 /// Merge nested vectors: outer is indexed by module_id, inner by local_id.
-fn merge_nested_vecs<T: Clone>(target: &mut ImVector<ImVector<T>>, source: &ImVector<ImVector<T>>) {
+fn merge_nested_vecs<T: Clone>(
+    target: &mut ImVector<ImVector<T>>,
+    source: &ImVector<ImVector<T>>,
+) {
     while target.len() < source.len() {
         target.push_back(ImVector::new());
     }

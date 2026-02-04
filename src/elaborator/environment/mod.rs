@@ -678,7 +678,7 @@ impl Environment {
             if let Some(dep_env) = project.get_env_by_id(dep_id) {
                 if let Some(ref dep_normalizer) = dep_env.normalizer {
                     // Dependency has prenormalized state - merge and reuse
-                    normalizer.merge(dep_normalizer);
+                    normalizer.merge_imports(dep_normalizer);
                     // Add only the dependency's own facts (not its imports)
                     for normalized in &dep_env.normalized_module_facts {
                         self.normalized_imports.push(normalized.clone());

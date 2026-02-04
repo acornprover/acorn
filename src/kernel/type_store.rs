@@ -1221,7 +1221,10 @@ fn merge_vec<T: Clone>(target: &mut ImVector<T>, source: &ImVector<T>) {
 }
 
 /// Merge nested vectors: outer is indexed by module_id, inner by local_id.
-fn merge_nested_vecs<T: Clone>(target: &mut ImVector<ImVector<T>>, source: &ImVector<ImVector<T>>) {
+fn merge_nested_vecs<T: Clone>(
+    target: &mut ImVector<ImVector<T>>,
+    source: &ImVector<ImVector<T>>,
+) {
     while target.len() < source.len() {
         target.push_back(ImVector::new());
     }
@@ -1254,6 +1257,7 @@ fn merge_nested_vecs_with<T: Clone, F>(
         }
     }
 }
+
 
 impl Default for TypeStore {
     fn default() -> Self {

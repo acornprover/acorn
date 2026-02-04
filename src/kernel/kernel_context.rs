@@ -996,6 +996,13 @@ impl KernelContext {
         self.type_store.merge(&other.type_store);
         self.symbol_table.merge(&other.symbol_table);
     }
+
+    /// Merges another KernelContext into this one, excluding scoped constants.
+    /// This is intended for merging import state only.
+    pub fn merge_imports(&mut self, other: &KernelContext) {
+        self.type_store.merge(&other.type_store);
+        self.symbol_table.merge_imports(&other.symbol_table);
+    }
 }
 
 impl Default for KernelContext {
