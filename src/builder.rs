@@ -15,6 +15,7 @@ use crate::elaborator::goal::Goal;
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::source::SourceType;
 use crate::module::{LoadState, ModuleDescriptor, ModuleId};
+use crate::normalizer::NormalizedGoal;
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
@@ -633,6 +634,7 @@ impl<'a> Builder<'a> {
 
     /// Verifies a goal.
     /// env should be the environment that the proof happens in.
+    /// pre_normalized is the pre-normalized goal from prenormalize(), used for validation.
     fn verify_goal(
         &mut self,
         mut processor: Rc<Processor>,
@@ -640,6 +642,7 @@ impl<'a> Builder<'a> {
         env: &Environment,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
+        pre_normalized: Option<&NormalizedGoal>,
     ) -> Result<(), BuildError> {
         // Check if we've been cancelled before starting any work
         if self.cancellation_token.is_cancelled() {
@@ -733,7 +736,14 @@ impl<'a> Builder<'a> {
 
         // Try searching
         let processor = Rc::make_mut(&mut processor);
-        processor.set_goal(goal)?;
+
+        // Use pre-normalized goal data when available, otherwise normalize at runtime
+        if let Some(pre_normalized) = pre_normalized {
+            processor.set_normalized_goal(pre_normalized);
+        } else {
+            processor.set_goal(goal)?;
+        }
+
         let start = std::time::Instant::now();
         let outcome = processor.search(ProverMode::Interactive {
             timeout_secs: self.timeout_secs,
@@ -811,6 +821,7 @@ impl<'a> Builder<'a> {
 
         assert!(cursor.node().has_goal());
         let goal = cursor.goal().unwrap();
+        let pre_normalized = cursor.normalized_goal();
         if let Some(ref filter) = self.goal_filter {
             let matches = match filter {
                 GoalFilter::SingleLine { line, .. } => goal.first_line == *line,
@@ -829,6 +840,7 @@ impl<'a> Builder<'a> {
             cursor.goal_env().unwrap(),
             new_certs,
             worklist,
+            pre_normalized,
         )?;
 
         Ok(())
@@ -843,7 +855,7 @@ impl<'a> Builder<'a> {
         // In strict mode, reject any use of the axiom keyword
         if self.strict {
             for node in &env.nodes {
-                if let Node::Structural(Fact::Proposition(prop)) = node {
+                if let Node::Structural(Fact::Proposition(prop), _) = node {
                     if matches!(prop.source.source_type, SourceType::Axiom(_)) {
                         let range = prop.source.range;
                         let event = self.make_event(

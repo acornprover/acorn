@@ -983,14 +983,6 @@ impl KernelContext {
         LocalContext::from_types(vec![Term::bool_type(); count])
     }
 
-    /// Collects differences between this kernel context and another, for debugging.
-    pub fn collect_differences(&self, other: &KernelContext, differences: &mut Vec<String>) {
-        self.type_store
-            .collect_differences(&other.type_store, differences);
-        self.symbol_table
-            .collect_differences(&other.symbol_table, differences);
-    }
-
     /// Merges another KernelContext into this one.
     pub fn merge(&mut self, other: &KernelContext) {
         self.type_store.merge(&other.type_store);

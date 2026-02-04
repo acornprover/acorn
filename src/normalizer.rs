@@ -33,9 +33,13 @@ pub struct NormalizedFact {
 }
 
 /// A goal that has been normalized into proof steps.
+/// Includes the normalizer state after normalizing this goal.
+#[derive(Clone)]
 pub struct NormalizedGoal {
     pub goal: Goal,
     pub steps: Vec<ProofStep>,
+    /// The normalizer state after normalizing this goal (with negated goal added).
+    pub normalizer: Normalizer,
 }
 
 #[derive(Clone)]
@@ -229,24 +233,6 @@ impl Normalizer {
             NewConstantType::Local,
             type_term,
         ))
-    }
-
-    /// Collects differences between this normalizer and another, for debugging.
-    pub fn collect_differences(&self, other: &Normalizer, differences: &mut Vec<String>) {
-        self.kernel_context
-            .collect_differences(&other.kernel_context, differences);
-        self.synthetic_registry
-            .collect_differences(&other.synthetic_registry, differences);
-    }
-
-    /// Asserts that two normalizers have the same state, for debugging purposes.
-    /// Panics with a detailed message if they differ.
-    pub fn assert_same(&self, other: &Normalizer) {
-        let mut differences = Vec::new();
-        self.collect_differences(other, &mut differences);
-        if !differences.is_empty() {
-            panic!("Normalizers differ:\n{}", differences.join("\n"));
-        }
     }
 
     /// Merges another Normalizer into this one.
@@ -2218,6 +2204,7 @@ impl Normalizer {
         Ok(NormalizedGoal {
             goal: goal.clone(),
             steps,
+            normalizer: self.clone(),
         })
     }
 

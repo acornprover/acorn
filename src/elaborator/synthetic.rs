@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use im::HashMap as ImHashMap;
 
 use crate::elaborator::source::Source;
 use crate::kernel::atom::AtomId;
@@ -91,18 +93,20 @@ impl std::fmt::Display for SyntheticKey {
 #[derive(Clone)]
 pub struct SyntheticRegistry {
     /// The definition for each synthetic atom, indexed by (ModuleId, AtomId).
-    definitions: HashMap<(ModuleId, AtomId), Arc<SyntheticDefinition>>,
+    /// Uses im::HashMap for O(1) clones with structural sharing.
+    definitions: ImHashMap<(ModuleId, AtomId), Arc<SyntheticDefinition>>,
 
     /// Same information as `definitions`, but indexed by SyntheticKey.
     /// This is used to avoid defining the same thing multiple times.
-    by_key: HashMap<SyntheticKey, Arc<SyntheticDefinition>>,
+    /// Uses im::HashMap for O(1) clones with structural sharing.
+    by_key: ImHashMap<SyntheticKey, Arc<SyntheticDefinition>>,
 }
 
 impl SyntheticRegistry {
     pub fn new() -> Self {
         SyntheticRegistry {
-            definitions: HashMap::new(),
-            by_key: HashMap::new(),
+            definitions: ImHashMap::new(),
+            by_key: ImHashMap::new(),
         }
     }
 
@@ -199,17 +203,6 @@ impl SyntheticRegistry {
             output.push(info);
         }
         output
-    }
-
-    /// Collects differences between this registry and another, for debugging.
-    pub fn collect_differences(&self, other: &SyntheticRegistry, differences: &mut Vec<String>) {
-        if self.definitions.len() != other.definitions.len() {
-            differences.push(format!(
-                "SyntheticRegistry definition count: {} vs {}",
-                self.definitions.len(),
-                other.definitions.len()
-            ));
-        }
     }
 
     /// Merges another SyntheticRegistry into this one.

@@ -616,35 +616,4 @@ impl Prover {
         self.add_steps(steps, kernel_context);
         self.goal = Some(goal);
     }
-
-    /// Collects differences between this prover and another, for debugging.
-    pub fn collect_differences(&self, other: &Prover, differences: &mut Vec<String>) {
-        // Compare active set sizes
-        let self_active = self.active_set.len();
-        let other_active = other.active_set.len();
-        if self_active != other_active {
-            differences.push(format!(
-                "Prover active_set size: {} vs {}",
-                self_active, other_active
-            ));
-        }
-
-        // Compare passive set sizes
-        let self_passive = self.passive_set.len();
-        let other_passive = other.passive_set.len();
-        if self_passive != other_passive {
-            differences.push(format!(
-                "Prover passive_set size: {} vs {}",
-                self_passive, other_passive
-            ));
-        }
-
-        // Compare nonfactual activations
-        if self.nonfactual_activations != other.nonfactual_activations {
-            differences.push(format!(
-                "Prover nonfactual_activations: {} vs {}",
-                self.nonfactual_activations, other.nonfactual_activations
-            ));
-        }
-    }
 }

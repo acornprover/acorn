@@ -83,28 +83,6 @@ impl Processor {
         &self.checker
     }
 
-    /// Asserts that two processors have the same state, for debugging purposes.
-    /// Panics with a detailed message if they differ.
-    pub fn assert_same(&self, other: &Processor) {
-        let mut differences = Vec::new();
-
-        // Compare normalizers
-        self.normalizer
-            .collect_differences(&other.normalizer, &mut differences);
-
-        // Compare checkers
-        self.checker
-            .collect_differences(&other.checker, &mut differences);
-
-        // Compare provers
-        self.prover
-            .collect_differences(&other.prover, &mut differences);
-
-        if !differences.is_empty() {
-            panic!("Processors differ:\n{}", differences.join("\n"));
-        }
-    }
-
     /// Adds a normalized fact to the prover.
     pub fn add_normalized_fact(&mut self, normalized: &NormalizedFact) -> Result<(), BuildError> {
         let kernel_context = self.normalizer.kernel_context();
@@ -145,7 +123,11 @@ impl Processor {
     }
 
     /// Sets a normalized goal as the prover's goal.
+    /// Also sets the normalizer to the state from the NormalizedGoal.
     pub fn set_normalized_goal(&mut self, normalized: &NormalizedGoal) {
+        // Use the pre-normalized normalizer state (which includes the negated goal)
+        self.normalizer = normalized.normalizer.clone();
+
         let source = &normalized.goal.proposition.source;
         let kernel_context = self.normalizer.kernel_context();
         for step in &normalized.steps {
@@ -170,6 +152,7 @@ impl Processor {
     }
 
     /// Normalizes a goal and sets it as the prover's goal.
+    /// Prefer set_normalized_goal when pre-normalized data is available.
     pub fn set_goal(&mut self, goal: &Goal) -> Result<(), BuildError> {
         let normalized = self.normalizer.normalize_goal(goal)?;
         self.set_normalized_goal(&normalized);

@@ -1131,46 +1131,6 @@ impl TypeStore {
         None
     }
 
-    /// Collects differences between this type store and another, for debugging.
-    pub fn collect_differences(&self, other: &TypeStore, differences: &mut Vec<String>) {
-        // Compare ground types
-        let self_ground_count: usize = self.ground_id_to_type.iter().map(|v| v.len()).sum();
-        let other_ground_count: usize = other.ground_id_to_type.iter().map(|v| v.len()).sum();
-        if self_ground_count != other_ground_count {
-            differences.push(format!(
-                "TypeStore ground type count: {} vs {}",
-                self_ground_count, other_ground_count
-            ));
-        }
-
-        // Compare datatypes
-        if self.datatype_to_ground_id.len() != other.datatype_to_ground_id.len() {
-            differences.push(format!(
-                "TypeStore datatype count: {} vs {}",
-                self.datatype_to_ground_id.len(),
-                other.datatype_to_ground_id.len()
-            ));
-        }
-
-        // Compare arbitrary types
-        if self.arbitrary_to_ground_id.len() != other.arbitrary_to_ground_id.len() {
-            differences.push(format!(
-                "TypeStore arbitrary type count: {} vs {}",
-                self.arbitrary_to_ground_id.len(),
-                other.arbitrary_to_ground_id.len()
-            ));
-        }
-
-        // Compare typeclasses
-        if self.typeclass_to_id.len() != other.typeclass_to_id.len() {
-            differences.push(format!(
-                "TypeStore typeclass count: {} vs {}",
-                self.typeclass_to_id.len(),
-                other.typeclass_to_id.len()
-            ));
-        }
-    }
-
     /// Merges another TypeStore into this one.
     /// Entries from `other` are added to `self`. If there are conflicts,
     /// the entries should be identical (same module_id, local_id -> same value).
@@ -1221,10 +1181,7 @@ fn merge_vec<T: Clone>(target: &mut ImVector<T>, source: &ImVector<T>) {
 }
 
 /// Merge nested vectors: outer is indexed by module_id, inner by local_id.
-fn merge_nested_vecs<T: Clone>(
-    target: &mut ImVector<ImVector<T>>,
-    source: &ImVector<ImVector<T>>,
-) {
+fn merge_nested_vecs<T: Clone>(target: &mut ImVector<ImVector<T>>, source: &ImVector<ImVector<T>>) {
     while target.len() < source.len() {
         target.push_back(ImVector::new());
     }
@@ -1257,7 +1214,6 @@ fn merge_nested_vecs_with<T: Clone, F>(
         }
     }
 }
-
 
 impl Default for TypeStore {
     fn default() -> Self {

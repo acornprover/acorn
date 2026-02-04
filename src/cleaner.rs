@@ -109,14 +109,14 @@ impl ModuleCleaner {
 
         for node in &env.nodes {
             match node {
-                Node::Claim(goal, _) => {
+                Node::Claim(goal, _, _, _) => {
                     // Only collect claims when inside proofs, but skip block-level goals
                     if inside_proof && !node.is_block_level_goal() {
                         // This is an internal claim in a proof, it's cleanable
                         ranges.push(goal.proposition.source.range);
                     }
                 }
-                Node::Block(block, _) => {
+                Node::Block(block, _, _) => {
                     // Only collect blocks when inside proofs
                     // This means forall/if/by blocks inside theorems are cleanable,
                     // but top-level theorem blocks themselves are not
@@ -128,7 +128,7 @@ impl ModuleCleaner {
                     // Always recurse into the block to find nested cleanable items
                     Self::collect_ranges(&block.env, ranges);
                 }
-                Node::Structural(_) => {
+                Node::Structural(_, _) => {
                     // Skip structural nodes
                 }
             }

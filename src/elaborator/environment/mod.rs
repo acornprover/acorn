@@ -694,7 +694,10 @@ impl Environment {
         // This can be cloned by Processor::with_imports to avoid re-normalizing.
         self.import_normalizer = Some(normalizer.clone());
 
-        // Then, add all facts from the top-level nodes in this environment
+        // Normalize top-level facts for backwards compatibility and for goal normalization.
+        // Due to Rc::make_mut cloning behavior in verification, only top-level facts
+        // (added in verify_module's loop) are visible - internal facts from blocks
+        // are added to cloned processors that get dropped.
         for node in &self.nodes {
             if let Some(fact) = node.get_fact() {
                 match normalizer.normalize_fact(&fact) {
@@ -708,10 +711,112 @@ impl Environment {
             }
         }
 
+        // Now normalize goals. For each goal, we compute the normalizer state that matches
+        // what verification sees. This iterates through nodes in order, adding facts to
+        // the normalizer as we go (mirroring verify_node behavior).
+        let import_normalizer = self.import_normalizer.clone().unwrap();
+        Self::prenormalize_goals(&mut self.nodes, &import_normalizer, &mut first_error);
+
         self.normalizer = Some(normalizer);
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
+        }
+    }
+
+    /// Recursively normalizes goals in nodes, computing the correct normalizer state for each.
+    ///
+    /// The normalizer state for a goal depends on:
+    /// 1. Import facts (from base_normalizer)
+    /// 2. Facts from nodes processed BEFORE the goal in the current traversal
+    ///
+    /// At the top level, verify_module's loop adds facts after each node is verified.
+    /// Inside a block, verify_node's loop adds facts after each child is verified.
+    /// The Rc::make_mut behavior means facts added inside a block stay inside that block's
+    /// cloned processor, visible to later siblings but not to the parent.
+    ///
+    /// This function mirrors that behavior: we iterate through nodes in order, adding facts
+    /// to the normalizer as we go. When recursing into a block, we clone the current
+    /// normalizer and process the block's nodes independently.
+    fn prenormalize_goals(
+        nodes: &mut [Node],
+        base_normalizer: &Normalizer,
+        first_error: &mut Option<String>,
+    ) {
+        // Clone the normalizer to track state as we process nodes.
+        // We need to track state for this level only.
+        let mut current_normalizer = base_normalizer.clone();
+
+        for node in nodes.iter_mut() {
+            match node {
+                Node::Structural(fact, normalized_fact_slot) => {
+                    // Normalize the fact and store it
+                    match current_normalizer.normalize_fact(fact) {
+                        Ok(normalized) => {
+                            *normalized_fact_slot = Some(normalized);
+                        }
+                        Err(e) => {
+                            if first_error.is_none() {
+                                *first_error = Some(e.message);
+                            }
+                        }
+                    }
+                }
+                Node::Claim(goal, fact, normalized_goal_slot, normalized_fact_slot) => {
+                    // Runtime order: verify_goal (which calls set_goal) runs BEFORE add_fact.
+                    // So we normalize the goal FIRST, then add the fact for subsequent nodes.
+
+                    // Normalize the goal on a CLONE of current_normalizer (without the claim's fact).
+                    // This captures the state that would exist after set_goal is called.
+                    // The NormalizedGoal.normalizer will include the negated goal.
+                    let mut goal_normalizer = current_normalizer.clone();
+                    match goal_normalizer.normalize_goal(goal) {
+                        Ok(normalized) => {
+                            *normalized_goal_slot = Some(normalized);
+                        }
+                        Err(e) => {
+                            if first_error.is_none() {
+                                *first_error = Some(e.message);
+                            }
+                        }
+                    }
+
+                    // AFTER goal verification, add the claim's fact to current_normalizer.
+                    // This matches runtime: add_fact is called after verify_node returns.
+                    match current_normalizer.normalize_fact(fact) {
+                        Ok(normalized) => {
+                            *normalized_fact_slot = Some(normalized);
+                        }
+                        Err(e) => {
+                            if first_error.is_none() {
+                                *first_error = Some(e.message);
+                            }
+                        }
+                    }
+                }
+                Node::Block(block, external_fact, normalized_fact_slot) => {
+                    // Recurse into the block's nodes with current normalizer state.
+                    // This mirrors how verify_node clones the processor when entering a block.
+                    Self::prenormalize_goals(
+                        &mut block.env.nodes,
+                        &current_normalizer,
+                        first_error,
+                    );
+                    // After the block, add the external fact (if any) for subsequent nodes
+                    if let Some(fact) = external_fact {
+                        match current_normalizer.normalize_fact(fact) {
+                            Ok(normalized) => {
+                                *normalized_fact_slot = Some(normalized);
+                            }
+                            Err(e) => {
+                                if first_error.is_none() {
+                                    *first_error = Some(e.message);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

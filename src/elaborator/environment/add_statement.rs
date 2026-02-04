@@ -1889,7 +1889,7 @@ impl Environment {
                 provides_inhabitants,
                 source,
             );
-            self.add_node(Node::Structural(extends_fact));
+            self.add_node(Node::Structural(extends_fact, None));
         }
 
         // Add a node for each typeclass condition.
@@ -2175,7 +2175,7 @@ impl Environment {
         let instance_fact = Fact::Instance(instance_datatype.clone(), typeclass.clone(), source);
 
         let node = if conditions.is_empty() {
-            Node::Structural(instance_fact)
+            Node::Structural(instance_fact, None)
         } else {
             // We must prove in a block that all the conditions hold for this instance.
             // Instead of combining conditions with And, we pass them as separate goals.
@@ -2198,7 +2198,7 @@ impl Environment {
                 &statement.last_token,
                 is.body.as_ref(),
             )?;
-            Node::Block(block, Some(instance_fact))
+            Node::Block(block, Some(instance_fact), None)
         };
 
         let index = self.add_node(node);

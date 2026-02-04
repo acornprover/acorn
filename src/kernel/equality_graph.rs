@@ -1434,37 +1434,6 @@ impl EqualityGraph {
         // Validate the clause set
         self.clause_set.validate();
     }
-
-    /// Collects differences between this equality graph and another, for debugging.
-    pub fn collect_differences(&self, other: &EqualityGraph, differences: &mut Vec<String>) {
-        if self.terms.len() != other.terms.len() {
-            differences.push(format!(
-                "EqualityGraph terms count: {} vs {}",
-                self.terms.len(),
-                other.terms.len()
-            ));
-        }
-        if self.groups.len() != other.groups.len() {
-            differences.push(format!(
-                "EqualityGraph groups count: {} vs {}",
-                self.groups.len(),
-                other.groups.len()
-            ));
-        }
-        if self.applications.len() != other.applications.len() {
-            differences.push(format!(
-                "EqualityGraph applications count: {} vs {}",
-                self.applications.len(),
-                other.applications.len()
-            ));
-        }
-        if self.has_contradiction != other.has_contradiction {
-            differences.push(format!(
-                "EqualityGraph has_contradiction: {} vs {}",
-                self.has_contradiction, other.has_contradiction
-            ));
-        }
-    }
 }
 
 /// A test wrapper that combines a EqualityGraph with its KernelContext.

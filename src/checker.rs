@@ -760,34 +760,6 @@ impl Checker {
             }
         }
     }
-
-    /// Collects differences between this checker and another, for debugging.
-    pub fn collect_differences(&self, other: &Checker, differences: &mut Vec<String>) {
-        // Compare term graphs
-        self.term_graph
-            .collect_differences(&other.term_graph, differences);
-
-        // Compare generalization sets
-        self.generalization_set
-            .collect_differences(&other.generalization_set, differences);
-
-        // Compare reasons
-        if self.reasons.len() != other.reasons.len() {
-            differences.push(format!(
-                "Checker reasons count: {} vs {}",
-                self.reasons.len(),
-                other.reasons.len()
-            ));
-        }
-
-        // Compare direct contradiction
-        if self.direct_contradiction != other.direct_contradiction {
-            differences.push(format!(
-                "Checker direct_contradiction: {} vs {}",
-                self.direct_contradiction, other.direct_contradiction
-            ));
-        }
-    }
 }
 
 /// A test wrapper that combines a Checker with a KernelContext.

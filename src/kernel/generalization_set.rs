@@ -41,18 +41,6 @@ impl GeneralizationSet {
         }
         None
     }
-
-    /// Collects differences between this generalization set and another, for debugging.
-    pub fn collect_differences(&self, other: &GeneralizationSet, differences: &mut Vec<String>) {
-        let self_size = self.tree.values.len();
-        let other_size = other.tree.values.len();
-        if self_size != other_size {
-            differences.push(format!(
-                "GeneralizationSet tree size: {} vs {}",
-                self_size, other_size
-            ));
-        }
-    }
 }
 
 /// Compare two literals in a substitution-invariant way.
