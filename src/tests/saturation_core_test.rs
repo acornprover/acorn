@@ -2191,8 +2191,7 @@ fn test_backward_rewrite_specialization_regression() {
     let goal = node.goal().unwrap();
     let goal_env = node.goal_env().unwrap();
 
-    let mut processor = Processor::new();
-    processor.add_imports(&project, module_id).unwrap();
+    let mut processor = Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_goal(&goal).unwrap();
     let outcome = processor.search(ProverMode::Interactive { timeout_secs: 5.0 });

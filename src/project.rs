@@ -1270,16 +1270,17 @@ impl Project {
     pub fn find_cert(
         &self,
         goal: &Goal,
-        env: &Environment,
+        root_env: &Environment,
+        goal_env: &Environment,
         cursor: &crate::elaborator::node::NodeCursor,
     ) -> Option<(&Certificate, Vec<crate::checker::CertificateStep>)> {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
 
-        let mut processor = Processor::new();
-        if processor.add_imports(self, goal.module_id).is_err() {
-            return None;
-        }
+        let mut processor = match Processor::with_imports(None, root_env) {
+            Ok(p) => p,
+            Err(_) => return None,
+        };
         if processor.add_module_facts(cursor).is_err() {
             return None;
         }
@@ -1288,7 +1289,8 @@ impl Project {
         for cert in &cert_store.certs {
             if cert.goal == goal.name {
                 // Try to verify this certificate
-                if let Ok(steps) = processor.check_cert(cert, Some(goal), self, &env.bindings) {
+                if let Ok(steps) = processor.check_cert(cert, Some(goal), self, &goal_env.bindings)
+                {
                     return Some((cert, steps));
                 }
             }
@@ -1336,7 +1338,7 @@ impl Project {
             let goal_env = cursor
                 .goal_env()
                 .map_err(|e| format!("goal_env failed: {}", e))?;
-            let goal_info = self.create_goal_info(goal, goal_env, &cursor);
+            let goal_info = self.create_goal_info(goal, env, goal_env, &cursor);
             goal_infos.push(goal_info);
         } else if let Some(block) = cursor.node().get_block() {
             // This is a Block node - collect ALL block-level goal children
@@ -1378,7 +1380,7 @@ impl Project {
                     .goal_env()
                     .map_err(|e| format!("goal_env failed: {}", e))?;
 
-                let goal_info = self.create_goal_info(&goal, goal_env, &goal_cursor);
+                let goal_info = self.create_goal_info(&goal, env, goal_env, &goal_cursor);
                 goal_infos.push(goal_info);
             }
         } else {
@@ -1392,6 +1394,7 @@ impl Project {
     fn create_goal_info(
         &self,
         goal: &crate::elaborator::goal::Goal,
+        root_env: &crate::elaborator::environment::Environment,
         goal_env: &crate::elaborator::environment::Environment,
         cursor: &crate::elaborator::node::NodeCursor,
     ) -> GoalInfo {
@@ -1399,7 +1402,7 @@ impl Project {
 
         // Check if there's a verified certificate for this goal
         let (has_cached_proof, steps) = if let Some((_cert, certificate_steps)) =
-            self.find_cert(goal, goal_env, cursor)
+            self.find_cert(goal, root_env, goal_env, cursor)
         {
             // Convert CertificateSteps to interface::Step objects
             let steps: Vec<Step> = certificate_steps

@@ -1047,8 +1047,7 @@ fn test_proving_with_mixin_instance() {
 
         let goal_env = cursor.goal_env().unwrap();
 
-        let mut processor = crate::processor::Processor::new();
-        processor.add_imports(&p, module_id).unwrap();
+        let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
         processor.set_goal(&goal).unwrap();
 
@@ -1533,8 +1532,7 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
     let goal = cursor.goal().unwrap();
     let goal_env = cursor.goal_env().unwrap();
 
-    let mut processor = crate::processor::Processor::new();
-    processor.add_imports(&p, module_id).unwrap();
+    let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&cursor).unwrap();
     processor.set_goal(&goal).unwrap();
 

@@ -18,8 +18,7 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
     let node = base_env.get_node_by_goal_name(goal_name);
     let goal = node.goal().unwrap();
     let env = node.goal_env().unwrap();
-    let mut processor = Processor::new();
-    processor.add_imports(project, module_id).unwrap();
+    let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_goal(&goal).unwrap();
     let outcome = processor.search(ProverMode::Test);
@@ -55,10 +54,10 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
     for cursor in env.iter_goals() {
         let goal = cursor.goal().unwrap();
         if goal.name == goal_name {
-            let mut processor = Processor::new();
-            if processor.add_imports(&project, module_id).is_err() {
-                return Outcome::Inconsistent;
-            }
+            let mut processor = match Processor::with_imports(None, env) {
+                Ok(p) => p,
+                Err(_) => return Outcome::Inconsistent,
+            };
             if processor.add_module_facts(&cursor).is_err() {
                 return Outcome::Inconsistent;
             }
@@ -97,8 +96,7 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
             last_goal_top_index = Some(last_goal_top_index.map_or(top_index, |i| i.max(top_index)));
         }
 
-        let mut processor = Processor::new();
-        processor.add_imports(&project, module_id)?;
+        let mut processor = Processor::with_imports(None, env)?;
         processor.add_module_facts(&cursor)?;
         processor.set_goal(&goal)?;
 
@@ -120,12 +118,11 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
 
     // Normalize any facts after the last goal (or all facts if there are no goals).
     // This catches normalization errors in trailing definitions.
+    // Note: prenormalize() already does this during module loading, but we keep
+    // this check for test coverage.
     let first_unnormalized = last_goal_top_index.map_or(0, |i| i + 1);
     if first_unnormalized < env.nodes.len() {
-        let mut processor = Processor::new();
-
-        // Add imported facts to build up normalizer state
-        processor.add_imports(&project, module_id)?;
+        let mut processor = Processor::with_imports(None, env)?;
 
         // Add all facts from this module to normalize trailing ones
         for node in &env.nodes {
@@ -176,8 +173,7 @@ pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
         if goal.name == goal_name {
             let goal_env = cursor.goal_env().unwrap();
 
-            let mut processor = Processor::new();
-            processor.add_imports(&project, module_id)?;
+            let mut processor = Processor::with_imports(None, env)?;
             processor.add_module_facts(&cursor)?;
             processor.set_goal(&goal)?;
 

@@ -8,7 +8,6 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::node::NodeCursor;
-use crate::module::ModuleId;
 use crate::normalizer::{NormalizedFact, NormalizedGoal, Normalizer};
 use crate::project::Project;
 use crate::proof_step::Rule;
@@ -64,18 +63,6 @@ impl Processor {
             processor.add_normalized_fact(normalized)?;
         }
         Ok(processor)
-    }
-
-    /// Adds all imported facts for the given module to this processor.
-    pub fn add_imports(
-        &mut self,
-        project: &Project,
-        module_id: ModuleId,
-    ) -> Result<(), BuildError> {
-        for fact in project.imported_facts(module_id, None) {
-            self.add_fact(&fact)?;
-        }
-        Ok(())
     }
 
     /// Adds all module-local facts that are usable at the given cursor position.
@@ -264,8 +251,7 @@ impl Processor {
         let goal = cursor.goal().unwrap();
         let goal_env = cursor.goal_env().unwrap();
 
-        let mut processor = Processor::new();
-        processor.add_imports(&p, module_id).unwrap();
+        let mut processor = Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
         processor.set_goal(&goal).unwrap();
 
