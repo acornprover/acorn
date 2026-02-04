@@ -1175,34 +1175,9 @@ impl TypeStore {
     /// Entries from `other` are added to `self`. If there are conflicts,
     /// the entries should be identical (same module_id, local_id -> same value).
     pub fn merge(&mut self, other: &TypeStore) {
-        // Merge ground types
-        for (module_idx, module_types) in other.ground_id_to_type.iter().enumerate() {
-            while self.ground_id_to_type.len() <= module_idx {
-                self.ground_id_to_type.push_back(ImVector::new());
-            }
-            while self.ground_id_to_arity.len() <= module_idx {
-                self.ground_id_to_arity.push_back(ImVector::new());
-            }
-            for (local_idx, acorn_type) in module_types.iter().enumerate() {
-                let self_module = &mut self.ground_id_to_type[module_idx];
-                if local_idx < self_module.len() {
-                    self.ground_id_to_type[module_idx].set(local_idx, acorn_type.clone());
-                } else {
-                    // Entries should be contiguous, so we should be at exactly the end
-                    assert_eq!(local_idx, self_module.len());
-                    self.ground_id_to_type[module_idx].push_back(acorn_type.clone());
-                }
-            }
-            for (local_idx, arity) in other.ground_id_to_arity[module_idx].iter().enumerate() {
-                let self_module = &mut self.ground_id_to_arity[module_idx];
-                if local_idx < self_module.len() {
-                    self.ground_id_to_arity[module_idx].set(local_idx, *arity);
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.ground_id_to_arity[module_idx].push_back(*arity);
-                }
-            }
-        }
+        // Merge ground types and arities
+        merge_nested_vecs(&mut self.ground_id_to_type, &other.ground_id_to_type);
+        merge_nested_vecs(&mut self.ground_id_to_arity, &other.ground_id_to_arity);
 
         // Merge hash maps
         for (k, v) in other.datatype_to_ground_id.iter() {
@@ -1216,56 +1191,65 @@ impl TypeStore {
         }
 
         // Merge typeclass vectors
-        for (module_idx, module_typeclasses) in other.id_to_typeclass.iter().enumerate() {
-            while self.id_to_typeclass.len() <= module_idx {
-                self.id_to_typeclass.push_back(ImVector::new());
-            }
-            for (local_idx, typeclass) in module_typeclasses.iter().enumerate() {
-                let self_module = &mut self.id_to_typeclass[module_idx];
-                if local_idx < self_module.len() {
-                    self.id_to_typeclass[module_idx].set(local_idx, typeclass.clone());
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.id_to_typeclass[module_idx].push_back(typeclass.clone());
-                }
-            }
-        }
+        merge_nested_vecs(&mut self.id_to_typeclass, &other.id_to_typeclass);
 
-        // Merge typeclass_extends
-        for (module_idx, module_extends) in other.typeclass_extends.iter().enumerate() {
-            while self.typeclass_extends.len() <= module_idx {
-                self.typeclass_extends.push_back(ImVector::new());
-            }
-            for (local_idx, extends_set) in module_extends.iter().enumerate() {
-                let self_module = &mut self.typeclass_extends[module_idx];
-                if local_idx < self_module.len() {
-                    // Union the sets
-                    let existing = &self.typeclass_extends[module_idx][local_idx];
-                    let merged: StdHashSet<_> = existing.union(extends_set).cloned().collect();
-                    self.typeclass_extends[module_idx].set(local_idx, merged);
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.typeclass_extends[module_idx].push_back(extends_set.clone());
-                }
-            }
-        }
+        // Merge typeclass_extends and typeclass_instances (union sets)
+        merge_nested_vecs_with(
+            &mut self.typeclass_extends,
+            &other.typeclass_extends,
+            |a, b| a.union(b).cloned().collect(),
+        );
+        merge_nested_vecs_with(
+            &mut self.typeclass_instances,
+            &other.typeclass_instances,
+            |a, b| a.union(b).cloned().collect(),
+        );
+    }
+}
 
-        // Merge typeclass_instances
-        for (module_idx, module_instances) in other.typeclass_instances.iter().enumerate() {
-            while self.typeclass_instances.len() <= module_idx {
-                self.typeclass_instances.push_back(ImVector::new());
-            }
-            for (local_idx, instances_set) in module_instances.iter().enumerate() {
-                let self_module = &mut self.typeclass_instances[module_idx];
-                if local_idx < self_module.len() {
-                    // Union the sets
-                    let existing = &self.typeclass_instances[module_idx][local_idx];
-                    let merged: StdHashSet<_> = existing.union(instances_set).cloned().collect();
-                    self.typeclass_instances[module_idx].set(local_idx, merged);
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.typeclass_instances[module_idx].push_back(instances_set.clone());
-                }
+/// Merge entries from `source` into `target`, extending as needed.
+/// Entries are expected to be contiguous (no gaps).
+fn merge_vec<T: Clone>(target: &mut ImVector<T>, source: &ImVector<T>) {
+    for (idx, item) in source.iter().enumerate() {
+        if idx < target.len() {
+            target.set(idx, item.clone());
+        } else {
+            debug_assert_eq!(idx, target.len());
+            target.push_back(item.clone());
+        }
+    }
+}
+
+/// Merge nested vectors: outer is indexed by module_id, inner by local_id.
+fn merge_nested_vecs<T: Clone>(target: &mut ImVector<ImVector<T>>, source: &ImVector<ImVector<T>>) {
+    while target.len() < source.len() {
+        target.push_back(ImVector::new());
+    }
+    for (mod_idx, source_inner) in source.iter().enumerate() {
+        merge_vec(&mut target[mod_idx], source_inner);
+    }
+}
+
+/// Merge nested vectors with a custom combine function for overlapping entries.
+fn merge_nested_vecs_with<T: Clone, F>(
+    target: &mut ImVector<ImVector<T>>,
+    source: &ImVector<ImVector<T>>,
+    combine: F,
+) where
+    F: Fn(&T, &T) -> T,
+{
+    while target.len() < source.len() {
+        target.push_back(ImVector::new());
+    }
+    for (mod_idx, source_inner) in source.iter().enumerate() {
+        for (idx, item) in source_inner.iter().enumerate() {
+            let target_len = target[mod_idx].len();
+            if idx < target_len {
+                let merged = combine(&target[mod_idx][idx], item);
+                target[mod_idx].set(idx, merged);
+            } else {
+                debug_assert_eq!(idx, target_len);
+                target[mod_idx].push_back(item.clone());
             }
         }
     }

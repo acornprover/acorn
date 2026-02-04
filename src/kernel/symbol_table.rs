@@ -666,70 +666,21 @@ impl SymbolTable {
     /// Entries from `other` are added to `self`.
     pub fn merge(&mut self, other: &SymbolTable) {
         // Merge global constants and their types
-        for (module_idx, module_constants) in other.global_constants.iter().enumerate() {
-            while self.global_constants.len() <= module_idx {
-                self.global_constants.push_back(ImVector::new());
-            }
-            while self.global_constant_types.len() <= module_idx {
-                self.global_constant_types.push_back(ImVector::new());
-            }
-            for (local_idx, constant_name) in module_constants.iter().enumerate() {
-                let self_module = &mut self.global_constants[module_idx];
-                if local_idx < self_module.len() {
-                    self.global_constants[module_idx].set(local_idx, constant_name.clone());
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.global_constants[module_idx].push_back(constant_name.clone());
-                }
-            }
-            for (local_idx, constant_type) in
-                other.global_constant_types[module_idx].iter().enumerate()
-            {
-                let self_module = &mut self.global_constant_types[module_idx];
-                if local_idx < self_module.len() {
-                    self.global_constant_types[module_idx].set(local_idx, constant_type.clone());
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.global_constant_types[module_idx].push_back(constant_type.clone());
-                }
-            }
-        }
+        merge_nested_vecs(&mut self.global_constants, &other.global_constants);
+        merge_nested_vecs(
+            &mut self.global_constant_types,
+            &other.global_constant_types,
+        );
 
-        // Merge scoped constants - these are local to a verification context, so
-        // we should generally not have overlapping scoped constants when merging imports.
-        // Just extend if other has more.
-        for (idx, constant_name) in other.scoped_constants.iter().enumerate() {
-            if idx < self.scoped_constants.len() {
-                self.scoped_constants.set(idx, constant_name.clone());
-            } else {
-                assert_eq!(idx, self.scoped_constants.len());
-                self.scoped_constants.push_back(constant_name.clone());
-            }
-        }
-        for (idx, constant_type) in other.scoped_constant_types.iter().enumerate() {
-            if idx < self.scoped_constant_types.len() {
-                self.scoped_constant_types.set(idx, constant_type.clone());
-            } else {
-                assert_eq!(idx, self.scoped_constant_types.len());
-                self.scoped_constant_types.push_back(constant_type.clone());
-            }
-        }
+        // Merge scoped constants
+        merge_vec(&mut self.scoped_constants, &other.scoped_constants);
+        merge_vec(
+            &mut self.scoped_constant_types,
+            &other.scoped_constant_types,
+        );
 
         // Merge synthetic types
-        for (module_idx, module_synthetics) in other.synthetic_types.iter().enumerate() {
-            while self.synthetic_types.len() <= module_idx {
-                self.synthetic_types.push_back(ImVector::new());
-            }
-            for (local_idx, synthetic_type) in module_synthetics.iter().enumerate() {
-                let self_module = &mut self.synthetic_types[module_idx];
-                if local_idx < self_module.len() {
-                    self.synthetic_types[module_idx].set(local_idx, synthetic_type.clone());
-                } else {
-                    assert_eq!(local_idx, self_module.len());
-                    self.synthetic_types[module_idx].push_back(synthetic_type.clone());
-                }
-            }
-        }
+        merge_nested_vecs(&mut self.synthetic_types, &other.synthetic_types);
 
         // Merge hash maps
         for (k, v) in other.name_to_symbol.iter() {
@@ -755,5 +706,27 @@ impl SymbolTable {
         for id in other.inhabited_typeclasses.iter() {
             self.inhabited_typeclasses.insert(*id);
         }
+    }
+}
+
+/// Merge entries from `source` into `target`, extending as needed.
+fn merge_vec<T: Clone>(target: &mut ImVector<T>, source: &ImVector<T>) {
+    for (idx, item) in source.iter().enumerate() {
+        if idx < target.len() {
+            target.set(idx, item.clone());
+        } else {
+            debug_assert_eq!(idx, target.len());
+            target.push_back(item.clone());
+        }
+    }
+}
+
+/// Merge nested vectors: outer is indexed by module_id, inner by local_id.
+fn merge_nested_vecs<T: Clone>(target: &mut ImVector<ImVector<T>>, source: &ImVector<ImVector<T>>) {
+    while target.len() < source.len() {
+        target.push_back(ImVector::new());
+    }
+    for (mod_idx, source_inner) in source.iter().enumerate() {
+        merge_vec(&mut target[mod_idx], source_inner);
     }
 }
