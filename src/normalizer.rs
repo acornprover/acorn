@@ -30,6 +30,7 @@ use tracing::trace;
 #[derive(Clone)]
 pub struct NormalizedFact {
     pub steps: Vec<ProofStep>,
+    pub normalizer: Normalizer,
 }
 
 /// A goal that has been normalized into proof steps.
@@ -2176,7 +2177,10 @@ impl Normalizer {
             }
         }
 
-        Ok(NormalizedFact { steps })
+        Ok(NormalizedFact {
+            steps,
+            normalizer: self.clone(),
+        })
     }
 
     /// Normalizes a goal into proof steps that include both positive versions

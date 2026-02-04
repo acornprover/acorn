@@ -416,6 +416,37 @@ impl Checker {
         Ok(())
     }
 
+    /// Insert pre-normalized goal clauses into the checker.
+    /// Uses the provided normalized goal (including its normalizer state).
+    pub fn insert_normalized_goal(
+        &mut self,
+        normalized: &crate::normalizer::NormalizedGoal,
+        normalizer: &mut crate::normalizer::Normalizer,
+    ) -> Result<(), Error> {
+        trace!(
+            "inserting normalized goal {} (line {})",
+            normalized.goal.name,
+            normalized.goal.first_line
+        );
+
+        *normalizer = normalized.normalizer.clone();
+        let source = &normalized.goal.proposition.source;
+        let kernel_context = normalizer.kernel_context();
+        for step in &normalized.steps {
+            let step_source = if let Rule::Assumption(info) = &step.rule {
+                &info.source
+            } else {
+                source
+            };
+            self.insert_clause(
+                &step.clause,
+                StepReason::Assumption(step_source.clone()),
+                kernel_context,
+            );
+        }
+        Ok(())
+    }
+
     /// Check a certificate. It is expected that the certificate has a proof.
     /// Returns a list of CertificateSteps showing how each step was verified.
     ///

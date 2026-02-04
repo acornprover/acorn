@@ -340,6 +340,50 @@ impl<'a> NodeCursor<'a> {
         facts
     }
 
+    /// Pre-normalized facts from this module that are visible at the current node.
+    /// This does not include imported facts.
+    pub fn visible_normalized_facts(&self) -> Result<Vec<&NormalizedFact>, String> {
+        let mut facts = vec![];
+        let (env, i) = &self.annotated_path[0];
+        for node in &env.nodes[0..*i] {
+            if node.get_fact().is_some() {
+                match node.get_normalized_fact() {
+                    Some(nf) => facts.push(nf),
+                    None => {
+                        return Err(format!("missing prenormalized fact for node {}", node));
+                    }
+                }
+            }
+        }
+
+        for (env, i) in self.annotated_path.iter().skip(1) {
+            for node in &env.nodes[0..*i] {
+                if node.get_fact().is_some() {
+                    match node.get_normalized_fact() {
+                        Some(nf) => facts.push(nf),
+                        None => {
+                            return Err(format!("missing prenormalized fact for node {}", node));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(block) = &self.node().get_block() {
+            for node in &block.env.nodes {
+                if node.get_fact().is_some() {
+                    match node.get_normalized_fact() {
+                        Some(nf) => facts.push(nf),
+                        None => {
+                            return Err(format!("missing prenormalized fact for node {}", node));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(facts)
+    }
+
     /// Get all facts that are inside the block of this cursor.
     /// This does not include imported facts, and it does not include facts that
     /// are top-level in the module.

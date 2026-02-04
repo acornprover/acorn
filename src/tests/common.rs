@@ -16,11 +16,11 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
         _ => panic!("no module"),
     };
     let node = base_env.get_node_by_goal_name(goal_name);
-    let goal = node.goal().unwrap();
     let env = node.goal_env().unwrap();
+    let normalized_goal = node.normalized_goal().expect("missing prenormalized goal");
     let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
-    processor.set_goal(&goal).unwrap();
+    processor.set_normalized_goal(normalized_goal);
     let outcome = processor.search(ProverMode::Test);
 
     assert_eq!(outcome, Outcome::Success);
@@ -61,9 +61,11 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
             if processor.add_module_facts(&cursor).is_err() {
                 return Outcome::Inconsistent;
             }
-            if processor.set_goal(&goal).is_err() {
-                return Outcome::Inconsistent;
-            }
+            let normalized_goal = match cursor.normalized_goal() {
+                Some(n) => n,
+                None => return Outcome::Inconsistent,
+            };
+            processor.set_normalized_goal(normalized_goal);
 
             return processor.search(ProverMode::Test);
         }
@@ -86,7 +88,7 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
     let mut last_goal_top_index: Option<usize> = None;
 
     for cursor in env.iter_goals() {
-        let goal = cursor.goal().unwrap();
+        let _goal = cursor.goal().unwrap();
         let goal_env = cursor.goal_env().unwrap();
 
         // Track the top-level index of this goal
@@ -98,7 +100,10 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
 
         let mut processor = Processor::with_imports(None, env)?;
         processor.add_module_facts(&cursor)?;
-        processor.set_goal(&goal)?;
+        let normalized_goal = cursor
+            .normalized_goal()
+            .ok_or_else(|| "missing prenormalized goal".to_string())?;
+        processor.set_normalized_goal(normalized_goal);
 
         // This is a key difference between our verification tests, and our real verification.
         // This helps us test that verification fails in cases where we do have an
@@ -175,7 +180,10 @@ pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
 
             let mut processor = Processor::with_imports(None, env)?;
             processor.add_module_facts(&cursor)?;
-            processor.set_goal(&goal)?;
+            let normalized_goal = cursor
+                .normalized_goal()
+                .ok_or_else(|| "missing prenormalized goal".to_string())?;
+            processor.set_normalized_goal(normalized_goal);
 
             let outcome = processor.search(ProverMode::Test);
             if outcome != Outcome::Success {

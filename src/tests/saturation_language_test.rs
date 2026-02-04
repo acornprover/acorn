@@ -1043,13 +1043,14 @@ fn test_proving_with_mixin_instance() {
     };
 
     for cursor in env.iter_goals() {
-        let goal = cursor.goal().unwrap();
-
         let goal_env = cursor.goal_env().unwrap();
 
         let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        processor.set_goal(&goal).unwrap();
+        let normalized_goal = cursor
+            .normalized_goal()
+            .expect("missing prenormalized goal");
+        processor.set_normalized_goal(normalized_goal);
 
         let outcome = processor.search(crate::prover::ProverMode::Test);
         assert_eq!(outcome, Outcome::Success);
@@ -1529,12 +1530,14 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
 
     // Run the prover and generate a certificate
     let cursor = env.iter_goals().next().expect("expected a goal in main");
-    let goal = cursor.goal().unwrap();
     let goal_env = cursor.goal_env().unwrap();
 
     let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&cursor).unwrap();
-    processor.set_goal(&goal).unwrap();
+    let normalized_goal = cursor
+        .normalized_goal()
+        .expect("missing prenormalized goal");
+    processor.set_normalized_goal(normalized_goal);
 
     let outcome = processor.search(crate::prover::ProverMode::Test);
     assert_eq!(outcome, Outcome::Success);

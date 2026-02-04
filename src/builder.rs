@@ -651,7 +651,10 @@ impl<'a> Builder<'a> {
 
         // If there's a cert override for single-goal verification, use it instead of the worklist
         if let Some(ref cert) = self.cert_override {
-            let result = processor.check_cert(cert, Some(goal), self.project, &env.bindings);
+            let pre_normalized = pre_normalized
+                .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
+            let result =
+                processor.check_cert(cert, Some(pre_normalized), self.project, &env.bindings);
             match result {
                 Ok(_steps) => {
                     self.metrics.goals_done += 1;
@@ -674,8 +677,11 @@ impl<'a> Builder<'a> {
             let cert = worklist.get_cert(*i).unwrap().clone();
 
             // If clean_certs is enabled, clean the certificate
+            let pre_normalized = pre_normalized
+                .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
             let (cert_to_use, check_result) = if self.clean_certs {
-                match processor.clean_cert(cert, Some(goal), self.project, &env.bindings) {
+                match processor.clean_cert(cert, Some(pre_normalized), self.project, &env.bindings)
+                {
                     Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
                     Err(e) => {
                         return Err(BuildError::goal(
@@ -686,7 +692,8 @@ impl<'a> Builder<'a> {
                 }
             } else {
                 // Normal path: just check the certificate
-                let result = processor.check_cert(&cert, Some(goal), self.project, &env.bindings);
+                let result =
+                    processor.check_cert(&cert, Some(pre_normalized), self.project, &env.bindings);
                 (cert, result)
             };
 
@@ -737,12 +744,10 @@ impl<'a> Builder<'a> {
         // Try searching
         let processor = Rc::make_mut(&mut processor);
 
-        // Use pre-normalized goal data when available, otherwise normalize at runtime
-        if let Some(pre_normalized) = pre_normalized {
-            processor.set_normalized_goal(pre_normalized);
-        } else {
-            processor.set_goal(goal)?;
-        }
+        // Use pre-normalized goal data only; do not normalize during phase three.
+        let pre_normalized =
+            pre_normalized.ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
+        processor.set_normalized_goal(pre_normalized);
 
         let start = std::time::Instant::now();
         let outcome = processor.search(ProverMode::Interactive {
@@ -755,14 +760,14 @@ impl<'a> Builder<'a> {
                     {
                         // Validate the cert immediately after generation.
                         processor
-                            .check_cert(&cert, Some(goal), self.project, &env.bindings)
+                            .check_cert(&cert, Some(pre_normalized), self.project, &env.bindings)
                             .expect("newly generated cert should be checkable");
                     }
                     #[cfg(not(feature = "validate"))]
                     if self.verbose {
                         // Since we aren't performance-sensitive, check the cert.
                         processor
-                            .check_cert(&cert, Some(goal), self.project, &env.bindings)
+                            .check_cert(&cert, Some(pre_normalized), self.project, &env.bindings)
                             .expect("newly generated cert should be checkable");
                     }
                     new_certs.push(cert);
@@ -805,8 +810,14 @@ impl<'a> Builder<'a> {
                     break;
                 }
 
-                if let Some(fact) = cursor.node().get_fact() {
-                    Rc::make_mut(&mut processor).add_fact(&fact)?;
+                if cursor.node().get_fact().is_some() {
+                    let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
+                        BuildError::new(
+                            Default::default(),
+                            "missing prenormalized fact".to_string(),
+                        )
+                    })?;
+                    Rc::make_mut(&mut processor).add_normalized_fact_with_normalizer(normalized)?;
                 }
 
                 if cursor.has_next() {
@@ -911,8 +922,14 @@ impl<'a> Builder<'a> {
                 if !cursor.has_next() {
                     break;
                 }
-                if let Some(fact) = cursor.node().get_fact() {
-                    Rc::make_mut(&mut processor).add_fact(&fact)?;
+                if cursor.node().get_fact().is_some() {
+                    let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
+                        BuildError::new(
+                            Default::default(),
+                            "missing prenormalized fact".to_string(),
+                        )
+                    })?;
+                    Rc::make_mut(&mut processor).add_normalized_fact_with_normalizer(normalized)?;
                 }
                 cursor.next();
             }

@@ -67,8 +67,11 @@ impl Processor {
 
     /// Adds all module-local facts that are usable at the given cursor position.
     pub fn add_module_facts(&mut self, cursor: &NodeCursor) -> Result<(), BuildError> {
-        for fact in cursor.module_facts() {
-            self.add_fact(&fact)?;
+        let facts = cursor
+            .visible_normalized_facts()
+            .map_err(|message| BuildError::new(Default::default(), message))?;
+        for normalized in facts {
+            self.add_normalized_fact_with_normalizer(normalized)?;
         }
         Ok(())
     }
@@ -109,6 +112,15 @@ impl Processor {
         self.prover
             .add_steps(normalized.steps.clone(), kernel_context);
         Ok(())
+    }
+
+    /// Adds a normalized fact and updates the normalizer to the fact's state.
+    pub fn add_normalized_fact_with_normalizer(
+        &mut self,
+        normalized: &NormalizedFact,
+    ) -> Result<(), BuildError> {
+        self.normalizer = normalized.normalizer.clone();
+        self.add_normalized_fact(normalized)
     }
 
     /// Normalizes a fact and adds the resulting proof steps to the prover.
@@ -176,15 +188,15 @@ impl Processor {
     pub fn check_cert(
         &self,
         cert: &Certificate,
-        goal: Option<&Goal>,
+        normalized_goal: Option<&NormalizedGoal>,
         project: &Project,
         bindings: &BindingMap,
     ) -> Result<Vec<CertificateStep>, Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = self.normalizer.clone();
 
-        if let Some(goal) = goal {
-            checker.insert_goal(goal, &mut normalizer)?;
+        if let Some(normalized_goal) = normalized_goal {
+            checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
         }
 
         let bindings = Cow::Borrowed(bindings);
@@ -197,15 +209,15 @@ impl Processor {
     pub fn clean_cert(
         &self,
         cert: Certificate,
-        goal: Option<&Goal>,
+        normalized_goal: Option<&NormalizedGoal>,
         project: &Project,
         bindings: &BindingMap,
     ) -> Result<(Certificate, Vec<CertificateStep>), Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = self.normalizer.clone();
 
-        if let Some(goal) = goal {
-            checker.insert_goal(goal, &mut normalizer)?;
+        if let Some(normalized_goal) = normalized_goal {
+            checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
         }
 
         let bindings = Cow::Borrowed(bindings);
@@ -231,12 +243,14 @@ impl Processor {
         };
 
         let cursor = env.get_node_by_goal_name("goal");
-        let goal = cursor.goal().unwrap();
         let goal_env = cursor.goal_env().unwrap();
 
         let mut processor = Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        processor.set_goal(&goal).unwrap();
+        let normalized_goal = cursor
+            .normalized_goal()
+            .expect("missing prenormalized goal");
+        processor.set_normalized_goal(normalized_goal);
 
         (processor, goal_env.bindings.clone())
     }

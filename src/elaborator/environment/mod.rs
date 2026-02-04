@@ -655,6 +655,12 @@ impl Environment {
     /// Returns Ok(()) if all facts normalized successfully, or Err if any failed.
     /// Even on error, the normalizer states are set to what was achieved before the error.
     pub fn prenormalize(&mut self, project: &Project) -> Result<(), String> {
+        if !self.normalized_module_facts.is_empty() {
+            return Err(
+                "prenormalize called after normalized_module_facts was already populated"
+                    .to_string(),
+            );
+        }
         use std::collections::HashSet;
 
         let mut normalizer = Normalizer::new();
@@ -694,30 +700,29 @@ impl Environment {
         // This can be cloned by Processor::with_imports to avoid re-normalizing.
         self.import_normalizer = Some(normalizer.clone());
 
-        // Normalize top-level facts for backwards compatibility and for goal normalization.
-        // Due to Rc::make_mut cloning behavior in verification, only top-level facts
-        // (added in verify_module's loop) are visible - internal facts from blocks
-        // are added to cloned processors that get dropped.
+        // Now normalize goals. For each goal, we compute the normalizer state that matches
+        // what verification sees. This iterates through nodes in order, adding facts to
+        // the normalizer as we go (mirroring verify_node behavior).
+        let import_normalizer = self.import_normalizer.clone().unwrap();
+        let final_normalizer =
+            Self::prenormalize_goals(&mut self.nodes, &import_normalizer, &mut first_error);
+
+        // Collect pre-normalized top-level facts for use as module facts in dependents.
+        // Facts should be normalized exactly once during prenormalize_goals.
         for node in &self.nodes {
-            if let Some(fact) = node.get_fact() {
-                match normalizer.normalize_fact(&fact) {
-                    Ok(normalized) => self.normalized_module_facts.push(normalized),
-                    Err(e) => {
+            if node.get_fact().is_some() {
+                match node.get_normalized_fact() {
+                    Some(normalized) => self.normalized_module_facts.push(normalized.clone()),
+                    None => {
                         if first_error.is_none() {
-                            first_error = Some(e.message);
+                            first_error = Some("missing prenormalized fact".to_string());
                         }
                     }
                 }
             }
         }
 
-        // Now normalize goals. For each goal, we compute the normalizer state that matches
-        // what verification sees. This iterates through nodes in order, adding facts to
-        // the normalizer as we go (mirroring verify_node behavior).
-        let import_normalizer = self.import_normalizer.clone().unwrap();
-        Self::prenormalize_goals(&mut self.nodes, &import_normalizer, &mut first_error);
-
-        self.normalizer = Some(normalizer);
+        self.normalizer = Some(final_normalizer);
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
@@ -742,7 +747,7 @@ impl Environment {
         nodes: &mut [Node],
         base_normalizer: &Normalizer,
         first_error: &mut Option<String>,
-    ) {
+    ) -> Normalizer {
         // Clone the normalizer to track state as we process nodes.
         // We need to track state for this level only.
         let mut current_normalizer = base_normalizer.clone();
@@ -818,6 +823,8 @@ impl Environment {
                 }
             }
         }
+
+        current_normalizer
     }
 }
 
