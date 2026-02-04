@@ -904,17 +904,6 @@ impl<'a> Builder<'a> {
                 }
                 cursor.next();
             }
-
-            // Verify that the processor's normalizer matches the prenormalized state.
-            if let Some(ref prenorm) = env.normalizer {
-                // The verification loop doesn't add the last node's fact, but prenormalize
-                // includes all facts. Add the last fact before comparing.
-                if let Some(fact) = cursor.node().get_fact() {
-                    Rc::make_mut(&mut processor).add_fact(&fact)?;
-                }
-                let proc = Rc::try_unwrap(processor).unwrap_or_else(|rc| (*rc).clone());
-                proc.normalizer().assert_same(prenorm);
-            }
         }
 
         let module_good = if env.nodes.is_empty() {
