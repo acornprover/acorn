@@ -224,18 +224,10 @@ impl Processor {
     pub fn test_parse_code(&self, code: &str, bindings: &BindingMap, normalizer: &Normalizer) {
         use std::borrow::Cow;
 
-        let kernel_context = normalizer.kernel_context().clone();
         let mut normalizer_cow = Cow::Owned(normalizer.clone());
         let mut bindings_cow = Cow::Borrowed(bindings);
         let project = Project::new_mock();
 
-        Checker::parse_code_line(
-            code,
-            &project,
-            &mut bindings_cow,
-            &mut normalizer_cow,
-            &kernel_context,
-        )
-        .unwrap();
+        Checker::parse_code_line(code, &project, &mut bindings_cow, &mut normalizer_cow).unwrap();
     }
 }

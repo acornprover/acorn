@@ -162,9 +162,7 @@ impl Certificate {
         let mut claims = Vec::new();
 
         for code in proof {
-            // Get fresh kernel_context each iteration to see updates from register_arbitrary_type etc
-            let kernel_context = normalizer.kernel_context().clone();
-            match Checker::parse_code_line(code, project, bindings, normalizer, &kernel_context)? {
+            match Checker::parse_code_line(code, project, bindings, normalizer)? {
                 ParsedLine::LetSatisfy { .. } => {
                     // Let-satisfy sets up bindings but doesn't produce claims
                 }
@@ -173,6 +171,12 @@ impl Certificate {
                         if !claims.contains(&clause) {
                             claims.push(clause);
                         }
+                    }
+                }
+                #[cfg(feature = "bigcert")]
+                ParsedLine::ClaimSpecialization { clause, .. } => {
+                    if !claims.contains(&clause) {
+                        claims.push(clause);
                     }
                 }
             }
