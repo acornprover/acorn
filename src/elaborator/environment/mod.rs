@@ -626,7 +626,7 @@ impl Environment {
     }
 
     /// Helper to collect all transitive dependencies for this environment.
-    /// Used by prenormalize since the module isn't in the project yet.
+    /// Used by the normalization pass since the module isn't in the project yet.
     fn collect_dependencies(
         &self,
         project: &Project,
@@ -645,19 +645,19 @@ impl Environment {
         }
     }
 
-    /// Populates the prenormalized fields by processing all facts.
+    /// Populates normalized fields by processing all facts during the normalization pass.
     /// This should be called after elaboration is complete.
     ///
-    /// For dependencies that have already been prenormalized, we merge their
+    /// For dependencies that have already been normalized, we merge their
     /// normalizer state and reuse their pre-normalized facts, avoiding redundant
     /// normalization work.
     ///
     /// Returns Ok(()) if all facts normalized successfully, or Err if any failed.
     /// Even on error, the normalizer states are set to what was achieved before the error.
-    pub fn prenormalize(&mut self, project: &Project) -> Result<(), String> {
+    pub fn run_normalization_pass(&mut self, project: &Project) -> Result<(), String> {
         if !self.normalized_module_facts.is_empty() {
             return Err(
-                "prenormalize called after normalized_module_facts was already populated"
+                "normalization pass called after normalized_module_facts was already populated"
                     .to_string(),
             );
         }
@@ -673,7 +673,7 @@ impl Environment {
         self.collect_dependencies(project, &mut seen, &mut deps);
 
         // Add imported facts from dependencies.
-        // If a dependency has prenormalized state, merge it and reuse the pre-normalized facts.
+        // If a dependency has normalized state, merge it and reuse the normalized facts.
         // Otherwise, fall back to normalizing (shouldn't happen in practice).
         //
         // Important: we only copy normalized_module_facts (the dependency's own facts),
@@ -683,7 +683,7 @@ impl Environment {
         for dep_id in deps {
             if let Some(dep_env) = project.get_env_by_id(dep_id) {
                 if let Some(ref dep_normalizer) = dep_env.normalizer {
-                    // Dependency has prenormalized state - merge and reuse
+                    // Dependency has normalized state - merge and reuse
                     normalizer.merge_imports(dep_normalizer);
                     // Add only the dependency's own facts (not its imports)
                     for normalized in &dep_env.normalized_module_facts {
@@ -691,7 +691,7 @@ impl Environment {
                     }
                 } else {
                     // This should never happen - dependencies are processed first
-                    panic!("Dependency {} not prenormalized", dep_id.0);
+                    panic!("Dependency {} not normalized", dep_id.0);
                 }
             }
         }
@@ -705,17 +705,17 @@ impl Environment {
         // the normalizer as we go (mirroring verify_node behavior).
         let import_normalizer = self.import_normalizer.clone().unwrap();
         let final_normalizer =
-            Self::prenormalize_goals(&mut self.nodes, &import_normalizer, &mut first_error);
+            Self::normalize_nodes_pass(&mut self.nodes, &import_normalizer, &mut first_error);
 
-        // Collect pre-normalized top-level facts for use as module facts in dependents.
-        // Facts should be normalized exactly once during prenormalize_goals.
+        // Collect normalized top-level facts for use as module facts in dependents.
+        // Facts should be normalized exactly once during normalize_nodes_pass.
         for node in &self.nodes {
             if node.get_fact().is_some() {
                 match node.get_normalized_fact() {
                     Some(normalized) => self.normalized_module_facts.push(normalized.clone()),
                     None => {
                         if first_error.is_none() {
-                            first_error = Some("missing prenormalized fact".to_string());
+                            first_error = Some("missing normalized fact".to_string());
                         }
                     }
                 }
@@ -743,7 +743,7 @@ impl Environment {
     /// This function mirrors that behavior: we iterate through nodes in order, adding facts
     /// to the normalizer as we go. When recursing into a block, we clone the current
     /// normalizer and process the block's nodes independently.
-    fn prenormalize_goals(
+    fn normalize_nodes_pass(
         nodes: &mut [Node],
         base_normalizer: &Normalizer,
         first_error: &mut Option<String>,
@@ -802,7 +802,7 @@ impl Environment {
                 Node::Block(block, external_fact, normalized_fact_slot) => {
                     // Recurse into the block's nodes with current normalizer state.
                     // This mirrors how verify_node clones the processor when entering a block.
-                    Self::prenormalize_goals(
+                    Self::normalize_nodes_pass(
                         &mut block.env.nodes,
                         &current_normalizer,
                         first_error,

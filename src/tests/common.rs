@@ -17,7 +17,7 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
     };
     let node = base_env.get_node_by_goal_name(goal_name);
     let env = node.goal_env().unwrap();
-    let normalized_goal = node.normalized_goal().expect("missing prenormalized goal");
+    let normalized_goal = node.normalized_goal().expect("missing normalized goal");
     let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_normalized_goal(normalized_goal);
@@ -108,7 +108,7 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         processor.add_module_facts(&cursor)?;
         let normalized_goal = cursor
             .normalized_goal()
-            .ok_or_else(|| "missing prenormalized goal".to_string())?;
+            .ok_or_else(|| "missing normalized goal".to_string())?;
         processor.set_normalized_goal(normalized_goal);
 
         // This is a key difference between our verification tests, and our real verification.
@@ -135,14 +135,14 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
 
     // Normalize any facts after the last goal (or all facts if there are no goals).
     // This catches normalization errors in trailing definitions.
-    // Note: prenormalize() already does this during module loading, but we keep
+    // Note: the normalization pass already does this during module loading, but we keep
     // this check for test coverage.
     let first_unnormalized = last_goal_top_index.map_or(0, |i| i + 1);
     if first_unnormalized < env.nodes.len() {
-        // Ensure all facts were pre-normalized during prenormalize.
+        // Ensure all facts were normalized during the normalization pass.
         for node in &env.nodes {
             if node.get_fact().is_some() && node.get_normalized_fact().is_none() {
-                return Err("missing prenormalized fact".to_string());
+                return Err("missing normalized fact".to_string());
             }
         }
     }
@@ -192,7 +192,7 @@ pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
             processor.add_module_facts(&cursor)?;
             let normalized_goal = cursor
                 .normalized_goal()
-                .ok_or_else(|| "missing prenormalized goal".to_string())?;
+                .ok_or_else(|| "missing normalized goal".to_string())?;
             processor.set_normalized_goal(normalized_goal);
 
             let outcome = processor.search(ProverMode::Test, &normalized_goal.normalizer);

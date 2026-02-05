@@ -25,14 +25,14 @@ pub enum Node {
     /// The prover doesn't need to prove these.
     /// For example, this could be an axiom, or a definition.
     /// It could also be a form like a citation that has already been proven by the prover.
-    /// The optional NormalizedFact is populated during prenormalize().
+    /// The optional NormalizedFact is populated during the normalization pass.
     Structural(Fact, Option<NormalizedFact>),
 
     /// A claim is something that we need to prove, and then we can subsequently use it.
     /// The Goal represents what needs to be proven; the Fact represents what can be used once proven.
     /// The optional NormalizedGoal is the pre-normalized goal with captured normalizer state.
     /// The optional NormalizedFact is the pre-normalized fact.
-    /// Both are populated during prenormalize().
+    /// Both are populated during the normalization pass.
     Claim(Goal, Fact, Option<NormalizedGoal>, Option<NormalizedFact>),
 
     /// A block has its own environment inside. We need to validate everything in the block.
@@ -40,7 +40,7 @@ pub enum Node {
     /// The optional fact is what we can use externally once the block is proven.
     /// It is relative to the outside environment.
     /// Other than the external claim, nothing else in the block is visible outside the block.
-    /// The optional NormalizedFact is the pre-normalized external fact, populated during prenormalize().
+    /// The optional NormalizedFact is the external fact normalized during the normalization pass.
     Block(Block, Option<Fact>, Option<NormalizedFact>),
 }
 
@@ -350,7 +350,7 @@ impl<'a> NodeCursor<'a> {
                 match node.get_normalized_fact() {
                     Some(nf) => facts.push(nf),
                     None => {
-                        return Err(format!("missing prenormalized fact for node {}", node));
+                        return Err(format!("missing normalized fact for node {}", node));
                     }
                 }
             }
@@ -362,7 +362,7 @@ impl<'a> NodeCursor<'a> {
                     match node.get_normalized_fact() {
                         Some(nf) => facts.push(nf),
                         None => {
-                            return Err(format!("missing prenormalized fact for node {}", node));
+                            return Err(format!("missing normalized fact for node {}", node));
                         }
                     }
                 }
@@ -375,7 +375,7 @@ impl<'a> NodeCursor<'a> {
                     match node.get_normalized_fact() {
                         Some(nf) => facts.push(nf),
                         None => {
-                            return Err(format!("missing prenormalized fact for node {}", node));
+                            return Err(format!("missing normalized fact for node {}", node));
                         }
                     }
                 }

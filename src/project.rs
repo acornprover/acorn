@@ -1185,7 +1185,7 @@ impl Project {
         // Normalize all facts after elaboration.
         // We ignore errors here since some facts may intentionally fail to normalize
         // (e.g., exists over uninhabited types in test cases).
-        let _ = env.prenormalize(self);
+        let _ = env.run_normalization_pass(self);
 
         // Compute simple blake3 hash of just the file contents
         let content_hash = blake3::hash(text.as_bytes());

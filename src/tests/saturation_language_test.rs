@@ -1047,9 +1047,7 @@ fn test_proving_with_mixin_instance() {
 
         let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor
-            .normalized_goal()
-            .expect("missing prenormalized goal");
+        let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
         processor.set_normalized_goal(normalized_goal);
 
         let outcome =
@@ -1541,9 +1539,7 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
 
     let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor
-        .normalized_goal()
-        .expect("missing prenormalized goal");
+    let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
     processor.set_normalized_goal(normalized_goal);
 
     let outcome = processor.search(crate::prover::ProverMode::Test, &normalized_goal.normalizer);

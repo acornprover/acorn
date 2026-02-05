@@ -2192,7 +2192,7 @@ fn test_backward_rewrite_specialization_regression() {
 
     let mut processor = Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&node).unwrap();
-    let normalized_goal = node.normalized_goal().expect("missing prenormalized goal");
+    let normalized_goal = node.normalized_goal().expect("missing normalized goal");
     processor.set_normalized_goal(normalized_goal);
     let outcome = processor.search(
         ProverMode::Interactive { timeout_secs: 5.0 },

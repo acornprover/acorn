@@ -634,7 +634,7 @@ impl<'a> Builder<'a> {
 
     /// Verifies a goal.
     /// env should be the environment that the proof happens in.
-    /// pre_normalized is the pre-normalized goal from prenormalize(), used for validation.
+    /// normalized_goal is the normalized goal from the normalization pass, used for validation.
     fn verify_goal(
         &mut self,
         mut processor: Rc<Processor>,
@@ -642,7 +642,7 @@ impl<'a> Builder<'a> {
         env: &Environment,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
-        pre_normalized: Option<&NormalizedGoal>,
+        normalized_goal: Option<&NormalizedGoal>,
     ) -> Result<(), BuildError> {
         // Check if we've been cancelled before starting any work
         if self.cancellation_token.is_cancelled() {
@@ -651,12 +651,12 @@ impl<'a> Builder<'a> {
 
         // If there's a cert override for single-goal verification, use it instead of the worklist
         if let Some(ref cert) = self.cert_override {
-            let pre_normalized = pre_normalized
-                .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
+            let normalized_goal =
+                normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
             let result = processor.check_cert(
                 cert,
-                Some(pre_normalized),
-                &pre_normalized.normalizer,
+                Some(normalized_goal),
+                &normalized_goal.normalizer,
                 self.project,
                 &env.bindings,
             );
@@ -682,13 +682,13 @@ impl<'a> Builder<'a> {
             let cert = worklist.get_cert(*i).unwrap().clone();
 
             // If clean_certs is enabled, clean the certificate
-            let pre_normalized = pre_normalized
-                .ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
+            let normalized_goal =
+                normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
             let (cert_to_use, check_result) = if self.clean_certs {
                 match processor.clean_cert(
                     cert,
-                    Some(pre_normalized),
-                    &pre_normalized.normalizer,
+                    Some(normalized_goal),
+                    &normalized_goal.normalizer,
                     self.project,
                     &env.bindings,
                 ) {
@@ -704,8 +704,8 @@ impl<'a> Builder<'a> {
                 // Normal path: just check the certificate
                 let result = processor.check_cert(
                     &cert,
-                    Some(pre_normalized),
-                    &pre_normalized.normalizer,
+                    Some(normalized_goal),
+                    &normalized_goal.normalizer,
                     self.project,
                     &env.bindings,
                 );
@@ -759,20 +759,20 @@ impl<'a> Builder<'a> {
         // Try searching
         let processor = Rc::make_mut(&mut processor);
 
-        // Use pre-normalized goal data only; do not normalize during phase three.
-        let pre_normalized =
-            pre_normalized.ok_or_else(|| BuildError::goal(goal, "missing prenormalized goal"))?;
-        processor.set_normalized_goal(pre_normalized);
+        // Use normalized goal data only; do not normalize during phase three.
+        let normalized_goal =
+            normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
+        processor.set_normalized_goal(normalized_goal);
 
         let start = std::time::Instant::now();
         let outcome = processor.search(
             ProverMode::Interactive {
                 timeout_secs: self.timeout_secs,
             },
-            &pre_normalized.normalizer,
+            &normalized_goal.normalizer,
         );
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, &pre_normalized.normalizer, self.verbose) {
+            match processor.make_cert(&env.bindings, &normalized_goal.normalizer, self.verbose) {
                 Ok(cert) => {
                     #[cfg(feature = "validate")]
                     {
@@ -780,8 +780,8 @@ impl<'a> Builder<'a> {
                         processor
                             .check_cert(
                                 &cert,
-                                Some(pre_normalized),
-                                &pre_normalized.normalizer,
+                                Some(normalized_goal),
+                                &normalized_goal.normalizer,
                                 self.project,
                                 &env.bindings,
                             )
@@ -793,8 +793,8 @@ impl<'a> Builder<'a> {
                         processor
                             .check_cert(
                                 &cert,
-                                Some(pre_normalized),
-                                &pre_normalized.normalizer,
+                                Some(normalized_goal),
+                                &normalized_goal.normalizer,
                                 self.project,
                                 &env.bindings,
                             )
@@ -842,10 +842,7 @@ impl<'a> Builder<'a> {
 
                 if cursor.node().get_fact().is_some() {
                     let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
-                        BuildError::new(
-                            Default::default(),
-                            "missing prenormalized fact".to_string(),
-                        )
+                        BuildError::new(Default::default(), "missing normalized fact".to_string())
                     })?;
                     Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
                 }
@@ -862,7 +859,7 @@ impl<'a> Builder<'a> {
 
         assert!(cursor.node().has_goal());
         let goal = cursor.goal().unwrap();
-        let pre_normalized = cursor.normalized_goal();
+        let normalized_goal = cursor.normalized_goal();
         if let Some(ref filter) = self.goal_filter {
             let matches = match filter {
                 GoalFilter::SingleLine { line, .. } => goal.first_line == *line,
@@ -881,7 +878,7 @@ impl<'a> Builder<'a> {
             cursor.goal_env().unwrap(),
             new_certs,
             worklist,
-            pre_normalized,
+            normalized_goal,
         )?;
 
         Ok(())
@@ -954,10 +951,7 @@ impl<'a> Builder<'a> {
                 }
                 if cursor.node().get_fact().is_some() {
                     let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
-                        BuildError::new(
-                            Default::default(),
-                            "missing prenormalized fact".to_string(),
-                        )
+                        BuildError::new(Default::default(), "missing normalized fact".to_string())
                     })?;
                     Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
                 }

@@ -34,7 +34,7 @@ impl Processor {
         }
     }
 
-    /// Creates a new Processor with imports already added from prenormalized state.
+    /// Creates a new Processor with imports already added from normalized state.
     /// This uses pre-normalized facts directly (no normalization in phase three).
     pub fn with_imports(
         cancellation_token: Option<CancellationToken>,
@@ -208,9 +208,7 @@ impl Processor {
 
         let mut processor = Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor
-            .normalized_goal()
-            .expect("missing prenormalized goal");
+        let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
         processor.set_normalized_goal(normalized_goal);
 
         (
