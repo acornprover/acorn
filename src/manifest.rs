@@ -57,7 +57,14 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the build format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build.
-const MANIFEST_VERSION: u32 = 5;
+const BASE_MANIFEST_VERSION: u32 = 5;
+
+// bigcert caches are intentionally incompatible with non-bigcert caches.
+#[cfg(feature = "bigcert")]
+const MANIFEST_VERSION: u32 = BASE_MANIFEST_VERSION + 1;
+
+#[cfg(not(feature = "bigcert"))]
+const MANIFEST_VERSION: u32 = BASE_MANIFEST_VERSION;
 
 /// A newtype wrapper for module names, created by joining parts with "."
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
