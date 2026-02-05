@@ -49,6 +49,21 @@ pub enum Expression {
     /// The last token is the closing brace.
     Binder(Token, Vec<Declaration>, Box<Expression>, Token),
 
+    /// A generic binder is like a binder but with type parameters.
+    /// For example: function[T](x: T) { x }
+    /// The first token is the "function" keyword.
+    /// The type parameters are the [T, U, ...] list.
+    /// The declarations are the value argument list.
+    /// The expression is the body block.
+    /// The last token is the closing brace.
+    GenericBinder(
+        Token,
+        Vec<TypeParamExpr>,
+        Vec<Declaration>,
+        Box<Expression>,
+        Token,
+    ),
+
     /// If-then-else expressions. The else branch is optional.
     /// The first token is the "if" keyword.
     /// The first expression is the condition.
@@ -343,6 +358,7 @@ impl Expression {
             Expression::Concatenation(left, _) => left.first_token(),
             Expression::Grouping(left_paren, _, _) => left_paren,
             Expression::Binder(token, _, _, _) => token,
+            Expression::GenericBinder(token, _, _, _, _) => token,
             Expression::IfThenElse(token, _, _, _, _) => token,
             Expression::Match(token, _, _, _) => token,
         }
@@ -362,6 +378,7 @@ impl Expression {
             Expression::Concatenation(_, right) => right.last_token(),
             Expression::Grouping(_, _, right_paren) => right_paren,
             Expression::Binder(_, _, _, right_brace) => right_brace,
+            Expression::GenericBinder(_, _, _, _, right_brace) => right_brace,
             Expression::IfThenElse(_, _, _, _, right_brace) => right_brace,
             Expression::Match(_, _, _, right_brace) => right_brace,
         }
@@ -407,6 +424,13 @@ impl Expression {
             Expression::Binder(token, args, sub, _) => {
                 println!("Binder:");
                 println!("  token: {}", token);
+                println!("  args: {:?}", args);
+                println!("  subexpression: {}", sub);
+            }
+            Expression::GenericBinder(token, type_params, args, sub, _) => {
+                println!("GenericBinder:");
+                println!("  token: {}", token);
+                println!("  type_params: {:?}", type_params);
                 println!("  args: {:?}", args);
                 println!("  subexpression: {}", sub);
             }
@@ -571,6 +595,7 @@ impl Expression {
             Expression::Singleton(_)
             | Expression::Grouping(..)
             | Expression::Binder(..)
+            | Expression::GenericBinder(..)
             | Expression::IfThenElse(..)
             | Expression::Match(..) => {
                 // These expressions never need to be parenthesized.
@@ -735,6 +760,7 @@ impl Expression {
             },
             Expression::Concatenation(left, _) => left.is_type(),
             Expression::Binder(..)
+            | Expression::GenericBinder(..)
             | Expression::Unary(..)
             | Expression::Match(..)
             | Expression::IfThenElse(..) => false,
@@ -938,6 +964,12 @@ fn parse_partial_expressions(
                 if expected_type != ExpressionType::Value {
                     return Err(token.error("quantifiers cannot be used here"));
                 }
+                // Check for optional type parameters on function keyword
+                let type_params = if token.token_type == TokenType::Function {
+                    TypeParamExpr::parse_list(tokens)?
+                } else {
+                    vec![]
+                };
                 tokens.expect_type(TokenType::LeftParen)?;
                 let args = Declaration::parse_list(tokens)?;
                 tokens.expect_type(TokenType::LeftBrace)?;
@@ -946,7 +978,17 @@ fn parse_partial_expressions(
                     ExpressionType::Value,
                     Terminator::Is(TokenType::RightBrace),
                 )?;
-                let binder = Expression::Binder(token, args, Box::new(subexpression), right_brace);
+                let binder = if type_params.is_empty() {
+                    Expression::Binder(token, args, Box::new(subexpression), right_brace)
+                } else {
+                    Expression::GenericBinder(
+                        token,
+                        type_params,
+                        args,
+                        Box::new(subexpression),
+                        right_brace,
+                    )
+                };
                 partials.push_back(PartialExpression::Expression(binder));
             }
 
@@ -1406,6 +1448,32 @@ impl Expression {
                     .append(allocator.text("}"))
                     .group()
             }
+            Expression::GenericBinder(token, type_params, args, sub, _) => {
+                let mut type_params_doc = allocator.text("[");
+                for (i, tp) in type_params.iter().enumerate() {
+                    if i > 0 {
+                        type_params_doc = type_params_doc.append(allocator.text(", "));
+                    }
+                    type_params_doc = type_params_doc.append(allocator.text(format!("{}", tp)));
+                }
+                type_params_doc = type_params_doc.append(allocator.text("]"));
+                let args_doc = self.pretty_args(allocator, args, flat);
+                allocator
+                    .text(token.text())
+                    .append(type_params_doc)
+                    .append(args_doc)
+                    .append(allocator.space())
+                    .append(allocator.text("{"))
+                    .append(
+                        line()
+                            .nest(4)
+                            .append(sub.pretty_ref(allocator, flat))
+                            .nest(4),
+                    )
+                    .append(line())
+                    .append(allocator.text("}"))
+                    .group()
+            }
             Expression::IfThenElse(_, cond, if_block, else_block, _) => {
                 let if_doc = allocator
                     .text("if")
@@ -1781,5 +1849,17 @@ mod tests {
     fn test_expr_question_mark() {
         check_value("a? + b?");
         check_value("foo?.bar");
+    }
+
+    #[test]
+    fn test_generic_lambda_parsing() {
+        check_value("function[T](x: T) { x }");
+        check_value("function[T, U](x: T, y: U) { x }");
+    }
+
+    #[test]
+    fn test_generic_lambda_with_application() {
+        // Generic lambda instantiated with type args, then applied to value args
+        expect_concatenation("function[T](x: T) { x }[Nat](5)");
     }
 }

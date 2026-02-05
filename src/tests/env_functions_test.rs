@@ -580,3 +580,60 @@ fn test_partial_application() {
     env.add("let add00: Nat -> Nat = add3(zero, zero)");
     env.add("let add00_alt: Nat -> Nat = add0(zero)");
 }
+
+#[test]
+fn test_generic_lambda_as_function_value() {
+    let mut env = Environment::test();
+    // A generic identity function instantiated with Bool gives a Bool -> Bool function
+    env.add("let f: Bool -> Bool = function[T](x: T) { x }[Bool]");
+    env.expect_def("f", "function(x0: Bool) { x0 }");
+}
+
+#[test]
+fn test_generic_lambda_applied() {
+    let mut env = Environment::test();
+    // A generic identity function, instantiated with Bool, applied to true
+    env.add("let p: Bool = function[T](x: T) { x }[Bool](true)");
+    env.expect_def("p", "function(x0: Bool) { x0 }(true)");
+}
+
+#[test]
+fn test_generic_lambda_with_nat() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("let zero: Nat = axiom");
+    // Generic lambda instantiated with Nat
+    env.add("let f: Nat -> Nat = function[T](x: T) { x }[Nat]");
+    env.expect_def("f", "function(x0: Nat) { x0 }");
+}
+
+#[test]
+fn test_generic_lambda_multiple_type_params() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    // Two type params
+    env.add("let f: (Bool, Nat) -> Bool = function[T, U](x: T, y: U) { x }[Bool, Nat]");
+    env.expect_def("f", "function(x0: Bool, x1: Nat) { x0 }");
+}
+
+#[test]
+fn test_generic_lambda_body_uses_equality() {
+    let mut env = Environment::test();
+    // Generic lambda whose body uses equality on the type param
+    env.add("let f: Bool -> Bool = function[T](x: T) { x = x }[Bool]");
+    env.expect_def("f", "function(x0: Bool) { (x0 = x0) }");
+}
+
+#[test]
+fn test_generic_lambda_wrong_type_args_count() {
+    let mut env = Environment::test();
+    // Should fail: 2 type params but only 1 type arg
+    env.bad("let p: Bool = function[T, U](x: T, y: U) { x }[Bool](true, true)");
+}
+
+#[test]
+fn test_generic_lambda_standalone_error() {
+    let mut env = Environment::test();
+    // Should fail: generic lambda without type instantiation
+    env.bad("let f: Bool -> Bool = function[T](x: T) { x }");
+}

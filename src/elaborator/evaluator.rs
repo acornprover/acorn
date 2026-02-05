@@ -143,7 +143,9 @@ impl<'a> Evaluator<'a> {
                 Ok(PotentialType::Resolved(t))
             }
             Expression::Grouping(_, e, _) => self.evaluate_potential_type(e),
-            Expression::Binder(token, _, _, _) | Expression::IfThenElse(token, _, _, _, _) => {
+            Expression::Binder(token, _, _, _)
+            | Expression::GenericBinder(token, _, _, _, _)
+            | Expression::IfThenElse(token, _, _, _, _) => {
                 Err(token.error("unexpected token in type expression"))
             }
             Expression::Match(token, _, _, _) => {
@@ -1192,6 +1194,55 @@ impl<'a> Evaluator<'a> {
                 },
             },
             Expression::Concatenation(function_expr, args_expr) => {
+                // Special case: generic lambda instantiation
+                // function[T](x: T) { body }[Nat] is parsed as
+                // Concatenation(GenericBinder([T], (x: T), body), Grouping([Nat]))
+                if let Expression::GenericBinder(token, type_params, decls, body, _) =
+                    function_expr.as_ref()
+                {
+                    // args_expr must be type arguments [Nat, Bool, ...]
+                    let type_arg_exprs = match args_expr.as_ref() {
+                        Expression::Grouping(left, e, _)
+                            if left.token_type == TokenType::LeftBracket
+                                || left.token_type == TokenType::LessThan =>
+                        {
+                            e.flatten_comma_separated_list()
+                        }
+                        _ => return Err(token.error("generic function requires type arguments")),
+                    };
+
+                    // Evaluate type arguments using current evaluator
+                    let mut type_args = vec![];
+                    for expr in &type_arg_exprs {
+                        type_args.push(self.evaluate_type(expr)?);
+                    }
+                    if type_args.len() != type_params.len() {
+                        return Err(args_expr.error("wrong number of type arguments"));
+                    }
+
+                    // Create a modified BindingMap with type params bound to concrete types
+                    let mut new_bindings = self.bindings.clone();
+                    for (param, arg_type) in type_params.iter().zip(type_args.iter()) {
+                        let potential = PotentialType::Resolved(arg_type.clone());
+                        new_bindings.add_type_alias(param.name.text(), potential, &param.name)?;
+                    }
+
+                    // Create a new evaluator with the modified bindings
+                    let mut evaluator = Evaluator::new(self.project, &new_bindings, None);
+
+                    // Evaluate as a regular Lambda
+                    if decls.is_empty() {
+                        return Err(token.error("generic function must have at least one argument"));
+                    }
+                    let (arg_names, arg_types) = evaluator.bind_args(stack, decls, None)?;
+                    let body_val = evaluator.evaluate_value_with_stack(stack, body, None)?;
+                    let lambda = AcornValue::Lambda(arg_types, Box::new(body_val));
+                    stack.remove_all(&arg_names);
+
+                    lambda.check_type(expected_type, expression)?;
+                    return Ok(PotentialValue::Resolved(lambda));
+                }
+
                 let function = self.evaluate_potential_value(stack, function_expr, None)?;
 
                 // Handle the case where the "args" are actually type parameters.
@@ -1290,6 +1341,9 @@ impl<'a> Evaluator<'a> {
                     ret_val.as_ref().unwrap().check_type(expected_type, token)?;
                 }
                 ret_val?
+            }
+            Expression::GenericBinder(token, _, _, _, _) => {
+                return Err(token.error("generic function requires type arguments"));
             }
             Expression::IfThenElse(_, cond_exp, if_exp, else_exp, _) => {
                 let cond =
