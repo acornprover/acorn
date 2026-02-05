@@ -717,8 +717,8 @@ impl CodeGenerator<'_> {
         term: &Term,
         local_context: &LocalContext,
         normalizer: &Normalizer,
-    ) -> Option<AcornValue> {
-        Some(normalizer.denormalize_term_with_context(term, local_context, true))
+    ) -> AcornValue {
+        normalizer.denormalize_term_with_context(term, local_context, true)
     }
 
     #[cfg(feature = "bigcert")]
@@ -728,7 +728,7 @@ impl CodeGenerator<'_> {
         var_map: &VariableMap,
         replacement_context: &LocalContext,
         normalizer: &Normalizer,
-    ) -> Option<AcornValue> {
+    ) -> Result<AcornValue> {
         // Convert one concrete specialization into an explicit theorem application:
         //   forall(x, y) { body(x, y) }  +  map{x->a, y->b}
         // becomes:
@@ -740,8 +740,7 @@ impl CodeGenerator<'_> {
         // 3. Apply only type-var substitutions first, so the lambda has concrete argument types.
         // 4. Denormalize to a forall-value, convert it to a lambda.
         // 5. Denormalize mapped value terms into call arguments and apply.
-        //
-        // If any step fails, caller falls back to the compact specialized-claim format.
+        // Any failure here is a hard error for non-empty var maps.
         let generic_context = generic.get_local_context();
 
         let mut used_value_vars = HashSet::new();
@@ -759,7 +758,10 @@ impl CodeGenerator<'_> {
         }
 
         if used_value_vars.is_empty() {
-            return None;
+            return Err(Error::internal(
+                "bigcert explicit specialization failed: generic clause has no value variables"
+                    .to_string(),
+            ));
         }
 
         let mut ordered_value_vars = used_value_vars.into_iter().collect::<Vec<_>>();
@@ -772,13 +774,21 @@ impl CodeGenerator<'_> {
         // mapped to concrete terms.
         for var_id in ordered_value_vars.iter().chain(ordered_type_vars.iter()) {
             if !var_map.has_mapping(*var_id) {
-                return None;
+                return Err(Error::internal(format!(
+                    "bigcert explicit specialization failed: missing mapping for x{}",
+                    var_id
+                )));
             }
         }
 
         let mut type_map = VariableMap::new();
         for var_id in &ordered_type_vars {
-            let mapped = var_map.get(*var_id as usize)?;
+            let mapped = var_map.get(*var_id as usize).ok_or_else(|| {
+                Error::internal(format!(
+                    "bigcert explicit specialization failed: missing type-var mapping for x{}",
+                    var_id
+                ))
+            })?;
             type_map.set(*var_id, mapped.clone());
         }
 
@@ -795,26 +805,42 @@ impl CodeGenerator<'_> {
         let generic_value = normalizer.denormalize(&generic_for_application, None, None, true);
         let (arg_types, body) = match generic_value {
             AcornValue::ForAll(arg_types, body) => (arg_types, *body),
-            _ => return None,
+            _ => {
+                return Err(Error::internal(
+                    "bigcert explicit specialization failed: specialized theorem is not forall"
+                        .to_string(),
+                ))
+            }
         };
 
         if arg_types.len() != ordered_value_vars.len() {
-            return None;
+            return Err(Error::internal(format!(
+                "bigcert explicit specialization failed: theorem expects {} value args but found {} mapped value vars",
+                arg_types.len(),
+                ordered_value_vars.len()
+            )));
         }
 
         let mut arg_values = Vec::new();
         for var_id in &ordered_value_vars {
-            let mapped = var_map.get(*var_id as usize)?;
+            let mapped = var_map.get(*var_id as usize).ok_or_else(|| {
+                Error::internal(format!(
+                    "bigcert explicit specialization failed: missing value-var mapping for x{}",
+                    var_id
+                ))
+            })?;
             if mapped.has_any_variable() {
-                return None;
+                return Err(Error::internal(format!(
+                    "bigcert explicit specialization failed: mapped argument for x{} still has variables: {}",
+                    var_id, mapped
+                )));
             }
-            let arg_value =
-                self.term_to_value_for_bigcert(mapped, replacement_context, normalizer)?;
+            let arg_value = self.term_to_value_for_bigcert(mapped, replacement_context, normalizer);
             arg_values.push(arg_value);
         }
 
         let theorem = AcornValue::lambda(arg_types, body);
-        Some(AcornValue::apply(theorem, arg_values))
+        Ok(AcornValue::apply(theorem, arg_values))
     }
 
     /// Convert to a clause to code strings.
@@ -859,15 +885,16 @@ impl CodeGenerator<'_> {
         let mut value = {
             #[cfg(feature = "bigcert")]
             {
-                self.value_from_explicit_specialization(
-                    generic,
-                    var_map,
-                    replacement_context,
-                    normalizer,
-                )
-                .unwrap_or_else(|| {
+                if var_map.iter().next().is_none() {
                     normalizer.denormalize(&clause, Some(&self.arbitrary_names), None, true)
-                })
+                } else {
+                    self.value_from_explicit_specialization(
+                        generic,
+                        var_map,
+                        replacement_context,
+                        normalizer,
+                    )?
+                }
             }
             #[cfg(not(feature = "bigcert"))]
             {
