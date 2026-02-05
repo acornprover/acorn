@@ -735,51 +735,28 @@ impl CodeGenerator<'_> {
         //   function(x, y) { body(x, y) }(a, b)
         //
         // Steps:
-        // 1. Identify which generic vars are value vars vs type vars.
-        // 2. Require that all used vars are mapped (otherwise we cannot form a complete call).
-        // 3. Apply only type-var substitutions first, so the lambda has concrete argument types.
-        // 4. Denormalize to a forall-value, convert it to a lambda.
-        // 5. Denormalize mapped value terms into call arguments and apply.
+        // 1. Identify type vars used in the theorem body.
+        // 2. Apply only type-var substitutions first, so the lambda has concrete argument types.
+        // 3. Derive value-arg variable order from denormalization quantifier order.
+        // 4. Require that those vars are mapped.
+        // 5. Denormalize to a forall-value, convert it to a lambda.
+        // 6. Denormalize mapped value terms into call arguments and apply.
         // Any failure here is a hard error for non-empty var maps.
         let generic_context = generic.get_local_context();
 
-        let mut used_value_vars = HashSet::new();
         let mut used_type_vars = HashSet::new();
         for literal in &generic.literals {
             for term in [&literal.left, &literal.right] {
                 for (var_id, var_type) in term.collect_vars(generic_context) {
                     if var_type.as_ref().is_type_param_kind() {
                         used_type_vars.insert(var_id);
-                    } else {
-                        used_value_vars.insert(var_id);
                     }
                 }
             }
         }
 
-        if used_value_vars.is_empty() {
-            return Err(Error::internal(
-                "bigcert explicit specialization failed: generic clause has no value variables"
-                    .to_string(),
-            ));
-        }
-
-        let mut ordered_value_vars = used_value_vars.into_iter().collect::<Vec<_>>();
-        ordered_value_vars.sort_unstable();
-
         let mut ordered_type_vars = used_type_vars.into_iter().collect::<Vec<_>>();
         ordered_type_vars.sort_unstable();
-
-        // We currently only emit explicit applications when all used vars are fully
-        // mapped to concrete terms.
-        for var_id in ordered_value_vars.iter().chain(ordered_type_vars.iter()) {
-            if !var_map.has_mapping(*var_id) {
-                return Err(Error::internal(format!(
-                    "bigcert explicit specialization failed: missing mapping for x{}",
-                    var_id
-                )));
-            }
-        }
 
         let mut type_map = VariableMap::new();
         for var_id in &ordered_type_vars {
@@ -801,6 +778,53 @@ impl CodeGenerator<'_> {
                 normalizer.kernel_context(),
             )
         };
+
+        // Match denormalize() quantifier behavior: value vars are all non-type vars in
+        // index order up to the max variable used in any literal.
+        let app_context = generic_for_application.get_local_context();
+        let max_var = generic_for_application
+            .literals
+            .iter()
+            .filter_map(|lit| {
+                let left_max = lit.left.max_variable();
+                let right_max = lit.right.max_variable();
+                match (left_max, right_max) {
+                    (Some(l), Some(r)) => Some(l.max(r)),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    (None, None) => None,
+                }
+            })
+            .max();
+        let mut ordered_value_vars = Vec::new();
+        if let Some(max_var) = max_var {
+            for var_id in 0..=(max_var as usize) {
+                let Some(var_type) = app_context.get_var_type(var_id) else {
+                    continue;
+                };
+                if !var_type.as_ref().is_type_param_kind() {
+                    ordered_value_vars.push(var_id as AtomId);
+                }
+            }
+        }
+
+        if ordered_value_vars.is_empty() {
+            return Err(Error::internal(
+                "bigcert explicit specialization failed: generic clause has no value variables"
+                    .to_string(),
+            ));
+        }
+
+        // We currently only emit explicit applications when all vars used by the
+        // theorem application are fully mapped to concrete terms.
+        for var_id in ordered_value_vars.iter().chain(ordered_type_vars.iter()) {
+            if !var_map.has_mapping(*var_id) {
+                return Err(Error::internal(format!(
+                    "bigcert explicit specialization failed: missing mapping for x{}",
+                    var_id
+                )));
+            }
+        }
 
         let generic_value = normalizer.denormalize(&generic_for_application, None, None, true);
         let (arg_types, body) = match generic_value {
@@ -2545,5 +2569,56 @@ mod tests {
                 &goal_env.bindings,
             )
             .expect("generated certificate should verify");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_bigcert_explicit_specialization_handles_sparse_variable_ids() {
+        use super::CodeGenerator;
+        use crate::elaborator::binding_map::BindingMap;
+        use crate::kernel::clause::Clause;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+        use crate::module::ModuleId;
+        use crate::normalizer::Normalizer;
+        use crate::prover::proof::ConcreteStep;
+
+        // Build a generic clause with a hole in variable IDs: only x2 appears in terms.
+        let mut normalizer = Normalizer::new();
+        let (generic, var_map) = {
+            let kctx = normalizer.kernel_context_mut();
+            let local = kctx.parse_local(&["Bool", "Bool", "Bool"]);
+            let generic = Clause::from_literals_unnormalized(
+                vec![Literal::positive(Term::new_variable(2))],
+                &local,
+            );
+
+            let mut var_map = VariableMap::new();
+            var_map.set(0, Term::new_true());
+            var_map.set(1, Term::new_false());
+            var_map.set(2, Term::new_true());
+            (generic, var_map)
+        };
+
+        let step = ConcreteStep {
+            generic,
+            var_maps: vec![(var_map, LocalContext::empty())],
+        };
+
+        let bindings = BindingMap::new(ModuleId::PRELUDE);
+        let mut generator = CodeGenerator::new(&bindings);
+        let (_defs, codes) = generator
+            .concrete_step_to_code(&step, &normalizer)
+            .expect("sparse variable-id specialization should codegen");
+
+        assert!(
+            codes
+                .iter()
+                .any(|line| line.contains("function(") && line.contains("}(true, false, true)")),
+            "expected explicit specialization with all mapped args, got: {:?}",
+            codes
+        );
     }
 }
