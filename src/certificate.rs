@@ -87,8 +87,9 @@ impl Certificate {
     /// This is the serialization boundary where resolved IDs are converted back to names.
     /// Requires the normalizer (to denormalize clauses and look up synthetic definitions)
     /// and the bindings (to generate readable names).
-    pub fn from_concrete_proof(
-        concrete_proof: &ConcreteProof,
+    pub fn from_concrete_steps(
+        goal: String,
+        concrete_steps: &[ConcreteStep],
         normalizer: &Normalizer,
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
@@ -96,13 +97,8 @@ impl Certificate {
         let mut definitions = Vec::new();
         let mut codes = Vec::new();
 
-        for clause in &concrete_proof.claims {
-            // Create a ConcreteStep with an identity mapping (clause is already specialized)
-            let step = ConcreteStep {
-                generic: clause.clone(),
-                var_maps: vec![(VariableMap::new(), clause.get_local_context().clone())],
-            };
-            let (defs, step_codes) = generator.concrete_step_to_code(&step, normalizer)?;
+        for step in concrete_steps {
+            let (defs, step_codes) = generator.concrete_step_to_code(step, normalizer)?;
             for def in defs {
                 if !definitions.contains(&def) {
                     definitions.push(def);
@@ -119,7 +115,34 @@ impl Certificate {
         let mut answer = definitions;
         answer.extend(codes);
 
-        Ok(Certificate::new(concrete_proof.goal.clone(), answer))
+        Ok(Certificate::new(goal, answer))
+    }
+
+    /// Convert a ConcreteProof to a Certificate (string format).
+    ///
+    /// This is the serialization boundary where resolved IDs are converted back to names.
+    /// Requires the normalizer (to denormalize clauses and look up synthetic definitions)
+    /// and the bindings (to generate readable names).
+    pub fn from_concrete_proof(
+        concrete_proof: &ConcreteProof,
+        normalizer: &Normalizer,
+        bindings: &BindingMap,
+    ) -> Result<Certificate, CodeGenError> {
+        let mut concrete_steps = Vec::new();
+        for clause in &concrete_proof.claims {
+            // Create a ConcreteStep with an identity mapping (clause is already specialized)
+            concrete_steps.push(ConcreteStep {
+                generic: clause.clone(),
+                var_maps: vec![(VariableMap::new(), clause.get_local_context().clone())],
+            });
+        }
+
+        Certificate::from_concrete_steps(
+            concrete_proof.goal.clone(),
+            &concrete_steps,
+            normalizer,
+            bindings,
+        )
     }
 
     /// Convert this certificate to a ConcreteProof.

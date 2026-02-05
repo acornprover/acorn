@@ -2663,6 +2663,26 @@ impl Normalizer {
             .type_term_to_acorn_type_with_context(&type_term, local_context, instantiate_type_vars)
     }
 
+    /// Converts a single term to an AcornValue using the provided LocalContext.
+    /// This is equivalent to the term-level work done by `denormalize(...)`,
+    /// but avoids wrapping the term into a synthetic clause first.
+    pub fn denormalize_term_with_context(
+        &self,
+        term: &Term,
+        local_context: &LocalContext,
+        instantiate_type_vars: bool,
+    ) -> AcornValue {
+        self.denormalize_term(
+            term,
+            local_context,
+            None,
+            None,
+            None,
+            None,
+            instantiate_type_vars,
+        )
+    }
+
     /// Given a list of (module_id, atom_id) for synthetic atoms that we need to define, find a set
     /// of SyntheticInfo that covers them.
     /// The output may have synthetic atoms that aren't used in the input.

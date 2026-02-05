@@ -711,6 +711,112 @@ impl CodeGenerator<'_> {
         Ok(())
     }
 
+    #[cfg(feature = "bigcert")]
+    fn term_to_value_for_bigcert(
+        &self,
+        term: &Term,
+        local_context: &LocalContext,
+        normalizer: &Normalizer,
+    ) -> Option<AcornValue> {
+        Some(normalizer.denormalize_term_with_context(term, local_context, true))
+    }
+
+    #[cfg(feature = "bigcert")]
+    fn value_from_explicit_specialization(
+        &self,
+        generic: &Clause,
+        var_map: &VariableMap,
+        replacement_context: &LocalContext,
+        normalizer: &Normalizer,
+    ) -> Option<AcornValue> {
+        // Convert one concrete specialization into an explicit theorem application:
+        //   forall(x, y) { body(x, y) }  +  map{x->a, y->b}
+        // becomes:
+        //   function(x, y) { body(x, y) }(a, b)
+        //
+        // Steps:
+        // 1. Identify which generic vars are value vars vs type vars.
+        // 2. Require that all used vars are mapped (otherwise we cannot form a complete call).
+        // 3. Apply only type-var substitutions first, so the lambda has concrete argument types.
+        // 4. Denormalize to a forall-value, convert it to a lambda.
+        // 5. Denormalize mapped value terms into call arguments and apply.
+        //
+        // If any step fails, caller falls back to the compact specialized-claim format.
+        let generic_context = generic.get_local_context();
+
+        let mut used_value_vars = HashSet::new();
+        let mut used_type_vars = HashSet::new();
+        for literal in &generic.literals {
+            for term in [&literal.left, &literal.right] {
+                for (var_id, var_type) in term.collect_vars(generic_context) {
+                    if var_type.as_ref().is_type_param_kind() {
+                        used_type_vars.insert(var_id);
+                    } else {
+                        used_value_vars.insert(var_id);
+                    }
+                }
+            }
+        }
+
+        if used_value_vars.is_empty() {
+            return None;
+        }
+
+        let mut ordered_value_vars = used_value_vars.into_iter().collect::<Vec<_>>();
+        ordered_value_vars.sort_unstable();
+
+        let mut ordered_type_vars = used_type_vars.into_iter().collect::<Vec<_>>();
+        ordered_type_vars.sort_unstable();
+
+        // We currently only emit explicit applications when all used vars are fully
+        // mapped to concrete terms.
+        for var_id in ordered_value_vars.iter().chain(ordered_type_vars.iter()) {
+            if !var_map.has_mapping(*var_id) {
+                return None;
+            }
+        }
+
+        let mut type_map = VariableMap::new();
+        for var_id in &ordered_type_vars {
+            let mapped = var_map.get(*var_id as usize)?;
+            type_map.set(*var_id, mapped.clone());
+        }
+
+        let generic_for_application = if ordered_type_vars.is_empty() {
+            generic.clone()
+        } else {
+            type_map.specialize_clause_with_replacement_context(
+                generic,
+                replacement_context,
+                normalizer.kernel_context(),
+            )
+        };
+
+        let generic_value = normalizer.denormalize(&generic_for_application, None, None, true);
+        let (arg_types, body) = match generic_value {
+            AcornValue::ForAll(arg_types, body) => (arg_types, *body),
+            _ => return None,
+        };
+
+        if arg_types.len() != ordered_value_vars.len() {
+            return None;
+        }
+
+        let mut arg_values = Vec::new();
+        for var_id in &ordered_value_vars {
+            let mapped = var_map.get(*var_id as usize)?;
+            if mapped.has_any_variable() {
+                return None;
+            }
+            let arg_value =
+                self.term_to_value_for_bigcert(mapped, replacement_context, normalizer)?;
+            arg_values.push(arg_value);
+        }
+
+        let theorem = AcornValue::lambda(arg_types, body);
+        Some(AcornValue::apply(theorem, arg_values))
+    }
+
     /// Convert to a clause to code strings.
     /// This will generate synthetic atom definitions if necessary.
     /// Appends let statements that define arbitrary variables and synthetic atoms to definitions,
@@ -750,7 +856,24 @@ impl CodeGenerator<'_> {
         let keys_before: HashSet<Term> = self.arbitrary_names.keys().cloned().collect();
 
         self.add_arbitrary_for_clause(&clause);
-        let mut value = normalizer.denormalize(&clause, Some(&self.arbitrary_names), None, true);
+        let mut value = {
+            #[cfg(feature = "bigcert")]
+            {
+                self.value_from_explicit_specialization(
+                    generic,
+                    var_map,
+                    replacement_context,
+                    normalizer,
+                )
+                .unwrap_or_else(|| {
+                    normalizer.denormalize(&clause, Some(&self.arbitrary_names), None, true)
+                })
+            }
+            #[cfg(not(feature = "bigcert"))]
+            {
+                normalizer.denormalize(&clause, Some(&self.arbitrary_names), None, true)
+            }
+        };
 
         // Define the arbitrary variables.
         // Use the clause's local context to look up typeclass constraints for type variables.
@@ -2322,5 +2445,78 @@ mod tests {
         );
         // Zero.0[Bar] should codegen to "Bar.0" since Bar has its own 0 attribute
         p.check_goal_code("main", "goal", "Bar.0 = Bar.bar");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_bigcert_emits_explicit_function_application() {
+        use crate::module::LoadState;
+        use crate::processor::Processor;
+        use crate::prover::{Outcome, ProverMode};
+
+        let mut project = Project::new_mock();
+        project.mock(
+            "/mock/main.ac",
+            r#"
+            inductive Foo {
+                foo
+                bar
+            }
+
+            let f: Foo -> Bool = axiom
+            let g: Foo -> Bool = axiom
+            let h: Foo -> Bool = axiom
+
+            axiom rule(x: Foo) {
+                f(x) and g(x) implies h(x)
+            }
+
+            theorem goal(y: Foo) {
+                f(y) and g(y) implies h(y)
+            }
+            "#,
+        );
+
+        let module_id = project.load_module_by_name("main").expect("load failed");
+        let env = match project.get_module_by_id(module_id) {
+            LoadState::Ok(env) => env,
+            LoadState::Error(e) => panic!("error: {}", e),
+            _ => panic!("no module"),
+        };
+
+        let cursor = env.get_node_by_goal_name("goal");
+        let goal_env = cursor.goal_env().unwrap();
+        let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
+
+        let mut processor = Processor::with_imports(None, env).unwrap();
+        processor.add_module_facts(&cursor).unwrap();
+        processor.set_normalized_goal(normalized_goal);
+
+        let outcome = processor.search(ProverMode::Test, &normalized_goal.normalizer);
+        assert_eq!(outcome, Outcome::Success);
+
+        let cert = processor
+            .prover()
+            .make_cert(&goal_env.bindings, &normalized_goal.normalizer, false)
+            .expect("make_cert failed");
+        let proof = cert.proof.clone().expect("expected proof");
+
+        assert!(
+            proof
+                .iter()
+                .any(|line| line.contains("function(") && line.contains("}(")),
+            "expected at least one explicit function application in certificate, got: {:?}",
+            proof
+        );
+
+        processor
+            .check_cert(
+                &cert,
+                Some(normalized_goal),
+                &normalized_goal.normalizer,
+                &project,
+                &goal_env.bindings,
+            )
+            .expect("generated certificate should verify");
     }
 }

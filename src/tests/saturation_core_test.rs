@@ -2,6 +2,29 @@ use super::common::*;
 use crate::project::Project;
 use crate::prover::Outcome;
 
+fn assert_proof_lines(actual: Vec<String>, expected_small: &[&str], expected_big: &[&str]) {
+    #[cfg(feature = "bigcert")]
+    let _ = expected_small;
+    #[cfg(not(feature = "bigcert"))]
+    let _ = expected_big;
+
+    let expected = {
+        #[cfg(feature = "bigcert")]
+        {
+            expected_big
+        }
+        #[cfg(not(feature = "bigcert"))]
+        {
+            expected_small
+        }
+    };
+    let expected = expected
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn test_specialization() {
     let text = r#"
@@ -989,7 +1012,11 @@ fn test_proving_with_active_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(c.proof.unwrap(), vec!["not g(y) or not f(y) or h(y)"]);
+    assert_proof_lines(
+        c.proof.unwrap(),
+        &["not g(y) or not f(y) or h(y)"],
+        &["function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)"],
+    );
 }
 
 #[test]
@@ -1080,9 +1107,14 @@ fn test_proving_removes_duplicates() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["not f(y) or g(y)", "not f(y)", "f(y)"]
+        &["not f(y) or g(y)", "not f(y)", "f(y)"],
+        &[
+            "function(x0: Foo) { not f(x0) or g(x0) }(y)",
+            "not f(y)",
+            "function(x1: Foo) { f(x1) }(y)",
+        ],
     );
 }
 
@@ -1119,9 +1151,15 @@ fn test_proving_with_passive_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["not h(y) or f(y)", "f(y)", "not g(y) or not f(y)", "g(y)"]
+        &["not h(y) or f(y)", "f(y)", "not g(y) or not f(y)", "g(y)"],
+        &[
+            "function(x0: Foo) { not h(x0) or f(x0) }(y)",
+            "f(y)",
+            "function(x1: Foo) { not g(x1) or not f(x1) }(y)",
+            "function(x2: Foo) { g(x2) }(y)",
+        ],
     );
 }
 
@@ -1151,7 +1189,11 @@ fn test_proving_activating_rewrite_pattern() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(c.proof.unwrap(), vec!["g(y) = f(y)"]);
+    assert_proof_lines(
+        c.proof.unwrap(),
+        &["g(y) = f(y)"],
+        &["function(x0: Foo) { g(x0) = f(x0) }(y)"],
+    );
 }
 
 #[test]
@@ -1180,9 +1222,13 @@ fn test_proving_with_passive_contradiction() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["g(Foo.foo) = f(Foo.foo)", "not h(f(Foo.foo))"]
+        &["g(Foo.foo) = f(Foo.foo)", "not h(f(Foo.foo))"],
+        &[
+            "function(x0: Foo) { g(x0) = f(x0) }(Foo.foo)",
+            "not h(f(Foo.foo))",
+        ],
     );
 }
 
@@ -1211,13 +1257,18 @@ fn test_proving_with_multiple_rewrite() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "g(y) = f(y)",
             "g(g(y)) = f(g(y))",
-            "g(g(g(y))) = f(g(g(y)))"
-        ]
+            "g(g(g(y))) = f(g(g(y)))",
+        ],
+        &[
+            "function(x0: Foo) { g(x0) = f(x0) }(y)",
+            "function(x1: Foo) { g(x1) = f(x1) }(g(y))",
+            "function(x2: Foo) { g(x2) = f(x2) }(g(g(y)))",
+        ],
     );
 }
 
@@ -1248,9 +1299,13 @@ fn test_proving_random_bug() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["g(y) != f(y)", "f(y) = z or h(y) = f(y) or g(y) = f(y)"]
+        &["g(y) != f(y)", "f(y) = z or h(y) = f(y) or g(y) = f(y)"],
+        &[
+            "g(y) != f(y)",
+            "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
+        ],
     );
 }
 
@@ -1284,14 +1339,20 @@ fn test_proving_with_equality_factoring_basic() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "h(y) != g(y) or g(y) = f(y)",
             "h(y) = g(y)",
             "g(y) = f(y)",
-            "h(y) != f(y)"
-        ]
+            "h(y) != f(y)",
+        ],
+        &[
+            "h(y) != g(y) or g(y) = f(y)",
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x1: Foo) { h(x1) != f(x1) }(y)",
+        ],
     );
 }
 
@@ -1327,14 +1388,20 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "h(y) != g(y) or g(y) = f(y)",
             "h(y) = g(y)",
             "g(y) = f(y)",
-            "h(y) != f(y)"
-        ]
+            "h(y) != f(y)",
+        ],
+        &[
+            "h(y) != g(y) or g(y) = f(y)",
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x1: Foo) { h(x1) != f(x1) }(y)",
+        ],
     );
 }
 
@@ -1367,15 +1434,22 @@ fn test_proving_with_equality_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "not f(x, x) or f(g(x), x)",
             "not f(g(x), x) or f(g(g(x)), x)",
             "not f(g(x), x)",
             "g(x) != g(x) or f(x, x)",
-            "f(x, x)"
-        ]
+            "f(x, x)",
+        ],
+        &[
+            "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(x, x)",
+            "function(x2: Foo, x3: Foo) { not f(x2, x3) or f(g(x2), x3) }(g(x), x)",
+            "not f(g(x), x)",
+            "function(x4: Foo, x5: Foo) { g(x4) != g(x5) or f(x4, x5) }(x, x)",
+            "function(x6: Foo) { f(x6, x6) }(x)",
+        ],
     );
 }
 
@@ -1533,7 +1607,14 @@ fn test_proving_multiple_simplifying() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo)", "f(Foo.bar)"]);
+    assert_proof_lines(
+        c.proof.unwrap(),
+        &["f(Foo.foo)", "f(Foo.bar)"],
+        &[
+            "function(x0: Foo) { f(x0) }(Foo.foo)",
+            "function(x1: Foo) { f(x1) }(Foo.bar)",
+        ],
+    );
 }
 
 #[test]
@@ -1564,9 +1645,13 @@ fn test_proving_of_existence() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["let s0: Foo satisfy { f(s0) }", "not f(s0)"]
+        &["let s0: Foo satisfy { f(s0) }", "not f(s0)"],
+        &[
+            "let s0: Foo satisfy { f(s0) }",
+            "function(x0: Foo) { not f(x0) }(s0)",
+        ],
     );
 }
 
@@ -1599,13 +1684,18 @@ fn test_proving_of_conjunction_existence() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "let s0: Foo satisfy { f(s0) and g(s0) }",
             "not g(s0) or not f(s0)",
-            "not f(s0)"
-        ]
+            "not f(s0)",
+        ],
+        &[
+            "let s0: Foo satisfy { f(s0) and g(s0) }",
+            "function(x0: Foo) { not g(x0) or not f(x0) }(s0)",
+            "not f(s0)",
+        ],
     );
 }
 
@@ -1638,13 +1728,18 @@ fn test_proving_with_skolem() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "let s0: Foo -> Foo satisfy { forall(x0: Foo) { not f(x0) or g(x0, s0(x0)) } }",
             "not g(x, s0(x))",
-            "not f(x) or g(x, s0(x))"
-        ]
+            "not f(x) or g(x, s0(x))",
+        ],
+        &[
+            "let s0: Foo -> Foo satisfy { forall(x0: Foo) { not f(x0) or g(x0, s0(x0)) } }",
+            "function(x1: Foo) { not g(x, x1) }(s0(x))",
+            "function(x2: Foo) { not f(x2) or g(x2, s0(x2)) }(x)",
+        ],
     );
 }
 
@@ -1793,9 +1888,10 @@ fn test_proving_with_duplicate_literals() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["not f(Foo.foo, Foo.foo) or not f(Foo.foo, Foo.foo)"]
+        &["not f(Foo.foo, Foo.foo) or not f(Foo.foo, Foo.foo)"],
+        &["function(x0: Foo, x1: Foo) { not f(x0, x1) or not f(x1, x0) }(Foo.foo, Foo.foo)"],
     );
 }
 
@@ -1875,13 +1971,18 @@ fn test_proving_using_unimported_function() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec![
+        &[
             "not lib(foo).g(Foo.foo) or h(Foo.foo)",
             "not lib(foo).g(Foo.foo)",
-            "not f(Foo.foo) or lib(foo).g(Foo.foo)"
-        ]
+            "not f(Foo.foo) or lib(foo).g(Foo.foo)",
+        ],
+        &[
+            "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
+            "not lib(foo).g(Foo.foo)",
+            "function(x1: Foo) { not f(x1) or lib(foo).g(x1) }(Foo.foo)",
+        ],
     );
 }
 

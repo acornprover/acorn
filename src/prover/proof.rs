@@ -163,13 +163,27 @@ fn add_var_map<R: ProofResolver>(
 impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
-        let concrete_proof = self.make_concrete_proof(goal)?;
-        Certificate::from_concrete_proof(&concrete_proof, self.normalizer, bindings)
+        #[cfg(feature = "bigcert")]
+        {
+            let concrete_steps = self.collect_concrete_steps()?;
+            return Certificate::from_concrete_steps(
+                goal,
+                &concrete_steps,
+                self.normalizer,
+                bindings,
+            );
+        }
+
+        #[cfg(not(feature = "bigcert"))]
+        {
+            let concrete_proof = self.make_concrete_proof(goal)?;
+            Certificate::from_concrete_proof(&concrete_proof, self.normalizer, bindings)
+        }
     }
 
-    /// Create a concrete proof from this proof.
-    /// This is an intermediate representation between Proof and Certificate.
-    pub fn make_concrete_proof(&self, goal: String) -> Result<ConcreteProof, Error> {
+    /// Reconstruct concrete specialization steps in claim order, skipping clauses
+    /// that we intentionally omit from certificates.
+    fn collect_concrete_steps(&self) -> Result<Vec<ConcreteStep>, Error> {
         let kernel_context = self.normalizer.kernel_context();
 
         // First, reconstruct all the steps, working backwards.
@@ -188,7 +202,7 @@ impl<'a> Proof<'a> {
                 continue;
             }
             // Multiple concrete instantiations are possible
-            let concrete_id = ConcreteStepId::ProofStep(id.clone());
+            let concrete_id = ConcreteStepId::ProofStep(*id);
             let var_maps_with_context = match concrete_steps.get(&concrete_id) {
                 Some(concrete_step) => concrete_step.var_maps.clone(),
                 None => continue,
@@ -221,18 +235,44 @@ impl<'a> Proof<'a> {
             }
         }
 
-        // Collect all clauses in order
+        // Collect all concrete specializations in order.
         let mut claims = Vec::new();
+        let mut steps_in_order = Vec::new();
         for (ps_id, _) in &self.steps {
             for concrete_id in concrete_ids_for(*ps_id) {
                 let Some(cs) = concrete_steps.remove(&concrete_id) else {
                     continue;
                 };
-                for clause in cs.to_clauses(kernel_context) {
+                let ConcreteStep { generic, var_maps } = cs;
+                for (var_map, replacement_context) in var_maps {
+                    let concrete_step = ConcreteStep {
+                        generic: generic.clone(),
+                        var_maps: vec![(var_map, replacement_context)],
+                    };
+                    let Some(clause) = concrete_step.to_clauses(kernel_context).into_iter().next()
+                    else {
+                        continue;
+                    };
                     if !claims.contains(&clause) && !skip_clauses.contains(&clause) {
                         claims.push(clause);
+                        steps_in_order.push(concrete_step);
                     }
                 }
+            }
+        }
+
+        Ok(steps_in_order)
+    }
+
+    /// Create a concrete proof from this proof.
+    /// This is an intermediate representation between Proof and Certificate.
+    pub fn make_concrete_proof(&self, goal: String) -> Result<ConcreteProof, Error> {
+        let kernel_context = self.normalizer.kernel_context();
+        let steps_in_order = self.collect_concrete_steps()?;
+        let mut claims = Vec::new();
+        for step in &steps_in_order {
+            for clause in step.to_clauses(kernel_context) {
+                claims.push(clause);
             }
         }
 
