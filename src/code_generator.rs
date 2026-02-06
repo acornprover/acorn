@@ -727,6 +727,21 @@ impl CodeGenerator<'_> {
         definitions: &mut Vec<String>,
         codes: &mut Vec<String>,
     ) -> Result<()> {
+        // In bigcert mode with a non-empty var_map, encode as a lambda-application value.
+        // This preserves the generic theorem + specialization args for the checker.
+        #[cfg(feature = "bigcert")]
+        if var_map.iter().next().is_some() {
+            let mut value = normalizer.specialization_to_value(generic, var_map);
+
+            // Handle synthetic atoms in the value.
+            let synthetic_ids = value.find_synthetics();
+            self.define_synthetics(synthetic_ids, normalizer, definitions)?;
+            value = value.replace_synthetics(&self.synthetic_names);
+
+            codes.push(self.value_to_code(&value)?);
+            return Ok(());
+        }
+
         let mut clause = var_map.specialize_clause_with_replacement_context(
             &generic,
             replacement_context,
