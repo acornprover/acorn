@@ -2685,6 +2685,26 @@ impl Normalizer {
         )
     }
 
+    /// Converts a single term to an AcornValue using the provided LocalContext.
+    /// If `arbitrary_names` is provided, matching free variables are converted to constants.
+    pub fn denormalize_term_with_context_and_arbitrary(
+        &self,
+        term: &Term,
+        local_context: &LocalContext,
+        arbitrary_names: Option<&HashMap<Term, ConstantName>>,
+        instantiate_type_vars: bool,
+    ) -> AcornValue {
+        self.denormalize_term(
+            term,
+            local_context,
+            arbitrary_names,
+            None,
+            None,
+            None,
+            instantiate_type_vars,
+        )
+    }
+
     /// Given a list of (module_id, atom_id) for synthetic atoms that we need to define, find a set
     /// of SyntheticInfo that covers them.
     /// The output may have synthetic atoms that aren't used in the input.

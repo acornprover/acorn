@@ -718,9 +718,15 @@ impl CodeGenerator<'_> {
         &self,
         term: &Term,
         local_context: &LocalContext,
+        arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         normalizer: &Normalizer,
     ) -> AcornValue {
-        normalizer.denormalize_term_with_context(term, local_context, true)
+        normalizer.denormalize_term_with_context_and_arbitrary(
+            term,
+            local_context,
+            arbitrary_names,
+            true,
+        )
     }
 
     #[cfg(feature = "bigcert")]
@@ -924,13 +930,12 @@ impl CodeGenerator<'_> {
                     normalized_var_id, original_var_id
                 ))
             })?;
-            if mapped.has_any_variable() {
-                return Err(Error::internal(format!(
-                    "bigcert explicit specialization failed: mapped argument for normalized x{} (original x{}) still has variables: {}",
-                    normalized_var_id, original_var_id, mapped
-                )));
-            }
-            let arg_value = self.term_to_value_for_bigcert(mapped, replacement_context, normalizer);
+            let arg_value = self.term_to_value_for_bigcert(
+                mapped,
+                replacement_context,
+                Some(&self.arbitrary_names),
+                normalizer,
+            );
             arg_values.push(arg_value);
         }
 
