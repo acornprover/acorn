@@ -236,14 +236,16 @@ impl<'a> Proof<'a> {
         }
 
         // Collect all concrete specializations in order.
-        let mut claims = Vec::new();
-        let mut steps_in_order = Vec::new();
+        let mut claim_index: HashMap<Clause, usize> = HashMap::new();
+        let mut steps_in_order: Vec<ConcreteStep> = Vec::new();
         for (ps_id, _) in &self.steps {
             for concrete_id in concrete_ids_for(*ps_id) {
                 let Some(cs) = concrete_steps.remove(&concrete_id) else {
                     continue;
                 };
-                let ConcreteStep { generic, var_maps } = cs;
+                let ConcreteStep {
+                    generic, var_maps, ..
+                } = cs;
                 for (var_map, replacement_context) in var_maps {
                     let concrete_step = ConcreteStep {
                         generic: generic.clone(),
@@ -253,10 +255,14 @@ impl<'a> Proof<'a> {
                     else {
                         continue;
                     };
-                    if !claims.contains(&clause) && !skip_clauses.contains(&clause) {
-                        claims.push(clause);
-                        steps_in_order.push(concrete_step);
+                    if skip_clauses.contains(&clause) {
+                        continue;
                     }
+                    if claim_index.contains_key(&clause) {
+                        continue;
+                    }
+                    claim_index.insert(clause, steps_in_order.len());
+                    steps_in_order.push(concrete_step);
                 }
             }
         }

@@ -629,6 +629,189 @@ impl<'a> NormalizationContext<'a> {
         Ok(output)
     }
 
+    /// Converts a value to a term in "exact parse" mode (no CNF conversion or synthesis).
+    ///
+    /// This is used for certificate parsing where we need a stable structural parse of what
+    /// was written, without expanding functional equality or introducing synthetic terms.
+    pub fn value_to_exact_term(&self, value: &AcornValue) -> Result<Term, String> {
+        self.value_to_exact_term_with_offset(value, 0)
+    }
+
+    fn value_to_exact_term_with_offset(
+        &self,
+        value: &AcornValue,
+        value_var_offset: AtomId,
+    ) -> Result<Term, String> {
+        match value {
+            AcornValue::Variable(var_id, _) => Ok(Term::new_variable(*var_id + value_var_offset)),
+            AcornValue::Application(application) => {
+                let func = self.value_to_exact_term_with_offset(
+                    &application.function,
+                    value_var_offset,
+                )?;
+                let mut args = func.args().to_vec();
+                for arg in &application.args {
+                    args.push(self.value_to_exact_term_with_offset(
+                        arg,
+                        value_var_offset,
+                    )?);
+                }
+                Ok(Term::new(*func.get_head_atom(), args))
+            }
+            AcornValue::Constant(c) => {
+                self.symbol_table()
+                    .term_from_instance_with_vars(c, self.type_store(), self.type_var_map())
+                    .map_err(|e| {
+                        format!(
+                            "cannot convert exact parse constant '{}' to term: {}",
+                            value, e
+                        )
+                    })
+            }
+            AcornValue::Bool(true) => Ok(Term::new_true()),
+            AcornValue::Bool(false) => Ok(Term::new_false()),
+            _ => Err(format!(
+                "unsupported exact parse term conversion for '{}'",
+                value
+            )),
+        }
+    }
+
+    fn value_to_exact_signed_term(
+        &self,
+        value: &AcornValue,
+        value_var_offset: AtomId,
+    ) -> Result<Option<(Term, bool)>, String> {
+        match value {
+            AcornValue::Not(subvalue) => {
+                let Some((term, positive)) = self.value_to_exact_signed_term(
+                    subvalue,
+                    value_var_offset,
+                )?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((term, !positive)))
+            }
+            AcornValue::Bool(true) => Ok(Some((Term::new_true(), true))),
+            AcornValue::Bool(false) => Ok(Some((Term::new_true(), false))),
+            AcornValue::Variable(_, _) | AcornValue::Application(_) | AcornValue::Constant(_) => {
+                let term = self.value_to_exact_term_with_offset(value, value_var_offset)?;
+                Ok(Some((term, true)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn value_to_exact_literal(
+        &self,
+        value: &AcornValue,
+        value_var_offset: AtomId,
+    ) -> Result<Literal, String> {
+        match value {
+            AcornValue::Binary(BinaryOp::Equals, left, right) => {
+                let left_term = self.value_to_exact_term_with_offset(left, value_var_offset)?;
+                let right_term = self.value_to_exact_term_with_offset(right, value_var_offset)?;
+                Ok(Literal::equals(left_term, right_term))
+            }
+            AcornValue::Binary(BinaryOp::NotEquals, left, right) => {
+                let left_term = self.value_to_exact_term_with_offset(left, value_var_offset)?;
+                let right_term = self.value_to_exact_term_with_offset(right, value_var_offset)?;
+                Ok(Literal::not_equals(left_term, right_term))
+            }
+            _ => {
+                let Some((term, positive)) =
+                    self.value_to_exact_signed_term(value, value_var_offset)?
+                else {
+                    return Err(format!(
+                        "unsupported exact parse literal conversion for '{}'",
+                        value
+                    ));
+                };
+                Ok(Literal::from_signed_term(term, positive))
+            }
+        }
+    }
+
+    fn value_to_exact_literals(
+        &self,
+        value: &AcornValue,
+        value_var_offset: AtomId,
+        output: &mut Vec<Literal>,
+    ) -> Result<(), String> {
+        match value {
+            AcornValue::Binary(BinaryOp::Or, left, right) => {
+                self.value_to_exact_literals(left, value_var_offset, output)?;
+                self.value_to_exact_literals(right, value_var_offset, output)?;
+                Ok(())
+            }
+            _ => {
+                output.push(self.value_to_exact_literal(value, value_var_offset)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn exact_clause_from_parts(
+        &self,
+        arg_types: &[AcornType],
+        body: &AcornValue,
+    ) -> Result<Clause, String> {
+        let mut type_var_entries: Vec<(AtomId, Term)> = vec![];
+        if let Some(type_var_map) = self.type_var_map() {
+            let mut id_to_kind: HashMap<AtomId, Term> = HashMap::new();
+            for (_, (id, kind)) in type_var_map {
+                id_to_kind.entry(*id).or_insert_with(|| kind.clone());
+            }
+            type_var_entries = id_to_kind.into_iter().collect();
+            type_var_entries.sort_by_key(|(id, _)| *id);
+        }
+        let value_var_offset = type_var_entries.len() as AtomId;
+
+        let mut context_types = Vec::new();
+        for (_, kind) in &type_var_entries {
+            context_types.push(kind.clone());
+        }
+        context_types.extend(arg_types.iter().map(|arg_type| {
+            self.type_store()
+                .to_type_term_with_vars(arg_type, self.type_var_map())
+        }));
+        let context = LocalContext::from_types(context_types);
+
+        let mut literals = Vec::new();
+        self.value_to_exact_literals(body, value_var_offset, &mut literals)?;
+        let mut clause = Clause::from_literals_unnormalized(literals, &context);
+        clause.normalize();
+        Ok(clause)
+    }
+
+    /// Converts a parsed value into a clause in exact mode.
+    ///
+    /// This is the `value -> Clause` leg of the exact certificate roundtrip:
+    /// `Clause -> value -> string -> value -> Clause`.
+    /// Leading `forall` binders become clause context variables.
+    pub fn value_to_exact_clause(&self, value: &AcornValue) -> Result<Clause, String> {
+        match value {
+            AcornValue::ForAll(arg_types, body) => self.exact_clause_from_parts(arg_types, body),
+            _ => self.exact_clause_from_parts(&[], value),
+        }
+    }
+
+    /// Parses a theorem-like value in exact mode into a single clause.
+    ///
+    /// Expects input shaped like `forall(args) { lit1 or lit2 or ... }`.
+    /// Returns Ok(None) if the value is not a forall.
+    pub fn value_to_exact_forall_clause(
+        &self,
+        theorem_value: &AcornValue,
+    ) -> Result<Option<Clause>, String> {
+        let AcornValue::ForAll(arg_types, body) = theorem_value else {
+            return Ok(None);
+        };
+        let clause = self.exact_clause_from_parts(arg_types, body)?;
+        Ok(Some(clause))
+    }
+
     /// Converts the value into a list of lists of literals, adding skolem constants
     /// to the normalizer as needed.
     /// True is [], false is [[]]. This is logical if you think hard about it.

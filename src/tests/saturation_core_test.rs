@@ -1448,7 +1448,7 @@ fn test_proving_with_equality_resolution() {
             "function(x2: Foo, x3: Foo) { not f(x2, x3) or f(g(x2), x3) }(g(x), x)",
             "not f(g(x), x)",
             "function(x4: Foo, x5: Foo) { g(x4) != g(x5) or f(x4, x5) }(x, x)",
-            "function(x6: Foo) { f(x6, x6) }(x)",
+            "f(x, x)",
         ],
     );
 }
@@ -1772,14 +1772,20 @@ fn test_proving_with_free_variable() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
         &[
             "let s0: Foo satisfy { true }",
             "f(s0)",
             "not f(s0) or g",
             "not f(s0)",
-        ]
+        ],
+        &[
+            "let s0: Foo satisfy { true }",
+            "function(x0: Foo) { f(x0) }(s0)",
+            "function(x1: Foo) { not f(x1) or g }(s0)",
+            "not f(s0)",
+        ],
     );
 }
 
@@ -1858,9 +1864,13 @@ fn test_proving_with_theorem_arg() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
+    assert_proof_lines(
         c.proof.unwrap(),
-        vec!["a + (b + c) = a + b + c", "a + (b + c) = b + c + a"]
+        &["a + (b + c) = a + b + c", "a + (b + c) = b + c + a"],
+        &[
+            "function(x0: T, x1: T, x2: T) { x0 + x1 + x2 = x0 + (x1 + x2) }(a, b, c)",
+            "function(x3: T, x4: T) { x3 + x4 = x4 + x3 }(b + c, a)",
+        ],
     );
 }
 

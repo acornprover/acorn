@@ -546,8 +546,8 @@ impl<'a> TermRef<'a> {
     /// Calculate multi-weight for KBO ordering.
     /// Returns (weight1, weight2) and populates refcounts with variable usage.
     fn multi_weight(&self, refcounts: &mut Vec<u8>) -> (u32, u32) {
-        let mut weight1 = 0;
-        let mut weight2 = 0;
+        let mut weight1: u32 = 0;
+        let mut weight2: u32 = 0;
 
         for component in self.components {
             match component {
@@ -580,11 +580,13 @@ impl<'a> TermRef<'a> {
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::GlobalConstant(m, i))) => {
                     weight1 += 1;
-                    weight2 += 4 * (m.get() as u32 * 65536 + *i as u32);
+                    let symbol_weight =
+                        (m.get() as u32).wrapping_mul(65536).wrapping_add(*i as u32);
+                    weight2 = weight2.wrapping_add(4u32.wrapping_mul(symbol_weight));
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::ScopedConstant(i))) => {
                     weight1 += 1;
-                    weight2 += 1 + 4 * (*i) as u32;
+                    weight2 = weight2.wrapping_add(1u32.wrapping_add(4u32.wrapping_mul(*i as u32)));
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::Synthetic(m, i))) => {
                     weight1 += 1;
@@ -596,12 +598,18 @@ impl<'a> TermRef<'a> {
                 TermComponent::Atom(Atom::Symbol(Symbol::Type(t))) => {
                     // Type atoms contribute to weight
                     weight1 += 1;
-                    weight2 += 4 * (t.module_id().get() as u32 * 65536 + t.local_id() as u32);
+                    let symbol_weight = (t.module_id().get() as u32)
+                        .wrapping_mul(65536)
+                        .wrapping_add(t.local_id() as u32);
+                    weight2 = weight2.wrapping_add(4u32.wrapping_mul(symbol_weight));
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::Typeclass(tc))) => {
                     // Typeclass atoms contribute to weight similarly to types
                     weight1 += 1;
-                    weight2 += 4 * (tc.module_id().get() as u32 * 65536 + tc.local_id() as u32);
+                    let symbol_weight = (tc.module_id().get() as u32)
+                        .wrapping_mul(65536)
+                        .wrapping_add(tc.local_id() as u32);
+                    weight2 = weight2.wrapping_add(4u32.wrapping_mul(symbol_weight));
                 }
             }
         }
