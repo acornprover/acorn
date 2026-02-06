@@ -161,12 +161,6 @@ impl Certificate {
                         }
                     }
                 }
-                #[cfg(feature = "bigcert")]
-                CertificateStep::ClaimSpecialization { clause, .. } => {
-                    if !claims.contains(&clause) {
-                        claims.push(clause);
-                    }
-                }
             }
         }
 

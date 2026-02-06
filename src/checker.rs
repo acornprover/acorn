@@ -17,17 +17,11 @@ use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
-#[cfg(not(feature = "bigcert"))]
 use crate::kernel::generalization_set::GeneralizationSet;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
-#[cfg(not(feature = "bigcert"))]
 use crate::kernel::literal::Literal;
-#[cfg(feature = "bigcert")]
-use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::Term;
-#[cfg(feature = "bigcert")]
-use crate::kernel::variable_map::VariableMap;
 use crate::kernel::{EqualityGraph, StepId};
 use crate::normalizer::{NormalizationContext, Normalizer};
 use crate::project::Project;
@@ -142,12 +136,7 @@ pub struct Checker {
     term_graph: EqualityGraph,
 
     /// For looking up specializations of clauses with free variables.
-    #[cfg(not(feature = "bigcert"))]
     generalization_set: Arc<GeneralizationSet>,
-
-    /// In bigcert mode, track generic clauses by exact hash lookup.
-    #[cfg(feature = "bigcert")]
-    generic_clause_steps: Arc<HashMap<Clause, usize>>,
 
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
@@ -161,19 +150,10 @@ pub struct Checker {
 }
 
 impl Checker {
-    #[cfg(feature = "bigcert")]
-    fn normalize_bigcert_clause(mut clause: Clause) -> Clause {
-        clause.normalize();
-        clause
-    }
-
     pub fn new() -> Checker {
         Checker {
             term_graph: EqualityGraph::new(),
-            #[cfg(not(feature = "bigcert"))]
             generalization_set: Arc::new(GeneralizationSet::new()),
-            #[cfg(feature = "bigcert")]
-            generic_clause_steps: Arc::new(HashMap::new()),
             direct_contradiction: false,
             past_boolean_reductions: HashSet::new(),
             reasons: Vec::new(),
@@ -199,19 +179,11 @@ impl Checker {
 
         if clause.has_any_variable() {
             // The clause has free variables, so it can be a generalization.
-            #[cfg(not(feature = "bigcert"))]
             Arc::make_mut(&mut self.generalization_set).insert(
                 clause.clone(),
                 step_id,
                 kernel_context,
             );
-            #[cfg(feature = "bigcert")]
-            {
-                let key = Self::normalize_bigcert_clause(clause.clone());
-                Arc::make_mut(&mut self.generic_clause_steps)
-                    .entry(key)
-                    .or_insert(step_id);
-            }
 
             // We only need to do equality resolution for clauses with free variables,
             // because resolvable concrete literals would already have been simplified out.
@@ -287,21 +259,12 @@ impl Checker {
         }
 
         // If not found in term graph, check if there's a generalization in the clause set
-        #[cfg(not(feature = "bigcert"))]
         if let Some(step_id) = self
             .generalization_set
             .find_generalization(clause.clone(), kernel_context)
         {
             trace!(clause = %clause, result = "generalization_set", "checking clause");
             return Some(self.reasons[step_id].clone());
-        }
-        #[cfg(feature = "bigcert")]
-        if clause.has_any_variable() {
-            let key = Self::normalize_bigcert_clause(clause.clone());
-            if let Some(step_id) = self.generic_clause_steps.get(&key) {
-                trace!(clause = %clause, result = "generic_clause_set", "checking clause");
-                return Some(self.reasons[*step_id].clone());
-            }
         }
 
         // Try last-argument elimination as a fallback.
@@ -310,7 +273,6 @@ impl Checker {
         // and we want to match it against:
         //   g0(x0, x1, x2, x3, x4, x5) = x3(x4(x5))
         // by eliminating the common last argument x0 from both sides.
-        #[cfg(not(feature = "bigcert"))]
         if let Some(reduced) = self.try_last_arg_elimination(clause) {
             if let Some(step_id) = self
                 .generalization_set
@@ -331,7 +293,6 @@ impl Checker {
     /// - Both sides are applications
     /// - The last argument of both sides is the same variable
     /// - That variable doesn't appear elsewhere in the terms
-    #[cfg(not(feature = "bigcert"))]
     fn try_last_arg_elimination(&self, clause: &Clause) -> Option<Clause> {
         // Must be a single literal
         if clause.literals.len() != 1 {
@@ -525,42 +486,6 @@ impl Checker {
                         self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                     }
                 }
-                #[cfg(feature = "bigcert")]
-                CertificateStep::ClaimSpecialization {
-                    theorem,
-                    args,
-                    mut clause,
-                } => {
-                    if !seen_claims.insert(clause.clone()) {
-                        continue;
-                    }
-
-                    let expected_clause =
-                        Self::specialize_bigcert_theorem(&theorem, &args, &kernel_context);
-                    if expected_clause != clause {
-                        return Err(Error::GeneratedBadCode(format!(
-                            "Specialized claim '{}' does not match theorem application '{}'",
-                            clause, theorem
-                        )));
-                    }
-
-                    let theorem_text = theorem.to_string();
-                    let theorem_key = Self::normalize_bigcert_clause(theorem);
-                    let Some(step_id) = self.generic_clause_steps.get(&theorem_key) else {
-                        return Err(Error::GeneratedBadCode(format!(
-                            "Specialized claim '{}' uses theorem '{}' which is not known",
-                            clause, theorem_text
-                        )));
-                    };
-
-                    certificate_lines.push(CertificateLine {
-                        statement: clause_to_code(&clause, &normalizer, &bindings),
-                        reason: self.reasons[*step_id].clone(),
-                    });
-
-                    clause.normalize();
-                    self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
-                }
             }
         }
 
@@ -572,97 +497,6 @@ impl Checker {
                 "proof does not result in a contradiction".to_string(),
             ))
         }
-    }
-
-    #[cfg(feature = "bigcert")]
-    fn value_to_bigcert_term(
-        value: &AcornValue,
-        kernel_context: &KernelContext,
-    ) -> Result<Term, Error> {
-        match value {
-            AcornValue::Application(application) => {
-                let func = Self::value_to_bigcert_term(&application.function, kernel_context)?;
-                let mut args = func.args().to_vec();
-                for arg in &application.args {
-                    args.push(Self::value_to_bigcert_term(arg, kernel_context)?);
-                }
-                Ok(Term::new(*func.get_head_atom(), args))
-            }
-            AcornValue::Constant(c) => kernel_context
-                .symbol_table
-                .term_from_instance(c, &kernel_context.type_store)
-                .map_err(|e| {
-                    Error::GeneratedBadCode(format!(
-                        "cannot convert bigcert specialization argument '{}' to term: {}",
-                        value, e
-                    ))
-                }),
-            AcornValue::Bool(true) => Ok(Term::new_true()),
-            AcornValue::Bool(false) => Ok(Term::new_false()),
-            _ => Err(Error::GeneratedBadCode(format!(
-                "unsupported bigcert specialization argument '{}'",
-                value
-            ))),
-        }
-    }
-
-    #[cfg(feature = "bigcert")]
-    fn specialize_bigcert_theorem(
-        theorem: &Clause,
-        args: &[Term],
-        kernel_context: &KernelContext,
-    ) -> Clause {
-        let mut var_map = VariableMap::new();
-        for (i, arg) in args.iter().enumerate() {
-            var_map.set(i as AtomId, arg.clone());
-        }
-        let mut clause = var_map.specialize_clause_with_replacement_context(
-            theorem,
-            &LocalContext::empty(),
-            kernel_context,
-        );
-        clause.normalize_var_ids_no_flip();
-        clause
-    }
-
-    #[cfg(feature = "bigcert")]
-    fn try_parse_bigcert_specialization_claim(
-        value: &AcornValue,
-        normalizer: &mut Cow<Normalizer>,
-    ) -> Result<Option<CertificateStep>, Error> {
-        let AcornValue::Application(application) = value else {
-            return Ok(None);
-        };
-        let AcornValue::Lambda(arg_types, body) = application.function.as_ref() else {
-            return Ok(None);
-        };
-
-        let theorem_value = AcornValue::forall(arg_types.clone(), (**body).clone());
-        let view = NormalizationContext::new_ref(normalizer.as_ref(), None);
-        let theorem = match view.value_to_exact_forall_clause(&theorem_value) {
-            Ok(Some(clause)) => clause,
-            Ok(None) | Err(_) => return Ok(None),
-        };
-
-        let kernel_context = normalizer.kernel_context();
-        let mut args = Vec::with_capacity(application.args.len());
-        for arg in &application.args {
-            let term = Self::value_to_bigcert_term(arg, kernel_context)?;
-            if term.has_any_variable() {
-                return Err(Error::GeneratedBadCode(format!(
-                    "bigcert specialization argument '{}' is not concrete",
-                    arg
-                )));
-            }
-            args.push(term);
-        }
-
-        let clause = Self::specialize_bigcert_theorem(&theorem, &args, kernel_context);
-        Ok(Some(CertificateStep::ClaimSpecialization {
-            theorem,
-            args,
-            clause,
-        }))
     }
 
     /// Parse a single code line, updating bindings/normalizer, and return structured result.
@@ -882,32 +716,10 @@ impl Checker {
             }
             StatementInfo::Claim(claim) => {
                 let value = evaluator.evaluate_value(&claim.claim, Some(&AcornType::Bool))?;
-                #[cfg(feature = "bigcert")]
-                if let Some(specialization) =
-                    Self::try_parse_bigcert_specialization_claim(&value, normalizer)?
-                {
-                    return Ok(specialization);
-                }
-                #[cfg(feature = "bigcert")]
-                {
-                    let view = NormalizationContext::new_ref(normalizer.as_ref(), None);
-                    let clauses = view.value_to_exact_clauses(&value).map_err(|e| {
-                        Error::GeneratedBadCode(format!(
-                            "failed exact-parse claim '{}': {}",
-                            code, e
-                        ))
-                    })?;
-                    return Ok(CertificateStep::Claim(clauses));
-                }
-                #[cfg(not(feature = "bigcert"))]
                 let module_id = bindings.module_id();
-                #[cfg(not(feature = "bigcert"))]
-                {
-                    let mut view =
-                        NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-                    let clauses = view.value_to_denormalized_clauses(&value)?;
-                    Ok(CertificateStep::Claim(clauses))
-                }
+                let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
+                let clauses = view.value_to_denormalized_clauses(&value)?;
+                Ok(CertificateStep::Claim(clauses))
             }
             _ => Err(Error::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",

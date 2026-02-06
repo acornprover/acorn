@@ -1,7 +1,5 @@
 use crate::checker::StepReason;
 use crate::kernel::clause::Clause;
-#[cfg(feature = "bigcert")]
-use crate::kernel::term::Term;
 
 /// Result of parsing a single line of certificate code.
 ///
@@ -23,14 +21,4 @@ pub enum CertificateStep {
 
     /// A claim statement with clauses to check.
     Claim(Vec<Clause>),
-
-    /// In bigcert mode, an explicit theorem application:
-    ///   function(...) { theorem }(args...)
-    /// We keep theorem and args separate for fast checking.
-    #[cfg(feature = "bigcert")]
-    ClaimSpecialization {
-        theorem: Clause,
-        args: Vec<Term>,
-        clause: Clause,
-    },
 }
