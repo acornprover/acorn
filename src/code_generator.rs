@@ -397,6 +397,26 @@ impl SyntheticNameSet {
         }
     }
 
+    /// Assign fresh names to synthetics that don't already have one.
+    /// Returns only the synthetics that were newly named in this call.
+    fn assign_synthetic_names(
+        &mut self,
+        bindings: &BindingMap,
+        atoms: &[(ModuleId, AtomId)],
+    ) -> Vec<(ModuleId, AtomId, String)> {
+        let mut assigned = vec![];
+        for &(module_id, local_id) in atoms {
+            if self.synthetic_names.contains_key(&(module_id, local_id)) {
+                continue;
+            }
+            let name = bindings.next_indexed_var('s', &mut self.next_s);
+            self.synthetic_names
+                .insert((module_id, local_id), name.clone());
+            assigned.push((module_id, local_id, name));
+        }
+        assigned
+    }
+
     fn add_arbitrary_for_term(
         &mut self,
         bindings: &BindingMap,
@@ -626,17 +646,10 @@ impl CodeGenerator<'_> {
                 continue;
             }
 
-            // Assign names to any atoms that don't have them yet
+            // Assign names to any atoms that don't have them yet.
+            let assigned = names.assign_synthetic_names(self.bindings, &info.atoms);
             let mut decl = vec![];
-            for &(module_id, local_id) in &info.atoms {
-                if names.synthetic_names.contains_key(&(module_id, local_id)) {
-                    // We already have a name for this synthetic atom
-                    continue;
-                }
-                let name = self.bindings.next_indexed_var('s', &mut names.next_s);
-                names
-                    .synthetic_names
-                    .insert((module_id, local_id), name.clone());
+            for (module_id, local_id, name) in assigned {
                 decl.push((name, normalizer.get_synthetic_type(module_id, local_id)));
             }
             if decl.is_empty() {
