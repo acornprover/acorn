@@ -2594,7 +2594,8 @@ impl Normalizer {
         let var_types_raw = local_context.get_var_types();
 
         // Build variable remapping: for each original index, what's its new index?
-        // Type variables and arbitrary variables get None (excluded from forall).
+        // Type variables, arbitrary variables, and Empty placeholder variables
+        // get None (excluded from forall).
         let mut var_remapping: Vec<Option<u16>> = Vec::new();
         let mut new_index: u16 = 0;
         for i in 0..num_vars {
@@ -2604,8 +2605,9 @@ impl Normalizer {
             let is_arbitrary = arbitrary_names
                 .map(|m| m.contains_key(type_term))
                 .unwrap_or(false);
+            let is_empty_placeholder = type_term.as_ref().is_empty_type();
 
-            if is_type_var || is_arbitrary {
+            if is_type_var || is_arbitrary || is_empty_placeholder {
                 var_remapping.push(None);
             } else {
                 var_remapping.push(Some(new_index));

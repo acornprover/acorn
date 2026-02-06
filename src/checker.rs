@@ -194,10 +194,9 @@ pub struct Checker {
 
 impl Checker {
     #[cfg(feature = "bigcert")]
-    fn canonical_bigcert_clause(clause: &Clause) -> Clause {
-        let mut key = clause.clone();
-        key.normalize();
-        key
+    fn normalize_bigcert_clause(mut clause: Clause) -> Clause {
+        clause.normalize();
+        clause
     }
 
     pub fn new() -> Checker {
@@ -240,7 +239,7 @@ impl Checker {
             );
             #[cfg(feature = "bigcert")]
             {
-                let key = Self::canonical_bigcert_clause(clause);
+                let key = Self::normalize_bigcert_clause(clause.clone());
                 Arc::make_mut(&mut self.generic_clause_steps)
                     .entry(key)
                     .or_insert(step_id);
@@ -330,7 +329,7 @@ impl Checker {
         }
         #[cfg(feature = "bigcert")]
         if clause.has_any_variable() {
-            let key = Self::canonical_bigcert_clause(clause);
+            let key = Self::normalize_bigcert_clause(clause.clone());
             if let Some(step_id) = self.generic_clause_steps.get(&key) {
                 trace!(clause = %clause, result = "generic_clause_set", "checking clause");
                 return Some(self.reasons[*step_id].clone());
@@ -531,13 +530,13 @@ impl Checker {
                 return Ok(certificate_steps);
             }
 
-            match Self::parse_code_line(code, project, &mut bindings, &mut normalizer)? {
+            let parsed = Self::parse_code_line(code, project, &mut bindings, &mut normalizer)?;
+            let kernel_context = normalizer.kernel_context();
+            match parsed {
                 ParsedLine::LetSatisfy { .. } => {
                     // let...satisfy updates bindings/normalizer during parsing.
                 }
                 ParsedLine::Claim(clauses) => {
-                    // Re-read context after parsing because parsing may register new symbols/types.
-                    let kernel_context = normalizer.kernel_context();
                     for mut clause in clauses {
                         if !seen_claims.insert(clause.clone()) {
                             continue;
@@ -564,8 +563,6 @@ impl Checker {
                     args,
                     mut clause,
                 } => {
-                    // Re-read context after parsing because parsing may register new symbols/types.
-                    let kernel_context = normalizer.kernel_context();
                     if !seen_claims.insert(clause.clone()) {
                         continue;
                     }
@@ -579,11 +576,12 @@ impl Checker {
                         )));
                     }
 
-                    let theorem_key = Self::canonical_bigcert_clause(&theorem);
+                    let theorem_text = theorem.to_string();
+                    let theorem_key = Self::normalize_bigcert_clause(theorem);
                     let Some(step_id) = self.generic_clause_steps.get(&theorem_key) else {
                         return Err(Error::GeneratedBadCode(format!(
                             "Specialized claim '{}' uses theorem '{}' which is not known",
-                            clause, theorem
+                            clause, theorem_text
                         )));
                     };
 
