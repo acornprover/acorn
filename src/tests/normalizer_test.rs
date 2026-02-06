@@ -1,5 +1,93 @@
+use std::borrow::Cow;
+
+use crate::code_generator::CodeGenerator;
+use crate::elaborator::acorn_type::AcornType;
+use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
+use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
-use crate::normalizer::Normalizer;
+use crate::elaborator::evaluator::Evaluator;
+use crate::kernel::clause::Clause;
+use crate::normalizer::{NormalizationContext, Normalizer};
+use crate::processor::Processor;
+use crate::project::Project;
+use crate::syntax::statement::{Statement, StatementInfo};
+
+fn parse_claim_value(code: &str, project: &Project, bindings: &Cow<BindingMap>) -> AcornValue {
+    let statement = Statement::parse_str_with_options(code, true)
+        .unwrap_or_else(|e| panic!("failed to parse claim '{}': {}", code, e));
+    let mut evaluator = Evaluator::new(project, bindings, None);
+
+    match statement.statement {
+        StatementInfo::Claim(claim) => evaluator
+            .evaluate_value(&claim.claim, Some(&AcornType::Bool))
+            .unwrap_or_else(|e| panic!("failed to evaluate claim '{}': {}", code, e)),
+        _ => {
+            // Some expressions (notably `forall(...) { ... }`) parse as statement-level constructs.
+            // Wrap them in a theorem so we can evaluate the expression form consistently.
+            let wrapped = format!("theorem roundtrip {{ {} }}", code);
+            let wrapped_statement = Statement::parse_str_with_options(&wrapped, true)
+                .unwrap_or_else(|e| panic!("failed to parse wrapped claim '{}': {}", code, e));
+            let StatementInfo::Theorem(theorem) = wrapped_statement.statement else {
+                panic!("expected wrapped theorem statement, got '{}'", code);
+            };
+            evaluator
+                .evaluate_value(&theorem.claim, Some(&AcornType::Bool))
+                .unwrap_or_else(|e| panic!("failed to evaluate wrapped claim '{}': {}", code, e))
+        }
+    }
+}
+
+fn canonicalized_clauses(clauses: &[Clause]) -> Vec<Clause> {
+    let mut output: Vec<Clause> = clauses
+        .iter()
+        .map(|clause| {
+            let mut clause = clause.clone();
+            clause.normalize();
+            clause
+        })
+        .collect();
+    output.sort_by_key(|clause| format!("{:?}", clause));
+    output
+}
+
+fn assert_exact_roundtrip(env_code: &str, claim_code: &str) {
+    let (_processor, bindings, normalized_goal) = Processor::test_goal(env_code);
+    let normalizer = normalized_goal.normalizer;
+    let project = Project::new_mock();
+    let bindings_cow = Cow::Borrowed(&bindings);
+
+    let view = NormalizationContext::new_ref(&normalizer, None);
+
+    let value = parse_claim_value(claim_code, &project, &bindings_cow);
+    let expected_clauses = view
+        .value_to_exact_clauses(&value)
+        .unwrap_or_else(|e| panic!("failed exact parse for '{}': {}", claim_code, e));
+
+    let value_for_serialization = AcornValue::reduce(
+        BinaryOp::And,
+        expected_clauses
+            .iter()
+            .map(|clause| normalizer.denormalize(clause, None, None, false))
+            .collect(),
+    );
+    let mut code_generator = CodeGenerator::new(&bindings);
+    let serialized = code_generator
+        .value_to_code(&value_for_serialization)
+        .expect("failed to serialize clause(s)");
+
+    let reparsed_value = parse_claim_value(&serialized, &project, &bindings_cow);
+    let actual_clauses = view
+        .value_to_exact_clauses(&reparsed_value)
+        .unwrap_or_else(|e| panic!("failed exact parse for serialized '{}': {}", serialized, e));
+
+    assert_eq!(
+        canonicalized_clauses(&expected_clauses),
+        canonicalized_clauses(&actual_clauses),
+        "exact roundtrip mismatch\ninput claim: {}\nserialized: {}",
+        claim_code,
+        serialized
+    );
+}
 
 #[test]
 fn test_nat_normalization() {
@@ -53,6 +141,51 @@ fn test_nat_normalization() {
         &env,
         "recursion_step",
         &["recursion(x0, x1, suc(x2)) = x0(recursion(x0, x1, x2))"],
+    );
+}
+
+#[test]
+fn test_exact_roundtrip_single_clause() {
+    assert_exact_roundtrip(
+        r#"
+        inductive Foo {
+            foo
+            bar
+        }
+        let p: Foo -> Bool = axiom
+        let q: Foo -> Bool = axiom
+        theorem goal { true }
+        "#,
+        "p(Foo.foo) or not q(Foo.bar)",
+    );
+}
+
+#[test]
+fn test_exact_roundtrip_conjunction_of_clauses() {
+    assert_exact_roundtrip(
+        r#"
+        inductive Foo {
+            foo
+            bar
+        }
+        let p: Foo -> Bool = axiom
+        let q: Foo -> Bool = axiom
+        theorem goal { true }
+        "#,
+        "(p(Foo.foo) or q(Foo.bar)) and (p(Foo.bar) or not q(Foo.foo))",
+    );
+}
+
+#[test]
+fn test_exact_roundtrip_forall_clause() {
+    assert_exact_roundtrip(
+        r#"
+        type Nat: axiom
+        let add: (Nat, Nat) -> Nat = axiom
+        let zero: Nat = axiom
+        theorem goal { true }
+        "#,
+        "forall(x: Nat, y: Nat) { add(x, zero) = y or y != zero }",
     );
 }
 

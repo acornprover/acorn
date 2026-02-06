@@ -645,29 +645,23 @@ impl<'a> NormalizationContext<'a> {
         match value {
             AcornValue::Variable(var_id, _) => Ok(Term::new_variable(*var_id + value_var_offset)),
             AcornValue::Application(application) => {
-                let func = self.value_to_exact_term_with_offset(
-                    &application.function,
-                    value_var_offset,
-                )?;
+                let func =
+                    self.value_to_exact_term_with_offset(&application.function, value_var_offset)?;
                 let mut args = func.args().to_vec();
                 for arg in &application.args {
-                    args.push(self.value_to_exact_term_with_offset(
-                        arg,
-                        value_var_offset,
-                    )?);
+                    args.push(self.value_to_exact_term_with_offset(arg, value_var_offset)?);
                 }
                 Ok(Term::new(*func.get_head_atom(), args))
             }
-            AcornValue::Constant(c) => {
-                self.symbol_table()
-                    .term_from_instance_with_vars(c, self.type_store(), self.type_var_map())
-                    .map_err(|e| {
-                        format!(
-                            "cannot convert exact parse constant '{}' to term: {}",
-                            value, e
-                        )
-                    })
-            }
+            AcornValue::Constant(c) => self
+                .symbol_table()
+                .term_from_instance_with_vars(c, self.type_store(), self.type_var_map())
+                .map_err(|e| {
+                    format!(
+                        "cannot convert exact parse constant '{}' to term: {}",
+                        value, e
+                    )
+                }),
             AcornValue::Bool(true) => Ok(Term::new_true()),
             AcornValue::Bool(false) => Ok(Term::new_false()),
             _ => Err(format!(
@@ -684,10 +678,8 @@ impl<'a> NormalizationContext<'a> {
     ) -> Result<Option<(Term, bool)>, String> {
         match value {
             AcornValue::Not(subvalue) => {
-                let Some((term, positive)) = self.value_to_exact_signed_term(
-                    subvalue,
-                    value_var_offset,
-                )?
+                let Some((term, positive)) =
+                    self.value_to_exact_signed_term(subvalue, value_var_offset)?
                 else {
                     return Ok(None);
                 };
@@ -795,6 +787,35 @@ impl<'a> NormalizationContext<'a> {
             AcornValue::ForAll(arg_types, body) => self.exact_clause_from_parts(arg_types, body),
             _ => self.exact_clause_from_parts(&[], value),
         }
+    }
+
+    fn collect_exact_clauses(
+        &self,
+        value: &AcornValue,
+        output: &mut Vec<Clause>,
+    ) -> Result<(), String> {
+        match value {
+            AcornValue::Binary(BinaryOp::And, left, right) => {
+                self.collect_exact_clauses(left, output)?;
+                self.collect_exact_clauses(right, output)?;
+                Ok(())
+            }
+            _ => {
+                output.push(self.value_to_exact_clause(value)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Converts a parsed value into one or more clauses in exact mode.
+    ///
+    /// This is the `value -> Vec<Clause>` leg of exact certificate roundtrip for
+    /// conjunctions of clauses:
+    /// `Vec<Clause> -> conjunction value -> string -> value -> Vec<Clause>`.
+    pub fn value_to_exact_clauses(&self, value: &AcornValue) -> Result<Vec<Clause>, String> {
+        let mut output = Vec::new();
+        self.collect_exact_clauses(value, &mut output)?;
+        Ok(output)
     }
 
     /// Parses a theorem-like value in exact mode into a single clause.
