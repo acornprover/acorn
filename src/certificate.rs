@@ -7,7 +7,8 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::checker::{Checker, ParsedLine};
+use crate::certificate_step::CertificateStep;
+use crate::checker::Checker;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::concrete_proof::ConcreteProof;
@@ -163,10 +164,10 @@ impl Certificate {
 
         for code in proof {
             match Checker::parse_code_line(code, project, bindings, normalizer)? {
-                ParsedLine::LetSatisfy { .. } => {
+                CertificateStep::LetSatisfy { .. } => {
                     // Let-satisfy sets up bindings but doesn't produce claims
                 }
-                ParsedLine::Claim(clauses) => {
+                CertificateStep::Claim(clauses) => {
                     for clause in clauses {
                         if !claims.contains(&clause) {
                             claims.push(clause);
@@ -174,7 +175,7 @@ impl Certificate {
                     }
                 }
                 #[cfg(feature = "bigcert")]
-                ParsedLine::ClaimSpecialization { clause, .. } => {
+                CertificateStep::ClaimSpecialization { clause, .. } => {
                     if !claims.contains(&clause) {
                         claims.push(clause);
                     }

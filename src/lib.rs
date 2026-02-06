@@ -1,6 +1,7 @@
 pub mod build_cache;
 pub mod builder;
 pub mod certificate;
+pub mod certificate_step;
 pub mod checker;
 pub mod cleaner;
 pub mod code_generator;

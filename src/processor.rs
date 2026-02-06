@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::builder::BuildError;
 use crate::certificate::Certificate;
-use crate::checker::{CertificateStep, Checker, StepReason};
+use crate::checker::{CertificateLine, Checker, StepReason};
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::node::NodeCursor;
@@ -143,7 +143,7 @@ impl Processor {
     /// Checks a certificate.
     /// Clones the checker and normalizer, because the checking process despoils them.
     /// If the goal is provided, it is added to the checker before checking the certificate.
-    /// Returns a list of CertificateSteps showing how each step was verified.
+    /// Returns a list of CertificateLines showing how each line was verified.
     pub fn check_cert(
         &self,
         cert: &Certificate,
@@ -151,7 +151,7 @@ impl Processor {
         normalizer: &Normalizer,
         project: &Project,
         bindings: &BindingMap,
-    ) -> Result<Vec<CertificateStep>, Error> {
+    ) -> Result<Vec<CertificateLine>, Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = normalizer.clone();
 
@@ -173,7 +173,7 @@ impl Processor {
         normalizer: &Normalizer,
         project: &Project,
         bindings: &BindingMap,
-    ) -> Result<(Certificate, Vec<CertificateStep>), Error> {
+    ) -> Result<(Certificate, Vec<CertificateLine>), Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = normalizer.clone();
 

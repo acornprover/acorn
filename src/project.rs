@@ -1273,7 +1273,7 @@ impl Project {
         root_env: &Environment,
         goal_env: &Environment,
         cursor: &crate::elaborator::node::NodeCursor,
-    ) -> Option<(&Certificate, Vec<crate::checker::CertificateStep>)> {
+    ) -> Option<(&Certificate, Vec<crate::checker::CertificateLine>)> {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
 
@@ -1410,7 +1410,7 @@ impl Project {
         let (has_cached_proof, steps) = if let Some((_cert, certificate_steps)) =
             self.find_cert(goal, root_env, goal_env, cursor)
         {
-            // Convert CertificateSteps to interface::Step objects
+            // Convert certificate lines to interface::Step objects
             let steps: Vec<Step> = certificate_steps
                 .into_iter()
                 .map(|cert_step| {

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::certificate::Certificate;
+use crate::certificate_step::CertificateStep;
 use crate::code_generator::Error;
 use crate::elaborator::acorn_type::AcornType;
 use crate::elaborator::acorn_value::AcornValue;
@@ -117,40 +118,9 @@ fn clause_to_code(clause: &Clause, normalizer: &Normalizer, bindings: &Cow<Bindi
         .unwrap_or_else(|_| format!("{} (internal)", clause))
 }
 
-/// Result of parsing a single line of certificate code.
-///
-/// This is the boundary where name resolution happens: certificate strings use names
-/// like "Nat.add", which get resolved to current numeric IDs during parsing.
-/// This makes certificates robust to refactoring (see `Certificate` docs).
-pub enum ParsedLine {
-    /// A let...satisfy statement. Sets up bindings for subsequent claims.
-    ///
-    /// These map user-chosen names (like "s0") to existing synthetic constants.
-    /// The synthetic constants themselves are created during goal normalization,
-    /// not from the certificate - the certificate just establishes the name mapping.
-    LetSatisfy {
-        /// Clauses from the satisfy condition (empty for trivial conditions like `true`).
-        clauses_to_insert: Vec<Clause>,
-        /// The reason for this step (Skolemization or SyntheticDefinition).
-        reason: StepReason,
-    },
-    /// A claim statement with clauses to check.
-    Claim(Vec<Clause>),
-
-    /// In bigcert mode, an explicit theorem application:
-    ///   function(...) { theorem }(args...)
-    /// We keep theorem and args separate for fast checking.
-    #[cfg(feature = "bigcert")]
-    ClaimSpecialization {
-        theorem: Clause,
-        args: Vec<Term>,
-        clause: Clause,
-    },
-}
-
-/// Information about a single step in a certificate proof.
+/// Information about a single line in a certificate proof.
 #[derive(Debug, Clone)]
-pub struct CertificateStep {
+pub struct CertificateLine {
     /// The statement from the certificate (the code line).
     pub statement: String,
 
@@ -497,7 +467,7 @@ impl Checker {
     }
 
     /// Check a certificate. It is expected that the certificate has a proof.
-    /// Returns a list of CertificateSteps showing how each step was verified.
+    /// Returns a list of CertificateLines showing how each line was verified.
     ///
     /// Consumes bindings, normalizer and the checker itself since they may be
     /// modified during checking and should not be reused afterwards.
@@ -507,7 +477,7 @@ impl Checker {
         project: &Project,
         mut bindings: Cow<BindingMap>,
         mut normalizer: Cow<Normalizer>,
-    ) -> Result<Vec<CertificateStep>, Error> {
+    ) -> Result<Vec<CertificateLine>, Error> {
         // Check for contradiction before parsing. If goal insertion already
         // created a contradiction, we don't need to parse or check the proof.
         if self.has_contradiction() {
@@ -519,22 +489,22 @@ impl Checker {
             return Err(Error::NoProof);
         };
 
-        let mut certificate_steps = Vec::new();
+        let mut certificate_lines = Vec::new();
         let mut seen_claims = HashSet::new();
 
         for code in proof {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
-                return Ok(certificate_steps);
+                return Ok(certificate_lines);
             }
 
             let parsed = Self::parse_code_line(code, project, &mut bindings, &mut normalizer)?;
             let kernel_context = normalizer.kernel_context();
             match parsed {
-                ParsedLine::LetSatisfy { .. } => {
+                CertificateStep::LetSatisfy { .. } => {
                     // let...satisfy updates bindings/normalizer during parsing.
                 }
-                ParsedLine::Claim(clauses) => {
+                CertificateStep::Claim(clauses) => {
                     for mut clause in clauses {
                         if !seen_claims.insert(clause.clone()) {
                             continue;
@@ -546,7 +516,7 @@ impl Checker {
                             )));
                         };
 
-                        certificate_steps.push(CertificateStep {
+                        certificate_lines.push(CertificateLine {
                             statement: clause_to_code(&clause, &normalizer, &bindings),
                             reason,
                         });
@@ -556,7 +526,7 @@ impl Checker {
                     }
                 }
                 #[cfg(feature = "bigcert")]
-                ParsedLine::ClaimSpecialization {
+                CertificateStep::ClaimSpecialization {
                     theorem,
                     args,
                     mut clause,
@@ -583,7 +553,7 @@ impl Checker {
                         )));
                     };
 
-                    certificate_steps.push(CertificateStep {
+                    certificate_lines.push(CertificateLine {
                         statement: clause_to_code(&clause, &normalizer, &bindings),
                         reason: self.reasons[*step_id].clone(),
                     });
@@ -596,7 +566,7 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
-            Ok(certificate_steps)
+            Ok(certificate_lines)
         } else {
             Err(Error::GeneratedBadCode(
                 "proof does not result in a contradiction".to_string(),
@@ -659,7 +629,7 @@ impl Checker {
     fn try_parse_bigcert_specialization_claim(
         value: &AcornValue,
         normalizer: &mut Cow<Normalizer>,
-    ) -> Result<Option<ParsedLine>, Error> {
+    ) -> Result<Option<CertificateStep>, Error> {
         let AcornValue::Application(application) = value else {
             return Ok(None);
         };
@@ -688,7 +658,7 @@ impl Checker {
         }
 
         let clause = Self::specialize_bigcert_theorem(&theorem, &args, kernel_context);
-        Ok(Some(ParsedLine::ClaimSpecialization {
+        Ok(Some(CertificateStep::ClaimSpecialization {
             theorem,
             args,
             clause,
@@ -701,7 +671,7 @@ impl Checker {
         project: &Project,
         bindings: &mut Cow<BindingMap>,
         normalizer: &mut Cow<Normalizer>,
-    ) -> Result<ParsedLine, Error> {
+    ) -> Result<CertificateStep, Error> {
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new(project, bindings, None);
 
@@ -905,7 +875,7 @@ impl Checker {
                     None => StepReason::SyntheticDefinition,
                 };
 
-                Ok(ParsedLine::LetSatisfy {
+                Ok(CertificateStep::LetSatisfy {
                     clauses_to_insert,
                     reason,
                 })
@@ -927,7 +897,7 @@ impl Checker {
                             code, e
                         ))
                     })?;
-                    return Ok(ParsedLine::Claim(clauses));
+                    return Ok(CertificateStep::Claim(clauses));
                 }
                 #[cfg(not(feature = "bigcert"))]
                 let module_id = bindings.module_id();
@@ -936,7 +906,7 @@ impl Checker {
                     let mut view =
                         NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
                     let clauses = view.value_to_denormalized_clauses(&value)?;
-                    Ok(ParsedLine::Claim(clauses))
+                    Ok(CertificateStep::Claim(clauses))
                 }
             }
             _ => Err(Error::GeneratedBadCode(format!(
@@ -947,26 +917,26 @@ impl Checker {
     }
 
     /// Check a ConcreteProof directly.
-    /// Returns a list of CertificateSteps showing how each step was verified.
+    /// Returns a list of CertificateLines showing how each line was verified.
     pub fn check_concrete_proof(
         mut self,
         concrete_proof: &ConcreteProof,
         kernel_context: &KernelContext,
         normalizer: &Normalizer,
         bindings: &Cow<BindingMap>,
-    ) -> Result<Vec<CertificateStep>, Error> {
-        let mut certificate_steps = Vec::new();
+    ) -> Result<Vec<CertificateLine>, Error> {
+        let mut certificate_lines = Vec::new();
 
         for clause in &concrete_proof.claims {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
-                return Ok(certificate_steps);
+                return Ok(certificate_lines);
             }
 
             let mut clause = clause.clone();
             match self.check_clause(&clause, kernel_context) {
                 Some(reason) => {
-                    certificate_steps.push(CertificateStep {
+                    certificate_lines.push(CertificateLine {
                         statement: clause_to_code(&clause, normalizer, bindings),
                         reason,
                     });
@@ -984,7 +954,7 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
-            Ok(certificate_steps)
+            Ok(certificate_lines)
         } else {
             Err(Error::GeneratedBadCode(
                 "proof does not result in a contradiction".to_string(),
@@ -1003,7 +973,7 @@ impl Checker {
         project: &Project,
         bindings: Cow<BindingMap>,
         normalizer: Cow<Normalizer>,
-    ) -> Result<(Certificate, Vec<CertificateStep>), Error> {
+    ) -> Result<(Certificate, Vec<CertificateLine>), Error> {
         let mut good_cert = cert;
         let mut keep_count = 0;
 
