@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use crate::certificate_step::CertificateStep;
 use crate::checker::Checker;
-use crate::code_generator::{CodeGenerator, Error as CodeGenError};
+use crate::code_generator::{CodeGenerator, Error as CodeGenError, SyntheticNameSet};
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::variable_map::VariableMap;
@@ -82,11 +82,13 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
         let mut generator = CodeGenerator::new(bindings);
+        let mut names = SyntheticNameSet::new();
         let mut definitions = Vec::new();
         let mut codes = Vec::new();
 
         for step in concrete_steps {
-            let (defs, step_codes) = generator.concrete_step_to_code(step, normalizer)?;
+            let (defs, step_codes) =
+                generator.concrete_step_to_code(&mut names, step, normalizer)?;
             for def in defs {
                 if !definitions.contains(&def) {
                     definitions.push(def);

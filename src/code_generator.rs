@@ -355,21 +355,95 @@ pub struct CodeGenerator<'a> {
     /// We use variables named k0, k1, k2, etc for existential variables.
     next_k: u32,
 
-    /// We use variables named s0, s1, s2, etc for synthetic atoms.
-    next_s: u32,
-
     /// We use variables named T0, T1, T2, etc for type parameters.
     next_t: u32,
 
     /// The names we have assigned to stack variables so far.
     var_names: Vec<String>,
+}
+
+/// Mutable naming state shared across certificate generation steps.
+///
+/// This tracks stable names for synthetic IDs and arbitrary witnesses so a later
+/// step can refer to names introduced in an earlier step.
+pub struct SyntheticNameSet {
+    /// We use variables named s0, s1, s2, etc for synthetic atoms and arbitrary witnesses.
+    pub next_s: u32,
 
     /// The names we have assigned to synthetic atoms so far.
-    synthetic_names: HashMap<(ModuleId, AtomId), String>,
+    pub synthetic_names: HashMap<(ModuleId, AtomId), String>,
 
     /// The names for whenever we need an arbitrary member of a type.
     /// Maps type to the name of an element of that type.
-    arbitrary_names: HashMap<Term, ConstantName>,
+    pub arbitrary_names: HashMap<Term, ConstantName>,
+}
+
+impl SyntheticNameSet {
+    pub fn new() -> Self {
+        SyntheticNameSet {
+            next_s: 0,
+            synthetic_names: HashMap::new(),
+            arbitrary_names: HashMap::new(),
+        }
+    }
+
+    /// Check if a constant name is a replaced synthetic (after replace_synthetics was called).
+    /// Replaced synthetics have unqualified names like "s0", "s1", etc.
+    pub fn is_replaced_synthetic(&self, name: &ConstantName) -> bool {
+        if let ConstantName::Unqualified(_, word) = name {
+            self.synthetic_names.values().any(|s| s == word)
+        } else {
+            false
+        }
+    }
+
+    fn add_arbitrary_for_term(
+        &mut self,
+        bindings: &BindingMap,
+        term: &Term,
+        local_context: &LocalContext,
+    ) {
+        match term.as_ref().decompose() {
+            Decomposition::Atom(Atom::FreeVariable(var_id)) => {
+                // For a variable term, get its type from the local context.
+                let var_type = local_context
+                    .get_var_type(*var_id as usize)
+                    .cloned()
+                    .expect("Variable should have type in LocalContext");
+                // Skip type variables (those whose type is TypeSort or a typeclass).
+                // Type variables are type-level parameters, not value-level, so they
+                // don't need arbitrary value definitions in certificates.
+                if var_type.as_ref().is_type_param_kind() {
+                    return;
+                }
+                if !self.arbitrary_names.contains_key(&var_type) {
+                    // Generate a name for this arbitrary value
+                    let name = bindings.next_indexed_var('s', &mut self.next_s);
+                    let cname = ConstantName::Unqualified(bindings.module_id(), name);
+                    self.arbitrary_names.insert(var_type, cname);
+                }
+            }
+            Decomposition::Atom(_) => {}
+            Decomposition::Application(func, arg) => {
+                self.add_arbitrary_for_term(bindings, &func.to_owned(), local_context);
+                self.add_arbitrary_for_term(bindings, &arg.to_owned(), local_context);
+            }
+            Decomposition::Pi(input, output) => {
+                self.add_arbitrary_for_term(bindings, &input.to_owned(), local_context);
+                self.add_arbitrary_for_term(bindings, &output.to_owned(), local_context);
+            }
+        }
+    }
+
+    /// For any variables in this clause, add an arbitrary variable.
+    fn add_arbitrary_for_clause(&mut self, bindings: &BindingMap, clause: &Clause) {
+        let local_context = clause.get_local_context();
+        for literal in &clause.literals {
+            for term in [&literal.left, &literal.right] {
+                self.add_arbitrary_for_term(bindings, term, local_context);
+            }
+        }
+    }
 }
 
 impl CodeGenerator<'_> {
@@ -379,11 +453,8 @@ impl CodeGenerator<'_> {
             bindings,
             next_x: 0,
             next_k: 0,
-            next_s: 0,
             next_t: 0,
             var_names: vec![],
-            synthetic_names: HashMap::new(),
-            arbitrary_names: HashMap::new(),
         }
     }
 
@@ -500,16 +571,6 @@ impl CodeGenerator<'_> {
         }
     }
 
-    /// Check if a constant name is a replaced synthetic (after replace_synthetics was called).
-    /// This is needed because replaced synthetics have Unqualified names like "s0", "s1", etc.
-    fn is_replaced_synthetic(&self, name: &ConstantName) -> bool {
-        if let ConstantName::Unqualified(_, word) = name {
-            self.synthetic_names.values().any(|s| s == word)
-        } else {
-            false
-        }
-    }
-
     /// Adds parameters, if there are any, to an expression representing a type.
     fn parametrize_expr(&self, base_expr: Expression, params: &[AcornType]) -> Result<Expression> {
         if params.is_empty() {
@@ -527,14 +588,26 @@ impl CodeGenerator<'_> {
     /// If this value cannot be expressed in a single chunk of code, returns an error.
     /// For example, it might refer to a constant that is not in scope.
     pub fn value_to_code(&mut self, value: &AcornValue) -> Result<String> {
-        let expr = self.value_to_expr(value, false)?;
+        let empty_names = SyntheticNameSet::new();
+        let expr = self.value_to_expr(value, false, &empty_names)?;
+        Ok(expr.to_string())
+    }
+
+    /// Like value_to_code, but uses externally managed synthetic/arbitrary naming state.
+    fn value_to_code_with_names(
+        &mut self,
+        value: &AcornValue,
+        names: &SyntheticNameSet,
+    ) -> Result<String> {
+        let expr = self.value_to_expr(value, false, names)?;
         Ok(expr.to_string())
     }
 
     /// Generates definitions for the given synthetic atom IDs and appends them to codes.
-    /// Updates self.synthetic_names with names for all provided synthetic atom IDs.
+    /// Updates names.synthetic_names with names for all provided synthetic atom IDs.
     fn define_synthetics(
         &mut self,
+        names: &mut SyntheticNameSet,
         skolem_ids: Vec<(ModuleId, AtomId)>,
         normalizer: &Normalizer,
         codes: &mut Vec<String>,
@@ -547,7 +620,7 @@ impl CodeGenerator<'_> {
             let all_already_defined = info
                 .atoms
                 .iter()
-                .all(|&(m, i)| self.synthetic_names.contains_key(&(m, i)));
+                .all(|&(m, i)| names.synthetic_names.contains_key(&(m, i)));
             if all_already_defined {
                 // Skip this info - we've already generated code for it
                 continue;
@@ -556,12 +629,13 @@ impl CodeGenerator<'_> {
             // Assign names to any atoms that don't have them yet
             let mut decl = vec![];
             for &(module_id, local_id) in &info.atoms {
-                if self.synthetic_names.contains_key(&(module_id, local_id)) {
+                if names.synthetic_names.contains_key(&(module_id, local_id)) {
                     // We already have a name for this synthetic atom
                     continue;
                 }
-                let name = self.bindings.next_indexed_var('s', &mut self.next_s);
-                self.synthetic_names
+                let name = self.bindings.next_indexed_var('s', &mut names.next_s);
+                names
+                    .synthetic_names
                     .insert((module_id, local_id), name.clone());
                 decl.push((name, normalizer.get_synthetic_type(module_id, local_id)));
             }
@@ -700,10 +774,10 @@ impl CodeGenerator<'_> {
             // Define them first (recursively) before we use them in this definition.
             let additional_synthetic_ids = cond_val.find_synthetics();
             if !additional_synthetic_ids.is_empty() {
-                self.define_synthetics(additional_synthetic_ids, normalizer, codes)?;
+                self.define_synthetics(names, additional_synthetic_ids, normalizer, codes)?;
             }
 
-            let cond = self.value_to_code(&cond_val)?;
+            let cond = self.value_to_code_with_names(&cond_val, names)?;
 
             let let_statement = format!("let {} satisfy {{ {} }}", decl_str, cond);
             codes.push(let_statement);
@@ -720,6 +794,7 @@ impl CodeGenerator<'_> {
     /// This is needed to look up variable types when specializing.
     fn specialization_to_code(
         &mut self,
+        names: &mut SyntheticNameSet,
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
@@ -747,15 +822,15 @@ impl CodeGenerator<'_> {
         // We only want to generate definitions for entries added in THIS call,
         // because those entries need the current clause's LocalContext for correct denormalization.
         // Entries from earlier calls were already processed with their own (correct) contexts.
-        let keys_before: HashSet<Term> = self.arbitrary_names.keys().cloned().collect();
+        let keys_before: HashSet<Term> = names.arbitrary_names.keys().cloned().collect();
 
-        self.add_arbitrary_for_clause(&clause);
-        let mut value = normalizer.denormalize(&clause, Some(&self.arbitrary_names), None, true);
+        names.add_arbitrary_for_clause(self.bindings, &clause);
+        let mut value = normalizer.denormalize(&clause, Some(&names.arbitrary_names), None, true);
 
         // Define the arbitrary variables.
         // Use the clause's local context to look up typeclass constraints for type variables.
         let local_context = clause.get_local_context();
-        for (ty, name) in self.arbitrary_names.clone() {
+        for (ty, name) in names.arbitrary_names.clone() {
             if keys_before.contains(&ty) {
                 continue; // Already processed in a previous call with the correct context
             }
@@ -768,12 +843,12 @@ impl CodeGenerator<'_> {
 
         // Create a name and definition for each synthetic atom.
         let synthetic_ids = value.find_synthetics();
-        self.define_synthetics(synthetic_ids, normalizer, definitions)?;
+        self.define_synthetics(names, synthetic_ids, normalizer, definitions)?;
 
-        value = value.replace_synthetics(&self.synthetic_names);
+        value = value.replace_synthetics(&names.synthetic_names);
         let subvalues = value.remove_and();
         for subvalue in subvalues {
-            codes.push(self.value_to_code(&subvalue)?);
+            codes.push(self.value_to_code_with_names(&subvalue, names)?);
         }
         Ok(())
     }
@@ -783,6 +858,7 @@ impl CodeGenerator<'_> {
     /// arbitrary variables and synthetic atoms, and code is the actual clause content.
     pub fn concrete_step_to_code(
         &mut self,
+        names: &mut SyntheticNameSet,
         step: &ConcreteStep,
         normalizer: &Normalizer,
     ) -> Result<(Vec<String>, Vec<String>)> {
@@ -790,6 +866,7 @@ impl CodeGenerator<'_> {
         let mut codes = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_code(
+                names,
                 &step.generic,
                 var_map,
                 replacement_context,
@@ -804,52 +881,9 @@ impl CodeGenerator<'_> {
         Ok((defs, codes))
     }
 
-    fn type_to_code(&mut self, acorn_type: &AcornType) -> Result<String> {
+    fn type_to_code(&self, acorn_type: &AcornType) -> Result<String> {
         let expr = self.type_to_expr(acorn_type)?;
         Ok(expr.to_string())
-    }
-
-    fn add_arbitrary_for_term(&mut self, term: &Term, local_context: &LocalContext) {
-        match term.as_ref().decompose() {
-            Decomposition::Atom(Atom::FreeVariable(var_id)) => {
-                // For a variable term, get its type from the local context.
-                let var_type = local_context
-                    .get_var_type(*var_id as usize)
-                    .cloned()
-                    .expect("Variable should have type in LocalContext");
-                // Skip type variables (those whose type is TypeSort or a typeclass).
-                // Type variables are type-level parameters, not value-level, so they
-                // don't need arbitrary value definitions in certificates.
-                if var_type.as_ref().is_type_param_kind() {
-                    return;
-                }
-                if !self.arbitrary_names.contains_key(&var_type) {
-                    // Generate a name for this arbitrary value
-                    let name = self.bindings.next_indexed_var('s', &mut self.next_s);
-                    let cname = ConstantName::Unqualified(self.bindings.module_id(), name);
-                    self.arbitrary_names.insert(var_type, cname);
-                }
-            }
-            Decomposition::Atom(_) => {}
-            Decomposition::Application(func, arg) => {
-                self.add_arbitrary_for_term(&func.to_owned(), local_context);
-                self.add_arbitrary_for_term(&arg.to_owned(), local_context);
-            }
-            Decomposition::Pi(input, output) => {
-                self.add_arbitrary_for_term(&input.to_owned(), local_context);
-                self.add_arbitrary_for_term(&output.to_owned(), local_context);
-            }
-        }
-    }
-
-    /// For any variables in this clause, add an arbitrary variable.
-    fn add_arbitrary_for_clause(&mut self, clause: &Clause) {
-        let local_context = clause.get_local_context();
-        for literal in &clause.literals {
-            for term in [&literal.left, &literal.right] {
-                self.add_arbitrary_for_term(term, local_context);
-            }
-        }
     }
 
     /// Check if we can infer a function's type parameters from its argument types.
@@ -964,23 +998,23 @@ impl CodeGenerator<'_> {
     }
 
     /// Create a marked-up string to display information for this type.
-    pub fn type_to_marked(&mut self, acorn_type: &AcornType) -> Result<MarkedString> {
+    pub fn type_to_marked(&self, acorn_type: &AcornType) -> Result<MarkedString> {
         let code = self.type_to_code(acorn_type)?;
         Ok(Self::marked(format!("type {}", code)))
     }
 
     /// Given a constant instance, create an expression that refers to it.
     /// This does *not* include the parameters.
-    fn const_to_expr(&self, ci: &ConstantInstance) -> Result<Expression> {
+    fn const_to_expr(&self, ci: &ConstantInstance, names: &SyntheticNameSet) -> Result<Expression> {
         if ci.name.is_synthetic() {
             if let Some(id) = ci.name.synthetic_id() {
-                if let Some(synthetic_name) = self.synthetic_names.get(&id) {
+                if let Some(synthetic_name) = names.synthetic_names.get(&id) {
                     return Ok(Expression::generate_identifier(synthetic_name));
                 }
             }
             return Err(Error::synthetic(&ci.name.to_string()));
         }
-        if self.is_replaced_synthetic(&ci.name) {
+        if names.is_replaced_synthetic(&ci.name) {
             if let ConstantName::Unqualified(_, word) = &ci.name {
                 return Ok(Expression::generate_identifier(word));
             }
@@ -1080,6 +1114,7 @@ impl CodeGenerator<'_> {
     /// If use_x is true we use x-variables; otherwise we use k-variables.
     fn generate_quantifier_expr(
         &mut self,
+        names: &SyntheticNameSet,
         token_type: TokenType,
         quants: &Vec<AcornType>,
         value: &AcornValue,
@@ -1100,7 +1135,7 @@ impl CodeGenerator<'_> {
             let decl = var_name;
             decls.push(decl);
         }
-        let subresult = self.value_to_expr(value, false)?;
+        let subresult = self.value_to_expr(value, false, names)?;
         self.var_names.truncate(initial_var_names_len);
         Ok(Expression::Binder(
             token_type.generate(),
@@ -1115,7 +1150,12 @@ impl CodeGenerator<'_> {
     /// We automatically generate variable names sometimes, using next_x and next_k.
     /// "inferrable" is true if the type of this value can be inferred, which means
     /// we don't need top level parameters.
-    fn value_to_expr(&mut self, value: &AcornValue, inferrable: bool) -> Result<Expression> {
+    fn value_to_expr(
+        &mut self,
+        value: &AcornValue,
+        inferrable: bool,
+        names: &SyntheticNameSet,
+    ) -> Result<Expression> {
         match value {
             AcornValue::Variable(i, _) => {
                 if *i >= self.var_names.len() as u16 {
@@ -1141,7 +1181,7 @@ impl CodeGenerator<'_> {
                     // We currently never infer the type of arguments from the type of the function.
                     // Inference only goes the other way.
                     // We could improve this at some point.
-                    arg_exprs.push(self.value_to_expr(arg, false)?);
+                    arg_exprs.push(self.value_to_expr(arg, false, names)?);
                 }
 
                 // Check if we could replace this with receiver+attribute syntax
@@ -1233,7 +1273,7 @@ impl CodeGenerator<'_> {
                 let inferrable = if let AcornValue::Constant(c) = fa.function.as_ref() {
                     // Synthetics can't have explicit type params in the syntax
                     // Check both original synthetics and replaced ones (now named s0, s1, etc.)
-                    if c.name.is_synthetic() || self.is_replaced_synthetic(&c.name) {
+                    if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
                         true
                     } else if let ConstantName::TypeclassAttribute(typeclass, attr_name) = &c.name {
                         if let AcornType::Data(datatype, _) = &receiver_type {
@@ -1255,7 +1295,7 @@ impl CodeGenerator<'_> {
                 } else {
                     true
                 };
-                let f = self.value_to_expr(&fa.function, inferrable)?;
+                let f = self.value_to_expr(&fa.function, inferrable, names)?;
                 let grouped_args = Expression::generate_paren_grouping(arg_exprs);
                 Ok(Expression::Concatenation(
                     Box::new(f),
@@ -1263,8 +1303,8 @@ impl CodeGenerator<'_> {
                 ))
             }
             AcornValue::Binary(op, left, right) => {
-                let mut left_expr = self.value_to_expr(left, false)?;
-                let mut right_expr = self.value_to_expr(right, false)?;
+                let mut left_expr = self.value_to_expr(left, false, names)?;
+                let mut right_expr = self.value_to_expr(right, false, names)?;
                 let token = op.token_type().generate();
 
                 if let AcornValue::Binary(left_op, _, _) = left.as_ref() {
@@ -1298,21 +1338,21 @@ impl CodeGenerator<'_> {
                 ))
             }
             AcornValue::Not(x) => {
-                let x = self.value_to_expr(x, false)?;
+                let x = self.value_to_expr(x, false, names)?;
                 Ok(Expression::generate_unary(TokenType::Not, x))
             }
             AcornValue::Try(x, _) => {
-                let x = self.value_to_expr(x, false)?;
+                let x = self.value_to_expr(x, false, names)?;
                 Ok(Expression::generate_unary(TokenType::QuestionMark, x))
             }
             AcornValue::ForAll(quants, value) => {
-                self.generate_quantifier_expr(TokenType::ForAll, quants, value, true)
+                self.generate_quantifier_expr(names, TokenType::ForAll, quants, value, true)
             }
             AcornValue::Exists(quants, value) => {
-                self.generate_quantifier_expr(TokenType::Exists, quants, value, false)
+                self.generate_quantifier_expr(names, TokenType::Exists, quants, value, false)
             }
             AcornValue::Lambda(quants, value) => {
-                self.generate_quantifier_expr(TokenType::Function, quants, value, true)
+                self.generate_quantifier_expr(names, TokenType::Function, quants, value, true)
             }
             AcornValue::Bool(b) => {
                 let token = if *b {
@@ -1373,12 +1413,12 @@ impl CodeGenerator<'_> {
                     }
                 }
 
-                let const_expr = self.const_to_expr(&c)?;
+                let const_expr = self.const_to_expr(&c, names)?;
 
                 // Synthetics can't have explicit type params in the syntax
                 // Check both original synthetics and replaced ones (now named s0, s1, etc.)
                 let is_synthetic_const =
-                    c.name.is_synthetic() || self.is_replaced_synthetic(&c.name);
+                    c.name.is_synthetic() || names.is_replaced_synthetic(&c.name);
                 // Only add type params if the constant itself is polymorphic.
                 // A constant like `item: T` (theorem parameter) has params but empty
                 // type_param_names - it uses types from enclosing scope but isn't polymorphic.
@@ -1392,9 +1432,9 @@ impl CodeGenerator<'_> {
                 }
             }
             AcornValue::IfThenElse(condition, if_value, else_value) => {
-                let condition = self.value_to_expr(condition, false)?;
-                let if_value = self.value_to_expr(if_value, false)?;
-                let else_value = self.value_to_expr(else_value, false)?;
+                let condition = self.value_to_expr(condition, false, names)?;
+                let if_value = self.value_to_expr(if_value, false, names)?;
+                let else_value = self.value_to_expr(else_value, false, names)?;
                 Ok(Expression::IfThenElse(
                     TokenType::If.generate(),
                     Box::new(condition),
@@ -1530,11 +1570,11 @@ impl From<String> for Error {
 
 #[cfg(test)]
 mod tests {
+    use super::{CodeGenerator, SyntheticNameSet};
     use crate::project::Project;
 
     #[test]
     fn test_polymorphic_synthetic_declaration() {
-        use super::CodeGenerator;
         use crate::processor::Processor;
 
         let (processor, bindings, normalized_goal) = Processor::test_goal(
@@ -1548,9 +1588,10 @@ mod tests {
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
         let mut codes = vec![];
         generator
-            .define_synthetics(synthetic_ids, normalizer, &mut codes)
+            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
             .unwrap();
 
         // The synthetic uses T0 for its type parameter (not T from the goal)
@@ -1563,7 +1604,6 @@ mod tests {
 
     #[test]
     fn test_polymorphic_synthetic_with_typeclass() {
-        use super::CodeGenerator;
         use crate::processor::Processor;
 
         // Similar to test_polymorphic_synthetic_declaration but with a typeclass constraint
@@ -1581,9 +1621,10 @@ mod tests {
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
         let mut codes = vec![];
         generator
-            .define_synthetics(synthetic_ids, normalizer, &mut codes)
+            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
             .unwrap();
 
         // The synthetic uses T0 with typeclass constraint
@@ -1596,7 +1637,6 @@ mod tests {
 
     #[test]
     fn test_polymorphic_synthetic_with_multi_arg_function() {
-        use super::CodeGenerator;
         use crate::processor::Processor;
 
         // Use a pattern that creates a synthetic with type ((T, T) -> Bool) -> T
@@ -1616,9 +1656,10 @@ mod tests {
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
         let mut codes = vec![];
         generator
-            .define_synthetics(synthetic_ids, normalizer, &mut codes)
+            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
             .unwrap();
 
         // The synthetic uses T0 with type ((T0, T0) -> Bool) -> T0
