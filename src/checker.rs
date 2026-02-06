@@ -28,8 +28,6 @@ use crate::kernel::term::Term;
 #[cfg(feature = "bigcert")]
 use crate::kernel::variable_map::VariableMap;
 use crate::kernel::{EqualityGraph, StepId};
-#[cfg(feature = "bigcert")]
-use crate::module::ModuleId;
 use crate::normalizer::{NormalizationContext, Normalizer};
 use crate::project::Project;
 use crate::proof_step::Rule;
@@ -660,7 +658,6 @@ impl Checker {
     #[cfg(feature = "bigcert")]
     fn try_parse_bigcert_specialization_claim(
         value: &AcornValue,
-        module_id: ModuleId,
         normalizer: &mut Cow<Normalizer>,
     ) -> Result<Option<ParsedLine>, Error> {
         let AcornValue::Application(application) = value else {
@@ -671,12 +668,11 @@ impl Checker {
         };
 
         let theorem_value = AcornValue::forall(arg_types.clone(), (**body).clone());
-        let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-        let theorem_clauses = view.value_to_denormalized_clauses(&theorem_value)?;
-        if theorem_clauses.len() != 1 {
-            return Ok(None);
-        }
-        let theorem = theorem_clauses[0].clone();
+        let view = NormalizationContext::new_ref(normalizer.as_ref(), None);
+        let theorem = match view.value_to_exact_forall_clause(&theorem_value) {
+            Ok(Some(clause)) => clause,
+            Ok(None) | Err(_) => return Ok(None),
+        };
 
         let kernel_context = normalizer.kernel_context();
         let mut args = Vec::with_capacity(application.args.len());
@@ -916,16 +912,32 @@ impl Checker {
             }
             StatementInfo::Claim(claim) => {
                 let value = evaluator.evaluate_value(&claim.claim, Some(&AcornType::Bool))?;
-                let module_id = bindings.module_id();
                 #[cfg(feature = "bigcert")]
                 if let Some(specialization) =
-                    Self::try_parse_bigcert_specialization_claim(&value, module_id, normalizer)?
+                    Self::try_parse_bigcert_specialization_claim(&value, normalizer)?
                 {
                     return Ok(specialization);
                 }
-                let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-                let clauses = view.value_to_denormalized_clauses(&value)?;
-                Ok(ParsedLine::Claim(clauses))
+                #[cfg(feature = "bigcert")]
+                {
+                    let view = NormalizationContext::new_ref(normalizer.as_ref(), None);
+                    let clauses = view.value_to_exact_clauses(&value).map_err(|e| {
+                        Error::GeneratedBadCode(format!(
+                            "failed exact-parse claim '{}': {}",
+                            code, e
+                        ))
+                    })?;
+                    return Ok(ParsedLine::Claim(clauses));
+                }
+                #[cfg(not(feature = "bigcert"))]
+                let module_id = bindings.module_id();
+                #[cfg(not(feature = "bigcert"))]
+                {
+                    let mut view =
+                        NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
+                    let clauses = view.value_to_denormalized_clauses(&value)?;
+                    Ok(ParsedLine::Claim(clauses))
+                }
             }
             _ => Err(Error::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
