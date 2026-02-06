@@ -22,6 +22,8 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
+#[cfg(feature = "bigcert")]
+use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
 use crate::proof_step::{ProofStep, Truthiness};
 use tracing::trace;
@@ -2854,6 +2856,130 @@ impl Normalizer {
             .collect();
 
         AcornValue::forall(var_types, disjunction)
+    }
+
+    /// Converts a specialization (generic clause + variable map) into an AcornValue
+    /// in lambda-application form: `apply(lambda(arg_types, body), args)`.
+    ///
+    /// This is a pure encoding — no arbitrary name handling or synthetic handling.
+    /// All replacement terms in the var_map are assumed to be concrete (no free variables).
+    ///
+    /// Steps:
+    /// 1. Separate type-var mappings from value-var mappings
+    /// 2. Apply type-var substitutions to get concrete argument types
+    /// 3. Denormalize the type-specialized clause → ForAll(arg_types, body)
+    /// 4. Convert ForAll → Lambda
+    /// 5. Denormalize each concrete replacement term as an argument
+    /// 6. Return apply(lambda, args)
+    #[cfg(feature = "bigcert")]
+    pub fn specialization_to_value(&self, generic: &Clause, var_map: &VariableMap) -> AcornValue {
+        let local_context = generic.get_local_context();
+        let var_types_raw = local_context.get_var_types();
+
+        // Find the max variable actually used in the clause.
+        let num_vars = generic
+            .literals
+            .iter()
+            .filter_map(|lit| {
+                let left_max = lit.left.max_variable();
+                let right_max = lit.right.max_variable();
+                match (left_max, right_max) {
+                    (Some(l), Some(r)) => Some(l.max(r)),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    (None, None) => None,
+                }
+            })
+            .max()
+            .map(|max| (max + 1) as usize)
+            .unwrap_or(0);
+
+        // Extract type-var mappings from the var_map.
+        let mut type_var_map = VariableMap::new();
+        for i in 0..num_vars {
+            let type_term = &var_types_raw[i];
+            if type_term.as_ref().is_type_param_kind() {
+                if let Some(mapped) = var_map.get(i) {
+                    type_var_map.set(i as AtomId, mapped.clone());
+                }
+            }
+        }
+
+        // Apply type-var substitutions to the generic clause so the lambda has concrete arg types.
+        let type_specialized = if type_var_map.len() > 0 {
+            let mut clause = type_var_map.specialize_clause_with_replacement_context(
+                generic,
+                &LocalContext::empty(),
+                &self.kernel_context,
+            );
+            // Also apply type substitutions to the context's var types.
+            let new_var_types = clause
+                .get_local_context()
+                .get_var_types()
+                .iter()
+                .map(|vt| apply_to_term(vt.as_ref(), &type_var_map))
+                .collect();
+            clause.context = LocalContext::from_types(new_var_types);
+            clause
+        } else {
+            generic.clone()
+        };
+
+        // Normalize variable IDs so there are no gaps (e.g. from removed type vars).
+        let (normalized, normalized_var_ids) = Clause::normalize_with_var_ids(
+            type_specialized.literals.clone(),
+            type_specialized.get_local_context(),
+        );
+
+        // Denormalize the normalized clause → ForAll(arg_types, body).
+        let forall_value = self.denormalize(&normalized, None, None, true);
+
+        // Convert ForAll → Lambda. If there are no value vars, wrap in a dummy lambda
+        // so the checker can still identify it as a specialization.
+        let (lambda, arg_count) = match forall_value {
+            AcornValue::ForAll(arg_types, body) => {
+                let n = arg_types.len();
+                (AcornValue::lambda(arg_types, *body), n)
+            }
+            other => {
+                // No value vars (type-only specialization). Wrap in dummy lambda.
+                (AcornValue::lambda(vec![AcornType::Bool], other), 0)
+            }
+        };
+
+        // Build argument values by denormalizing each mapped concrete replacement term.
+        // The normalized_var_ids maps normalized var index → original var index.
+        // We need to match the forall/lambda quantifier order, which is the normalized
+        // value vars in order (skipping type vars and empty placeholders).
+        let normalized_context = normalized.get_local_context();
+        let normalized_var_types = normalized_context.get_var_types();
+        let mut args = Vec::new();
+        for (normalized_id, &original_id) in normalized_var_ids.iter().enumerate() {
+            let type_term = &normalized_var_types[normalized_id];
+            if type_term.as_ref().is_type_param_kind() || type_term.as_ref().is_empty_type() {
+                continue;
+            }
+            if let Some(mapped) = var_map.get(original_id as usize) {
+                let arg_value =
+                    self.denormalize_term_with_context(mapped, &LocalContext::empty(), true);
+                args.push(arg_value);
+            }
+        }
+
+        if arg_count == 0 {
+            // Type-only specialization: use dummy argument.
+            args = vec![AcornValue::Bool(true)];
+        }
+
+        assert_eq!(
+            args.len(),
+            if arg_count == 0 { 1 } else { arg_count },
+            "specialization_to_value: expected {} args but built {}",
+            arg_count,
+            args.len()
+        );
+
+        AcornValue::apply(lambda, args)
     }
 
     /// Convert a type Term to AcornType, looking up typeclass constraints from LocalContext.
