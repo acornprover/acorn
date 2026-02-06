@@ -1892,3 +1892,50 @@ fn test_polymorphic_synthetic_claim() {
     )
     .expect("claim should parse");
 }
+
+// Demonstrates that certificate type parameters are currently global, not step-local.
+// If type params were scoped per line, both parse_code_line calls below would succeed.
+#[test]
+#[ignore = "demonstrates current bug: type params are not step-local across certificate steps"]
+fn test_certificate_type_params_are_not_step_local() {
+    use crate::checker::Checker;
+    use crate::processor::Processor;
+    use crate::project::Project;
+    use std::borrow::Cow;
+
+    let (_processor, bindings, normalized_goal) = Processor::test_goal(
+        r#"
+        typeclass T: Grp {
+            1: T
+        }
+
+        define has_finite_order[T: Grp](x: T) -> Bool { axiom }
+
+        let is_torsion_free[T: Grp] = forall(x: T) { not has_finite_order(x) or x = T.1 }
+
+        theorem goal[G: Grp] { is_torsion_free[G] }
+        "#,
+    );
+
+    let project = Project::new_mock();
+    let normalizer = normalized_goal.normalizer.clone();
+    let mut normalizer_cow = Cow::Owned(normalizer);
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+
+    Checker::parse_code_line(
+        "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
+        &project,
+        &mut bindings_cow,
+        &mut normalizer_cow,
+    )
+    .expect("first line should parse");
+
+    // This currently fails because T0 remains bound globally after the first line.
+    Checker::parse_code_line(
+        "let s1[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s1) or is_torsion_free[T0]) and (s1 != Grp.1[T0] or is_torsion_free[T0]) }",
+        &project,
+        &mut bindings_cow,
+        &mut normalizer_cow,
+    )
+    .expect("second line should parse if type params were step-local");
+}
