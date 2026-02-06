@@ -1893,11 +1893,10 @@ fn test_polymorphic_synthetic_claim() {
     .expect("claim should parse");
 }
 
-// Demonstrates that certificate type parameters are currently global, not step-local.
-// If type params were scoped per line, both parse_code_line calls below would succeed.
+// Certificate type parameters are scoped to a single line.
+// Re-using the same type parameter name in a later line should work.
 #[test]
-#[ignore = "demonstrates current bug: type params are not step-local across certificate steps"]
-fn test_certificate_type_params_are_not_step_local() {
+fn test_certificate_type_params_are_step_local() {
     use crate::checker::Checker;
     use crate::processor::Processor;
     use crate::project::Project;
@@ -1937,5 +1936,5 @@ fn test_certificate_type_params_are_not_step_local() {
         &mut bindings_cow,
         &mut normalizer_cow,
     )
-    .expect("second line should parse if type params were step-local");
+    .expect("second line should parse");
 }

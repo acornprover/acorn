@@ -513,206 +513,217 @@ impl Checker {
             StatementInfo::VariableSatisfy(vss) => {
                 // Bind type parameters first
                 let type_params = evaluator.evaluate_type_params(&vss.type_params)?;
+                let type_param_names: Vec<String> =
+                    type_params.iter().map(|p| p.name.clone()).collect();
                 for param in &type_params {
                     bindings.to_mut().add_arbitrary_type(param.clone());
                     normalizer.to_mut().register_arbitrary_type(param);
                 }
+                let result = (|| -> Result<CertificateStep, Error> {
+                    // Re-create evaluator with updated bindings
+                    let mut evaluator = Evaluator::new(project, bindings, None);
 
-                // Re-create evaluator with updated bindings
-                let mut evaluator = Evaluator::new(project, bindings, None);
-
-                // Parse declarations
-                let mut decls = vec![];
-                for decl in &vss.declarations {
-                    match decl {
-                        Declaration::Typed(name_token, type_expr) => {
-                            let name = name_token.text().to_string();
-                            let acorn_type = evaluator.evaluate_type(type_expr)?;
-                            decls.push((name, acorn_type));
-                        }
-                        Declaration::SelfToken(_) => {
-                            return Err(Error::GeneratedBadCode(
-                                "Unexpected 'self' in let...satisfy statement".to_string(),
-                            ));
-                        }
-                    }
-                }
-
-                // Evaluate the condition
-                let mut stack = Stack::new();
-                evaluator.bind_args(&mut stack, &vss.declarations, None)?;
-                let condition_value = evaluator.evaluate_value_with_stack(
-                    &mut stack,
-                    &vss.condition,
-                    Some(&AcornType::Bool),
-                )?;
-
-                // Look up synthetic definition
-                let types: Vec<_> = decls.iter().map(|(_, ty)| ty.clone()).collect();
-                let exists_value = AcornValue::exists(types.clone(), condition_value.clone());
-
-                // Build type_var_map from type parameters
-                let type_var_map: Option<HashMap<String, (AtomId, Term)>> =
-                    if type_params.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            type_params
-                                .iter()
-                                .enumerate()
-                                .map(|(i, p)| {
-                                    let var_type = if let Some(tc) = &p.typeclass {
-                                        let tc_id = normalizer
-                                            .to_mut()
-                                            .kernel_context_mut()
-                                            .type_store
-                                            .add_typeclass(tc);
-                                        Term::typeclass(tc_id)
-                                    } else {
-                                        Term::type_sort()
-                                    };
-                                    (p.name.clone(), (i as AtomId, var_type))
-                                })
-                                .collect(),
-                        )
-                    };
-
-                let (source, synthetic_atoms) = match normalizer
-                    .to_mut()
-                    .get_synthetic_definition(&exists_value, type_var_map.as_ref())
-                {
-                    Some(def) => (def.source.clone(), Some(def.atoms.clone())),
-                    None => {
-                        if condition_value != AcornValue::Bool(true) {
-                            return Err(Error::GeneratedBadCode(format!(
-                                "statement '{}' does not match any synthetic definition",
-                                code
-                            )));
-                        }
-                        // Trivial condition requires the type to be inhabited
-                        let kernel_context = normalizer.kernel_context();
-                        for (name, acorn_type) in &decls {
-                            let type_term = kernel_context
-                                .type_store
-                                .get_type_term(acorn_type)
-                                .map_err(|e| {
-                                    Error::GeneratedBadCode(format!(
-                                        "cannot convert type '{}' to term: {}",
-                                        acorn_type, e
-                                    ))
-                                })?;
-                            if !kernel_context.provably_inhabited(&type_term, None) {
-                                return Err(Error::GeneratedBadCode(format!(
-                                    "cannot create witness '{}' of type '{}' with trivial condition: \
-                                     type is not provably inhabited",
-                                    name, acorn_type
-                                )));
+                    // Parse declarations
+                    let mut decls = vec![];
+                    for decl in &vss.declarations {
+                        match decl {
+                            Declaration::Typed(name_token, type_expr) => {
+                                let name = name_token.text().to_string();
+                                let acorn_type = evaluator.evaluate_type(type_expr)?;
+                                decls.push((name, acorn_type));
+                            }
+                            Declaration::SelfToken(_) => {
+                                return Err(Error::GeneratedBadCode(
+                                    "Unexpected 'self' in let...satisfy statement".to_string(),
+                                ));
                             }
                         }
-                        (None, None)
                     }
-                };
 
-                // Set up bindings and build constant values for substitution
-                let mut constant_values = Vec::new();
+                    // Evaluate the condition
+                    let mut stack = Stack::new();
+                    evaluator.bind_args(&mut stack, &vss.declarations, None)?;
+                    let condition_value = evaluator.evaluate_value_with_stack(
+                        &mut stack,
+                        &vss.condition,
+                        Some(&AcornType::Bool),
+                    )?;
 
-                if let Some(atoms) = &synthetic_atoms {
-                    for (i, (name, acorn_type)) in decls.iter().enumerate() {
-                        let (module_id, local_id) = atoms[i];
-                        let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
+                    // Look up synthetic definition
+                    let types: Vec<_> = decls.iter().map(|(_, ty)| ty.clone()).collect();
+                    let exists_value = AcornValue::exists(types.clone(), condition_value.clone());
 
-                        let (param_names, generic_type) = if !type_params.is_empty() {
-                            let names: Vec<String> =
-                                type_params.iter().map(|p| p.name.clone()).collect();
-                            (names, acorn_type.genericize(&type_params))
+                    // Build type_var_map from type parameters
+                    let type_var_map: Option<HashMap<String, (AtomId, Term)>> =
+                        if type_params.is_empty() {
+                            None
                         } else {
-                            (vec![], acorn_type.clone())
+                            Some(
+                                type_params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, p)| {
+                                        let var_type = if let Some(tc) = &p.typeclass {
+                                            let tc_id = normalizer
+                                                .to_mut()
+                                                .kernel_context_mut()
+                                                .type_store
+                                                .add_typeclass(tc);
+                                            Term::typeclass(tc_id)
+                                        } else {
+                                            Term::type_sort()
+                                        };
+                                        (p.name.clone(), (i as AtomId, var_type))
+                                    })
+                                    .collect(),
+                            )
                         };
 
-                        let user_cname = ConstantName::unqualified(bindings.module_id(), name);
-                        let type_args: Vec<_> = type_params
-                            .iter()
-                            .map(|p| AcornType::Variable(p.clone()))
-                            .collect();
+                    let (source, synthetic_atoms) = match normalizer
+                        .to_mut()
+                        .get_synthetic_definition(&exists_value, type_var_map.as_ref())
+                    {
+                        Some(def) => (def.source.clone(), Some(def.atoms.clone())),
+                        None => {
+                            if condition_value != AcornValue::Bool(true) {
+                                return Err(Error::GeneratedBadCode(format!(
+                                    "statement '{}' does not match any synthetic definition",
+                                    code
+                                )));
+                            }
+                            // Trivial condition requires the type to be inhabited
+                            let kernel_context = normalizer.kernel_context();
+                            for (name, acorn_type) in &decls {
+                                let type_term = kernel_context
+                                    .type_store
+                                    .get_type_term(acorn_type)
+                                    .map_err(|e| {
+                                        Error::GeneratedBadCode(format!(
+                                            "cannot convert type '{}' to term: {}",
+                                            acorn_type, e
+                                        ))
+                                    })?;
+                                if !kernel_context.provably_inhabited(&type_term, None) {
+                                    return Err(Error::GeneratedBadCode(format!(
+                                        "cannot create witness '{}' of type '{}' with trivial condition: \
+                                     type is not provably inhabited",
+                                        name, acorn_type
+                                    )));
+                                }
+                            }
+                            (None, None)
+                        }
+                    };
 
-                        let resolved_value = AcornValue::constant(
-                            synthetic_cname.clone(),
-                            type_args,
-                            acorn_type.clone(),
-                            generic_type.clone(),
-                            param_names.clone(),
-                        );
-                        constant_values.push(resolved_value.clone());
+                    // Set up bindings and build constant values for substitution
+                    let mut constant_values = Vec::new();
 
-                        let potential_value = if !type_params.is_empty() {
-                            PotentialValue::Unresolved(UnresolvedConstant {
-                                name: synthetic_cname.clone(),
-                                params: type_params.clone(),
-                                generic_type: generic_type.clone(),
-                                args: vec![],
-                            })
-                        } else {
-                            PotentialValue::Resolved(resolved_value)
-                        };
+                    if let Some(atoms) = &synthetic_atoms {
+                        for (i, (name, acorn_type)) in decls.iter().enumerate() {
+                            let (module_id, local_id) = atoms[i];
+                            let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
 
-                        bindings.to_mut().add_constant_alias(
-                            user_cname,
-                            synthetic_cname,
-                            potential_value,
-                            vec![],
-                            None,
-                        );
+                            let (param_names, generic_type) = if !type_params.is_empty() {
+                                let names: Vec<String> =
+                                    type_params.iter().map(|p| p.name.clone()).collect();
+                                (names, acorn_type.genericize(&type_params))
+                            } else {
+                                (vec![], acorn_type.clone())
+                            };
+
+                            let user_cname = ConstantName::unqualified(bindings.module_id(), name);
+                            let type_args: Vec<_> = type_params
+                                .iter()
+                                .map(|p| AcornType::Variable(p.clone()))
+                                .collect();
+
+                            let resolved_value = AcornValue::constant(
+                                synthetic_cname.clone(),
+                                type_args,
+                                acorn_type.clone(),
+                                generic_type.clone(),
+                                param_names.clone(),
+                            );
+                            constant_values.push(resolved_value.clone());
+
+                            let potential_value = if !type_params.is_empty() {
+                                PotentialValue::Unresolved(UnresolvedConstant {
+                                    name: synthetic_cname.clone(),
+                                    params: type_params.clone(),
+                                    generic_type: generic_type.clone(),
+                                    args: vec![],
+                                })
+                            } else {
+                                PotentialValue::Resolved(resolved_value)
+                            };
+
+                            bindings.to_mut().add_constant_alias(
+                                user_cname,
+                                synthetic_cname,
+                                potential_value,
+                                vec![],
+                                None,
+                            );
+                        }
+                    } else {
+                        // Trivial case, create new constants
+                        for (name, acorn_type) in &decls {
+                            let cname = ConstantName::unqualified(bindings.module_id(), name);
+                            bindings.to_mut().add_unqualified_constant(
+                                name,
+                                vec![],
+                                acorn_type.clone(),
+                                None,
+                                None,
+                                vec![],
+                                None,
+                                String::new(),
+                            );
+                            normalizer.to_mut().add_scoped_constant(
+                                cname.clone(),
+                                acorn_type,
+                                type_var_map.as_ref(),
+                            );
+
+                            let resolved_value = AcornValue::constant(
+                                cname,
+                                vec![],
+                                acorn_type.clone(),
+                                acorn_type.clone(),
+                                vec![],
+                            );
+                            constant_values.push(resolved_value);
+                        }
                     }
-                } else {
-                    // Trivial case, create new constants
-                    for (name, acorn_type) in &decls {
-                        let cname = ConstantName::unqualified(bindings.module_id(), name);
-                        bindings.to_mut().add_unqualified_constant(
-                            name,
-                            vec![],
-                            acorn_type.clone(),
-                            None,
-                            None,
-                            vec![],
-                            None,
-                            String::new(),
-                        );
-                        normalizer.to_mut().add_scoped_constant(
-                            cname.clone(),
-                            acorn_type,
-                            type_var_map.as_ref(),
-                        );
 
-                        let resolved_value = AcornValue::constant(
-                            cname,
-                            vec![],
-                            acorn_type.clone(),
-                            acorn_type.clone(),
-                            vec![],
-                        );
-                        constant_values.push(resolved_value);
-                    }
+                    // Build clauses from non-trivial conditions
+                    let clauses_to_insert = if condition_value != AcornValue::Bool(true) {
+                        let num_vars = decls.len() as AtomId;
+                        let value = condition_value.bind_values(0, num_vars, &constant_values);
+                        let mut view =
+                            NormalizationContext::new_ref(&normalizer, type_var_map.clone());
+                        view.nice_value_to_clauses(&value, &mut vec![])?
+                    } else {
+                        vec![]
+                    };
+
+                    let reason = match source {
+                        Some(source) => StepReason::Skolemization(source),
+                        None => StepReason::SyntheticDefinition,
+                    };
+
+                    Ok(CertificateStep::LetSatisfy {
+                        clauses_to_insert,
+                        reason,
+                    })
+                })();
+
+                // Type parameters in certificate lines are local to that line.
+                for name in type_param_names {
+                    bindings.to_mut().remove_type(&name);
                 }
 
-                // Build clauses from non-trivial conditions
-                let clauses_to_insert = if condition_value != AcornValue::Bool(true) {
-                    let num_vars = decls.len() as AtomId;
-                    let value = condition_value.bind_values(0, num_vars, &constant_values);
-                    let mut view = NormalizationContext::new_ref(&normalizer, type_var_map.clone());
-                    view.nice_value_to_clauses(&value, &mut vec![])?
-                } else {
-                    vec![]
-                };
-
-                let reason = match source {
-                    Some(source) => StepReason::Skolemization(source),
-                    None => StepReason::SyntheticDefinition,
-                };
-
-                Ok(CertificateStep::LetSatisfy {
-                    clauses_to_insert,
-                    reason,
-                })
+                result
             }
             StatementInfo::Claim(claim) => {
                 let value = evaluator.evaluate_value(&claim.claim, Some(&AcornType::Bool))?;
