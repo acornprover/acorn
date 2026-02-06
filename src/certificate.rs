@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 use std::borrow::Cow;
@@ -68,19 +68,6 @@ impl Certificate {
     /// Check if this certificate has a proof
     pub fn has_proof(&self) -> bool {
         self.proof.is_some()
-    }
-
-    /// Write the proof to a writer in flat format.
-    /// Uses @P as a marker followed by the proof lines.
-    /// If the proof is None, nothing is written.
-    pub fn write_proof_to<W: Write>(&self, mut w: W) -> io::Result<()> {
-        if let Some(proof_lines) = &self.proof {
-            writeln!(w, "@P")?;
-            for line in proof_lines {
-                writeln!(w, "{}", line)?;
-            }
-        }
-        Ok(())
     }
 
     /// Convert a ConcreteProof to a Certificate (string format).
