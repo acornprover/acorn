@@ -419,8 +419,8 @@ impl Checker {
 
             let kernel_context = normalizer.kernel_context();
             match step {
-                CertificateStep::Claim(clause) => {
-                    let mut clause = clause.clone();
+                CertificateStep::Claim(claim) => {
+                    let mut clause = Self::instantiate_claim_clause(claim, kernel_context)?;
                     if !seen_claims.insert(clause.clone()) {
                         continue;
                     }
@@ -452,6 +452,32 @@ impl Checker {
                 "proof does not result in a contradiction".to_string(),
             ))
         }
+    }
+
+    fn instantiate_claim_clause(
+        claim: &crate::kernel::certificate_step::Claim,
+        kernel_context: &KernelContext,
+    ) -> Result<Clause, Error> {
+        let generic_len = claim.clause.get_local_context().len();
+        for (var_id, term) in claim.var_map.iter() {
+            if var_id >= generic_len {
+                return Err(Error::GeneratedBadCode(format!(
+                    "claim var map binds out-of-scope variable x{}",
+                    var_id
+                )));
+            }
+            if let Some(max_var) = term.max_variable() {
+                if max_var as usize >= generic_len {
+                    return Err(Error::GeneratedBadCode(format!(
+                        "claim var map term references out-of-scope variable x{}",
+                        max_var
+                    )));
+                }
+            }
+        }
+        Ok(claim
+            .var_map
+            .specialize_clause(&claim.clause, kernel_context))
     }
 }
 

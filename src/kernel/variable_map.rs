@@ -299,7 +299,16 @@ impl VariableMap {
     /// Unmapped variables are kept as-is.
     pub fn specialize_clause(&self, clause: &Clause, kernel_context: &KernelContext) -> Clause {
         let input_context = clause.get_local_context();
-        let output_context = self.build_output_context(input_context);
+        // Build output context from replacement terms, then preserve unmapped input variables.
+        // Unmapped variables stay in the specialized clause, so their types must remain available.
+        let mut output_context = self.build_output_context(input_context);
+        for i in 0..input_context.len() {
+            if self.get_mapping(i as AtomId).is_none() {
+                if let Some(var_type) = input_context.get_var_type(i) {
+                    output_context.set_type(i, var_type.clone());
+                }
+            }
+        }
         let literals = clause
             .literals
             .iter()

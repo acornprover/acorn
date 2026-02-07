@@ -11,12 +11,12 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::CertificateStep;
+use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::clause::Clause;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term};
-use crate::kernel::variable_map::VariableMap;
+use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
 use crate::normalizer::Normalizer;
 use crate::prover::proof::ConcreteStep;
@@ -978,6 +978,7 @@ impl CodeGenerator<'_> {
         // Replace remaining free value variables with the allocated arbitrary symbols.
         let clause_context = clause.get_local_context().clone();
         let arbitrary_var_map = names.build_arbitrary_var_map(normalizer, &clause)?;
+
         clause = arbitrary_var_map.specialize_clause_with_replacement_context(
             &clause,
             &clause_context,
@@ -997,7 +998,73 @@ impl CodeGenerator<'_> {
         );
         steps.extend(synthetic_steps);
 
-        steps.push(CertificateStep::Claim(clause));
+        // Convert replacement-context free variables into explicit arbitrary symbols by type.
+        // This yields a claim map that does not depend on concrete variable IDs.
+        let mut replacement_arbitrary_map = VariableMap::new();
+        for var_id in 0..replacement_context.len() {
+            let var_type = replacement_context
+                .get_var_type(var_id)
+                .expect("replacement context should provide all var types");
+            if let Some(symbol) =
+                names.symbol_for_variable_type(normalizer, var_type, replacement_context)?
+            {
+                replacement_arbitrary_map.set(var_id as AtomId, Term::atom(Atom::Symbol(symbol)));
+            }
+        }
+
+        let generic_context = generic.get_local_context();
+        let generic_len = generic_context.len();
+        let mut claim_var_map = VariableMap::new();
+        for (var_id, term) in var_map.iter() {
+            if var_id >= generic_len {
+                continue;
+            }
+            let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
+            claim_var_map.set(var_id as AtomId, specialized);
+        }
+        for var_id in 0..generic_len {
+            let var_id = var_id as AtomId;
+            if claim_var_map.has_mapping(var_id) {
+                continue;
+            }
+            let var_type = generic_context
+                .get_var_type(var_id as usize)
+                .expect("generic context should provide all var types");
+            if let Some(symbol) =
+                names.symbol_for_variable_type(normalizer, var_type, generic_context)?
+            {
+                claim_var_map.set(var_id, Term::atom(Atom::Symbol(symbol)));
+            }
+        }
+
+        let has_out_of_scope_terms = claim_var_map.iter().any(|(_, term)| {
+            term.max_variable()
+                .map(|id| id as usize >= generic_len)
+                .unwrap_or(false)
+        });
+        let claim = if has_out_of_scope_terms {
+            Claim {
+                clause: clause.clone(),
+                var_map: VariableMap::new(),
+            }
+        } else {
+            let mut replayed =
+                claim_var_map.specialize_clause(generic, normalizer.kernel_context());
+            replayed.normalize_var_ids_no_flip();
+            if replayed == clause {
+                Claim {
+                    clause: generic.clone(),
+                    var_map: claim_var_map,
+                }
+            } else {
+                Claim {
+                    clause: clause.clone(),
+                    var_map: VariableMap::new(),
+                }
+            }
+        };
+
+        steps.push(CertificateStep::Claim(claim));
         Ok(())
     }
 
@@ -1034,8 +1101,11 @@ impl CodeGenerator<'_> {
             } => {
                 self.generate_code_for_synthetic_step(names, atoms, type_vars, clauses, normalizer)
             }
-            CertificateStep::Claim(clause) => {
-                let mut value = normalizer.denormalize(clause, None, None, true);
+            CertificateStep::Claim(claim) => {
+                let clause = claim
+                    .var_map
+                    .specialize_clause(&claim.clause, normalizer.kernel_context());
+                let mut value = normalizer.denormalize(&clause, None, None, true);
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)
             }

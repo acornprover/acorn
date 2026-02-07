@@ -17,7 +17,7 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::CertificateStep;
+use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::term::Term;
@@ -117,7 +117,7 @@ impl Certificate {
         let mut generator = CodeGenerator::new(bindings);
         let mut generation_normalizer = normalizer.clone();
         let mut names = SyntheticNameSet::new();
-        let mut ordered_steps = Vec::new();
+        let mut ordered_steps: Vec<CertificateStep> = Vec::new();
 
         for step in concrete_steps {
             let cert_steps = generator.concrete_step_to_certificate_steps(
@@ -416,12 +416,13 @@ impl Certificate {
                         clauses.len()
                     )));
                 }
-                Ok(CertificateStep::Claim(
-                    clauses
+                Ok(CertificateStep::Claim(Claim {
+                    clause: clauses
                         .into_iter()
                         .next()
                         .expect("clauses has exactly one element"),
-                ))
+                    var_map: VariableMap::new(),
+                }))
             }
             _ => Err(CodeGenError::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",

@@ -2,7 +2,18 @@ use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
+use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleId;
+
+/// A certificate claim line.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// The generic clause we are specializing.
+    pub clause: Clause,
+
+    /// Variable substitutions used for this claim.
+    pub var_map: VariableMap,
+}
 
 /// A single kernel-level step in certificate generation/checking.
 ///
@@ -32,6 +43,6 @@ pub enum CertificateStep {
         clauses: Vec<Clause>,
     },
 
-    /// A claim statement with one concrete clause to check.
-    Claim(Clause),
+    /// A claim statement with a generic clause plus specialization map.
+    Claim(Claim),
 }
