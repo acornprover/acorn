@@ -1044,9 +1044,6 @@ impl CodeGenerator<'_> {
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)
             }
-            CertificateStep::LetSatisfy { .. } => Err(Error::internal(
-                "unexpected parsed certificate step during code generation",
-            )),
         }
     }
 
@@ -1092,11 +1089,6 @@ impl CodeGenerator<'_> {
                 }
                 CertificateStep::Claim(_) => {
                     codes.push(code);
-                }
-                CertificateStep::LetSatisfy { .. } => {
-                    return Err(Error::internal(
-                        "unexpected parsed certificate step during code generation",
-                    ));
                 }
             }
         }

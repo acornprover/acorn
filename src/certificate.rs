@@ -154,9 +154,6 @@ impl Certificate {
 
         for code in proof {
             match Checker::parse_code_line(code, project, bindings, normalizer)? {
-                CertificateStep::LetSatisfy { .. } => {
-                    // Let-satisfy sets up bindings but doesn't produce claims
-                }
                 CertificateStep::Claim(clauses) => {
                     for clause in clauses {
                         if !claims.contains(&clause) {
@@ -166,10 +163,7 @@ impl Certificate {
                 }
                 CertificateStep::DefineArbitrary { .. }
                 | CertificateStep::DefineSynthetic { .. } => {
-                    return Err(CodeGenError::GeneratedBadCode(
-                        "unexpected generation-only certificate step while parsing certificate"
-                            .to_string(),
-                    ));
+                    // let...satisfy sets up bindings but doesn't produce claims
                 }
             }
         }

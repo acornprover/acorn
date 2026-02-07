@@ -6,8 +6,8 @@ use crate::module::ModuleId;
 
 /// A single kernel-level step in certificate generation/checking.
 ///
-/// Parsing uses `LetSatisfy` and `Claim`. Generation also uses kernel-only helper
-/// variants to represent one line before generating code strings.
+/// Parsing and generation both use this representation. Each step corresponds to one
+/// line of certificate code.
 #[derive(Clone)]
 pub enum CertificateStep {
     /// Define one arbitrary witness constant for a concrete type.
@@ -30,16 +30,6 @@ pub enum CertificateStep {
         /// Kernel clauses that define the synthetic condition.
         /// These clauses are converted into the `satisfy { ... }` body.
         clauses: Vec<Clause>,
-    },
-
-    /// A let...satisfy statement. Sets up bindings for subsequent claims.
-    ///
-    /// These map user-chosen names (like "s0") to existing synthetic constants.
-    /// The synthetic constants themselves are created during goal normalization,
-    /// not from the certificate - the certificate just establishes the name mapping.
-    LetSatisfy {
-        /// Clauses from the satisfy condition (empty for trivial conditions like `true`).
-        clauses_to_insert: Vec<Clause>,
     },
 
     /// A claim statement with clauses to check.

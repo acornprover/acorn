@@ -14,7 +14,7 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::source::Source;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
-use crate::kernel::atom::AtomId;
+use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::generalization_set::GeneralizationSet;
@@ -462,9 +462,6 @@ impl Checker {
             let parsed = Self::parse_code_line(code, project, &mut bindings, &mut normalizer)?;
             let kernel_context = normalizer.kernel_context();
             match parsed {
-                CertificateStep::LetSatisfy { .. } => {
-                    // let...satisfy updates bindings/normalizer during parsing.
-                }
                 CertificateStep::Claim(clauses) => {
                     for mut clause in clauses {
                         if !seen_claims.insert(clause.clone()) {
@@ -488,10 +485,7 @@ impl Checker {
                 }
                 CertificateStep::DefineArbitrary { .. }
                 | CertificateStep::DefineSynthetic { .. } => {
-                    return Err(Error::GeneratedBadCode(
-                        "unexpected generation-only certificate step while checking proof"
-                            .to_string(),
-                    ));
+                    // let...satisfy updates bindings/normalizer during parsing.
                 }
             }
         }
@@ -586,11 +580,11 @@ impl Checker {
                             )
                         };
 
-                    let synthetic_atoms = match normalizer
+                    let synthetic_definition = match normalizer
                         .to_mut()
                         .get_synthetic_definition(&exists_value, type_var_map.as_ref())
                     {
-                        Some(def) => Some(def.atoms.clone()),
+                        Some(def) => Some(def.clone()),
                         None => {
                             if condition_value != AcornValue::Bool(true) {
                                 return Err(Error::GeneratedBadCode(format!(
@@ -618,14 +612,24 @@ impl Checker {
                                     )));
                                 }
                             }
+                            if decls.len() != 1 {
+                                return Err(Error::GeneratedBadCode(
+                                    "let ... satisfy with trivial condition may declare exactly one arbitrary witness"
+                                        .to_string(),
+                                ));
+                            }
                             None
                         }
                     };
 
-                    // Set up bindings and build constant values for substitution
-                    let mut constant_values = Vec::new();
-
-                    if let Some(atoms) = &synthetic_atoms {
+                    if let Some(def) = &synthetic_definition {
+                        let atoms = &def.atoms;
+                        if atoms.len() != decls.len() {
+                            return Err(Error::GeneratedBadCode(
+                                "let ... satisfy declaration count does not match synthetic definition"
+                                    .to_string(),
+                            ));
+                        }
                         for (i, (name, acorn_type)) in decls.iter().enumerate() {
                             let (module_id, local_id) = atoms[i];
                             let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
@@ -651,7 +655,6 @@ impl Checker {
                                 generic_type.clone(),
                                 param_names.clone(),
                             );
-                            constant_values.push(resolved_value.clone());
 
                             let potential_value = if !type_params.is_empty() {
                                 PotentialValue::Unresolved(UnresolvedConstant {
@@ -672,55 +675,39 @@ impl Checker {
                                 None,
                             );
                         }
+                        Ok(CertificateStep::DefineSynthetic {
+                            atoms: def.atoms.clone(),
+                            type_vars: def.type_vars.clone(),
+                            clauses: def.clauses.clone(),
+                        })
                     } else {
-                        if decls.len() != 1 {
+                        let (name, acorn_type) = decls
+                            .first()
+                            .expect("decls should have exactly one element for trivial let");
+                        let cname = ConstantName::unqualified(bindings.module_id(), name);
+                        bindings.to_mut().add_unqualified_constant(
+                            name,
+                            vec![],
+                            acorn_type.clone(),
+                            None,
+                            None,
+                            vec![],
+                            None,
+                            String::new(),
+                        );
+                        let atom = normalizer.to_mut().add_scoped_constant(
+                            cname.clone(),
+                            acorn_type,
+                            type_var_map.as_ref(),
+                        );
+                        let Atom::Symbol(symbol) = atom else {
                             return Err(Error::GeneratedBadCode(
-                                "let ... satisfy with trivial condition may declare exactly one arbitrary witness"
+                                "internal error: add_scoped_constant returned non-symbol atom"
                                     .to_string(),
                             ));
-                        }
-                        // Trivial case, create new constants
-                        for (name, acorn_type) in &decls {
-                            let cname = ConstantName::unqualified(bindings.module_id(), name);
-                            bindings.to_mut().add_unqualified_constant(
-                                name,
-                                vec![],
-                                acorn_type.clone(),
-                                None,
-                                None,
-                                vec![],
-                                None,
-                                String::new(),
-                            );
-                            normalizer.to_mut().add_scoped_constant(
-                                cname.clone(),
-                                acorn_type,
-                                type_var_map.as_ref(),
-                            );
-
-                            let resolved_value = AcornValue::constant(
-                                cname,
-                                vec![],
-                                acorn_type.clone(),
-                                acorn_type.clone(),
-                                vec![],
-                            );
-                            constant_values.push(resolved_value);
-                        }
+                        };
+                        Ok(CertificateStep::DefineArbitrary { symbol })
                     }
-
-                    // Build clauses from non-trivial conditions
-                    let clauses_to_insert = if condition_value != AcornValue::Bool(true) {
-                        let num_vars = decls.len() as AtomId;
-                        let value = condition_value.bind_values(0, num_vars, &constant_values);
-                        let mut view =
-                            NormalizationContext::new_ref(&normalizer, type_var_map.clone());
-                        view.nice_value_to_clauses(&value, &mut vec![])?
-                    } else {
-                        vec![]
-                    };
-
-                    Ok(CertificateStep::LetSatisfy { clauses_to_insert })
                 })();
 
                 // Type parameters in certificate lines are local to that line.
