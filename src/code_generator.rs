@@ -514,6 +514,61 @@ impl SyntheticNameSet {
         }
         new_entries
     }
+
+    fn collect_synthetic_ids_from_clauses(clauses: &[Clause]) -> Vec<(ModuleId, AtomId)> {
+        let mut seen = HashSet::new();
+        let mut ids = vec![];
+        for clause in clauses {
+            for literal in &clause.literals {
+                for term in [&literal.left, &literal.right] {
+                    for atom in term.iter_atoms() {
+                        if let &Atom::Symbol(Symbol::Synthetic(module_id, local_id)) = atom {
+                            let id = (module_id, local_id);
+                            if seen.insert(id) {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    /// Collect synthetic definitions needed for the given ids.
+    /// This updates naming state and records kernel-level synthetic steps in dependency order.
+    fn collect_synthetic_steps(
+        &mut self,
+        bindings: &BindingMap,
+        skolem_ids: Vec<(ModuleId, AtomId)>,
+        normalizer: &Normalizer,
+        steps: &mut Vec<SyntheticDefinitionStep>,
+    ) {
+        let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
+        for info in &infos {
+            if self.are_synthetics_defined(&info.atoms) {
+                continue;
+            }
+
+            self.assign_synthetic_names(bindings, &info.atoms);
+            // Mark this synthetic definition before recursive expansion so cycles don't recurse
+            // infinitely when the condition references synthetics in the same definition group.
+            self.mark_synthetics_defined(&info.atoms);
+
+            // This definition may refer to other synthetics in its clauses.
+            // Collect and define those first so generated code has dependencies in order.
+            let additional_synthetic_ids = Self::collect_synthetic_ids_from_clauses(&info.clauses);
+            if !additional_synthetic_ids.is_empty() {
+                self.collect_synthetic_steps(bindings, additional_synthetic_ids, normalizer, steps);
+            }
+
+            steps.push(SyntheticDefinitionStep {
+                atoms: info.atoms.clone(),
+                type_vars: info.type_vars.clone(),
+                clauses: info.clauses.clone(),
+            });
+        }
+    }
 }
 
 impl CodeGenerator<'_> {
@@ -673,62 +728,6 @@ impl CodeGenerator<'_> {
         Ok(expr.to_string())
     }
 
-    fn collect_synthetic_ids_from_clauses(clauses: &[Clause]) -> Vec<(ModuleId, AtomId)> {
-        let mut seen = HashSet::new();
-        let mut ids = vec![];
-        for clause in clauses {
-            for literal in &clause.literals {
-                for term in [&literal.left, &literal.right] {
-                    for atom in term.iter_atoms() {
-                        if let &Atom::Symbol(Symbol::Synthetic(module_id, local_id)) = atom {
-                            let id = (module_id, local_id);
-                            if seen.insert(id) {
-                                ids.push(id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ids
-    }
-
-    /// Collect synthetic definitions needed for the given ids.
-    /// This updates naming state (assigned names + defined flags), but does not generate code.
-    fn collect_synthetic_steps(
-        &mut self,
-        names: &mut SyntheticNameSet,
-        skolem_ids: Vec<(ModuleId, AtomId)>,
-        normalizer: &Normalizer,
-        steps: &mut Vec<SyntheticDefinitionStep>,
-    ) -> Result<()> {
-        let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
-        for info in &infos {
-            if names.are_synthetics_defined(&info.atoms) {
-                continue;
-            }
-
-            names.assign_synthetic_names(self.bindings, &info.atoms);
-            // Mark this synthetic definition before recursive expansion so cycles don't recurse
-            // infinitely when the condition references synthetics in the same definition group.
-            names.mark_synthetics_defined(&info.atoms);
-
-            // This definition may refer to other synthetics in its clauses.
-            // Collect and define those first so generated code has dependencies in order.
-            let additional_synthetic_ids = Self::collect_synthetic_ids_from_clauses(&info.clauses);
-            if !additional_synthetic_ids.is_empty() {
-                self.collect_synthetic_steps(names, additional_synthetic_ids, normalizer, steps)?;
-            }
-
-            steps.push(SyntheticDefinitionStep {
-                atoms: info.atoms.clone(),
-                type_vars: info.type_vars.clone(),
-                clauses: info.clauses.clone(),
-            });
-        }
-        Ok(())
-    }
-
     /// Generate code for one kernel-level synthetic definition step.
     fn generate_code_for_synthetic_step(
         &mut self,
@@ -856,23 +855,6 @@ impl CodeGenerator<'_> {
         Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
     }
 
-    /// Generates definitions for the given synthetic atom IDs and appends them to codes.
-    /// Updates names.synthetic_names with names for all provided synthetic atom IDs.
-    fn define_synthetics(
-        &mut self,
-        names: &mut SyntheticNameSet,
-        skolem_ids: Vec<(ModuleId, AtomId)>,
-        normalizer: &Normalizer,
-        codes: &mut Vec<String>,
-    ) -> Result<()> {
-        let mut steps = vec![];
-        self.collect_synthetic_steps(names, skolem_ids, normalizer, &mut steps)?;
-        for step in steps {
-            codes.push(self.generate_code_for_synthetic_step(names, &step, normalizer)?);
-        }
-        Ok(())
-    }
-
     /// Convert to a clause to code strings.
     /// This will generate synthetic atom definitions if necessary.
     /// Appends let statements that define arbitrary variables and synthetic atoms to definitions,
@@ -921,7 +903,16 @@ impl CodeGenerator<'_> {
 
         // Create a name and definition for each synthetic atom.
         let synthetic_ids = value.find_synthetics();
-        self.define_synthetics(names, synthetic_ids, normalizer, definitions)?;
+        let mut synthetic_steps = vec![];
+        names.collect_synthetic_steps(
+            self.bindings,
+            synthetic_ids,
+            normalizer,
+            &mut synthetic_steps,
+        );
+        for step in synthetic_steps {
+            definitions.push(self.generate_code_for_synthetic_step(names, &step, normalizer)?);
+        }
 
         value = value.replace_synthetics(&names.synthetic_names);
         let subvalues = value.remove_and();
@@ -1667,10 +1658,16 @@ mod tests {
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
+        let mut synthetic_steps = vec![];
+        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
         let mut codes = vec![];
-        generator
-            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
-            .unwrap();
+        for step in synthetic_steps {
+            codes.push(
+                generator
+                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .unwrap(),
+            );
+        }
 
         // The synthetic uses T0 for its type parameter (not T from the goal)
         // foo[T0](s0) needs explicit type params since s0's type is Variable(T0)
@@ -1700,10 +1697,16 @@ mod tests {
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
+        let mut synthetic_steps = vec![];
+        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
         let mut codes = vec![];
-        generator
-            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
-            .unwrap();
+        for step in synthetic_steps {
+            codes.push(
+                generator
+                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .unwrap(),
+            );
+        }
 
         // The synthetic uses T0 with typeclass constraint
         // foo[T0](s0) needs explicit type params since s0's type is Variable(T0)
@@ -1735,10 +1738,16 @@ mod tests {
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
+        let mut synthetic_steps = vec![];
+        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
         let mut codes = vec![];
-        generator
-            .define_synthetics(&mut names, synthetic_ids, normalizer, &mut codes)
-            .unwrap();
+        for step in synthetic_steps {
+            codes.push(
+                generator
+                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .unwrap(),
+            );
+        }
 
         // The synthetic uses T0 with type ((T0, T0) -> Bool) -> T0
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
