@@ -486,6 +486,13 @@ impl Checker {
                         self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                     }
                 }
+                CertificateStep::DefineArbitrary { .. }
+                | CertificateStep::DefineSynthetic { .. } => {
+                    return Err(Error::GeneratedBadCode(
+                        "unexpected generation-only certificate step while checking proof"
+                            .to_string(),
+                    ));
+                }
             }
         }
 

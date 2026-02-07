@@ -163,6 +163,13 @@ impl Certificate {
                         }
                     }
                 }
+                CertificateStep::DefineArbitrary { .. }
+                | CertificateStep::DefineSynthetic { .. } => {
+                    return Err(CodeGenError::GeneratedBadCode(
+                        "unexpected generation-only certificate step while parsing certificate"
+                            .to_string(),
+                    ));
+                }
             }
         }
 

@@ -3,6 +3,7 @@ use std::fmt;
 
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
+use crate::certificate_step::CertificateStep;
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
 };
@@ -382,25 +383,6 @@ pub struct SyntheticNameSet {
     defined_synthetics: HashSet<(ModuleId, AtomId)>,
 }
 
-/// A synthetic definition prepared in kernel space before generating code.
-#[derive(Clone)]
-struct SyntheticDefinitionStep {
-    atoms: Vec<(ModuleId, AtomId)>,
-    type_vars: Vec<Term>,
-    clauses: Vec<Clause>,
-}
-
-/// A single kernel-level step in certificate generation before code is generated.
-#[derive(Clone)]
-enum GeneratedStep {
-    DefineArbitrary {
-        var_type: Term,
-        local_context: LocalContext,
-    },
-    DefineSynthetic(SyntheticDefinitionStep),
-    ClaimClause(Clause),
-}
-
 impl SyntheticNameSet {
     pub fn new() -> Self {
         SyntheticNameSet {
@@ -554,7 +536,7 @@ impl SyntheticNameSet {
         bindings: &BindingMap,
         skolem_ids: Vec<(ModuleId, AtomId)>,
         normalizer: &Normalizer,
-        steps: &mut Vec<SyntheticDefinitionStep>,
+        steps: &mut Vec<CertificateStep>,
     ) {
         let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
         for info in &infos {
@@ -574,7 +556,7 @@ impl SyntheticNameSet {
                 self.collect_synthetic_steps(bindings, additional_synthetic_ids, normalizer, steps);
             }
 
-            steps.push(SyntheticDefinitionStep {
+            steps.push(CertificateStep::DefineSynthetic {
                 atoms: info.atoms.clone(),
                 type_vars: info.type_vars.clone(),
                 clauses: info.clauses.clone(),
@@ -744,11 +726,13 @@ impl CodeGenerator<'_> {
     fn generate_code_for_synthetic_step(
         &mut self,
         names: &SyntheticNameSet,
-        step: &SyntheticDefinitionStep,
+        atoms: &[(ModuleId, AtomId)],
+        type_vars: &[Term],
+        clauses: &[Clause],
         normalizer: &Normalizer,
     ) -> Result<String> {
         let mut decl = vec![];
-        for &(module_id, local_id) in &step.atoms {
+        for &(module_id, local_id) in atoms {
             let Some(name) = names.synthetic_names.get(&(module_id, local_id)).cloned() else {
                 return Err(Error::internal(
                     "missing synthetic name during code generation",
@@ -763,7 +747,7 @@ impl CodeGenerator<'_> {
         // Denormalize clauses first so we can collect all type variable names.
         // Keep type vars symbolic (no instantiation) because we emit a polymorphic definition.
         let mut cond_parts = vec![];
-        for clause in &step.clauses {
+        for clause in clauses {
             let part = normalizer.denormalize(clause, None, None, false);
             cond_parts.push(part);
         }
@@ -788,7 +772,7 @@ impl CodeGenerator<'_> {
         let mut var_id_to_new_name: HashMap<u16, String> = HashMap::new();
         let mut type_param_names = Vec::new();
         let mut type_param_constraints: Vec<Option<Typeclass>> = Vec::new();
-        for (id, type_var_kind) in step.type_vars.iter().enumerate() {
+        for (id, type_var_kind) in type_vars.iter().enumerate() {
             let id = id as u16;
             let name = self.bindings.next_indexed_var('T', &mut self.next_t);
             var_id_to_new_name.insert(id, name.clone());
@@ -861,7 +845,7 @@ impl CodeGenerator<'_> {
             decl_parts.join("")
         };
 
-        let defining_synthetics: HashSet<(ModuleId, AtomId)> = step.atoms.iter().copied().collect();
+        let defining_synthetics: HashSet<(ModuleId, AtomId)> = atoms.iter().copied().collect();
         let cond_val = rename_type_vars_in_value(&cond_val, &rename_map, &defining_synthetics);
         let cond = self.value_to_code_with_names(&cond_val, names)?;
         Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
@@ -877,7 +861,7 @@ impl CodeGenerator<'_> {
         var_map: &VariableMap,
         replacement_context: &LocalContext,
         normalizer: &Normalizer,
-        steps: &mut Vec<GeneratedStep>,
+        steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
         let mut clause = var_map.specialize_clause_with_replacement_context(
             &generic,
@@ -901,7 +885,7 @@ impl CodeGenerator<'_> {
         // Define arbitrary variables.
         let local_context = clause.get_local_context().clone();
         for (ty, _) in new_arbitraries {
-            steps.push(GeneratedStep::DefineArbitrary {
+            steps.push(CertificateStep::DefineArbitrary {
                 var_type: ty,
                 local_context: local_context.clone(),
             });
@@ -916,11 +900,9 @@ impl CodeGenerator<'_> {
             normalizer,
             &mut synthetic_steps,
         );
-        for step in synthetic_steps {
-            steps.push(GeneratedStep::DefineSynthetic(step));
-        }
+        steps.extend(synthetic_steps);
 
-        steps.push(GeneratedStep::ClaimClause(clause));
+        steps.push(CertificateStep::Claim(vec![clause]));
         Ok(())
     }
 
@@ -928,11 +910,11 @@ impl CodeGenerator<'_> {
     fn certificate_step_to_code(
         &mut self,
         names: &SyntheticNameSet,
-        step: &GeneratedStep,
+        step: &CertificateStep,
         normalizer: &Normalizer,
     ) -> Result<String> {
         match step {
-            GeneratedStep::DefineArbitrary {
+            CertificateStep::DefineArbitrary {
                 var_type,
                 local_context,
             } => {
@@ -946,15 +928,27 @@ impl CodeGenerator<'_> {
                 let ty_code = self.type_to_code(&denorm_type)?;
                 Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
             }
-            GeneratedStep::DefineSynthetic(step) => {
-                self.generate_code_for_synthetic_step(names, step, normalizer)
+            CertificateStep::DefineSynthetic {
+                atoms,
+                type_vars,
+                clauses,
+            } => {
+                self.generate_code_for_synthetic_step(names, atoms, type_vars, clauses, normalizer)
             }
-            GeneratedStep::ClaimClause(clause) => {
+            CertificateStep::Claim(clauses) => {
+                let [clause] = clauses.as_slice() else {
+                    return Err(Error::internal(
+                        "code generation expected a single-clause claim step",
+                    ));
+                };
                 let mut value =
                     normalizer.denormalize(clause, Some(&names.arbitrary_names), None, true);
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)
             }
+            CertificateStep::LetSatisfy { .. } => Err(Error::internal(
+                "unexpected parsed certificate step during code generation",
+            )),
         }
     }
 
@@ -964,7 +958,7 @@ impl CodeGenerator<'_> {
         names: &mut SyntheticNameSet,
         step: &ConcreteStep,
         normalizer: &Normalizer,
-    ) -> Result<Vec<GeneratedStep>> {
+    ) -> Result<Vec<CertificateStep>> {
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_certificate_steps(
@@ -994,11 +988,17 @@ impl CodeGenerator<'_> {
         for certificate_step in &certificate_steps {
             let code = self.certificate_step_to_code(names, certificate_step, normalizer)?;
             match certificate_step {
-                GeneratedStep::DefineArbitrary { .. } | GeneratedStep::DefineSynthetic(_) => {
+                CertificateStep::DefineArbitrary { .. }
+                | CertificateStep::DefineSynthetic { .. } => {
                     defs.push(code);
                 }
-                GeneratedStep::ClaimClause(_) => {
+                CertificateStep::Claim(_) => {
                     codes.push(code);
+                }
+                CertificateStep::LetSatisfy { .. } => {
+                    return Err(Error::internal(
+                        "unexpected parsed certificate step during code generation",
+                    ));
                 }
             }
         }
@@ -1722,7 +1722,7 @@ mod tests {
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, normalizer)
                     .unwrap(),
             );
         }
@@ -1761,7 +1761,7 @@ mod tests {
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, normalizer)
                     .unwrap(),
             );
         }
@@ -1802,7 +1802,7 @@ mod tests {
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .generate_code_for_synthetic_step(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, normalizer)
                     .unwrap(),
             );
         }
