@@ -32,6 +32,6 @@ pub enum CertificateStep {
         clauses: Vec<Clause>,
     },
 
-    /// A claim statement with clauses to check.
-    Claim(Vec<Clause>),
+    /// A claim statement with one concrete clause to check.
+    Claim(Clause),
 }

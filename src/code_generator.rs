@@ -997,7 +997,7 @@ impl CodeGenerator<'_> {
         );
         steps.extend(synthetic_steps);
 
-        steps.push(CertificateStep::Claim(vec![clause]));
+        steps.push(CertificateStep::Claim(clause));
         Ok(())
     }
 
@@ -1034,12 +1034,7 @@ impl CodeGenerator<'_> {
             } => {
                 self.generate_code_for_synthetic_step(names, atoms, type_vars, clauses, normalizer)
             }
-            CertificateStep::Claim(clauses) => {
-                let [clause] = clauses.as_slice() else {
-                    return Err(Error::internal(
-                        "code generation expected a single-clause claim step",
-                    ));
-                };
+            CertificateStep::Claim(clause) => {
                 let mut value = normalizer.denormalize(clause, None, None, true);
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)

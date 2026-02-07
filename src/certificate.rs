@@ -154,11 +154,9 @@ impl Certificate {
 
         for code in proof {
             match Checker::parse_code_line(code, project, bindings, normalizer)? {
-                CertificateStep::Claim(clauses) => {
-                    for clause in clauses {
-                        if !claims.contains(&clause) {
-                            claims.push(clause);
-                        }
+                CertificateStep::Claim(clause) => {
+                    if !claims.contains(&clause) {
+                        claims.push(clause);
                     }
                 }
                 CertificateStep::DefineArbitrary { .. }

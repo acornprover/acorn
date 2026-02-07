@@ -462,26 +462,24 @@ impl Checker {
             let parsed = Self::parse_code_line(code, project, &mut bindings, &mut normalizer)?;
             let kernel_context = normalizer.kernel_context();
             match parsed {
-                CertificateStep::Claim(clauses) => {
-                    for mut clause in clauses {
-                        if !seen_claims.insert(clause.clone()) {
-                            continue;
-                        }
-                        let Some(reason) = self.check_clause(&clause, &kernel_context) else {
-                            return Err(Error::GeneratedBadCode(format!(
-                                "Claim '{}' is not obviously true",
-                                clause
-                            )));
-                        };
-
-                        certificate_lines.push(CertificateLine {
-                            statement: clause_to_code(&clause, &normalizer, &bindings),
-                            reason,
-                        });
-
-                        clause.normalize();
-                        self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
+                CertificateStep::Claim(mut clause) => {
+                    if !seen_claims.insert(clause.clone()) {
+                        continue;
                     }
+                    let Some(reason) = self.check_clause(&clause, &kernel_context) else {
+                        return Err(Error::GeneratedBadCode(format!(
+                            "Claim '{}' is not obviously true",
+                            clause
+                        )));
+                    };
+
+                    certificate_lines.push(CertificateLine {
+                        statement: clause_to_code(&clause, &normalizer, &bindings),
+                        reason,
+                    });
+
+                    clause.normalize();
+                    self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
                 CertificateStep::DefineArbitrary { .. }
                 | CertificateStep::DefineSynthetic { .. } => {
@@ -722,7 +720,18 @@ impl Checker {
                 let module_id = bindings.module_id();
                 let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
                 let clauses = view.value_to_denormalized_clauses(&value)?;
-                Ok(CertificateStep::Claim(clauses))
+                if clauses.len() != 1 {
+                    return Err(Error::GeneratedBadCode(format!(
+                        "claim must normalize to exactly one clause, got {}",
+                        clauses.len()
+                    )));
+                }
+                Ok(CertificateStep::Claim(
+                    clauses
+                        .into_iter()
+                        .next()
+                        .expect("clauses has exactly one element"),
+                ))
             }
             _ => Err(Error::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
