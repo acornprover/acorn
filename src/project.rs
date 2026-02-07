@@ -9,7 +9,7 @@ use tower_lsp::lsp_types::{self, CompletionItem, Hover, HoverContents, MarkedStr
 use walkdir::WalkDir;
 
 use crate::build_cache::BuildCache;
-use crate::certificate::Certificate;
+use crate::certificate::{Certificate, CertificateLine};
 use crate::code_generator::{self, CodeGenerator};
 use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
@@ -1273,7 +1273,7 @@ impl Project {
         root_env: &Environment,
         goal_env: &Environment,
         cursor: &crate::elaborator::node::NodeCursor,
-    ) -> Option<(&Certificate, Vec<crate::kernel::checker::CertificateLine>)> {
+    ) -> Option<(&Certificate, Vec<CertificateLine>)> {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
 

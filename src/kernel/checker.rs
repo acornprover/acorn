@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::code_generator::Error;
-use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::source::Source;
 use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::Clause;
@@ -14,7 +13,6 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::proof_step::Rule;
 use crate::kernel::{EqualityGraph, StepId};
-use crate::normalizer::Normalizer;
 use tracing::trace;
 
 /// The reason why a certificate step was accepted.
@@ -90,20 +88,11 @@ impl StepReason {
     }
 }
 
-/// Converts a clause to readable code using the environment's names.
-fn clause_to_code(clause: &Clause, normalizer: &Normalizer, bindings: &Cow<BindingMap>) -> String {
-    let value = normalizer.denormalize(clause, None, None, false);
-    let mut code_gen = crate::code_generator::CodeGenerator::new(bindings);
-    code_gen
-        .value_to_code(&value)
-        .unwrap_or_else(|_| format!("{} (internal)", clause))
-}
-
-/// Information about a single line in a certificate proof.
+/// A checked certificate claim in kernel terms.
 #[derive(Debug, Clone)]
-pub struct CertificateLine {
-    /// The statement from the certificate (the code line).
-    pub statement: String,
+pub struct CheckedStep {
+    /// The claim clause as checked by the kernel.
+    pub clause: Clause,
 
     /// The reason this step was accepted.
     pub reason: StepReason,
@@ -418,16 +407,15 @@ impl Checker {
     pub fn check_cert_steps(
         &mut self,
         cert_steps: &[CertificateStep],
-        bindings: &Cow<BindingMap>,
-        normalizer: &Cow<Normalizer>,
-    ) -> Result<Vec<CertificateLine>, Error> {
-        let mut certificate_lines = Vec::new();
+        normalizer: &Cow<crate::normalizer::Normalizer>,
+    ) -> Result<Vec<CheckedStep>, Error> {
+        let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
 
         for step in cert_steps {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
-                return Ok(certificate_lines);
+                return Ok(checked_steps);
             }
 
             let kernel_context = normalizer.kernel_context();
@@ -444,8 +432,8 @@ impl Checker {
                         )));
                     };
 
-                    certificate_lines.push(CertificateLine {
-                        statement: clause_to_code(&clause, normalizer, bindings),
+                    checked_steps.push(CheckedStep {
+                        clause: clause.clone(),
                         reason,
                     });
 
@@ -459,7 +447,7 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
-            Ok(certificate_lines)
+            Ok(checked_steps)
         } else {
             Err(Error::GeneratedBadCode(
                 "proof does not result in a contradiction".to_string(),
@@ -468,27 +456,25 @@ impl Checker {
     }
 
     /// Check a ConcreteProof directly.
-    /// Returns a list of CertificateLines showing how each line was verified.
+    /// Returns checked steps in kernel terms.
     pub fn check_concrete_proof(
         mut self,
         concrete_proof: &ConcreteProof,
         kernel_context: &KernelContext,
-        normalizer: &Normalizer,
-        bindings: &Cow<BindingMap>,
-    ) -> Result<Vec<CertificateLine>, Error> {
-        let mut certificate_lines = Vec::new();
+    ) -> Result<Vec<CheckedStep>, Error> {
+        let mut checked_steps = Vec::new();
 
         for clause in &concrete_proof.claims {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
-                return Ok(certificate_lines);
+                return Ok(checked_steps);
             }
 
             let mut clause = clause.clone();
             match self.check_clause(&clause, kernel_context) {
                 Some(reason) => {
-                    certificate_lines.push(CertificateLine {
-                        statement: clause_to_code(&clause, normalizer, bindings),
+                    checked_steps.push(CheckedStep {
+                        clause: clause.clone(),
                         reason,
                     });
                 }
@@ -505,7 +491,7 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
-            Ok(certificate_lines)
+            Ok(checked_steps)
         } else {
             Err(Error::GeneratedBadCode(
                 "proof does not result in a contradiction".to_string(),

@@ -18,7 +18,7 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::CertificateStep;
-use crate::kernel::checker::{CertificateLine, Checker};
+use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
@@ -28,6 +28,28 @@ use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
 use crate::syntax::expression::Declaration;
 use crate::syntax::statement::{Statement, StatementInfo};
+
+/// Information about a single line in a checked certificate proof.
+#[derive(Debug, Clone)]
+pub struct CertificateLine {
+    /// The statement from the certificate (the code line).
+    pub statement: String,
+
+    /// The reason this step was accepted.
+    pub reason: StepReason,
+}
+
+fn clause_to_code(
+    clause: &crate::kernel::clause::Clause,
+    normalizer: &Normalizer,
+    bindings: &Cow<BindingMap>,
+) -> String {
+    let value = normalizer.denormalize(clause, None, None, false);
+    let mut code_gen = CodeGenerator::new(bindings);
+    code_gen
+        .value_to_code(&value)
+        .unwrap_or_else(|_| format!("{} (internal)", clause))
+}
 
 /// A proof certificate containing the concrete proof steps as strings.
 ///
@@ -461,7 +483,14 @@ impl Certificate {
             return Err(CodeGenError::NoProof);
         };
         let cert_steps = Self::parse_cert_steps(proof, project, &mut bindings, &mut normalizer)?;
-        checker.check_cert_steps(&cert_steps, &bindings, &normalizer)
+        let checked_steps = checker.check_cert_steps(&cert_steps, &normalizer)?;
+        Ok(checked_steps
+            .into_iter()
+            .map(|checked_step| CertificateLine {
+                statement: clause_to_code(&checked_step.clause, &normalizer, &bindings),
+                reason: checked_step.reason,
+            })
+            .collect())
     }
 
     /// Remove unneeded steps from this certificate.
