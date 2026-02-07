@@ -161,7 +161,7 @@ impl Processor {
 
         let bindings = Cow::Borrowed(bindings);
         let normalizer = Cow::Owned(normalizer);
-        checker.check_cert(cert, project, bindings, normalizer)
+        cert.check(checker, project, bindings, normalizer)
     }
 
     /// Cleans a certificate by removing unnecessary steps.
@@ -183,7 +183,7 @@ impl Processor {
 
         let bindings = Cow::Borrowed(bindings);
         let normalizer = Cow::Owned(normalizer);
-        checker.clean_cert(cert, project, bindings, normalizer)
+        cert.clean(checker, project, bindings, normalizer)
     }
 
     /// Creates a test Processor from code containing a theorem named "goal".
@@ -228,6 +228,7 @@ impl Processor {
         let mut bindings_cow = Cow::Borrowed(bindings);
         let project = Project::new_mock();
 
-        Checker::parse_code_line(code, &project, &mut bindings_cow, &mut normalizer_cow).unwrap();
+        Certificate::parse_code_line(code, &project, &mut bindings_cow, &mut normalizer_cow)
+            .unwrap();
     }
 }

@@ -1848,7 +1848,7 @@ fn test_dependently_typed_synthetic() {
 // Based on the certificate from ordered_group for ordered_imp_torsion_free.
 #[test]
 fn test_polymorphic_synthetic_claim() {
-    use crate::kernel::checker::Checker;
+    use crate::certificate::Certificate;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;
@@ -1873,7 +1873,7 @@ fn test_polymorphic_synthetic_claim() {
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
     // Parse the polymorphic synthetic
-    Checker::parse_code_line(
+    Certificate::parse_code_line(
         "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
@@ -1884,7 +1884,7 @@ fn test_polymorphic_synthetic_claim() {
     // Parse the claim - this triggers the bug when s0's type is looked up.
     // s0 has type Variable(T0) outside the let...satisfy block, so we need
     // explicit type params. Using G from the theorem's scope.
-    Checker::parse_code_line(
+    Certificate::parse_code_line(
         "has_finite_order[G](s0[G]) or is_torsion_free[G]",
         &project,
         &mut bindings_cow,
@@ -1897,7 +1897,7 @@ fn test_polymorphic_synthetic_claim() {
 // Re-using the same type parameter name in a later line should work.
 #[test]
 fn test_certificate_type_params_are_step_local() {
-    use crate::kernel::checker::Checker;
+    use crate::certificate::Certificate;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;
@@ -1921,7 +1921,7 @@ fn test_certificate_type_params_are_step_local() {
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
-    Checker::parse_code_line(
+    Certificate::parse_code_line(
         "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
@@ -1930,7 +1930,7 @@ fn test_certificate_type_params_are_step_local() {
     .expect("first line should parse");
 
     // This currently fails because T0 remains bound globally after the first line.
-    Checker::parse_code_line(
+    Certificate::parse_code_line(
         "let s1[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s1) or is_torsion_free[T0]) and (s1 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
