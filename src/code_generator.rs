@@ -383,10 +383,22 @@ pub struct SyntheticNameSet {
 }
 
 /// A synthetic definition prepared in kernel space before generating code.
+#[derive(Clone)]
 struct SyntheticDefinitionStep {
     atoms: Vec<(ModuleId, AtomId)>,
     type_vars: Vec<Term>,
     clauses: Vec<Clause>,
+}
+
+/// A single kernel-level step in certificate generation before code is generated.
+#[derive(Clone)]
+enum GeneratedStep {
+    DefineArbitrary {
+        var_type: Term,
+        local_context: LocalContext,
+    },
+    DefineSynthetic(SyntheticDefinitionStep),
+    ClaimClause(Clause),
 }
 
 impl SyntheticNameSet {
@@ -855,22 +867,17 @@ impl CodeGenerator<'_> {
         Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
     }
 
-    /// Convert to a clause to code strings.
-    /// This will generate synthetic atom definitions if necessary.
-    /// Appends let statements that define arbitrary variables and synthetic atoms to definitions,
-    /// and appends the actual clause content to codes.
-    ///
+    /// Convert one specialization to certificate steps.
     /// The replacement_context is the context that the var_map's replacement terms reference.
     /// This is needed to look up variable types when specializing.
-    fn specialization_to_code(
+    fn specialization_to_certificate_steps(
         &mut self,
         names: &mut SyntheticNameSet,
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
         normalizer: &Normalizer,
-        definitions: &mut Vec<String>,
-        codes: &mut Vec<String>,
+        steps: &mut Vec<GeneratedStep>,
     ) -> Result<()> {
         let mut clause = var_map.specialize_clause_with_replacement_context(
             &generic,
@@ -889,19 +896,18 @@ impl CodeGenerator<'_> {
         // the normalizer even more complicated.
 
         let new_arbitraries = names.add_arbitrary_for_clause(self.bindings, &clause);
-        let mut value = normalizer.denormalize(&clause, Some(&names.arbitrary_names), None, true);
+        let value = normalizer.denormalize(&clause, Some(&names.arbitrary_names), None, true);
 
-        // Define the arbitrary variables.
-        // Use the clause's local context to look up typeclass constraints for type variables.
-        let local_context = clause.get_local_context();
-        for (ty, name) in new_arbitraries {
-            let denorm_type = normalizer.denormalize_type_with_context(ty, local_context, true);
-            let ty_code = self.type_to_code(&denorm_type)?;
-            let decl = format!("let {}: {} satisfy {{ true }}", name, ty_code);
-            definitions.push(decl);
+        // Define arbitrary variables.
+        let local_context = clause.get_local_context().clone();
+        for (ty, _) in new_arbitraries {
+            steps.push(GeneratedStep::DefineArbitrary {
+                var_type: ty,
+                local_context: local_context.clone(),
+            });
         }
 
-        // Create a name and definition for each synthetic atom.
+        // Create synthetic definition steps.
         let synthetic_ids = value.find_synthetics();
         let mut synthetic_steps = vec![];
         names.collect_synthetic_steps(
@@ -911,15 +917,66 @@ impl CodeGenerator<'_> {
             &mut synthetic_steps,
         );
         for step in synthetic_steps {
-            definitions.push(self.generate_code_for_synthetic_step(names, &step, normalizer)?);
+            steps.push(GeneratedStep::DefineSynthetic(step));
         }
 
-        value = value.replace_synthetics(&names.synthetic_names);
-        let subvalues = value.remove_and();
-        for subvalue in subvalues {
-            codes.push(self.value_to_code_with_names(&subvalue, names)?);
-        }
+        steps.push(GeneratedStep::ClaimClause(clause));
         Ok(())
+    }
+
+    /// Converts a certificate step to one line of code.
+    fn certificate_step_to_code(
+        &mut self,
+        names: &SyntheticNameSet,
+        step: &GeneratedStep,
+        normalizer: &Normalizer,
+    ) -> Result<String> {
+        match step {
+            GeneratedStep::DefineArbitrary {
+                var_type,
+                local_context,
+            } => {
+                let Some(name) = names.arbitrary_names.get(var_type) else {
+                    return Err(Error::internal(
+                        "missing arbitrary name during code generation",
+                    ));
+                };
+                let denorm_type =
+                    normalizer.denormalize_type_with_context(var_type.clone(), local_context, true);
+                let ty_code = self.type_to_code(&denorm_type)?;
+                Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
+            }
+            GeneratedStep::DefineSynthetic(step) => {
+                self.generate_code_for_synthetic_step(names, step, normalizer)
+            }
+            GeneratedStep::ClaimClause(clause) => {
+                let mut value =
+                    normalizer.denormalize(clause, Some(&names.arbitrary_names), None, true);
+                value = value.replace_synthetics(&names.synthetic_names);
+                self.value_to_code_with_names(&value, names)
+            }
+        }
+    }
+
+    /// Converts a ConcreteStep to certificate steps.
+    fn concrete_step_to_certificate_steps(
+        &mut self,
+        names: &mut SyntheticNameSet,
+        step: &ConcreteStep,
+        normalizer: &Normalizer,
+    ) -> Result<Vec<GeneratedStep>> {
+        let mut steps = vec![];
+        for (var_map, replacement_context) in &step.var_maps {
+            self.specialization_to_certificate_steps(
+                names,
+                &step.generic,
+                var_map,
+                replacement_context,
+                normalizer,
+                &mut steps,
+            )?;
+        }
+        Ok(steps)
     }
 
     /// Converts a ConcreteStep to code.
@@ -931,18 +988,19 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         normalizer: &Normalizer,
     ) -> Result<(Vec<String>, Vec<String>)> {
+        let certificate_steps = self.concrete_step_to_certificate_steps(names, step, normalizer)?;
         let mut defs = vec![];
         let mut codes = vec![];
-        for (var_map, replacement_context) in &step.var_maps {
-            self.specialization_to_code(
-                names,
-                &step.generic,
-                var_map,
-                replacement_context,
-                normalizer,
-                &mut defs,
-                &mut codes,
-            )?;
+        for certificate_step in &certificate_steps {
+            let code = self.certificate_step_to_code(names, certificate_step, normalizer)?;
+            match certificate_step {
+                GeneratedStep::DefineArbitrary { .. } | GeneratedStep::DefineSynthetic(_) => {
+                    defs.push(code);
+                }
+                GeneratedStep::ClaimClause(_) => {
+                    codes.push(code);
+                }
+            }
         }
         // Deduplicate while preserving order (don't use sort which breaks dependency order)
         defs.dedup();
