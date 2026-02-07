@@ -673,6 +673,12 @@ impl Checker {
                             );
                         }
                     } else {
+                        if decls.len() != 1 {
+                            return Err(Error::GeneratedBadCode(
+                                "let ... satisfy with trivial condition may declare exactly one arbitrary witness"
+                                    .to_string(),
+                            ));
+                        }
                         // Trivial case, create new constants
                         for (name, acorn_type) in &decls {
                             let cname = ConstantName::unqualified(bindings.module_id(), name);
@@ -1023,5 +1029,36 @@ mod tests {
             result.is_some(),
             "GeneralizationSet should find the general clause as a match for the special clause"
         );
+    }
+
+    #[test]
+    fn test_parse_rejects_multi_arbitrary_declaration() {
+        use crate::processor::Processor;
+        use std::borrow::Cow;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal(
+            r#"
+            theorem goal { true }
+            "#,
+        );
+
+        let project = Project::new_mock();
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Owned(normalized_goal.normalizer.clone());
+
+        let err = match Checker::parse_code_line(
+            "let (x: Bool, y: Bool) satisfy { true }",
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        ) {
+            Ok(_) => panic!("expected parse failure"),
+            Err(err) => err,
+        };
+
+        let Error::GeneratedBadCode(msg) = err else {
+            panic!("expected GeneratedBadCode");
+        };
+        assert!(msg.contains("exactly one arbitrary witness"));
     }
 }
