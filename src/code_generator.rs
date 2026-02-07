@@ -1002,7 +1002,7 @@ impl CodeGenerator<'_> {
     }
 
     /// Converts a certificate step to one line of code.
-    fn certificate_step_to_code(
+    pub fn certificate_step_to_code(
         &mut self,
         names: &SyntheticNameSet,
         step: &CertificateStep,
@@ -1043,7 +1043,7 @@ impl CodeGenerator<'_> {
     }
 
     /// Converts a ConcreteStep to certificate steps.
-    fn concrete_step_to_certificate_steps(
+    pub fn concrete_step_to_certificate_steps(
         &mut self,
         names: &mut SyntheticNameSet,
         step: &ConcreteStep,
@@ -1061,36 +1061,6 @@ impl CodeGenerator<'_> {
             )?;
         }
         Ok(steps)
-    }
-
-    /// Converts a ConcreteStep to code.
-    /// Returns (definitions, code) where definitions are let statements that define
-    /// arbitrary variables and synthetic atoms, and code is the actual clause content.
-    pub fn concrete_step_to_code(
-        &mut self,
-        names: &mut SyntheticNameSet,
-        step: &ConcreteStep,
-        normalizer: &mut Normalizer,
-    ) -> Result<(Vec<String>, Vec<String>)> {
-        let certificate_steps = self.concrete_step_to_certificate_steps(names, step, normalizer)?;
-        let mut defs = vec![];
-        let mut codes = vec![];
-        for certificate_step in &certificate_steps {
-            let code = self.certificate_step_to_code(names, certificate_step, normalizer)?;
-            match certificate_step {
-                CertificateStep::DefineArbitrary { .. }
-                | CertificateStep::DefineSynthetic { .. } => {
-                    defs.push(code);
-                }
-                CertificateStep::Claim(_) => {
-                    codes.push(code);
-                }
-            }
-        }
-        // Deduplicate while preserving order (don't use sort which breaks dependency order)
-        defs.dedup();
-        codes.sort();
-        Ok((defs, codes))
     }
 
     fn type_to_code(&self, acorn_type: &AcornType) -> Result<String> {

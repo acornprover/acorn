@@ -450,19 +450,49 @@ impl Checker {
             return Err(Error::NoProof);
         };
 
+        let cert_steps = Self::parse_cert_steps(proof, project, &mut bindings, &mut normalizer)?;
+        self.check_cert_steps(&cert_steps, &bindings, &normalizer)
+    }
+
+    /// Parse all certificate proof lines into kernel-level certificate steps.
+    ///
+    /// Parsing may update bindings/normalizer (for let...satisfy declarations), so callers
+    /// should pass mutable views and then use the updated state for subsequent checking.
+    pub fn parse_cert_steps(
+        proof: &[String],
+        project: &Project,
+        bindings: &mut Cow<BindingMap>,
+        normalizer: &mut Cow<Normalizer>,
+    ) -> Result<Vec<CertificateStep>, Error> {
+        let mut steps = Vec::with_capacity(proof.len());
+        for code in proof {
+            steps.push(Self::parse_code_line(code, project, bindings, normalizer)?);
+        }
+        Ok(steps)
+    }
+
+    /// Check already-parsed certificate steps.
+    ///
+    /// Expects bindings/normalizer to match the state produced while parsing these steps.
+    pub fn check_cert_steps(
+        &mut self,
+        cert_steps: &[CertificateStep],
+        bindings: &Cow<BindingMap>,
+        normalizer: &Cow<Normalizer>,
+    ) -> Result<Vec<CertificateLine>, Error> {
         let mut certificate_lines = Vec::new();
         let mut seen_claims = HashSet::new();
 
-        for code in proof {
+        for step in cert_steps {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
                 return Ok(certificate_lines);
             }
 
-            let parsed = Self::parse_code_line(code, project, &mut bindings, &mut normalizer)?;
             let kernel_context = normalizer.kernel_context();
-            match parsed {
-                CertificateStep::Claim(mut clause) => {
+            match step {
+                CertificateStep::Claim(clause) => {
+                    let mut clause = clause.clone();
                     if !seen_claims.insert(clause.clone()) {
                         continue;
                     }
@@ -474,7 +504,7 @@ impl Checker {
                     };
 
                     certificate_lines.push(CertificateLine {
-                        statement: clause_to_code(&clause, &normalizer, &bindings),
+                        statement: clause_to_code(&clause, normalizer, bindings),
                         reason,
                     });
 

@@ -8,7 +8,7 @@ use crate::module::ModuleId;
 ///
 /// Parsing and generation both use this representation. Each step corresponds to one
 /// line of certificate code.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CertificateStep {
     /// Define one arbitrary witness constant for a concrete type.
     DefineArbitrary {

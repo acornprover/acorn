@@ -84,27 +84,29 @@ impl Certificate {
         let mut generator = CodeGenerator::new(bindings);
         let mut generation_normalizer = normalizer.clone();
         let mut names = SyntheticNameSet::new();
-        let mut definitions = Vec::new();
-        let mut codes = Vec::new();
+        let mut ordered_steps = Vec::new();
 
         for step in concrete_steps {
-            let (defs, step_codes) =
-                generator.concrete_step_to_code(&mut names, step, &mut generation_normalizer)?;
-            for def in defs {
-                if !definitions.contains(&def) {
-                    definitions.push(def);
-                }
-            }
-            for code in step_codes {
-                if !codes.contains(&code) {
-                    codes.push(code);
+            let cert_steps = generator.concrete_step_to_certificate_steps(
+                &mut names,
+                step,
+                &mut generation_normalizer,
+            )?;
+            for cert_step in cert_steps {
+                if !ordered_steps.contains(&cert_step) {
+                    ordered_steps.push(cert_step);
                 }
             }
         }
 
-        // Combine definitions and codes
-        let mut answer = definitions;
-        answer.extend(codes);
+        let mut answer = Vec::new();
+        for step in &ordered_steps {
+            answer.push(generator.certificate_step_to_code(
+                &names,
+                step,
+                &generation_normalizer,
+            )?);
+        }
 
         Ok(Certificate::new(goal, answer))
     }
@@ -151,9 +153,9 @@ impl Certificate {
         };
 
         let mut claims = Vec::new();
-
-        for code in proof {
-            match Checker::parse_code_line(code, project, bindings, normalizer)? {
+        let cert_steps = Checker::parse_cert_steps(proof, project, bindings, normalizer)?;
+        for step in cert_steps {
+            match step {
                 CertificateStep::Claim(clause) => {
                     if !claims.contains(&clause) {
                         claims.push(clause);
