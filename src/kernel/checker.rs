@@ -6,7 +6,6 @@ use crate::code_generator::Error;
 use crate::elaborator::source::Source;
 use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::Clause;
-use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::generalization_set::GeneralizationSet;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
@@ -443,50 +442,6 @@ impl Checker {
                 CertificateStep::DefineArbitrary { .. }
                 | CertificateStep::DefineSynthetic { .. } => {}
             }
-        }
-
-        if self.has_contradiction() {
-            trace!("has_contradiction (end of proof)");
-            Ok(checked_steps)
-        } else {
-            Err(Error::GeneratedBadCode(
-                "proof does not result in a contradiction".to_string(),
-            ))
-        }
-    }
-
-    /// Check a ConcreteProof directly.
-    /// Returns checked steps in kernel terms.
-    pub fn check_concrete_proof(
-        mut self,
-        concrete_proof: &ConcreteProof,
-        kernel_context: &KernelContext,
-    ) -> Result<Vec<CheckedStep>, Error> {
-        let mut checked_steps = Vec::new();
-
-        for clause in &concrete_proof.claims {
-            if self.has_contradiction() {
-                trace!("has_contradiction (early exit)");
-                return Ok(checked_steps);
-            }
-
-            let mut clause = clause.clone();
-            match self.check_clause(&clause, kernel_context) {
-                Some(reason) => {
-                    checked_steps.push(CheckedStep {
-                        clause: clause.clone(),
-                        reason,
-                    });
-                }
-                None => {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "Claim '{}' is not obviously true",
-                        clause
-                    )));
-                }
-            }
-            clause.normalize();
-            self.insert_clause(&clause, StepReason::PreviousClaim, kernel_context);
         }
 
         if self.has_contradiction() {

@@ -171,42 +171,6 @@ impl Certificate {
         )
     }
 
-    /// Convert this certificate to a ConcreteProof.
-    ///
-    /// This is the parsing boundary where string names are resolved to numeric IDs.
-    /// Requires the project (for parsing), bindings, and normalizer.
-    pub fn to_concrete_proof(
-        &self,
-        project: &Project,
-        bindings: &mut Cow<BindingMap>,
-        normalizer: &mut Cow<Normalizer>,
-    ) -> Result<ConcreteProof, CodeGenError> {
-        let Some(proof) = &self.proof else {
-            return Err(CodeGenError::NoProof);
-        };
-
-        let mut claims = Vec::new();
-        let cert_steps = Self::parse_cert_steps(proof, project, bindings, normalizer)?;
-        for step in cert_steps {
-            match step {
-                CertificateStep::Claim(clause) => {
-                    if !claims.contains(&clause) {
-                        claims.push(clause);
-                    }
-                }
-                CertificateStep::DefineArbitrary { .. }
-                | CertificateStep::DefineSynthetic { .. } => {
-                    // let...satisfy sets up bindings but doesn't produce claims
-                }
-            }
-        }
-
-        Ok(ConcreteProof {
-            goal: self.goal.clone(),
-            claims,
-        })
-    }
-
     /// Parse all certificate proof lines into kernel-level certificate steps.
     ///
     /// Parsing may update bindings/normalizer (for let...satisfy declarations), so callers
