@@ -13,6 +13,7 @@ use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleId;
@@ -376,6 +377,16 @@ pub struct SyntheticNameSet {
     /// The names for whenever we need an arbitrary member of a type.
     /// Maps type to the name of an element of that type.
     pub arbitrary_names: HashMap<Term, ConstantName>,
+
+    /// Synthetics we've already emitted a definition line for.
+    defined_synthetics: HashSet<(ModuleId, AtomId)>,
+}
+
+/// A synthetic definition prepared in kernel space before generating code.
+struct SyntheticDefinitionStep {
+    atoms: Vec<(ModuleId, AtomId)>,
+    type_vars: Vec<Term>,
+    clauses: Vec<Clause>,
 }
 
 impl SyntheticNameSet {
@@ -384,6 +395,7 @@ impl SyntheticNameSet {
             next_s: 0,
             synthetic_names: HashMap::new(),
             arbitrary_names: HashMap::new(),
+            defined_synthetics: HashSet::new(),
         }
     }
 
@@ -417,11 +429,36 @@ impl SyntheticNameSet {
         assigned
     }
 
+    fn are_synthetics_defined(&self, atoms: &[(ModuleId, AtomId)]) -> bool {
+        atoms.iter().all(|id| self.defined_synthetics.contains(id))
+    }
+
+    fn mark_synthetics_defined(&mut self, atoms: &[(ModuleId, AtomId)]) {
+        for id in atoms {
+            self.defined_synthetics.insert(*id);
+        }
+    }
+
+    fn ensure_arbitrary_for_type(
+        &mut self,
+        bindings: &BindingMap,
+        var_type: &Term,
+    ) -> Option<ConstantName> {
+        if self.arbitrary_names.contains_key(var_type) {
+            return None;
+        }
+        let name = bindings.next_indexed_var('s', &mut self.next_s);
+        let cname = ConstantName::Unqualified(bindings.module_id(), name);
+        self.arbitrary_names.insert(var_type.clone(), cname.clone());
+        Some(cname)
+    }
+
     fn add_arbitrary_for_term(
         &mut self,
         bindings: &BindingMap,
         term: &Term,
         local_context: &LocalContext,
+        new_entries: &mut Vec<(Term, ConstantName)>,
     ) {
         match term.as_ref().decompose() {
             Decomposition::Atom(Atom::FreeVariable(var_id)) => {
@@ -436,33 +473,46 @@ impl SyntheticNameSet {
                 if var_type.as_ref().is_type_param_kind() {
                     return;
                 }
-                if !self.arbitrary_names.contains_key(&var_type) {
-                    // Generate a name for this arbitrary value
-                    let name = bindings.next_indexed_var('s', &mut self.next_s);
-                    let cname = ConstantName::Unqualified(bindings.module_id(), name);
-                    self.arbitrary_names.insert(var_type, cname);
+                if let Some(cname) = self.ensure_arbitrary_for_type(bindings, &var_type) {
+                    new_entries.push((var_type, cname));
                 }
             }
             Decomposition::Atom(_) => {}
             Decomposition::Application(func, arg) => {
-                self.add_arbitrary_for_term(bindings, &func.to_owned(), local_context);
-                self.add_arbitrary_for_term(bindings, &arg.to_owned(), local_context);
+                self.add_arbitrary_for_term(bindings, &func.to_owned(), local_context, new_entries);
+                self.add_arbitrary_for_term(bindings, &arg.to_owned(), local_context, new_entries);
             }
             Decomposition::Pi(input, output) => {
-                self.add_arbitrary_for_term(bindings, &input.to_owned(), local_context);
-                self.add_arbitrary_for_term(bindings, &output.to_owned(), local_context);
+                self.add_arbitrary_for_term(
+                    bindings,
+                    &input.to_owned(),
+                    local_context,
+                    new_entries,
+                );
+                self.add_arbitrary_for_term(
+                    bindings,
+                    &output.to_owned(),
+                    local_context,
+                    new_entries,
+                );
             }
         }
     }
 
     /// For any variables in this clause, add an arbitrary variable.
-    fn add_arbitrary_for_clause(&mut self, bindings: &BindingMap, clause: &Clause) {
+    fn add_arbitrary_for_clause(
+        &mut self,
+        bindings: &BindingMap,
+        clause: &Clause,
+    ) -> Vec<(Term, ConstantName)> {
         let local_context = clause.get_local_context();
+        let mut new_entries = vec![];
         for literal in &clause.literals {
             for term in [&literal.left, &literal.right] {
-                self.add_arbitrary_for_term(bindings, term, local_context);
+                self.add_arbitrary_for_term(bindings, term, local_context, &mut new_entries);
             }
         }
+        new_entries
     }
 }
 
@@ -623,6 +673,189 @@ impl CodeGenerator<'_> {
         Ok(expr.to_string())
     }
 
+    fn collect_synthetic_ids_from_clauses(clauses: &[Clause]) -> Vec<(ModuleId, AtomId)> {
+        let mut seen = HashSet::new();
+        let mut ids = vec![];
+        for clause in clauses {
+            for literal in &clause.literals {
+                for term in [&literal.left, &literal.right] {
+                    for atom in term.iter_atoms() {
+                        if let &Atom::Symbol(Symbol::Synthetic(module_id, local_id)) = atom {
+                            let id = (module_id, local_id);
+                            if seen.insert(id) {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    /// Collect synthetic definitions needed for the given ids.
+    /// This updates naming state (assigned names + defined flags), but does not generate code.
+    fn collect_synthetic_steps(
+        &mut self,
+        names: &mut SyntheticNameSet,
+        skolem_ids: Vec<(ModuleId, AtomId)>,
+        normalizer: &Normalizer,
+        steps: &mut Vec<SyntheticDefinitionStep>,
+    ) -> Result<()> {
+        let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
+        for info in &infos {
+            if names.are_synthetics_defined(&info.atoms) {
+                continue;
+            }
+
+            names.assign_synthetic_names(self.bindings, &info.atoms);
+            // Mark this synthetic definition before recursive expansion so cycles don't recurse
+            // infinitely when the condition references synthetics in the same definition group.
+            names.mark_synthetics_defined(&info.atoms);
+
+            // This definition may refer to other synthetics in its clauses.
+            // Collect and define those first so generated code has dependencies in order.
+            let additional_synthetic_ids = Self::collect_synthetic_ids_from_clauses(&info.clauses);
+            if !additional_synthetic_ids.is_empty() {
+                self.collect_synthetic_steps(names, additional_synthetic_ids, normalizer, steps)?;
+            }
+
+            steps.push(SyntheticDefinitionStep {
+                atoms: info.atoms.clone(),
+                type_vars: info.type_vars.clone(),
+                clauses: info.clauses.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Generate code for one kernel-level synthetic definition step.
+    fn generate_code_for_synthetic_step(
+        &mut self,
+        names: &SyntheticNameSet,
+        step: &SyntheticDefinitionStep,
+        normalizer: &Normalizer,
+    ) -> Result<String> {
+        let mut decl = vec![];
+        for &(module_id, local_id) in &step.atoms {
+            let Some(name) = names.synthetic_names.get(&(module_id, local_id)).cloned() else {
+                return Err(Error::internal(
+                    "missing synthetic name during code generation",
+                ));
+            };
+            decl.push((name, normalizer.get_synthetic_type(module_id, local_id)));
+        }
+        if decl.is_empty() {
+            return Err(Error::internal("synthetic definition has no atoms"));
+        }
+
+        // Denormalize clauses first so we can collect all type variable names.
+        // Keep type vars symbolic (no instantiation) because we emit a polymorphic definition.
+        let mut cond_parts = vec![];
+        for clause in &step.clauses {
+            let part = normalizer.denormalize(clause, None, None, false);
+            cond_parts.push(part);
+        }
+        let cond_val = AcornValue::reduce(BinaryOp::And, cond_parts);
+
+        // Collect all type variables from both declaration types and condition value.
+        let mut all_type_vars = Vec::new();
+        for (_, ty) in &decl {
+            for var_name in collect_type_var_names(ty) {
+                if !all_type_vars.contains(&var_name) {
+                    all_type_vars.push(var_name);
+                }
+            }
+        }
+        for var_name in collect_type_var_names_from_value(&cond_val) {
+            if !all_type_vars.contains(&var_name) {
+                all_type_vars.push(var_name);
+            }
+        }
+
+        // Build type parameter names/constraints in var_id order.
+        let mut var_id_to_new_name: HashMap<u16, String> = HashMap::new();
+        let mut type_param_names = Vec::new();
+        let mut type_param_constraints: Vec<Option<Typeclass>> = Vec::new();
+        for (id, type_var_kind) in step.type_vars.iter().enumerate() {
+            let id = id as u16;
+            let name = self.bindings.next_indexed_var('T', &mut self.next_t);
+            var_id_to_new_name.insert(id, name.clone());
+            type_param_names.push(name);
+
+            let constraint = type_var_kind.as_ref().as_typeclass().map(|tc_id| {
+                normalizer
+                    .kernel_context()
+                    .type_store
+                    .get_typeclass(tc_id)
+                    .clone()
+            });
+            type_param_constraints.push(constraint);
+        }
+
+        // Build rename map: x0/T0 -> new T0, x1/T1 -> new T1, ...
+        let mut rename_map = HashMap::new();
+        for old_name in &all_type_vars {
+            let var_id = old_name
+                .strip_prefix("x")
+                .or_else(|| old_name.strip_prefix("T"))
+                .and_then(|s| s.parse::<u16>().ok());
+            let new_name = if let Some(id) = var_id {
+                var_id_to_new_name
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| old_name.clone())
+            } else {
+                old_name.clone()
+            };
+            rename_map.insert(old_name.clone(), new_name);
+        }
+
+        let type_params_str = if type_param_names.is_empty() {
+            String::new()
+        } else {
+            let mut param_strs: Vec<String> = Vec::new();
+            for (name, constraint) in type_param_names.iter().zip(type_param_constraints.iter()) {
+                let param_str = if let Some(typeclass) = constraint {
+                    let tc_code = if self.bindings.has_typeclass_name(&typeclass.name) {
+                        typeclass.name.clone()
+                    } else {
+                        let module_expr = self.module_to_expr(typeclass.module_id)?;
+                        format!("{}.{}", module_expr, typeclass.name)
+                    };
+                    format!("{}: {}", name, tc_code)
+                } else {
+                    name.clone()
+                };
+                param_strs.push(param_str);
+            }
+            format!("[{}]", param_strs.join(", "))
+        };
+
+        let mut decl_parts = vec![];
+        for (name, ty) in &decl {
+            let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
+            let ty_code = self.type_to_code(&renamed_ty)?;
+            decl_parts.push(format!("{}: {}", name, ty_code));
+        }
+
+        let decl_str = if decl_parts.len() > 1 {
+            format!("{} ({})", type_params_str, decl_parts.join(", "))
+        } else if !type_params_str.is_empty() {
+            let (name, ty) = &decl[0];
+            let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
+            let ty_code = self.type_to_code(&renamed_ty)?;
+            format!("{}{}: {}", name, type_params_str, ty_code)
+        } else {
+            decl_parts.join("")
+        };
+
+        let defining_synthetics: HashSet<(ModuleId, AtomId)> = step.atoms.iter().copied().collect();
+        let cond_val = rename_type_vars_in_value(&cond_val, &rename_map, &defining_synthetics);
+        let cond = self.value_to_code_with_names(&cond_val, names)?;
+        Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
+    }
+
     /// Generates definitions for the given synthetic atom IDs and appends them to codes.
     /// Updates names.synthetic_names with names for all provided synthetic atom IDs.
     fn define_synthetics(
@@ -632,168 +865,10 @@ impl CodeGenerator<'_> {
         normalizer: &Normalizer,
         codes: &mut Vec<String>,
     ) -> Result<()> {
-        // TODO: currently all synthetics are skolems, so we can assume this catches all of them,
-        // but we need to change that.
-        let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
-        for info in &infos {
-            // Check if all atoms in this info are already defined
-            let all_already_defined = info
-                .atoms
-                .iter()
-                .all(|&(m, i)| names.synthetic_names.contains_key(&(m, i)));
-            if all_already_defined {
-                // Skip this info - we've already generated code for it
-                continue;
-            }
-
-            // Assign names to any atoms that don't have them yet.
-            let assigned = names.assign_synthetic_names(self.bindings, &info.atoms);
-            let mut decl = vec![];
-            for (module_id, local_id, name) in assigned {
-                decl.push((name, normalizer.get_synthetic_type(module_id, local_id)));
-            }
-            if decl.is_empty() {
-                continue;
-            }
-
-            // Denormalize clauses first so we can collect all type variable names
-            // Don't instantiate type vars here - they're part of the polymorphic structure
-            let mut cond_parts = vec![];
-            for clause in &info.clauses {
-                let part = normalizer.denormalize(clause, None, None, false);
-                cond_parts.push(part);
-            }
-            let cond_val = AcornValue::reduce(BinaryOp::And, cond_parts);
-
-            // Collect all type variables from BOTH declaration types AND condition value
-            // Declaration types may use "T{i}" naming (from BoundVariable)
-            // Condition may use "x{i}" naming (from FreeVariable)
-            let mut all_type_vars = Vec::new();
-            for (_, ty) in &decl {
-                for var_name in collect_type_var_names(ty) {
-                    if !all_type_vars.contains(&var_name) {
-                        all_type_vars.push(var_name);
-                    }
-                }
-            }
-            for var_name in collect_type_var_names_from_value(&cond_val) {
-                if !all_type_vars.contains(&var_name) {
-                    all_type_vars.push(var_name);
-                }
-            }
-
-            // Build type_param_names and type_param_constraints in var_id order (0, 1, 2, ...).
-            // This ensures the certificate's type params match the order used during proving,
-            // which is critical for synthetic definition lookup to work correctly.
-            let mut var_id_to_new_name: HashMap<u16, String> = HashMap::new();
-            let mut type_param_names = Vec::new();
-            let mut type_param_constraints: Vec<Option<Typeclass>> = Vec::new();
-
-            for (id, type_var_kind) in info.type_vars.iter().enumerate() {
-                let id = id as u16;
-                let name = self.bindings.next_indexed_var('T', &mut self.next_t);
-                var_id_to_new_name.insert(id, name.clone());
-                type_param_names.push(name);
-
-                // Look up typeclass constraint from the kind
-                let constraint = type_var_kind.as_ref().as_typeclass().map(|tc_id| {
-                    normalizer
-                        .kernel_context()
-                        .type_store
-                        .get_typeclass(tc_id)
-                        .clone()
-                });
-                type_param_constraints.push(constraint);
-            }
-
-            // Build rename map: x0 -> T0, T0 -> T0, x1 -> T1, etc.
-            // Both "x{i}" and "T{i}" represent var_id i and should map to the same new name.
-            let mut rename_map = HashMap::new();
-            for old_name in &all_type_vars {
-                // Try to extract the variable ID from the name (e.g., "x0" -> 0 or "T0" -> 0)
-                let var_id = old_name
-                    .strip_prefix("x")
-                    .or_else(|| old_name.strip_prefix("T"))
-                    .and_then(|s| s.parse::<u16>().ok());
-
-                let new_name = if let Some(id) = var_id {
-                    var_id_to_new_name
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| old_name.clone())
-                } else {
-                    old_name.clone()
-                };
-
-                rename_map.insert(old_name.clone(), new_name);
-            }
-
-            // Build the type params string (shared across all synthetics)
-            let type_params_str = if type_param_names.is_empty() {
-                String::new()
-            } else {
-                let mut param_strs: Vec<String> = Vec::new();
-                for (name, constraint) in type_param_names.iter().zip(type_param_constraints.iter())
-                {
-                    let param_str = if let Some(typeclass) = constraint {
-                        // Check if the typeclass is available by name in the current bindings
-                        let tc_code = if self.bindings.has_typeclass_name(&typeclass.name) {
-                            typeclass.name.clone()
-                        } else {
-                            // Use lib(module).TypeclassName format
-                            let module_expr = self.module_to_expr(typeclass.module_id)?;
-                            format!("{}.{}", module_expr, typeclass.name)
-                        };
-                        format!("{}: {}", name, tc_code)
-                    } else {
-                        name.clone()
-                    };
-                    param_strs.push(param_str);
-                }
-                format!("[{}]", param_strs.join(", "))
-            };
-
-            // Create code for the declaration with renamed types
-            let mut decl_parts = vec![];
-            for (name, ty) in &decl {
-                let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
-                let ty_code = self.type_to_code(&renamed_ty)?;
-                decl_parts.push(format!("{}: {}", name, ty_code));
-            }
-
-            // For single synthetic: let s0[T0]: type satisfy { ... }
-            // For multiple synthetics: let [T0] (s0: type0, s1: type1) satisfy { ... }
-            let decl_str = if decl_parts.len() > 1 {
-                // Multiple synthetics: type params go before the tuple
-                format!("{} ({})", type_params_str, decl_parts.join(", "))
-            } else if !type_params_str.is_empty() {
-                // Single synthetic with type params: type params go after the name
-                let (name, ty) = &decl[0];
-                let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
-                let ty_code = self.type_to_code(&renamed_ty)?;
-                format!("{}{}: {}", name, type_params_str, ty_code)
-            } else {
-                // Single synthetic without type params
-                decl_parts.join("")
-            };
-
-            // Rename type variables in the condition value
-            // Pass the set of synthetics being defined so they don't get type params added
-            let defining_synthetics: HashSet<(ModuleId, AtomId)> =
-                info.atoms.iter().copied().collect();
-            let cond_val = rename_type_vars_in_value(&cond_val, &rename_map, &defining_synthetics);
-
-            // The denormalized clauses might contain additional synthetic constants.
-            // Define them first (recursively) before we use them in this definition.
-            let additional_synthetic_ids = cond_val.find_synthetics();
-            if !additional_synthetic_ids.is_empty() {
-                self.define_synthetics(names, additional_synthetic_ids, normalizer, codes)?;
-            }
-
-            let cond = self.value_to_code_with_names(&cond_val, names)?;
-
-            let let_statement = format!("let {} satisfy {{ {} }}", decl_str, cond);
-            codes.push(let_statement);
+        let mut steps = vec![];
+        self.collect_synthetic_steps(names, skolem_ids, normalizer, &mut steps)?;
+        for step in steps {
+            codes.push(self.generate_code_for_synthetic_step(names, &step, normalizer)?);
         }
         Ok(())
     }
@@ -831,24 +906,14 @@ impl CodeGenerator<'_> {
         // It might make more sense to do this in value space, so that we don't have to make
         // the normalizer even more complicated.
 
-        // Capture existing keys BEFORE adding new entries.
-        // We only want to generate definitions for entries added in THIS call,
-        // because those entries need the current clause's LocalContext for correct denormalization.
-        // Entries from earlier calls were already processed with their own (correct) contexts.
-        let keys_before: HashSet<Term> = names.arbitrary_names.keys().cloned().collect();
-
-        names.add_arbitrary_for_clause(self.bindings, &clause);
+        let new_arbitraries = names.add_arbitrary_for_clause(self.bindings, &clause);
         let mut value = normalizer.denormalize(&clause, Some(&names.arbitrary_names), None, true);
 
         // Define the arbitrary variables.
         // Use the clause's local context to look up typeclass constraints for type variables.
         let local_context = clause.get_local_context();
-        for (ty, name) in names.arbitrary_names.clone() {
-            if keys_before.contains(&ty) {
-                continue; // Already processed in a previous call with the correct context
-            }
-            let denorm_type =
-                normalizer.denormalize_type_with_context(ty.clone(), local_context, true);
+        for (ty, name) in new_arbitraries {
+            let denorm_type = normalizer.denormalize_type_with_context(ty, local_context, true);
             let ty_code = self.type_to_code(&denorm_type)?;
             let decl = format!("let {}: {} satisfy {{ true }}", name, ty_code);
             definitions.push(decl);
