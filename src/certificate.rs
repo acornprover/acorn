@@ -26,8 +26,9 @@ use crate::module::ModuleDescriptor;
 use crate::normalizer::{NormalizationContext, Normalizer};
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
-use crate::syntax::expression::Declaration;
+use crate::syntax::expression::{Declaration, Expression};
 use crate::syntax::statement::{Statement, StatementInfo};
+use crate::syntax::token::TokenType;
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
@@ -431,6 +432,171 @@ impl Certificate {
         }
     }
 
+    /// Serializes a claim in a clause-plus-arguments form.
+    ///
+    /// Example output:
+    /// `function(x0: Nat) { bar(x0) }(a)`
+    ///
+    /// This is currently a standalone helper and is not wired into normal certificate
+    /// serialization.
+    pub fn serialize_claim_with_args(
+        claim: &Claim,
+        normalizer: &Normalizer,
+        bindings: &BindingMap,
+    ) -> Result<String, CodeGenError> {
+        let local_context = claim.clause.get_local_context();
+        let var_count = local_context.len();
+        if var_count == 0 {
+            return Err(CodeGenError::GeneratedBadCode(
+                "cannot serialize claim-with-args for a clause with no local variables".to_string(),
+            ));
+        }
+        if local_context
+            .get_var_types()
+            .iter()
+            .any(|t| t.as_ref().is_type_param_kind())
+        {
+            return Err(CodeGenError::GeneratedBadCode(
+                "serialize_claim_with_args does not yet support type-parameter locals".to_string(),
+            ));
+        }
+        for var_id in 0..var_count {
+            if claim.var_map.get_mapping(var_id as AtomId).is_none() {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "missing claim var map entry for x{}",
+                    var_id
+                )));
+            }
+        }
+
+        let mut generator = CodeGenerator::new(bindings);
+        let generic_value = normalizer.denormalize(&claim.clause, None, None, true);
+        let generic_code = generator.value_to_code(&generic_value)?;
+        let body_code = match generic_value {
+            AcornValue::ForAll(_, _) => {
+                let generic_expr = Expression::parse_value_string(&generic_code)?;
+                match generic_expr {
+                    Expression::Binder(token, _, body, _)
+                        if token.token_type == TokenType::ForAll =>
+                    {
+                        body.to_string()
+                    }
+                    _ => {
+                        return Err(CodeGenError::GeneratedBadCode(
+                            "expected denormalized generic claim to have forall shape".to_string(),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(CodeGenError::GeneratedBadCode(
+                    "expected generic clause to denormalize to a forall body".to_string(),
+                ));
+            }
+        };
+
+        let mut decl_codes = Vec::with_capacity(var_count);
+        let mut arg_codes = Vec::with_capacity(var_count);
+        for var_id in 0..var_count {
+            let var_name = format!("x{}", var_id);
+            let var_type = local_context
+                .get_var_type(var_id)
+                .expect("local context should provide all variable types")
+                .clone();
+            let acorn_type =
+                normalizer.denormalize_type_with_context(var_type, local_context, true);
+            let type_code = generator.type_to_expr(&acorn_type)?.to_string();
+            decl_codes.push(format!("{}: {}", var_name, type_code));
+
+            let arg_term = claim
+                .var_map
+                .get_mapping(var_id as AtomId)
+                .expect("var map entry checked above");
+            let arg_value = normalizer.denormalize_term_with_context(arg_term, local_context, true);
+            arg_codes.push(generator.value_to_code(&arg_value)?);
+        }
+
+        Ok(format!(
+            "function({}) {{ {} }}({})",
+            decl_codes.join(", "),
+            body_code,
+            arg_codes.join(", ")
+        ))
+    }
+
+    /// Deserializes a claim produced by `serialize_claim_with_args`.
+    ///
+    /// This is currently a standalone helper and is not wired into normal certificate
+    /// parsing.
+    pub fn deserialize_claim_with_args(
+        code: &str,
+        project: &Project,
+        bindings: &BindingMap,
+        normalizer: &Normalizer,
+    ) -> Result<Claim, CodeGenError> {
+        let statement = Statement::parse_str_with_options(code, true)?;
+        let StatementInfo::Claim(claim_statement) = statement.statement else {
+            return Err(CodeGenError::GeneratedBadCode(
+                "expected a claim expression".to_string(),
+            ));
+        };
+
+        let mut evaluator = Evaluator::new(project, bindings, None);
+        let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
+
+        let (arg_types, body, args) = match evaluated {
+            AcornValue::Application(app) => match *app.function {
+                AcornValue::Lambda(arg_types, body) => (arg_types, *body, app.args),
+                _ => {
+                    return Err(CodeGenError::GeneratedBadCode(
+                        "expected a function(...) { ... }(...) claim shape".to_string(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(CodeGenError::GeneratedBadCode(
+                    "expected a function(...) { ... }(...) claim shape".to_string(),
+                ));
+            }
+        };
+
+        if arg_types.is_empty() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "expected at least one function argument in claim-with-args".to_string(),
+            ));
+        }
+        if args.len() != arg_types.len() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "argument count does not match function declaration".to_string(),
+            ));
+        }
+
+        let mut normalizer_clone = normalizer.clone();
+        let mut view =
+            NormalizationContext::new_mut(&mut normalizer_clone, None, bindings.module_id());
+        let generic_value = AcornValue::forall(arg_types, body);
+        let clauses = view.value_to_denormalized_clauses(&generic_value)?;
+        if clauses.len() != 1 {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "claim-with-args body normalized to {} clauses (expected 1)",
+                clauses.len()
+            )));
+        }
+        let clause = clauses
+            .into_iter()
+            .next()
+            .expect("clauses has exactly one element");
+
+        let term_view = NormalizationContext::new_ref(normalizer, None);
+        let mut var_map = VariableMap::new();
+        for (var_id, arg) in args.iter().enumerate() {
+            let term = term_view.value_to_simple_term(arg)?;
+            var_map.set(var_id as AtomId, term);
+        }
+
+        Ok(Claim { clause, var_map })
+    }
+
     /// Check this certificate. It is expected that it has a proof.
     ///
     /// Consumes checker/bindings/normalizer since checking mutates all three.
@@ -635,6 +801,7 @@ impl CertificateWorklist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::LoadState;
     use tempfile::tempdir;
 
     #[test]
@@ -690,5 +857,139 @@ mod tests {
         assert!(!loaded.certs[3].has_proof());
 
         // Clean up is automatic when temp_dir goes out of scope
+    }
+
+    fn setup_claim_codec_env(code: &str) -> (Project, BindingMap, Normalizer) {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", code);
+
+        let module_id = project
+            .load_module_by_name("main")
+            .expect("module should load");
+        let (bindings, normalizer) = {
+            let env = match project.get_module_by_id(module_id) {
+                LoadState::Ok(env) => env,
+                LoadState::Error(e) => panic!("module loading error: {}", e),
+                _ => panic!("unexpected module load state"),
+            };
+            let normalizer = env
+                .normalizer
+                .clone()
+                .expect("environment should have a normalizer");
+            (env.bindings.clone(), normalizer)
+        };
+
+        (project, bindings, normalizer)
+    }
+
+    #[test]
+    fn test_claim_with_args_roundtrip_single_argument() {
+        let code = r#"
+            theorem goal {
+                true = true
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x0 = true", &["Bool"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_true());
+        let claim = Claim { clause, var_map };
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization should succeed");
+        assert_eq!(serialized, "function(x0: Bool) { x0 }(true)");
+
+        let roundtrip =
+            Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
+                .expect("deserialization should succeed");
+        assert_eq!(roundtrip, claim);
+    }
+
+    #[test]
+    fn test_claim_with_args_roundtrip_multiple_arguments() {
+        let code = r#"
+            theorem goal {
+                true = false
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x0 = x1 or x0 = true", &["Bool", "Bool"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_false());
+        var_map.set(1, Term::new_true());
+        let claim = Claim { clause, var_map };
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization should succeed");
+        let roundtrip =
+            Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
+                .expect("deserialization should succeed");
+        assert_eq!(roundtrip, claim);
+    }
+
+    #[test]
+    fn test_claim_with_args_roundtrip_boolean_false_argument() {
+        let code = r#"
+            theorem goal {
+                false = false
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x0", &["Bool"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_false());
+        let claim = Claim { clause, var_map };
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization should succeed");
+        let roundtrip =
+            Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
+                .expect("deserialization should succeed");
+        assert_eq!(roundtrip, claim);
+    }
+
+    #[test]
+    fn test_serialize_claim_with_args_rejects_missing_mapping() {
+        let code = r#"
+            theorem goal {
+                true = false
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_true());
+        let claim = Claim { clause, var_map };
+
+        let err = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect_err("missing mapping should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("missing claim var map entry"));
+    }
+
+    #[test]
+    fn test_deserialize_claim_with_args_rejects_non_function_shape() {
+        let code = r#"
+            let bar: Bool -> Bool = axiom
+
+            theorem goal {
+                bar(true)
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+
+        let err =
+            Certificate::deserialize_claim_with_args("bar(true)", &project, &bindings, &normalizer)
+                .expect_err("non-function claim should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("function(...) { ... }(...)"));
     }
 }

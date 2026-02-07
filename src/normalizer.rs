@@ -629,6 +629,23 @@ impl<'a> NormalizationContext<'a> {
         Ok(output)
     }
 
+    /// Converts a simple value expression into a kernel term.
+    ///
+    /// This is intended for values that are already term-like (constants, applications,
+    /// variables from the provided stack, booleans). Complex logical values are rejected.
+    pub fn value_to_simple_term(&self, value: &AcornValue) -> Result<Term, String> {
+        let empty_stack = Vec::new();
+        match self.try_simple_value_to_signed_term(value, &empty_stack)? {
+            Some((term, true)) => Ok(term),
+            // `false` is represented as `not true` in signed-term form.
+            Some((term, false)) if term == Term::new_true() => Ok(Term::new_false()),
+            Some(_) | None => Err(format!(
+                "value '{}' cannot be represented as a simple term",
+                value
+            )),
+        }
+    }
+
     /// Converts the value into a list of lists of literals, adding skolem constants
     /// to the normalizer as needed.
     /// True is [], false is [[]]. This is logical if you think hard about it.

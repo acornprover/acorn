@@ -6,7 +6,7 @@ use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleId;
 
 /// A certificate claim line.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     /// The generic clause we are specializing.
     pub clause: Clause,
