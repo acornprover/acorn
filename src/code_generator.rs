@@ -375,9 +375,9 @@ pub struct SyntheticNameSet {
     /// The names we have assigned to synthetic atoms so far.
     pub synthetic_names: HashMap<(ModuleId, AtomId), String>,
 
-    /// The names for whenever we need an arbitrary member of a type.
-    /// Maps type to the name of an element of that type.
-    pub arbitrary_names: HashMap<Term, ConstantName>,
+    /// The scoped symbols for arbitraries, keyed by concrete type term.
+    /// These are allocated during generation so claims can be made fully concrete.
+    pub arbitrary_symbols: HashMap<Term, Symbol>,
 
     /// Synthetics we've already emitted a definition line for.
     defined_synthetics: HashSet<(ModuleId, AtomId)>,
@@ -388,7 +388,7 @@ impl SyntheticNameSet {
         SyntheticNameSet {
             next_s: 0,
             synthetic_names: HashMap::new(),
-            arbitrary_names: HashMap::new(),
+            arbitrary_symbols: HashMap::new(),
             defined_synthetics: HashSet::new(),
         }
     }
@@ -436,24 +436,77 @@ impl SyntheticNameSet {
     fn ensure_arbitrary_for_type(
         &mut self,
         bindings: &BindingMap,
-        var_type: &Term,
-    ) -> Option<ConstantName> {
-        if self.arbitrary_names.contains_key(var_type) {
-            return None;
+        normalizer: &mut Normalizer,
+        concrete_type: &Term,
+    ) -> Result<Option<Symbol>> {
+        if self.arbitrary_symbols.contains_key(concrete_type) {
+            return Ok(None);
         }
+        let acorn_type = normalizer
+            .kernel_context()
+            .type_store
+            .type_term_to_acorn_type(concrete_type);
         let name = bindings.next_indexed_var('s', &mut self.next_s);
         let cname = ConstantName::Unqualified(bindings.module_id(), name);
-        self.arbitrary_names.insert(var_type.clone(), cname.clone());
-        Some(cname)
+        let atom = normalizer.add_scoped_constant(cname, &acorn_type, None);
+        let Atom::Symbol(symbol) = atom else {
+            return Err(Error::internal(
+                "add_scoped_constant did not produce a symbol",
+            ));
+        };
+        self.arbitrary_symbols.insert(concrete_type.clone(), symbol);
+        Ok(Some(symbol))
+    }
+
+    fn concrete_type_for_term(
+        normalizer: &Normalizer,
+        var_type: &Term,
+        local_context: &LocalContext,
+    ) -> Result<Term> {
+        let acorn_type =
+            normalizer.denormalize_type_with_context(var_type.clone(), local_context, true);
+        normalizer
+            .kernel_context()
+            .type_store
+            .get_type_term(&acorn_type)
+            .map_err(Error::internal)
+    }
+
+    fn ensure_arbitrary_for_variable_type(
+        &mut self,
+        bindings: &BindingMap,
+        normalizer: &mut Normalizer,
+        var_type: &Term,
+        local_context: &LocalContext,
+    ) -> Result<Option<Symbol>> {
+        if var_type.as_ref().is_type_param_kind() {
+            return Ok(None);
+        }
+        let concrete_type = Self::concrete_type_for_term(normalizer, var_type, local_context)?;
+        self.ensure_arbitrary_for_type(bindings, normalizer, &concrete_type)
+    }
+
+    fn symbol_for_variable_type(
+        &self,
+        normalizer: &Normalizer,
+        var_type: &Term,
+        local_context: &LocalContext,
+    ) -> Result<Option<Symbol>> {
+        if var_type.as_ref().is_type_param_kind() {
+            return Ok(None);
+        }
+        let concrete_type = Self::concrete_type_for_term(normalizer, var_type, local_context)?;
+        Ok(self.arbitrary_symbols.get(&concrete_type).copied())
     }
 
     fn add_arbitrary_for_term(
         &mut self,
         bindings: &BindingMap,
+        normalizer: &mut Normalizer,
         term: &Term,
         local_context: &LocalContext,
-        new_entries: &mut Vec<(Term, ConstantName)>,
-    ) {
+        new_entries: &mut Vec<Symbol>,
+    ) -> Result<()> {
         match term.as_ref().decompose() {
             Decomposition::Atom(Atom::FreeVariable(var_id)) => {
                 // For a variable term, get its type from the local context.
@@ -461,52 +514,93 @@ impl SyntheticNameSet {
                     .get_var_type(*var_id as usize)
                     .cloned()
                     .expect("Variable should have type in LocalContext");
-                // Skip type variables (those whose type is TypeSort or a typeclass).
-                // Type variables are type-level parameters, not value-level, so they
-                // don't need arbitrary value definitions in certificates.
-                if var_type.as_ref().is_type_param_kind() {
-                    return;
-                }
-                if let Some(cname) = self.ensure_arbitrary_for_type(bindings, &var_type) {
-                    new_entries.push((var_type, cname));
+                if let Some(symbol) = self.ensure_arbitrary_for_variable_type(
+                    bindings,
+                    normalizer,
+                    &var_type,
+                    local_context,
+                )? {
+                    new_entries.push(symbol);
                 }
             }
             Decomposition::Atom(_) => {}
             Decomposition::Application(func, arg) => {
-                self.add_arbitrary_for_term(bindings, &func.to_owned(), local_context, new_entries);
-                self.add_arbitrary_for_term(bindings, &arg.to_owned(), local_context, new_entries);
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &func.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &arg.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
             }
             Decomposition::Pi(input, output) => {
                 self.add_arbitrary_for_term(
                     bindings,
+                    normalizer,
                     &input.to_owned(),
                     local_context,
                     new_entries,
-                );
+                )?;
                 self.add_arbitrary_for_term(
                     bindings,
+                    normalizer,
                     &output.to_owned(),
                     local_context,
                     new_entries,
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
     /// For any variables in this clause, add an arbitrary variable.
     fn add_arbitrary_for_clause(
         &mut self,
         bindings: &BindingMap,
+        normalizer: &mut Normalizer,
         clause: &Clause,
-    ) -> Vec<(Term, ConstantName)> {
+    ) -> Result<Vec<Symbol>> {
         let local_context = clause.get_local_context();
         let mut new_entries = vec![];
         for literal in &clause.literals {
             for term in [&literal.left, &literal.right] {
-                self.add_arbitrary_for_term(bindings, term, local_context, &mut new_entries);
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    term,
+                    local_context,
+                    &mut new_entries,
+                )?;
             }
         }
-        new_entries
+        Ok(new_entries)
+    }
+
+    fn build_arbitrary_var_map(
+        &self,
+        normalizer: &Normalizer,
+        clause: &Clause,
+    ) -> Result<VariableMap> {
+        let mut var_map = VariableMap::new();
+        let local_context = clause.get_local_context();
+        for i in 0..local_context.len() {
+            let var_type = local_context
+                .get_var_type(i)
+                .expect("LocalContext should have all variable types");
+            if let Some(symbol) =
+                self.symbol_for_variable_type(normalizer, var_type, local_context)?
+            {
+                var_map.set(i as AtomId, Term::atom(Atom::Symbol(symbol)));
+            }
+        }
+        Ok(var_map)
     }
 
     fn collect_synthetic_ids_from_clauses(clauses: &[Clause]) -> Vec<(ModuleId, AtomId)> {
@@ -860,7 +954,7 @@ impl CodeGenerator<'_> {
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
-        normalizer: &Normalizer,
+        normalizer: &mut Normalizer,
         steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
         let mut clause = var_map.specialize_clause_with_replacement_context(
@@ -874,25 +968,26 @@ impl CodeGenerator<'_> {
         // indices when some variables are replaced with constants.
         clause.normalize_var_ids_no_flip();
 
-        // This is the only place where we use the feature of "denormalize" that we can
-        // pass the arbitrary names like this.
-        // It might make more sense to do this in value space, so that we don't have to make
-        // the normalizer even more complicated.
-
-        let new_arbitraries = names.add_arbitrary_for_clause(self.bindings, &clause);
-        let value = normalizer.denormalize(&clause, Some(&names.arbitrary_names), None, true);
+        let new_arbitraries = names.add_arbitrary_for_clause(self.bindings, normalizer, &clause)?;
 
         // Define arbitrary variables.
-        let local_context = clause.get_local_context().clone();
-        for (ty, _) in new_arbitraries {
-            steps.push(CertificateStep::DefineArbitrary {
-                var_type: ty,
-                local_context: local_context.clone(),
-            });
+        for symbol in new_arbitraries {
+            steps.push(CertificateStep::DefineArbitrary { symbol });
         }
 
+        // Replace remaining free value variables with the allocated arbitrary symbols.
+        let clause_context = clause.get_local_context().clone();
+        let arbitrary_var_map = names.build_arbitrary_var_map(normalizer, &clause)?;
+        clause = arbitrary_var_map.specialize_clause_with_replacement_context(
+            &clause,
+            &clause_context,
+            normalizer.kernel_context(),
+        );
+        clause.normalize_var_ids_no_flip();
+
         // Create synthetic definition steps.
-        let synthetic_ids = value.find_synthetics();
+        let synthetic_ids =
+            SyntheticNameSet::collect_synthetic_ids_from_clauses(std::slice::from_ref(&clause));
         let mut synthetic_steps = vec![];
         names.collect_synthetic_steps(
             self.bindings,
@@ -914,18 +1009,22 @@ impl CodeGenerator<'_> {
         normalizer: &Normalizer,
     ) -> Result<String> {
         match step {
-            CertificateStep::DefineArbitrary {
-                var_type,
-                local_context,
-            } => {
-                let Some(name) = names.arbitrary_names.get(var_type) else {
+            CertificateStep::DefineArbitrary { symbol } => {
+                let Symbol::ScopedConstant(local_id) = symbol else {
                     return Err(Error::internal(
-                        "missing arbitrary name during code generation",
+                        "DefineArbitrary expected a local scoped constant symbol",
                     ));
                 };
-                let denorm_type =
-                    normalizer.denormalize_type_with_context(var_type.clone(), local_context, true);
-                let ty_code = self.type_to_code(&denorm_type)?;
+                let name = normalizer
+                    .kernel_context()
+                    .symbol_table
+                    .name_for_local_id(*local_id);
+                let type_term = normalizer.kernel_context().symbol_table.get_type(*symbol);
+                let acorn_type = normalizer
+                    .kernel_context()
+                    .type_store
+                    .type_term_to_acorn_type(type_term);
+                let ty_code = self.type_to_code(&acorn_type)?;
                 Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
             }
             CertificateStep::DefineSynthetic {
@@ -941,8 +1040,7 @@ impl CodeGenerator<'_> {
                         "code generation expected a single-clause claim step",
                     ));
                 };
-                let mut value =
-                    normalizer.denormalize(clause, Some(&names.arbitrary_names), None, true);
+                let mut value = normalizer.denormalize(clause, None, None, true);
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)
             }
@@ -957,7 +1055,7 @@ impl CodeGenerator<'_> {
         &mut self,
         names: &mut SyntheticNameSet,
         step: &ConcreteStep,
-        normalizer: &Normalizer,
+        normalizer: &mut Normalizer,
     ) -> Result<Vec<CertificateStep>> {
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
@@ -980,7 +1078,7 @@ impl CodeGenerator<'_> {
         &mut self,
         names: &mut SyntheticNameSet,
         step: &ConcreteStep,
-        normalizer: &Normalizer,
+        normalizer: &mut Normalizer,
     ) -> Result<(Vec<String>, Vec<String>)> {
         let certificate_steps = self.concrete_step_to_certificate_steps(names, step, normalizer)?;
         let mut defs = vec![];

@@ -1,6 +1,6 @@
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
-use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
 
@@ -12,13 +12,9 @@ use crate::module::ModuleId;
 pub enum CertificateStep {
     /// Define one arbitrary witness constant for a concrete type.
     DefineArbitrary {
-        /// Kernel type term for the witness being introduced.
-        /// This is the key used in `SyntheticNameSet.arbitrary_names`.
-        var_type: Term,
-
-        /// Local context used to denormalize `var_type` into user-facing type syntax.
-        /// Needed because free-variable types are interpreted relative to context.
-        local_context: LocalContext,
+        /// Kernel symbol for the witness constant.
+        /// This is expected to be a local scoped constant.
+        symbol: Symbol,
     },
 
     /// Define one synthetic group produced by normalization.

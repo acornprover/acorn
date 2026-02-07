@@ -82,13 +82,14 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
         let mut generator = CodeGenerator::new(bindings);
+        let mut generation_normalizer = normalizer.clone();
         let mut names = SyntheticNameSet::new();
         let mut definitions = Vec::new();
         let mut codes = Vec::new();
 
         for step in concrete_steps {
             let (defs, step_codes) =
-                generator.concrete_step_to_code(&mut names, step, normalizer)?;
+                generator.concrete_step_to_code(&mut names, step, &mut generation_normalizer)?;
             for def in defs {
                 if !definitions.contains(&def) {
                     definitions.push(def);
