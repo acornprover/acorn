@@ -579,11 +579,11 @@ impl Checker {
                             )
                         };
 
-                    let (source, synthetic_atoms) = match normalizer
+                    let synthetic_atoms = match normalizer
                         .to_mut()
                         .get_synthetic_definition(&exists_value, type_var_map.as_ref())
                     {
-                        Some(def) => (def.source.clone(), Some(def.atoms.clone())),
+                        Some(def) => Some(def.atoms.clone()),
                         None => {
                             if condition_value != AcornValue::Bool(true) {
                                 return Err(Error::GeneratedBadCode(format!(
@@ -611,7 +611,7 @@ impl Checker {
                                     )));
                                 }
                             }
-                            (None, None)
+                            None
                         }
                     };
 
@@ -707,15 +707,7 @@ impl Checker {
                         vec![]
                     };
 
-                    let reason = match source {
-                        Some(source) => StepReason::Skolemization(source),
-                        None => StepReason::SyntheticDefinition,
-                    };
-
-                    Ok(CertificateStep::LetSatisfy {
-                        clauses_to_insert,
-                        reason,
-                    })
+                    Ok(CertificateStep::LetSatisfy { clauses_to_insert })
                 })();
 
                 // Type parameters in certificate lines are local to that line.

@@ -1,4 +1,3 @@
-use crate::checker::StepReason;
 use crate::kernel::clause::Clause;
 
 /// Result of parsing a single line of certificate code.
@@ -15,8 +14,6 @@ pub enum CertificateStep {
     LetSatisfy {
         /// Clauses from the satisfy condition (empty for trivial conditions like `true`).
         clauses_to_insert: Vec<Clause>,
-        /// The reason for this step (Skolemization or SyntheticDefinition).
-        reason: StepReason,
     },
 
     /// A claim statement with clauses to check.
