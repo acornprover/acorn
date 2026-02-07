@@ -19,11 +19,11 @@ use crate::kernel::extended_term::ExtendedTerm;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
-use crate::proof_step::{ProofStep, Truthiness};
 use tracing::trace;
 
 /// A fact that has been normalized into proof steps.

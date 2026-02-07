@@ -12,11 +12,11 @@ use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::proof_step::{PremiseMap, ProofStep, ProofStepId, Rule, Truthiness};
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::VariableMap;
 use crate::kernel::EqualityGraphContradiction;
 use crate::normalizer::Normalizer;
-use crate::proof_step::{PremiseMap, ProofStep, ProofStepId, Rule, Truthiness};
 use crate::prover::{Outcome, ProverMode};
 
 /// A traditional saturation prover. Uses just a bit of AI for scoring.

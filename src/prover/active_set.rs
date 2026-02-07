@@ -14,13 +14,13 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::pdt::LiteralSet;
+use crate::kernel::proof_step::{
+    PremiseMap, ProofStep, ProofStepId, Rule, SimplificationInfo, SingleSourceInfo, Truthiness,
+};
 use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::VariableMap;
 use crate::kernel::{EqualityGraph, StepId};
-use crate::proof_step::{
-    PremiseMap, ProofStep, ProofStepId, Rule, SimplificationInfo, SingleSourceInfo, Truthiness,
-};
 
 /// Result of evaluating whether a literal can be eliminated during simplification.
 enum LiteralElimination {

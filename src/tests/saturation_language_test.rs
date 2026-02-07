@@ -1848,7 +1848,7 @@ fn test_dependently_typed_synthetic() {
 // Based on the certificate from ordered_group for ordered_imp_torsion_free.
 #[test]
 fn test_polymorphic_synthetic_claim() {
-    use crate::checker::Checker;
+    use crate::kernel::checker::Checker;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;
@@ -1897,7 +1897,7 @@ fn test_polymorphic_synthetic_claim() {
 // Re-using the same type parameter name in a later line should work.
 #[test]
 fn test_certificate_type_params_are_step_local() {
-    use crate::checker::Checker;
+    use crate::kernel::checker::Checker;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;

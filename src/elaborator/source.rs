@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use crate::elaborator::acorn_value::AcornValue;
+use crate::kernel::proof_step::Truthiness;
 use crate::module::ModuleId;
-use crate::proof_step::Truthiness;
 use tower_lsp::lsp_types::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

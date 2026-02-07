@@ -7,10 +7,10 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::certificate_step::CertificateStep;
-use crate::checker::Checker;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError, SyntheticNameSet};
 use crate::elaborator::binding_map::BindingMap;
+use crate::kernel::certificate_step::CertificateStep;
+use crate::kernel::checker::Checker;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleDescriptor;

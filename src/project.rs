@@ -10,7 +10,6 @@ use walkdir::WalkDir;
 
 use crate::build_cache::BuildCache;
 use crate::certificate::Certificate;
-use crate::checker::StepReason;
 use crate::code_generator::{self, CodeGenerator};
 use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
@@ -22,6 +21,7 @@ use crate::elaborator::goal::Goal;
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::ConstantName;
 use crate::interfaces::{GoalInfo, Location, Step};
+use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::syntax::statement::Statement;
@@ -1273,7 +1273,7 @@ impl Project {
         root_env: &Environment,
         goal_env: &Environment,
         cursor: &crate::elaborator::node::NodeCursor,
-    ) -> Option<(&Certificate, Vec<crate::checker::CertificateLine>)> {
+    ) -> Option<(&Certificate, Vec<crate::kernel::checker::CertificateLine>)> {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
 

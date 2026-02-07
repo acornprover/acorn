@@ -77,7 +77,7 @@ impl Scorer for ScoringModel {
 #[cfg(test)]
 mod tests {
     use crate::kernel::kernel_context::KernelContext;
-    use crate::proof_step::ProofStep;
+    use crate::kernel::proof_step::ProofStep;
 
     use super::*;
 

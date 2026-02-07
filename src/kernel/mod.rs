@@ -1,4 +1,6 @@
 pub mod atom;
+pub mod certificate_step;
+pub mod checker;
 pub mod clause;
 pub mod clause_set;
 pub mod cnf;
@@ -13,6 +15,7 @@ pub mod kernel_context;
 pub mod literal;
 pub mod local_context;
 pub mod pdt;
+pub mod proof_step;
 pub mod symbol;
 pub mod symbol_table;
 pub mod term;

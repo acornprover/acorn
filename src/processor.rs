@@ -2,13 +2,13 @@ use std::borrow::Cow;
 
 use crate::builder::BuildError;
 use crate::certificate::Certificate;
-use crate::checker::{CertificateLine, Checker, StepReason};
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::node::NodeCursor;
+use crate::kernel::checker::{CertificateLine, Checker, StepReason};
+use crate::kernel::proof_step::Rule;
 use crate::normalizer::{NormalizedFact, NormalizedGoal, Normalizer};
 use crate::project::Project;
-use crate::proof_step::Rule;
 use crate::prover::{Outcome, Prover, ProverMode};
 use tokio_util::sync::CancellationToken;
 

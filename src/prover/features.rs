@@ -1,6 +1,6 @@
 use ndarray::{Array1, Array2, Axis};
 
-use crate::proof_step::{ProofStep, Truthiness};
+use crate::kernel::proof_step::{ProofStep, Truthiness};
 
 // Features of a proof step that can be used to score it.
 // This is like a feature vector but in struct rather than vector form.

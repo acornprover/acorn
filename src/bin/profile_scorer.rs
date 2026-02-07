@@ -6,7 +6,7 @@
 //   samply record target/fastdev/profile_scorer
 
 use acorn::kernel::kernel_context::KernelContext;
-use acorn::proof_step::ProofStep;
+use acorn::kernel::proof_step::ProofStep;
 use acorn::prover::features::Features;
 use acorn::prover::scorer::Scorer;
 use acorn::prover::scoring_model::ScoringModel;

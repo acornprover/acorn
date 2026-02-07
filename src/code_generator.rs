@@ -3,7 +3,6 @@ use std::fmt;
 
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
-use crate::certificate_step::CertificateStep;
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
 };
@@ -12,6 +11,7 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
+use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::Clause;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
