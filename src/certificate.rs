@@ -593,14 +593,22 @@ impl Certificate {
         }
 
         if value_decl_codes.is_empty() {
-            let specialized = claim
-                .var_map
-                .specialize_clause(&claim.clause, kernel_context);
-            let mut specialized_value = normalizer.denormalize(&specialized, None, None, true);
-            if let Some(synthetic_names) = synthetic_names {
-                specialized_value = specialized_value.replace_synthetics(synthetic_names);
+            if type_param_decl_codes.is_empty() {
+                let specialized = claim
+                    .var_map
+                    .specialize_clause(&claim.clause, kernel_context);
+                let mut specialized_value = normalizer.denormalize(&specialized, None, None, true);
+                if let Some(synthetic_names) = synthetic_names {
+                    specialized_value = specialized_value.replace_synthetics(synthetic_names);
+                }
+                return generator.value_to_code(&specialized_value);
             }
-            return generator.value_to_code(&specialized_value);
+            return Ok(format!(
+                "function[{}] {{ {} }}[{}]",
+                type_param_decl_codes.join(", "),
+                body_code,
+                type_arg_codes.join(", ")
+            ));
         }
 
         if type_param_decl_codes.is_empty() {
@@ -672,13 +680,20 @@ impl Certificate {
                 },
                 _ => return Ok(None),
             },
+            AcornValue::TypeApplication(type_app) => match *type_app.function {
+                AcornValue::Lambda(arg_types, body) => {
+                    type_param_names = type_app.type_param_names;
+                    type_param_constraints = type_app.type_param_constraints;
+                    type_args = type_app.type_args;
+                    (arg_types, *body, vec![])
+                }
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
         };
 
-        if arg_types.is_empty() {
-            return Err(CodeGenError::GeneratedBadCode(
-                "expected at least one function argument in claim-with-args".to_string(),
-            ));
+        if arg_types.is_empty() && type_param_names.is_empty() {
+            return Ok(None);
         }
         if args.len() != arg_types.len() {
             return Err(CodeGenError::GeneratedBadCode(
@@ -1244,6 +1259,42 @@ mod tests {
             CertificateStep::Claim(claim) => assert_eq!(claim, expected),
             _ => panic!("expected claim step"),
         }
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_parse_code_line_accepts_claim_with_type_args_only_shape() {
+        let code = r#"
+            let foo[T]: Bool = axiom
+
+            theorem goal {
+                foo[Bool]
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Borrowed(&normalizer);
+        let step = Certificate::parse_code_line(
+            "function[T0] { foo[T0] }[Bool]",
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        )
+        .expect("type-only claim-with-args parsing should succeed");
+
+        let claim = match step {
+            CertificateStep::Claim(claim) => claim,
+            _ => panic!("expected claim step"),
+        };
+        assert!(claim.var_map.len() > 0);
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization should succeed");
+        let roundtrip =
+            Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
+                .expect("deserialization should succeed");
+        assert_eq!(roundtrip, claim);
     }
 
     #[test]

@@ -246,7 +246,7 @@ impl<'a> Proof<'a> {
                     generic, var_maps, ..
                 } = cs;
                 for (var_map, replacement_context) in var_maps {
-                    let concrete_step = ConcreteStep {
+                    let mut concrete_step = ConcreteStep {
                         generic: generic.clone(),
                         var_maps: vec![(var_map, replacement_context)],
                     };
@@ -254,6 +254,18 @@ impl<'a> Proof<'a> {
                     else {
                         continue;
                     };
+                    if matches!(concrete_id, ConcreteStepId::ProofStep(_)) {
+                        // A reconstructed proof-step output is a derived concrete fact, not a
+                        // direct instantiation of a known generic premise. Keep it concrete so
+                        // certificate serialization does not invent a generic claim form.
+                        concrete_step = ConcreteStep {
+                            generic: clause.clone(),
+                            var_maps: vec![(
+                                VariableMap::new(),
+                                clause.get_local_context().clone(),
+                            )],
+                        };
+                    }
                     if skip_clauses.contains(&clause) {
                         continue;
                     }

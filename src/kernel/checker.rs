@@ -498,7 +498,9 @@ impl Checker {
                     }
 
                     #[cfg(feature = "bigcert")]
-                    let reason = self.check_clause(&claim.clause, &kernel_context);
+                    let reason = self
+                        .check_clause(&claim.clause, &kernel_context)
+                        .or_else(|| self.check_clause(&clause, &kernel_context));
 
                     #[cfg(not(feature = "bigcert"))]
                     let reason = self.check_clause(&clause, &kernel_context);

@@ -1245,10 +1245,8 @@ impl<'a> Evaluator<'a> {
                         return Err(args_expr.error("wrong number of type arguments"));
                     }
 
-                    // Evaluate as a regular Lambda
-                    if decls.is_empty() {
-                        return Err(token.error("generic function must have at least one argument"));
-                    }
+                    // Evaluate as a regular Lambda.
+                    // Generic lambdas may omit value args entirely in type-only claim syntax.
                     let (arg_names, arg_types) = evaluator.bind_args(stack, decls, None)?;
                     let body_val = evaluator.evaluate_value_with_stack(stack, body, None)?;
                     let lambda = AcornValue::Lambda(arg_types, Box::new(body_val));

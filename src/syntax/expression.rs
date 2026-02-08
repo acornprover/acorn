@@ -161,6 +161,11 @@ impl Declaration {
     // Returns the declarations.
     pub fn parse_list(tokens: &mut TokenIter) -> Result<Vec<Declaration>> {
         let mut declarations = Vec::new();
+        tokens.skip_newlines();
+        if tokens.peek_type() == Some(TokenType::RightParen) {
+            tokens.next();
+            return Ok(declarations);
+        }
         loop {
             let (declaration, last_token) = Declaration::parse(
                 tokens,
@@ -970,8 +975,15 @@ fn parse_partial_expressions(
                 } else {
                     vec![]
                 };
-                tokens.expect_type(TokenType::LeftParen)?;
-                let args = Declaration::parse_list(tokens)?;
+                let args = if token.token_type == TokenType::Function
+                    && !type_params.is_empty()
+                    && tokens.peek_type() == Some(TokenType::LeftBrace)
+                {
+                    Vec::new()
+                } else {
+                    tokens.expect_type(TokenType::LeftParen)?;
+                    Declaration::parse_list(tokens)?
+                };
                 tokens.expect_type(TokenType::LeftBrace)?;
                 let (subexpression, right_brace) = Expression::parse(
                     tokens,
@@ -1457,7 +1469,11 @@ impl Expression {
                     type_params_doc = type_params_doc.append(allocator.text(format!("{}", tp)));
                 }
                 type_params_doc = type_params_doc.append(allocator.text("]"));
-                let args_doc = self.pretty_args(allocator, args, flat);
+                let args_doc = if args.is_empty() {
+                    allocator.nil()
+                } else {
+                    self.pretty_args(allocator, args, flat)
+                };
                 allocator
                     .text(token.text())
                     .append(type_params_doc)
@@ -1861,5 +1877,9 @@ mod tests {
     fn test_generic_lambda_with_application() {
         // Generic lambda instantiated with type args, then applied to value args
         expect_concatenation("function[T](x: T) { x }[Nat](5)");
+        // Type-only instantiation shape (no value args)
+        expect_concatenation("function[T] { true }[Nat]");
+        // Backward-compatibility with previous encoding
+        expect_concatenation("function[T]() { true }[Nat]");
     }
 }
