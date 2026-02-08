@@ -23,7 +23,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::VariableMap;
-use crate::module::ModuleDescriptor;
+use crate::module::{ModuleDescriptor, ModuleId};
 use crate::normalizer::{NormalizationContext, Normalizer};
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
@@ -202,7 +202,12 @@ impl Certificate {
                     if claim.clause.get_local_context().is_empty() || claim.var_map.len() == 0 {
                         generator.certificate_step_to_code(&names, step, &generation_normalizer)?
                     } else {
-                        Self::serialize_claim_with_args(claim, &generation_normalizer, bindings)?
+                        Self::serialize_claim_with_names(
+                            claim,
+                            &generation_normalizer,
+                            bindings,
+                            Some(&names.synthetic_names),
+                        )?
                     }
                 }
                 _ => generator.certificate_step_to_code(&names, step, &generation_normalizer)?,
@@ -523,6 +528,15 @@ impl Certificate {
         normalizer: &Normalizer,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
+        Self::serialize_claim_with_names(claim, normalizer, bindings, None)
+    }
+
+    fn serialize_claim_with_names(
+        claim: &Claim,
+        normalizer: &Normalizer,
+        bindings: &BindingMap,
+        synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
+    ) -> Result<String, CodeGenError> {
         let local_context = claim.clause.get_local_context();
         let var_count = local_context.len();
         if var_count == 0 {
@@ -532,7 +546,10 @@ impl Certificate {
         }
 
         let mut generator = CodeGenerator::new(bindings);
-        let generic_value = normalizer.denormalize(&claim.clause, None, None, false);
+        let mut generic_value = normalizer.denormalize(&claim.clause, None, None, false);
+        if let Some(synthetic_names) = synthetic_names {
+            generic_value = generic_value.replace_synthetics(synthetic_names);
+        }
         let generic_code = generator.value_to_code(&generic_value)?;
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
@@ -645,12 +662,20 @@ impl Certificate {
 
             let arg_value =
                 normalizer.denormalize_term_with_context(arg_term, local_context, false);
+            let arg_value = if let Some(synthetic_names) = synthetic_names {
+                arg_value.replace_synthetics(synthetic_names)
+            } else {
+                arg_value
+            };
             value_arg_codes.push(generator.value_to_code(&arg_value)?);
         }
 
         if value_decl_codes.is_empty() {
             let specialized = effective_var_map.specialize_clause(&claim.clause, kernel_context);
-            let specialized_value = normalizer.denormalize(&specialized, None, None, true);
+            let mut specialized_value = normalizer.denormalize(&specialized, None, None, true);
+            if let Some(synthetic_names) = synthetic_names {
+                specialized_value = specialized_value.replace_synthetics(synthetic_names);
+            }
             return generator.value_to_code(&specialized_value);
         }
 

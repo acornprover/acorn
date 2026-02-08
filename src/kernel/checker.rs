@@ -468,11 +468,28 @@ impl Checker {
                     if !seen_claims.insert(clause.clone()) {
                         continue;
                     }
-                    let Some(reason) = self.check_clause(&clause, &kernel_context) else {
-                        return Err(Error::GeneratedBadCode(format!(
-                            "Claim '{}' is not obviously true",
-                            clause
-                        )));
+
+                    #[cfg(feature = "bigcert")]
+                    let reason = self.check_clause(&claim.clause, &kernel_context);
+
+                    #[cfg(not(feature = "bigcert"))]
+                    let reason = self.check_clause(&clause, &kernel_context);
+
+                    let Some(reason) = reason else {
+                        #[cfg(feature = "bigcert")]
+                        {
+                            return Err(Error::GeneratedBadCode(format!(
+                                "Claim '{}' is not obviously true (generic form: '{}')",
+                                clause, claim.clause
+                            )));
+                        }
+                        #[cfg(not(feature = "bigcert"))]
+                        {
+                            return Err(Error::GeneratedBadCode(format!(
+                                "Claim '{}' is not obviously true",
+                                clause
+                            )));
+                        }
                     };
 
                     checked_steps.push(CheckedStep {

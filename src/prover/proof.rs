@@ -163,8 +163,21 @@ fn add_var_map<R: ProofResolver>(
 impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
+        #[cfg(feature = "bigcert")]
+        {
+            let concrete_steps = self.collect_concrete_steps()?;
+            return Certificate::from_concrete_steps(
+                goal,
+                &concrete_steps,
+                self.normalizer,
+                bindings,
+            );
+        }
+
+        #[cfg(not(feature = "bigcert"))]
         let concrete_proof = self.make_concrete_proof(goal)?;
-        Certificate::from_concrete_proof(&concrete_proof, self.normalizer, bindings)
+        #[cfg(not(feature = "bigcert"))]
+        return Certificate::from_concrete_proof(&concrete_proof, self.normalizer, bindings);
     }
 
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
