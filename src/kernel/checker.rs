@@ -1,14 +1,19 @@
 use std::borrow::Cow;
+#[cfg(feature = "bigcert")]
+use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(not(feature = "bigcert"))]
 use std::sync::Arc;
 
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
 use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::Clause;
+#[cfg(not(feature = "bigcert"))]
 use crate::kernel::generalization_set::GeneralizationSet;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
+#[cfg(not(feature = "bigcert"))]
 use crate::kernel::literal::Literal;
 use crate::kernel::proof_step::Rule;
 use crate::kernel::{EqualityGraph, StepId};
@@ -101,7 +106,7 @@ pub struct CheckedStep {
 ///
 /// The types of single-step we support are:
 ///
-///   Exact substitutions into a known theorem. Handled by the GeneralizationSet.
+///   Substitutions into a known theorem (or exact variable-clause matches in `bigcert` mode).
 ///   "Congruence closure" of equalities and subterm relationships. Handled by the EqualityGraph.
 ///   Propositional calculus on concrete literals. Handled by the EqualityGraph.
 ///   Introducing variables for existential quantifiers. Handled weirdly through a Normalizer.
@@ -111,7 +116,13 @@ pub struct Checker {
     term_graph: EqualityGraph,
 
     /// For looking up specializations of clauses with free variables.
+    #[cfg(not(feature = "bigcert"))]
     generalization_set: Arc<GeneralizationSet>,
+
+    /// In bigcert mode, variable clauses are matched by exact canonical equality only.
+    /// The `usize` value is the `step_id` (index into `self.reasons`) for that clause.
+    #[cfg(feature = "bigcert")]
+    exact_variable_clauses: HashMap<Clause, usize>,
 
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
@@ -128,7 +139,10 @@ impl Checker {
     pub fn new() -> Checker {
         Checker {
             term_graph: EqualityGraph::new(),
+            #[cfg(not(feature = "bigcert"))]
             generalization_set: Arc::new(GeneralizationSet::new()),
+            #[cfg(feature = "bigcert")]
+            exact_variable_clauses: HashMap::new(),
             direct_contradiction: false,
             past_boolean_reductions: HashSet::new(),
             reasons: Vec::new(),
@@ -154,11 +168,23 @@ impl Checker {
 
         if clause.has_any_variable() {
             // The clause has free variables, so it can be a generalization.
+            #[cfg(not(feature = "bigcert"))]
             Arc::make_mut(&mut self.generalization_set).insert(
                 clause.clone(),
                 step_id,
                 kernel_context,
             );
+
+            #[cfg(feature = "bigcert")]
+            {
+                // Normalize before exact matching so we do not depend on literal ordering
+                // or variable numbering conventions at insertion sites.
+                let mut canonical_clause = clause.clone();
+                canonical_clause.normalize();
+                self.exact_variable_clauses
+                    .entry(canonical_clause)
+                    .or_insert(step_id);
+            }
 
             // We only need to do equality resolution for clauses with free variables,
             // because resolvable concrete literals would already have been simplified out.
@@ -233,28 +259,45 @@ impl Checker {
             return Some(StepReason::EqualityGraph);
         }
 
-        // If not found in term graph, check if there's a generalization in the clause set
-        if let Some(step_id) = self
-            .generalization_set
-            .find_generalization(clause.clone(), kernel_context)
+        #[cfg(not(feature = "bigcert"))]
         {
-            trace!(clause = %clause, result = "generalization_set", "checking clause");
-            return Some(self.reasons[step_id].clone());
-        }
-
-        // Try last-argument elimination as a fallback.
-        // This handles cases where we have:
-        //   g0(T0, T0, (T0 -> T0), c1, c2, c3, x0) = c1(c2(c3), x0)
-        // and we want to match it against:
-        //   g0(x0, x1, x2, x3, x4, x5) = x3(x4(x5))
-        // by eliminating the common last argument x0 from both sides.
-        if let Some(reduced) = self.try_last_arg_elimination(clause) {
+            // If not found in term graph, check if there's a generalization in the clause set
             if let Some(step_id) = self
                 .generalization_set
-                .find_generalization(reduced, kernel_context)
+                .find_generalization(clause.clone(), kernel_context)
             {
-                trace!(clause = %clause, result = "last_arg_elimination", "checking clause");
+                trace!(clause = %clause, result = "generalization_set", "checking clause");
                 return Some(self.reasons[step_id].clone());
+            }
+
+            // Try last-argument elimination as a fallback.
+            // This handles cases where we have:
+            //   g0(T0, T0, (T0 -> T0), c1, c2, c3, x0) = c1(c2(c3), x0)
+            // and we want to match it against:
+            //   g0(x0, x1, x2, x3, x4, x5) = x3(x4(x5))
+            // by eliminating the common last argument x0 from both sides.
+            if let Some(reduced) = self.try_last_arg_elimination(clause) {
+                if let Some(step_id) = self
+                    .generalization_set
+                    .find_generalization(reduced, kernel_context)
+                {
+                    trace!(clause = %clause, result = "last_arg_elimination", "checking clause");
+                    return Some(self.reasons[step_id].clone());
+                }
+            }
+        }
+
+        #[cfg(feature = "bigcert")]
+        {
+            let mut canonical_clause = clause.clone();
+            canonical_clause.normalize();
+            if let Some(step_id) = self.exact_variable_clauses.get(&canonical_clause) {
+                trace!(
+                    clause = %clause,
+                    result = "exact_variable_clause",
+                    "checking clause"
+                );
+                return Some(self.reasons[*step_id].clone());
             }
         }
 
@@ -268,6 +311,7 @@ impl Checker {
     /// - Both sides are applications
     /// - The last argument of both sides is the same variable
     /// - That variable doesn't appear elsewhere in the terms
+    #[cfg(not(feature = "bigcert"))]
     fn try_last_arg_elimination(&self, clause: &Clause) -> Option<Clause> {
         // Must be a single literal
         if clause.literals.len() != 1 {
@@ -556,6 +600,25 @@ mod tests {
         // That should then reduce via truth table logic with "not c0 or c1" to yield "c1".
         let mut checker = TestChecker::with_clauses(&["c0 or c1 or c2", "not c0 or c1", "not c2"]);
         checker.check_clause_str("c1");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_checker_bigcert_requires_exact_variable_clause_match() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        context.parse_constant("g0", "Bool -> Bool");
+
+        let mut checker = Checker::new();
+        let generic = context.parse_clause("g0(x0)", &["Bool"]);
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        // Exact variable clause lookup is still allowed in bigcert mode.
+        assert!(checker.check_clause(&generic, &context).is_some());
+
+        // But specialization via generalization matching is disabled in bigcert mode.
+        let specialized = context.parse_clause("g0(c0)", &[]);
+        assert!(checker.check_clause(&specialized, &context).is_none());
     }
 
     #[test]
