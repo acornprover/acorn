@@ -1095,7 +1095,18 @@ fn test_proving_removes_duplicates() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_proof_lines(c.proof.unwrap(), &["not f(y) or g(y)", "not f(y)", "f(y)"]);
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
+    assert_proof_lines(
+        proof,
+        &[
+            "function(x0: Foo) { not f(x0) or g(x0) }(y)",
+            "not f(y)",
+            "function(x0: Foo) { f(x0) }(y)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["not f(y) or g(y)", "not f(y)", "f(y)"]);
 }
 
 #[test]
@@ -1131,8 +1142,20 @@ fn test_proving_with_passive_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "function(x0: Foo) { not h(x0) or f(x0) }(y)",
+            "f(y)",
+            "function(x0: Foo) { not g(x0) or not f(x0) }(y)",
+            "function(x0: Foo) { g(x0) }(y)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &["not h(y) or f(y)", "f(y)", "not g(y) or not f(y)", "g(y)"],
     );
 }
@@ -1163,7 +1186,11 @@ fn test_proving_activating_rewrite_pattern() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_proof_lines(c.proof.unwrap(), &["g(y) = f(y)"]);
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
+    assert_proof_lines(proof, &["function(x0: Foo) { g(x0) = f(x0) }(y)"]);
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["g(y) = f(y)"]);
 }
 
 #[test]
@@ -1192,10 +1219,17 @@ fn test_proving_with_passive_contradiction() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
-        &["g(Foo.foo) = f(Foo.foo)", "not h(f(Foo.foo))"],
+        proof,
+        &[
+            "function(x0: Foo) { g(x0) = f(x0) }(Foo.foo)",
+            "not h(f(Foo.foo))",
+        ],
     );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["g(Foo.foo) = f(Foo.foo)", "not h(f(Foo.foo))"]);
 }
 
 #[test]
@@ -1223,8 +1257,19 @@ fn test_proving_with_multiple_rewrite() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "function(x0: Foo) { g(x0) = f(x0) }(y)",
+            "function(x0: Foo) { g(x0) = f(x0) }(g(y))",
+            "function(x0: Foo) { g(x0) = f(x0) }(g(g(y)))",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "g(y) = f(y)",
             "g(g(y)) = f(g(y))",
@@ -1260,8 +1305,18 @@ fn test_proving_random_bug() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "g(y) != f(y)",
+            "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &["g(y) != f(y)", "f(y) = z or h(y) = f(y) or g(y) = f(y)"],
     );
 }
@@ -1296,8 +1351,20 @@ fn test_proving_with_equality_factoring_basic() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "h(y) != g(y) or g(y) = f(y)",
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x0: Foo) { h(x0) != f(x0) }(y)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "h(y) != g(y) or g(y) = f(y)",
             "h(y) = g(y)",
@@ -1339,8 +1406,20 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "h(y) != g(y) or g(y) = f(y)",
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x0: Foo) { h(x0) != f(x0) }(y)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "h(y) != g(y) or g(y) = f(y)",
             "h(y) = g(y)",
@@ -1379,8 +1458,21 @@ fn test_proving_with_equality_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(x, x)",
+            "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(g(x), x)",
+            "not f(g(x), x)",
+            "function(x0: Foo, x1: Foo) { g(x0) != g(x1) or f(x0, x1) }(x, x)",
+            "f(x, x)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "not f(x, x) or f(g(x), x)",
             "not f(g(x), x) or f(g(g(x)), x)",
@@ -1545,7 +1637,17 @@ fn test_proving_multiple_simplifying() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_proof_lines(c.proof.unwrap(), &["f(Foo.foo)", "f(Foo.bar)"]);
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
+    assert_proof_lines(
+        proof,
+        &[
+            "function(x0: Foo) { f(x0) }(Foo.foo)",
+            "function(x0: Foo) { f(x0) }(Foo.bar)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["f(Foo.foo)", "f(Foo.bar)"]);
 }
 
 #[test]
@@ -1576,10 +1678,17 @@ fn test_proving_of_existence() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
-        &["let s0: Foo satisfy { f(s0) }", "not f(s0)"],
+        proof,
+        &[
+            "let s0: Foo satisfy { f(s0) }",
+            "function(x0: Foo) { not f(x0) }(s0)",
+        ],
     );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["let s0: Foo satisfy { f(s0) }", "not f(s0)"]);
 }
 
 #[test]
@@ -1611,8 +1720,19 @@ fn test_proving_of_conjunction_existence() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "let s0: Foo satisfy { f(s0) and g(s0) }",
+            "function(x0: Foo) { not g(x0) or not f(x0) }(s0)",
+            "not f(s0)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "let s0: Foo satisfy { f(s0) and g(s0) }",
             "not g(s0) or not f(s0)",
@@ -1650,8 +1770,19 @@ fn test_proving_with_skolem() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "let s0: Foo -> Foo satisfy { forall(x0: Foo) { not f(x0) or g(x0, s0(x0)) } }",
+            "function(x0: Foo) { not g(x, x0) }(s0(x))",
+            "function(x0: Foo) { not f(x0) or g(x0, s0(x0)) }(x)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "let s0: Foo -> Foo satisfy { forall(x0: Foo) { not f(x0) or g(x0, s0(x0)) } }",
             "not g(x, s0(x))",
@@ -1788,8 +1919,18 @@ fn test_proving_with_theorem_arg() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "function[T0: Thing](x0: T0, x1: T0, x2: T0) { T0.add(x0, x1) + x2 = T0.add(x0, T0.add(x1, x2)) }[T](a, b, c)",
+            "function[T0: Thing](x0: T0, x1: T0) { T0.add(x0, x1) = T0.add(x1, x0) }[T](b + c, a)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &["a + (b + c) = a + b + c", "a + (b + c) = b + c + a"],
     );
 }
@@ -1818,8 +1959,15 @@ fn test_proving_with_duplicate_literals() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &["function(x0: Foo, x1: Foo) { not f(x0, x1) or not f(x1, x0) }(Foo.foo, Foo.foo)"],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &["not f(Foo.foo, Foo.foo) or not f(Foo.foo, Foo.foo)"],
     );
 }
@@ -1900,8 +2048,19 @@ fn test_proving_using_unimported_function() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
     assert_proof_lines(
-        c.proof.unwrap(),
+        proof,
+        &[
+            "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
+            "not lib(foo).g(Foo.foo)",
+            "function(x0: Foo) { not f(x0) or lib(foo).g(x0) }(Foo.foo)",
+        ],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(
+        proof,
         &[
             "not lib(foo).g(Foo.foo) or h(Foo.foo)",
             "not lib(foo).g(Foo.foo)",
