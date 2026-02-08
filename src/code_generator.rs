@@ -811,7 +811,16 @@ impl CodeGenerator<'_> {
             AcornType::Empty => Err(Error::internal("empty type generated")),
             AcornType::Bool => Err(Error::internal("Bool unbound")),
             AcornType::Type0 => Ok(Expression::generate_identifier("Type0")),
-            AcornType::TypeclassConstraint(tc) => Ok(Expression::generate_identifier(&tc.name)),
+            AcornType::TypeclassConstraint(tc) => {
+                if let Some(alias) = self.bindings.typeclass_alias(tc) {
+                    Ok(Expression::generate_identifier(alias))
+                } else if self.bindings.has_typeclass_name(&tc.name) {
+                    Ok(Expression::generate_identifier(&tc.name))
+                } else {
+                    let module = self.module_to_expr(tc.module_id)?;
+                    Ok(module.add_dot_str(&tc.name))
+                }
+            }
         }
     }
 
