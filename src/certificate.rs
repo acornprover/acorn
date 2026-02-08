@@ -135,11 +135,22 @@ impl Certificate {
 
         let mut answer = Vec::new();
         for step in &ordered_steps {
-            answer.push(generator.certificate_step_to_code(
-                &names,
-                step,
-                &generation_normalizer,
-            )?);
+            #[cfg(feature = "bigcert")]
+            let line = match step {
+                CertificateStep::Claim(claim) => {
+                    if claim.clause.get_local_context().is_empty() {
+                        generator.certificate_step_to_code(&names, step, &generation_normalizer)?
+                    } else {
+                        Self::serialize_claim_with_args(claim, &generation_normalizer, bindings)?
+                    }
+                }
+                _ => generator.certificate_step_to_code(&names, step, &generation_normalizer)?,
+            };
+
+            #[cfg(not(feature = "bigcert"))]
+            let line = generator.certificate_step_to_code(&names, step, &generation_normalizer)?;
+
+            answer.push(line);
         }
 
         Ok(Certificate::new(goal, answer))
@@ -408,6 +419,13 @@ impl Certificate {
             }
             StatementInfo::Claim(claim) => {
                 let value = evaluator.evaluate_value(&claim.claim, Some(&AcornType::Bool))?;
+                if let Some(claim) = Self::try_deserialize_claim_with_args_value(
+                    value.clone(),
+                    bindings.as_ref(),
+                    normalizer.as_ref(),
+                )? {
+                    return Ok(CertificateStep::Claim(claim));
+                }
                 let module_id = bindings.module_id();
                 let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
                 let clauses = view.value_to_denormalized_clauses(&value)?;
@@ -543,21 +561,26 @@ impl Certificate {
 
         let mut evaluator = Evaluator::new(project, bindings, None);
         let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
+        Self::try_deserialize_claim_with_args_value(evaluated, bindings, normalizer)?.ok_or_else(
+            || {
+                CodeGenError::GeneratedBadCode(
+                    "expected a function(...) { ... }(...) claim shape".to_string(),
+                )
+            },
+        )
+    }
 
-        let (arg_types, body, args) = match evaluated {
+    fn try_deserialize_claim_with_args_value(
+        value: AcornValue,
+        bindings: &BindingMap,
+        normalizer: &Normalizer,
+    ) -> Result<Option<Claim>, CodeGenError> {
+        let (arg_types, body, args) = match value {
             AcornValue::Application(app) => match *app.function {
                 AcornValue::Lambda(arg_types, body) => (arg_types, *body, app.args),
-                _ => {
-                    return Err(CodeGenError::GeneratedBadCode(
-                        "expected a function(...) { ... }(...) claim shape".to_string(),
-                    ));
-                }
+                _ => return Ok(None),
             },
-            _ => {
-                return Err(CodeGenError::GeneratedBadCode(
-                    "expected a function(...) { ... }(...) claim shape".to_string(),
-                ));
-            }
+            _ => return Ok(None),
         };
 
         if arg_types.is_empty() {
@@ -594,7 +617,7 @@ impl Certificate {
             var_map.set(var_id as AtomId, term);
         }
 
-        Ok(Claim { clause, var_map })
+        Ok(Some(Claim { clause, var_map }))
     }
 
     /// Check this certificate. It is expected that it has a proof.
@@ -802,6 +825,7 @@ impl CertificateWorklist {
 mod tests {
     use super::*;
     use crate::module::LoadState;
+    use std::borrow::Cow;
     use tempfile::tempdir;
 
     #[test]
@@ -991,5 +1015,159 @@ mod tests {
                 .expect_err("non-function claim should be rejected");
         let msg = err.to_string();
         assert!(msg.contains("function(...) { ... }(...)"));
+    }
+
+    #[test]
+    fn test_parse_code_line_accepts_claim_with_args_shape() {
+        let code = r#"
+            theorem goal {
+                false = false
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let mut expected_var_map = VariableMap::new();
+        expected_var_map.set(0, Term::new_false());
+        let expected = Claim {
+            clause: kernel.parse_clause("x0", &["Bool"]),
+            var_map: expected_var_map,
+        };
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Borrowed(&normalizer);
+        let step = Certificate::parse_code_line(
+            "function(x0: Bool) { x0 }(false)",
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        )
+        .expect("claim-with-args parsing should succeed");
+
+        match step {
+            CertificateStep::Claim(claim) => assert_eq!(claim, expected),
+            _ => panic!("expected claim step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_code_line_plain_claim_still_works() {
+        let code = r#"
+            let bar: Bool -> Bool = axiom
+
+            theorem goal {
+                bar(true)
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Borrowed(&normalizer);
+        let step = Certificate::parse_code_line(
+            "bar(true)",
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        )
+        .expect("plain claim parsing should succeed");
+
+        match step {
+            CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
+            _ => panic!("expected claim step"),
+        }
+    }
+
+    #[cfg(not(feature = "bigcert"))]
+    #[test]
+    fn test_from_concrete_steps_uses_legacy_claim_serialization_without_bigcert() {
+        let code = r#"
+            theorem goal {
+                false = false
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let generic = kernel.parse_clause("x0", &["Bool"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_false());
+        let concrete_steps = vec![ConcreteStep {
+            generic: generic.clone(),
+            var_maps: vec![(var_map, generic.get_local_context().clone())],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &normalizer,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0], "false");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_from_concrete_steps_uses_bigcert_claim_serialization() {
+        let code = r#"
+            theorem goal {
+                false = false
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let generic = kernel.parse_clause("x0", &["Bool"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_false());
+        let concrete_steps = vec![ConcreteStep {
+            generic: generic.clone(),
+            var_maps: vec![(var_map, generic.get_local_context().clone())],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &normalizer,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_from_concrete_steps_bigcert_falls_back_to_plain_claim_when_no_args() {
+        let code = r#"
+            theorem goal {
+                false
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let generic = kernel.parse_clause("false", &[]);
+
+        let concrete_steps = vec![ConcreteStep {
+            generic,
+            var_maps: vec![(
+                VariableMap::new(),
+                crate::kernel::local_context::LocalContext::empty(),
+            )],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &normalizer,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0], "false");
     }
 }
