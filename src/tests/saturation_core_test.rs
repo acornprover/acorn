@@ -997,7 +997,14 @@ fn test_proving_with_active_resolution() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_proof_lines(c.proof.unwrap(), &["not g(y) or not f(y) or h(y)"]);
+    let proof = c.proof.unwrap();
+    #[cfg(feature = "bigcert")]
+    assert_proof_lines(
+        proof,
+        &["function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)"],
+    );
+    #[cfg(not(feature = "bigcert"))]
+    assert_proof_lines(proof, &["not g(y) or not f(y) or h(y)"]);
 }
 
 #[test]
