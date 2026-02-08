@@ -1211,15 +1211,6 @@ impl<'a> Evaluator<'a> {
                         _ => return Err(token.error("generic function requires type arguments")),
                     };
 
-                    // Evaluate type arguments using current evaluator
-                    let mut type_args = vec![];
-                    for expr in &type_arg_exprs {
-                        type_args.push(self.evaluate_type(expr)?);
-                    }
-                    if type_args.len() != type_params.len() {
-                        return Err(args_expr.error("wrong number of type arguments"));
-                    }
-
                     // Create a modified BindingMap with type params bound to arbitrary types,
                     // preserving the generic lambda skeleton in AcornValue.
                     let mut new_bindings = self.bindings.clone();
@@ -1243,6 +1234,16 @@ impl<'a> Evaluator<'a> {
 
                     // Create a new evaluator with the modified bindings
                     let mut evaluator = Evaluator::new(self.project, &new_bindings, None);
+
+                    // Evaluate type arguments in the generic lambda's type-parameter scope,
+                    // so self-instantiation like function[T](...)[T] is representable.
+                    let mut type_args = vec![];
+                    for expr in &type_arg_exprs {
+                        type_args.push(evaluator.evaluate_type(expr)?);
+                    }
+                    if type_args.len() != type_params.len() {
+                        return Err(args_expr.error("wrong number of type arguments"));
+                    }
 
                     // Evaluate as a regular Lambda
                     if decls.is_empty() {

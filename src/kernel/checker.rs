@@ -186,6 +186,13 @@ impl Checker {
                     .or_insert(step_id);
             }
 
+            #[cfg(feature = "bigcert")]
+            if let Some(reduced_clause) =
+                self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
+            {
+                self.insert_clause(&reduced_clause, StepReason::EqualityGraph, kernel_context);
+            }
+
             // We only need to do equality resolution for clauses with free variables,
             // because resolvable concrete literals would already have been simplified out.
             for resolution in inference::equality_resolutions(clause, kernel_context) {
@@ -303,6 +310,27 @@ impl Checker {
 
         trace!(clause = %clause, result = "failed", "checking clause");
         None
+    }
+
+    #[cfg(feature = "bigcert")]
+    fn simplify_variable_clause_with_concrete_facts(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<Clause> {
+        let mut changed = false;
+        let mut reduced_literals = Vec::with_capacity(clause.literals.len());
+        for literal in &clause.literals {
+            match self.term_graph.evaluate_literal(literal, kernel_context) {
+                Some(true) => return None,
+                Some(false) => changed = true,
+                None => reduced_literals.push(literal.clone()),
+            }
+        }
+        if !changed {
+            return None;
+        }
+        Some(Clause::new(reduced_literals, clause.get_local_context()))
     }
 
     /// Try to eliminate the last argument from both sides of an equality.
@@ -497,6 +525,17 @@ impl Checker {
                         reason,
                     });
 
+                    #[cfg(feature = "bigcert")]
+                    {
+                        let mut generic_clause = claim.clause.clone();
+                        generic_clause.normalize();
+                        self.insert_clause(
+                            &generic_clause,
+                            StepReason::PreviousClaim,
+                            &kernel_context,
+                        );
+                    }
+
                     clause.normalize();
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
@@ -636,6 +675,24 @@ mod tests {
         // But specialization via generalization matching is disabled in bigcert mode.
         let specialized = context.parse_clause("g0(c0)", &[]);
         assert!(checker.check_clause(&specialized, &context).is_none());
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_checker_bigcert_simplifies_variable_clause_using_concrete_literal() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        context.parse_constant("g0", "(Bool, Bool) -> Bool");
+
+        let mut checker = Checker::new();
+        let not_baz = context.parse_clause("not c1", &[]);
+        checker.insert_clause(&not_baz, StepReason::Testing, &context);
+
+        let generic = context.parse_clause("not g0(x0, c0) or c1", &["Bool"]);
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        let reduced = context.parse_clause("not g0(x0, c0)", &["Bool"]);
+        assert!(checker.check_clause(&reduced, &context).is_some());
     }
 
     #[test]

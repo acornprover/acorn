@@ -20,8 +20,7 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::concrete_proof::ConcreteProof;
-use crate::kernel::local_context::LocalContext;
-use crate::kernel::term::{Decomposition, Term, TermRef};
+use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::normalizer::{NormalizationContext, Normalizer};
@@ -30,6 +29,9 @@ use crate::prover::proof::ConcreteStep;
 use crate::syntax::expression::{Declaration, Expression};
 use crate::syntax::statement::{Statement, StatementInfo};
 use crate::syntax::token::TokenType;
+
+#[cfg(all(test, feature = "bigcert"))]
+use crate::kernel::local_context::LocalContext;
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
@@ -103,66 +105,6 @@ impl Certificate {
     /// Check if this certificate has a proof
     pub fn has_proof(&self) -> bool {
         self.proof.is_some()
-    }
-
-    fn infer_type_param_bindings_from_type_pattern(
-        pattern: TermRef<'_>,
-        concrete: TermRef<'_>,
-        local_context: &LocalContext,
-        var_map: &mut VariableMap,
-    ) -> bool {
-        // While serializing a claim, some type-parameter mappings may be implicit:
-        // they only appear through the types of mapped value terms (e.g. x1: x0, x1 -> true).
-        // This matcher walks "generic type pattern" vs "concrete type" and fills var_map
-        // for locals whose kind is a type parameter (Type0/typeclass kind).
-        match (pattern.decompose(), concrete.decompose()) {
-            (Decomposition::Atom(Atom::FreeVariable(var_id)), _) => {
-                let is_type_param = local_context
-                    .get_var_type(*var_id as usize)
-                    .map(|t| t.as_ref().is_type_param_kind())
-                    .unwrap_or(false);
-                if is_type_param {
-                    return var_map.match_var(*var_id, concrete);
-                }
-                pattern == concrete
-            }
-            (Decomposition::Atom(pattern_atom), Decomposition::Atom(concrete_atom)) => {
-                pattern_atom == concrete_atom
-            }
-            (
-                Decomposition::Application(pattern_func, pattern_arg),
-                Decomposition::Application(concrete_func, concrete_arg),
-            ) => {
-                Self::infer_type_param_bindings_from_type_pattern(
-                    pattern_func,
-                    concrete_func,
-                    local_context,
-                    var_map,
-                ) && Self::infer_type_param_bindings_from_type_pattern(
-                    pattern_arg,
-                    concrete_arg,
-                    local_context,
-                    var_map,
-                )
-            }
-            (
-                Decomposition::Pi(pattern_input, pattern_output),
-                Decomposition::Pi(concrete_input, concrete_output),
-            ) => {
-                Self::infer_type_param_bindings_from_type_pattern(
-                    pattern_input,
-                    concrete_input,
-                    local_context,
-                    var_map,
-                ) && Self::infer_type_param_bindings_from_type_pattern(
-                    pattern_output,
-                    concrete_output,
-                    local_context,
-                    var_map,
-                )
-            }
-            _ => false,
-        }
     }
 
     /// Convert a ConcreteProof to a Certificate (string format).
@@ -586,22 +528,6 @@ impl Certificate {
             .unwrap_or(0);
 
         let kernel_context = normalizer.kernel_context();
-        let mut effective_var_map = claim.var_map.clone();
-        for var_id in 0..used_var_count {
-            let Some(mapped_term) = claim.var_map.get_mapping(var_id as AtomId) else {
-                continue;
-            };
-            let generic_type = local_context
-                .get_var_type(var_id)
-                .expect("local context should provide all variable types");
-            let mapped_type = mapped_term.get_type_with_context(local_context, kernel_context);
-            Self::infer_type_param_bindings_from_type_pattern(
-                generic_type.as_ref(),
-                mapped_type.as_ref(),
-                local_context,
-                &mut effective_var_map,
-            );
-        }
 
         let mut type_param_decl_codes: Vec<String> = vec![];
         let mut type_arg_codes: Vec<String> = vec![];
@@ -615,16 +541,12 @@ impl Certificate {
                 .expect("local context should provide all variable types")
                 .clone();
 
-            let arg_term = claim
-                .var_map
-                .get_mapping(var_id as AtomId)
-                .or_else(|| effective_var_map.get_mapping(var_id as AtomId))
-                .ok_or_else(|| {
-                    CodeGenError::GeneratedBadCode(format!(
-                        "missing claim var map entry for x{}",
-                        var_id
-                    ))
-                })?;
+            let arg_term = claim.var_map.get_mapping(var_id as AtomId).ok_or_else(|| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "missing claim var map entry for x{}",
+                    var_id
+                ))
+            })?;
 
             if var_type.as_ref().is_type_param_kind() {
                 let type_param_name = format!("T{}", var_id);
@@ -671,7 +593,9 @@ impl Certificate {
         }
 
         if value_decl_codes.is_empty() {
-            let specialized = effective_var_map.specialize_clause(&claim.clause, kernel_context);
+            let specialized = claim
+                .var_map
+                .specialize_clause(&claim.clause, kernel_context);
             let mut specialized_value = normalizer.denormalize(&specialized, None, None, true);
             if let Some(synthetic_names) = synthetic_names {
                 specialized_value = specialized_value.replace_synthetics(synthetic_names);
@@ -1441,5 +1365,39 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0], "false");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_from_concrete_steps_bigcert_infers_type_arg_from_value_mapping() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let generic = kernel.parse_clause("x1 = x1", &["Type", "x0"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_variable(0));
+        var_map.set(1, Term::new_true());
+        let replacement_context =
+            LocalContext::from_types(vec![Term::type_sort(), Term::bool_type()]);
+        let concrete_steps = vec![ConcreteStep {
+            generic: generic.clone(),
+            var_maps: vec![(var_map, replacement_context)],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &normalizer,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
     }
 }

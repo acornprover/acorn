@@ -17,7 +17,7 @@ use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::clause::Clause;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
-use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
 use crate::normalizer::Normalizer;
@@ -985,6 +985,62 @@ impl CodeGenerator<'_> {
         Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
     }
 
+    fn infer_type_param_bindings_from_type_pattern(
+        pattern: TermRef<'_>,
+        concrete: TermRef<'_>,
+        local_context: &LocalContext,
+        var_map: &mut VariableMap,
+    ) -> bool {
+        match (pattern.decompose(), concrete.decompose()) {
+            (Decomposition::Atom(Atom::FreeVariable(var_id)), _) => {
+                let is_type_param = local_context
+                    .get_var_type(*var_id as usize)
+                    .map(|t| t.as_ref().is_type_param_kind())
+                    .unwrap_or(false);
+                if is_type_param {
+                    return var_map.match_var(*var_id, concrete);
+                }
+                pattern == concrete
+            }
+            (Decomposition::Atom(pattern_atom), Decomposition::Atom(concrete_atom)) => {
+                pattern_atom == concrete_atom
+            }
+            (
+                Decomposition::Application(pattern_func, pattern_arg),
+                Decomposition::Application(concrete_func, concrete_arg),
+            ) => {
+                Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_func,
+                    concrete_func,
+                    local_context,
+                    var_map,
+                ) && Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_arg,
+                    concrete_arg,
+                    local_context,
+                    var_map,
+                )
+            }
+            (
+                Decomposition::Pi(pattern_input, pattern_output),
+                Decomposition::Pi(concrete_input, concrete_output),
+            ) => {
+                Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_input,
+                    concrete_input,
+                    local_context,
+                    var_map,
+                ) && Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_output,
+                    concrete_output,
+                    local_context,
+                    var_map,
+                )
+            }
+            _ => false,
+        }
+    }
+
     /// Convert one specialization to certificate steps.
     /// The replacement_context is the context that the var_map's replacement terms reference.
     /// This is needed to look up variable types when specializing.
@@ -1059,8 +1115,41 @@ impl CodeGenerator<'_> {
             if var_id >= generic_len {
                 continue;
             }
+            let var_type = generic_context
+                .get_var_type(var_id)
+                .expect("generic context should provide all var types");
             let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
+            if var_type.as_ref().is_type_param_kind() {
+                let specialized_type =
+                    specialized.get_type_with_context(generic_context, normalizer.kernel_context());
+                if !specialized_type.as_ref().is_type_param_kind()
+                    || matches!(
+                        specialized.as_ref().decompose(),
+                        Decomposition::Atom(Atom::FreeVariable(_))
+                    )
+                {
+                    // Placeholder type-parameter bindings are not concrete enough to serialize.
+                    // We infer concrete bindings from mapped value types below.
+                    continue;
+                }
+            }
             claim_var_map.set(var_id as AtomId, specialized);
+        }
+        for var_id in 0..generic_len {
+            let Some(mapped_term) = claim_var_map.get_mapping(var_id as AtomId).cloned() else {
+                continue;
+            };
+            let generic_type = generic_context
+                .get_var_type(var_id)
+                .expect("generic context should provide all var types");
+            let mapped_type =
+                mapped_term.get_type_with_context(generic_context, normalizer.kernel_context());
+            Self::infer_type_param_bindings_from_type_pattern(
+                generic_type.as_ref(),
+                mapped_type.as_ref(),
+                generic_context,
+                &mut claim_var_map,
+            );
         }
         for var_id in 0..generic_len {
             let var_id = var_id as AtomId;
@@ -1070,6 +1159,9 @@ impl CodeGenerator<'_> {
             let var_type = generic_context
                 .get_var_type(var_id as usize)
                 .expect("generic context should provide all var types");
+            if var_type.as_ref().is_type_param_kind() {
+                continue;
+            }
             if let Some(symbol) =
                 names.symbol_for_variable_type(normalizer, var_type, generic_context)?
             {
@@ -1077,32 +1169,66 @@ impl CodeGenerator<'_> {
             }
         }
 
+        let used_var_count = generic
+            .literals
+            .iter()
+            .filter_map(|lit| {
+                let left_max = lit.left.max_variable();
+                let right_max = lit.right.max_variable();
+                match (left_max, right_max) {
+                    (Some(l), Some(r)) => Some(l.max(r)),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    (None, None) => None,
+                }
+            })
+            .max()
+            .map(|max| (max + 1) as usize)
+            .unwrap_or(0);
+        let has_missing_used_mappings =
+            (0..used_var_count).any(|var_id| !claim_var_map.has_mapping(var_id as AtomId));
+        let has_placeholder_type_bindings = claim_var_map.iter().any(|(var_id, term)| {
+            let is_type_param = generic_context
+                .get_var_type(var_id)
+                .map(|t| t.as_ref().is_type_param_kind())
+                .unwrap_or(false);
+            is_type_param
+                && matches!(
+                    term.as_ref().decompose(),
+                    Decomposition::Atom(Atom::FreeVariable(_))
+                )
+        });
         let has_out_of_scope_terms = claim_var_map.iter().any(|(_, term)| {
             term.max_variable()
                 .map(|id| id as usize >= generic_len)
                 .unwrap_or(false)
         });
-        let claim = if has_out_of_scope_terms {
-            Claim {
-                clause: clause.clone(),
-                var_map: VariableMap::new(),
-            }
-        } else {
-            let mut replayed =
-                claim_var_map.specialize_clause(generic, normalizer.kernel_context());
-            replayed.normalize_var_ids_no_flip();
-            if replayed == clause {
-                Claim {
-                    clause: generic.clone(),
-                    var_map: claim_var_map,
-                }
-            } else {
+        let claim =
+            if has_out_of_scope_terms || has_missing_used_mappings || has_placeholder_type_bindings
+            {
                 Claim {
                     clause: clause.clone(),
                     var_map: VariableMap::new(),
                 }
-            }
-        };
+            } else {
+                let mut replayed =
+                    claim_var_map.specialize_clause(generic, normalizer.kernel_context());
+                replayed.normalize_var_ids_no_flip();
+                let mut concretized_clause =
+                    claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
+                concretized_clause.normalize_var_ids_no_flip();
+                if replayed == concretized_clause {
+                    Claim {
+                        clause: generic.clone(),
+                        var_map: claim_var_map,
+                    }
+                } else {
+                    Claim {
+                        clause: clause.clone(),
+                        var_map: VariableMap::new(),
+                    }
+                }
+            };
 
         steps.push(CertificateStep::Claim(claim));
         Ok(())
