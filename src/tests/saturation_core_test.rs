@@ -1682,15 +1682,28 @@ fn test_proving_with_free_variable() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_proof_lines(
-        c.proof.unwrap(),
-        &[
-            "let s0: Foo satisfy { true }",
-            "f(s0)",
-            "not f(s0) or g",
-            "not f(s0)",
-        ],
-    );
+    let proof = c.proof.unwrap();
+    if cfg!(feature = "bigcert") {
+        assert_proof_lines(
+            proof,
+            &[
+                "let s0: Foo satisfy { true }",
+                "function(x0: Foo) { f(x0) }(s0)",
+                "function(x0: Foo) { not f(x0) or g }(s0)",
+                "function(x0: Foo) { not f(x0) }(s0)",
+            ],
+        );
+    } else {
+        assert_proof_lines(
+            proof,
+            &[
+                "let s0: Foo satisfy { true }",
+                "f(s0)",
+                "not f(s0) or g",
+                "not f(s0)",
+            ],
+        );
+    }
 }
 
 #[test]

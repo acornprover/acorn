@@ -20,7 +20,8 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::concrete_proof::ConcreteProof;
-use crate::kernel::term::Term;
+use crate::kernel::local_context::LocalContext;
+use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleDescriptor;
 use crate::normalizer::{NormalizationContext, Normalizer};
@@ -104,6 +105,66 @@ impl Certificate {
         self.proof.is_some()
     }
 
+    fn infer_type_param_bindings_from_type_pattern(
+        pattern: TermRef<'_>,
+        concrete: TermRef<'_>,
+        local_context: &LocalContext,
+        var_map: &mut VariableMap,
+    ) -> bool {
+        // While serializing a claim, some type-parameter mappings may be implicit:
+        // they only appear through the types of mapped value terms (e.g. x1: x0, x1 -> true).
+        // This matcher walks "generic type pattern" vs "concrete type" and fills var_map
+        // for locals whose kind is a type parameter (Type0/typeclass kind).
+        match (pattern.decompose(), concrete.decompose()) {
+            (Decomposition::Atom(Atom::FreeVariable(var_id)), _) => {
+                let is_type_param = local_context
+                    .get_var_type(*var_id as usize)
+                    .map(|t| t.as_ref().is_type_param_kind())
+                    .unwrap_or(false);
+                if is_type_param {
+                    return var_map.match_var(*var_id, concrete);
+                }
+                pattern == concrete
+            }
+            (Decomposition::Atom(pattern_atom), Decomposition::Atom(concrete_atom)) => {
+                pattern_atom == concrete_atom
+            }
+            (
+                Decomposition::Application(pattern_func, pattern_arg),
+                Decomposition::Application(concrete_func, concrete_arg),
+            ) => {
+                Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_func,
+                    concrete_func,
+                    local_context,
+                    var_map,
+                ) && Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_arg,
+                    concrete_arg,
+                    local_context,
+                    var_map,
+                )
+            }
+            (
+                Decomposition::Pi(pattern_input, pattern_output),
+                Decomposition::Pi(concrete_input, concrete_output),
+            ) => {
+                Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_input,
+                    concrete_input,
+                    local_context,
+                    var_map,
+                ) && Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_output,
+                    concrete_output,
+                    local_context,
+                    var_map,
+                )
+            }
+            _ => false,
+        }
+    }
+
     /// Convert a ConcreteProof to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
@@ -138,7 +199,7 @@ impl Certificate {
             #[cfg(feature = "bigcert")]
             let line = match step {
                 CertificateStep::Claim(claim) => {
-                    if claim.clause.get_local_context().is_empty() {
+                    if claim.clause.get_local_context().is_empty() || claim.var_map.len() == 0 {
                         generator.certificate_step_to_code(&names, step, &generation_normalizer)?
                     } else {
                         Self::serialize_claim_with_args(claim, &generation_normalizer, bindings)?
@@ -469,76 +530,146 @@ impl Certificate {
                 "cannot serialize claim-with-args for a clause with no local variables".to_string(),
             ));
         }
-        if local_context
-            .get_var_types()
-            .iter()
-            .any(|t| t.as_ref().is_type_param_kind())
-        {
-            return Err(CodeGenError::GeneratedBadCode(
-                "serialize_claim_with_args does not yet support type-parameter locals".to_string(),
-            ));
-        }
-        for var_id in 0..var_count {
-            if claim.var_map.get_mapping(var_id as AtomId).is_none() {
-                return Err(CodeGenError::GeneratedBadCode(format!(
-                    "missing claim var map entry for x{}",
-                    var_id
-                )));
-            }
-        }
 
         let mut generator = CodeGenerator::new(bindings);
-        let generic_value = normalizer.denormalize(&claim.clause, None, None, true);
+        let generic_value = normalizer.denormalize(&claim.clause, None, None, false);
         let generic_code = generator.value_to_code(&generic_value)?;
-        let body_code = match generic_value {
-            AcornValue::ForAll(_, _) => {
-                let generic_expr = Expression::parse_value_string(&generic_code)?;
-                match generic_expr {
-                    Expression::Binder(token, _, body, _)
-                        if token.token_type == TokenType::ForAll =>
-                    {
-                        body.to_string()
-                    }
-                    _ => {
-                        return Err(CodeGenError::GeneratedBadCode(
-                            "expected denormalized generic claim to have forall shape".to_string(),
-                        ));
-                    }
+        let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
+            let generic_expr = Expression::parse_value_string(&generic_code)?;
+            match generic_expr {
+                Expression::Binder(token, _, body, _) if token.token_type == TokenType::ForAll => {
+                    body.to_string()
+                }
+                _ => {
+                    return Err(CodeGenError::GeneratedBadCode(
+                        "expected denormalized generic claim to have forall shape".to_string(),
+                    ));
                 }
             }
-            _ => {
-                return Err(CodeGenError::GeneratedBadCode(
-                    "expected generic clause to denormalize to a forall body".to_string(),
-                ));
-            }
+        } else {
+            generic_code
         };
 
-        let mut decl_codes = Vec::with_capacity(var_count);
-        let mut arg_codes = Vec::with_capacity(var_count);
-        for var_id in 0..var_count {
-            let var_name = format!("x{}", var_id);
+        let used_var_count = claim
+            .clause
+            .literals
+            .iter()
+            .filter_map(|lit| {
+                let left_max = lit.left.max_variable();
+                let right_max = lit.right.max_variable();
+                match (left_max, right_max) {
+                    (Some(l), Some(r)) => Some(l.max(r)),
+                    (Some(l), None) => Some(l),
+                    (None, Some(r)) => Some(r),
+                    (None, None) => None,
+                }
+            })
+            .max()
+            .map(|max| (max + 1) as usize)
+            .unwrap_or(0);
+
+        let kernel_context = normalizer.kernel_context();
+        let mut effective_var_map = claim.var_map.clone();
+        for var_id in 0..used_var_count {
+            let Some(mapped_term) = claim.var_map.get_mapping(var_id as AtomId) else {
+                continue;
+            };
+            let generic_type = local_context
+                .get_var_type(var_id)
+                .expect("local context should provide all variable types");
+            let mapped_type = mapped_term.get_type_with_context(local_context, kernel_context);
+            Self::infer_type_param_bindings_from_type_pattern(
+                generic_type.as_ref(),
+                mapped_type.as_ref(),
+                local_context,
+                &mut effective_var_map,
+            );
+        }
+
+        let mut type_param_decl_codes: Vec<String> = vec![];
+        let mut type_arg_codes: Vec<String> = vec![];
+        let mut value_decl_codes: Vec<String> = vec![];
+        let mut value_arg_codes: Vec<String> = vec![];
+        let mut next_value_decl_id: usize = 0;
+
+        for var_id in 0..used_var_count {
             let var_type = local_context
                 .get_var_type(var_id)
                 .expect("local context should provide all variable types")
                 .clone();
-            let acorn_type =
-                normalizer.denormalize_type_with_context(var_type, local_context, true);
-            let type_code = generator.type_to_expr(&acorn_type)?.to_string();
-            decl_codes.push(format!("{}: {}", var_name, type_code));
 
             let arg_term = claim
                 .var_map
                 .get_mapping(var_id as AtomId)
-                .expect("var map entry checked above");
-            let arg_value = normalizer.denormalize_term_with_context(arg_term, local_context, true);
-            arg_codes.push(generator.value_to_code(&arg_value)?);
+                .or_else(|| effective_var_map.get_mapping(var_id as AtomId))
+                .ok_or_else(|| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "missing claim var map entry for x{}",
+                        var_id
+                    ))
+                })?;
+
+            if var_type.as_ref().is_type_param_kind() {
+                let type_param_name = format!("T{}", var_id);
+                let kind = normalizer.denormalize_type_with_context(var_type, local_context, false);
+                let decl_code = match kind {
+                    AcornType::Type0 => type_param_name.clone(),
+                    AcornType::TypeclassConstraint(_) => {
+                        let kind_code = generator.type_to_expr(&kind)?.to_string();
+                        format!("{}: {}", type_param_name, kind_code)
+                    }
+                    _ => {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "invalid type-parameter kind for x{}",
+                            var_id
+                        )));
+                    }
+                };
+                type_param_decl_codes.push(decl_code);
+
+                let concrete_type = normalizer.denormalize_type_with_context(
+                    arg_term.clone(),
+                    local_context,
+                    false,
+                );
+                type_arg_codes.push(generator.type_to_expr(&concrete_type)?.to_string());
+                continue;
+            }
+
+            let var_name = format!("x{}", next_value_decl_id);
+            next_value_decl_id += 1;
+            let acorn_type =
+                normalizer.denormalize_type_with_context(var_type, local_context, false);
+            let type_code = generator.type_to_expr(&acorn_type)?.to_string();
+            value_decl_codes.push(format!("{}: {}", var_name, type_code));
+
+            let arg_value =
+                normalizer.denormalize_term_with_context(arg_term, local_context, false);
+            value_arg_codes.push(generator.value_to_code(&arg_value)?);
+        }
+
+        if value_decl_codes.is_empty() {
+            let specialized = effective_var_map.specialize_clause(&claim.clause, kernel_context);
+            let specialized_value = normalizer.denormalize(&specialized, None, None, true);
+            return generator.value_to_code(&specialized_value);
+        }
+
+        if type_param_decl_codes.is_empty() {
+            return Ok(format!(
+                "function({}) {{ {} }}({})",
+                value_decl_codes.join(", "),
+                body_code,
+                value_arg_codes.join(", ")
+            ));
         }
 
         Ok(format!(
-            "function({}) {{ {} }}({})",
-            decl_codes.join(", "),
+            "function[{}]({}) {{ {} }}[{}]({})",
+            type_param_decl_codes.join(", "),
+            value_decl_codes.join(", "),
             body_code,
-            arg_codes.join(", ")
+            type_arg_codes.join(", "),
+            value_arg_codes.join(", ")
         ))
     }
 
@@ -976,6 +1107,40 @@ mod tests {
             Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
                 .expect("deserialization should succeed");
         assert_eq!(roundtrip, claim);
+    }
+
+    #[test]
+    fn test_claim_with_args_supports_type_parameter_locals() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x1 = x1", &["Type", "x0"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::bool_type());
+        var_map.set(1, Term::new_true());
+        let claim = Claim {
+            clause: clause.clone(),
+            var_map: var_map.clone(),
+        };
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization with type locals should succeed");
+        assert_eq!(serialized, "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
+
+        let parsed =
+            Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
+                .expect("deserialization should succeed");
+
+        let mut expected_instantiated = var_map.specialize_clause(&clause, kernel);
+        expected_instantiated.normalize_var_ids_no_flip();
+        let mut parsed_instantiated = parsed.var_map.specialize_clause(&parsed.clause, kernel);
+        parsed_instantiated.normalize_var_ids_no_flip();
+        assert_eq!(parsed_instantiated, expected_instantiated);
     }
 
     #[test]
