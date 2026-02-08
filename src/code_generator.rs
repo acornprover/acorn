@@ -6,7 +6,9 @@ use tower_lsp::lsp_types::{LanguageString, MarkedString};
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
 };
-use crate::elaborator::acorn_value::{AcornValue, BinaryOp, ConstantInstance};
+use crate::elaborator::acorn_value::{
+    AcornValue, BinaryOp, ConstantInstance, TypeApplication as ValueTypeApplication,
+};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::type_unifier::TypeclassRegistry;
@@ -20,7 +22,7 @@ use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
 use crate::normalizer::Normalizer;
 use crate::prover::proof::ConcreteStep;
-use crate::syntax::expression::{Declaration, Expression};
+use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::TokenType;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -76,6 +78,12 @@ fn collect_type_var_names_from_value_recursive(value: &AcornValue, names: &mut V
             collect_type_var_names_from_value_recursive(&fa.function, names);
             for arg in &fa.args {
                 collect_type_var_names_from_value_recursive(arg, names);
+            }
+        }
+        AcornValue::TypeApplication(app) => {
+            collect_type_var_names_from_value_recursive(&app.function, names);
+            for type_arg in &app.type_args {
+                collect_type_var_names_recursive(type_arg, names);
             }
         }
         AcornValue::Binary(_, left, right) => {
@@ -239,6 +247,29 @@ fn rename_type_vars_in_value(
                 .collect();
             AcornValue::apply(new_func, new_args)
         }
+        AcornValue::TypeApplication(app) => AcornValue::TypeApplication(ValueTypeApplication {
+            function: Box::new(rename_type_vars_in_value(
+                &app.function,
+                rename_map,
+                defining_synthetics,
+            )),
+            type_param_names: app
+                .type_param_names
+                .iter()
+                .map(|name| {
+                    rename_map
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone())
+                })
+                .collect(),
+            type_param_constraints: app.type_param_constraints.clone(),
+            type_args: app
+                .type_args
+                .iter()
+                .map(|t| rename_type_vars_in_type(t, rename_map))
+                .collect(),
+        }),
         AcornValue::Binary(op, left, right) => AcornValue::Binary(
             *op,
             Box::new(rename_type_vars_in_value(
@@ -1427,6 +1458,69 @@ impl CodeGenerator<'_> {
                     ))
                 }
             }
+            AcornValue::TypeApplication(app) => {
+                if let AcornValue::Lambda(arg_types, body) = app.function.as_ref() {
+                    let initial_var_names_len = self.var_names.len();
+                    let mut decls = vec![];
+                    for arg_type in arg_types {
+                        let var_name = self.bindings.next_indexed_var('x', &mut self.next_x);
+                        let name_token = TokenType::Identifier.new_token(&var_name);
+                        self.var_names.push(var_name);
+                        let type_expr = self.type_to_expr(arg_type)?;
+                        decls.push(Declaration::Typed(name_token, type_expr));
+                    }
+                    let body_expr = self.value_to_expr(body, false, names)?;
+                    self.var_names.truncate(initial_var_names_len);
+
+                    let mut type_params = vec![];
+                    for (param_name, constraint) in app
+                        .type_param_names
+                        .iter()
+                        .zip(app.type_param_constraints.iter())
+                    {
+                        let typeclass = constraint
+                            .as_ref()
+                            .map(|tc| {
+                                self.type_to_expr(&AcornType::TypeclassConstraint(tc.clone()))
+                            })
+                            .transpose()?;
+                        type_params.push(TypeParamExpr {
+                            name: TokenType::Identifier.new_token(param_name),
+                            type_expr: None,
+                            typeclass,
+                        });
+                    }
+
+                    let generic = Expression::GenericBinder(
+                        TokenType::Function.generate(),
+                        type_params,
+                        decls,
+                        Box::new(body_expr),
+                        TokenType::RightBrace.generate(),
+                    );
+
+                    let type_arg_exprs = app
+                        .type_args
+                        .iter()
+                        .map(|t| self.type_to_expr(t))
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(Expression::Concatenation(
+                        Box::new(generic),
+                        Box::new(Expression::generate_params(type_arg_exprs)),
+                    ));
+                }
+
+                let function = self.value_to_expr(&app.function, inferrable, names)?;
+                let type_arg_exprs = app
+                    .type_args
+                    .iter()
+                    .map(|t| self.type_to_expr(t))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Expression::Concatenation(
+                    Box::new(function),
+                    Box::new(Expression::generate_params(type_arg_exprs)),
+                ))
+            }
             AcornValue::Application(fa) => {
                 let mut arg_exprs = vec![];
                 for arg in &fa.args {
@@ -2219,6 +2313,24 @@ mod tests {
             "#,
         );
         p.check_code("main", "double(true)");
+    }
+
+    #[test]
+    fn test_codegen_preserves_generic_lambda_application() {
+        let mut p = Project::new_mock();
+        p.mock(
+            "/mock/main.ac",
+            r#"
+            theorem goal {
+                true
+            }
+            "#,
+        );
+        p.check_code_into(
+            "main",
+            "function[T](x0: T) { x0 = x0 }[Bool](true)",
+            "function[T](x0: T) { x0 = x0 }[Bool](true)",
+        );
     }
 
     #[test]

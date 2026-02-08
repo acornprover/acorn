@@ -731,9 +731,21 @@ impl Certificate {
         bindings: &BindingMap,
         normalizer: &Normalizer,
     ) -> Result<Option<Claim>, CodeGenError> {
+        let mut type_param_names: Vec<String> = vec![];
+        let mut type_param_constraints = vec![];
+        let mut type_args = vec![];
         let (arg_types, body, args) = match value {
             AcornValue::Application(app) => match *app.function {
                 AcornValue::Lambda(arg_types, body) => (arg_types, *body, app.args),
+                AcornValue::TypeApplication(type_app) => match *type_app.function {
+                    AcornValue::Lambda(arg_types, body) => {
+                        type_param_names = type_app.type_param_names;
+                        type_param_constraints = type_app.type_param_constraints;
+                        type_args = type_app.type_args;
+                        (arg_types, *body, app.args)
+                    }
+                    _ => return Ok(None),
+                },
                 _ => return Ok(None),
             },
             _ => return Ok(None),
@@ -749,10 +761,43 @@ impl Certificate {
                 "argument count does not match function declaration".to_string(),
             ));
         }
+        if !type_param_names.is_empty()
+            && (type_param_names.len() != type_param_constraints.len()
+                || type_param_names.len() != type_args.len())
+        {
+            return Err(CodeGenError::GeneratedBadCode(
+                "type-argument metadata does not match type argument count".to_string(),
+            ));
+        }
 
         let mut normalizer_clone = normalizer.clone();
-        let mut view =
-            NormalizationContext::new_mut(&mut normalizer_clone, None, bindings.module_id());
+        let type_var_map = if type_param_names.is_empty() {
+            None
+        } else {
+            let mut map = HashMap::new();
+            for (i, (name, constraint)) in type_param_names
+                .iter()
+                .zip(type_param_constraints.iter())
+                .enumerate()
+            {
+                let var_type = if let Some(typeclass) = constraint {
+                    let typeclass_id = normalizer_clone
+                        .kernel_context_mut()
+                        .type_store
+                        .add_typeclass(typeclass);
+                    Term::typeclass(typeclass_id)
+                } else {
+                    Term::type_sort()
+                };
+                map.insert(name.clone(), (i as AtomId, var_type));
+            }
+            Some(map)
+        };
+        let mut view = NormalizationContext::new_mut(
+            &mut normalizer_clone,
+            type_var_map,
+            bindings.module_id(),
+        );
         let generic_value = AcornValue::forall(arg_types, body);
         let clauses = view.value_to_denormalized_clauses(&generic_value)?;
         if clauses.len() != 1 {
@@ -768,9 +813,17 @@ impl Certificate {
 
         let term_view = NormalizationContext::new_ref(normalizer, None);
         let mut var_map = VariableMap::new();
+        for (var_id, acorn_type) in type_args.iter().enumerate() {
+            let type_term = normalizer
+                .kernel_context()
+                .type_store
+                .to_type_term_with_vars(acorn_type, None);
+            var_map.set(var_id as AtomId, type_term);
+        }
+        let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
             let term = term_view.value_to_simple_term(arg)?;
-            var_map.set(var_id as AtomId, term);
+            var_map.set((value_offset + var_id) as AtomId, term);
         }
 
         Ok(Some(Claim { clause, var_map }))
@@ -1160,12 +1213,7 @@ mod tests {
         let parsed =
             Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
                 .expect("deserialization should succeed");
-
-        let mut expected_instantiated = var_map.specialize_clause(&clause, kernel);
-        expected_instantiated.normalize_var_ids_no_flip();
-        let mut parsed_instantiated = parsed.var_map.specialize_clause(&parsed.clause, kernel);
-        parsed_instantiated.normalize_var_ids_no_flip();
-        assert_eq!(parsed_instantiated, expected_instantiated);
+        assert_eq!(parsed, claim);
     }
 
     #[test]
@@ -1233,6 +1281,40 @@ mod tests {
             &mut normalizer_cow,
         )
         .expect("claim-with-args parsing should succeed");
+
+        match step {
+            CertificateStep::Claim(claim) => assert_eq!(claim, expected),
+            _ => panic!("expected claim step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_code_line_accepts_claim_with_type_args_shape() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let mut expected_var_map = VariableMap::new();
+        expected_var_map.set(0, Term::bool_type());
+        expected_var_map.set(1, Term::new_true());
+        let expected = Claim {
+            clause: kernel.parse_clause("x1 = x1", &["Type", "x0"]),
+            var_map: expected_var_map,
+        };
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Borrowed(&normalizer);
+        let step = Certificate::parse_code_line(
+            "function[T0](x0: T0) { x0 = x0 }[Bool](true)",
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        )
+        .expect("claim-with-type-args parsing should succeed");
 
         match step {
             CertificateStep::Claim(claim) => assert_eq!(claim, expected),

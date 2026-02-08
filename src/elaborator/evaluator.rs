@@ -1220,10 +1220,24 @@ impl<'a> Evaluator<'a> {
                         return Err(args_expr.error("wrong number of type arguments"));
                     }
 
-                    // Create a modified BindingMap with type params bound to concrete types
+                    // Create a modified BindingMap with type params bound to arbitrary types,
+                    // preserving the generic lambda skeleton in AcornValue.
                     let mut new_bindings = self.bindings.clone();
-                    for (param, arg_type) in type_params.iter().zip(type_args.iter()) {
-                        let potential = PotentialType::Resolved(arg_type.clone());
+                    let mut type_param_names = vec![];
+                    let mut type_param_constraints = vec![];
+                    for param in type_params {
+                        let type_param = TypeParam {
+                            name: param.name.text().to_string(),
+                            typeclass: if let Some(typeclass) = &param.typeclass {
+                                Some(self.evaluate_typeclass(typeclass)?)
+                            } else {
+                                None
+                            },
+                        };
+                        type_param_names.push(type_param.name.clone());
+                        type_param_constraints.push(type_param.typeclass.clone());
+                        let potential =
+                            PotentialType::Resolved(AcornType::Arbitrary(type_param.clone()));
                         new_bindings.add_type_alias(param.name.text(), potential, &param.name)?;
                     }
 
@@ -1239,8 +1253,14 @@ impl<'a> Evaluator<'a> {
                     let lambda = AcornValue::Lambda(arg_types, Box::new(body_val));
                     stack.remove_all(&arg_names);
 
-                    lambda.check_type(expected_type, expression)?;
-                    return Ok(PotentialValue::Resolved(lambda));
+                    let typed_lambda = AcornValue::type_apply(
+                        lambda,
+                        type_param_names,
+                        type_param_constraints,
+                        type_args,
+                    );
+                    typed_lambda.check_type(expected_type, expression)?;
+                    return Ok(PotentialValue::Resolved(typed_lambda));
                 }
 
                 let function = self.evaluate_potential_value(stack, function_expr, None)?;

@@ -142,6 +142,16 @@ mod tests {
     }
 
     #[test]
+    fn test_generic_lambda_application_in_statement() {
+        ok(indoc! {"
+        theorem goal {
+            function[T](x0: T) {
+                x0 = x0
+            }[Bool](true)
+        }"});
+    }
+
+    #[test]
     fn test_nat_ac_statements() {
         ok("type Nat: axiom");
         ok("let suc: Nat -> Nat = axiom");

@@ -586,7 +586,7 @@ fn test_generic_lambda_as_function_value() {
     let mut env = Environment::test();
     // A generic identity function instantiated with Bool gives a Bool -> Bool function
     env.add("let f: Bool -> Bool = function[T](x: T) { x }[Bool]");
-    env.expect_def("f", "function(x0: Bool) { x0 }");
+    env.expect_def("f", "function[T](x0: T) { x0 }[Bool]");
 }
 
 #[test]
@@ -594,7 +594,7 @@ fn test_generic_lambda_applied() {
     let mut env = Environment::test();
     // A generic identity function, instantiated with Bool, applied to true
     env.add("let p: Bool = function[T](x: T) { x }[Bool](true)");
-    env.expect_def("p", "function(x0: Bool) { x0 }(true)");
+    env.expect_def("p", "function[T](x0: T) { x0 }[Bool](true)");
 }
 
 #[test]
@@ -604,7 +604,7 @@ fn test_generic_lambda_with_nat() {
     env.add("let zero: Nat = axiom");
     // Generic lambda instantiated with Nat
     env.add("let f: Nat -> Nat = function[T](x: T) { x }[Nat]");
-    env.expect_def("f", "function(x0: Nat) { x0 }");
+    env.expect_def("f", "function[T](x0: T) { x0 }[Nat]");
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn test_generic_lambda_multiple_type_params() {
     env.add("type Nat: axiom");
     // Two type params
     env.add("let f: (Bool, Nat) -> Bool = function[T, U](x: T, y: U) { x }[Bool, Nat]");
-    env.expect_def("f", "function(x0: Bool, x1: Nat) { x0 }");
+    env.expect_def("f", "function[T, U](x0: T, x1: U) { x0 }[Bool, Nat]");
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn test_generic_lambda_body_uses_equality() {
     let mut env = Environment::test();
     // Generic lambda whose body uses equality on the type param
     env.add("let f: Bool -> Bool = function[T](x: T) { x = x }[Bool]");
-    env.expect_def("f", "function(x0: Bool) { (x0 = x0) }");
+    env.expect_def("f", "function[T](x0: T) { (x0 = x0) }[Bool]");
 }
 
 #[test]

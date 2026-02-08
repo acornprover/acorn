@@ -69,6 +69,41 @@ impl FunctionApplication {
     }
 }
 
+/// Represents explicit type application syntax on a value.
+/// This preserves source-level type arguments for roundtripping.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TypeApplication {
+    /// The value being type-applied.
+    pub function: Box<AcornValue>,
+
+    /// Ordered type parameter names from source syntax.
+    pub type_param_names: Vec<String>,
+
+    /// Optional typeclass constraints for each type parameter.
+    pub type_param_constraints: Vec<Option<Typeclass>>,
+
+    /// The concrete type arguments.
+    pub type_args: Vec<AcornType>,
+}
+
+impl TypeApplication {
+    fn substitutions(&self) -> Vec<(String, AcornType)> {
+        self.type_param_names
+            .iter()
+            .cloned()
+            .zip(self.type_args.iter().cloned())
+            .collect()
+    }
+
+    pub fn instantiated_function(&self) -> AcornValue {
+        self.function.instantiate(&self.substitutions())
+    }
+
+    pub fn get_type(&self) -> AcornType {
+        self.function.get_type().instantiate(&self.substitutions())
+    }
+}
+
 /// Represents binary operators used in Acorn
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BinaryOp {
@@ -315,6 +350,9 @@ pub enum AcornValue {
 
     Application(FunctionApplication),
 
+    /// Explicit type application syntax, e.g. `f[T]`.
+    TypeApplication(TypeApplication),
+
     /// A function definition that introduces variables onto the stack.
     Lambda(Vec<AcornType>, Box<AcornValue>),
 
@@ -375,6 +413,39 @@ impl fmt::Display for Subvalue<'_> {
                 write!(f, "{}{}", prefix, i)
             }
             AcornValue::Application(a) => a.fmt_helper(f, self.stack_size),
+            AcornValue::TypeApplication(ta) => {
+                if let AcornValue::Lambda(args, body) = ta.function.as_ref() {
+                    if !ta.type_param_names.is_empty()
+                        && ta.type_param_names.len() == ta.type_param_constraints.len()
+                    {
+                        let mut type_param_codes = Vec::new();
+                        for (name, constraint) in ta
+                            .type_param_names
+                            .iter()
+                            .zip(ta.type_param_constraints.iter())
+                        {
+                            if let Some(typeclass) = constraint {
+                                type_param_codes.push(format!("{}: {}", name, typeclass.name));
+                            } else {
+                                type_param_codes.push(name.clone());
+                            }
+                        }
+                        write!(
+                            f,
+                            "function[{}]({}) {{ {} }}",
+                            type_param_codes.join(", "),
+                            AcornType::decs_to_str(args, self.stack_size),
+                            Subvalue::new(body, self.stack_size + args.len())
+                        )?;
+                    } else {
+                        write!(f, "{}", Subvalue::new(&ta.function, self.stack_size))?;
+                    }
+                } else {
+                    write!(f, "{}", Subvalue::new(&ta.function, self.stack_size))?;
+                }
+                let args: Vec<_> = ta.type_args.iter().map(|t| t.to_string()).collect();
+                write!(f, "[{}]", args.join(", "))
+            }
             AcornValue::Lambda(args, body) => {
                 fmt_binder(f, "function", args, body, self.stack_size)
             }
@@ -470,6 +541,7 @@ impl AcornValue {
         match self {
             AcornValue::Variable(_, t) => t.clone(),
             AcornValue::Application(t) => t.get_type(),
+            AcornValue::TypeApplication(t) => t.get_type(),
             AcornValue::Lambda(args, return_value) => {
                 AcornType::functional(args.clone(), return_value.get_type())
             }
@@ -495,6 +567,7 @@ impl AcornValue {
         match self {
             AcornValue::Variable(_, var_type) => var_type == t,
             AcornValue::Application(app) => app.get_type() == *t,
+            AcornValue::TypeApplication(app) => app.get_type() == *t,
             AcornValue::Lambda(args, return_value) => {
                 if let AcornType::Function(ftype) = t {
                     args == &ftype.arg_types && return_value.is_type(&ftype.return_type)
@@ -537,12 +610,31 @@ impl AcornValue {
         }
     }
 
+    pub fn type_apply(
+        function: AcornValue,
+        type_param_names: Vec<String>,
+        type_param_constraints: Vec<Option<Typeclass>>,
+        type_args: Vec<AcornType>,
+    ) -> AcornValue {
+        if type_args.is_empty() {
+            function
+        } else {
+            AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(function),
+                type_param_names,
+                type_param_constraints,
+                type_args,
+            })
+        }
+    }
+
     /// Recursively extract the base function from applications.
     /// For example, if we have f(a)(b)(c), this returns f.
     /// This is useful for getting the original function from partial applications.
     pub fn unapply(&self) -> &AcornValue {
         match self {
             AcornValue::Application(app) => app.function.unapply(),
+            AcornValue::TypeApplication(app) => app.function.unapply(),
             _ => self,
         }
     }
@@ -646,7 +738,11 @@ impl AcornValue {
 
     /// Checks if this value is a lambda function
     pub fn is_lambda(&self) -> bool {
-        matches!(self, AcornValue::Lambda(_, _))
+        match self {
+            AcornValue::Lambda(_, _) => true,
+            AcornValue::TypeApplication(app) => app.function.is_lambda(),
+            _ => false,
+        }
     }
 
     /// Whether this value can be converted to a term, rather than requiring a literal or clause.
@@ -657,6 +753,7 @@ impl AcornValue {
             AcornValue::Application(app) => {
                 app.args.iter().all(|x| x.is_term()) && app.function.is_term()
             }
+            AcornValue::TypeApplication(app) => app.function.is_term(),
             AcornValue::Lambda(_, _) => false,
             AcornValue::Binary(_, _, _) => false,
             AcornValue::Not(_) => false,
@@ -758,6 +855,16 @@ impl AcornValue {
                     .map(|x| x.bind_values(first_binding_index, stack_size, values))
                     .collect(),
             }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.bind_values(
+                    first_binding_index,
+                    stack_size,
+                    values,
+                )),
+                type_param_names: app.type_param_names,
+                type_param_constraints: app.type_param_constraints,
+                type_args: app.type_args,
+            }),
             AcornValue::Lambda(args, return_value) => {
                 let return_value_stack_size = stack_size + args.len() as AtomId;
                 AcornValue::Lambda(
@@ -853,6 +960,12 @@ impl AcornValue {
                     .map(|x| x.insert_stack(index, increment))
                     .collect(),
             }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.insert_stack(index, increment)),
+                type_param_names: app.type_param_names,
+                type_param_constraints: app.type_param_constraints,
+                type_args: app.type_args,
+            }),
             AcornValue::Lambda(args, return_value) => {
                 AcornValue::Lambda(args, Box::new(return_value.insert_stack(index, increment)))
             }
@@ -919,6 +1032,9 @@ impl AcornValue {
                         args: expanded_args,
                     })
                 }
+            }
+            AcornValue::TypeApplication(app) => {
+                app.instantiated_function().expand_lambdas(stack_size)
             }
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
@@ -1016,6 +1132,12 @@ impl AcornValue {
                     args: new_args,
                 })
             }
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.replace_constants(stack_size, replacer)),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app.type_args.clone(),
+            }),
             AcornValue::Lambda(arg_types, value) => {
                 let new_value =
                     value.replace_constants(stack_size + arg_types.len() as AtomId, replacer);
@@ -1103,6 +1225,14 @@ impl AcornValue {
                     arg.validate_against_stack(stack)?;
                 }
                 Ok(())
+            }
+            AcornValue::TypeApplication(app) => {
+                if app.type_param_names.len() != app.type_args.len()
+                    || app.type_param_constraints.len() != app.type_args.len()
+                {
+                    return Err("type application has mismatched parameter metadata".to_string());
+                }
+                app.function.validate_against_stack(stack)
             }
             AcornValue::Lambda(args, value)
             | AcornValue::ForAll(args, value)
@@ -1204,6 +1334,16 @@ impl AcornValue {
                 function: Box::new(app.function.instantiate(params)),
                 args: app.args.iter().map(|x| x.instantiate(params)).collect(),
             }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.instantiate(params)),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app
+                    .type_args
+                    .iter()
+                    .map(|x| x.instantiate(params))
+                    .collect(),
+            }),
             AcornValue::Lambda(args, value) => AcornValue::Lambda(
                 args.iter()
                     .map(|x| x.instantiate(params))
@@ -1262,6 +1402,9 @@ impl AcornValue {
             AcornValue::Application(app) => {
                 app.function.has_generic() || app.args.iter().any(|x| x.has_generic())
             }
+            AcornValue::TypeApplication(ta) => {
+                ta.function.has_generic() || ta.type_args.iter().any(|x| x.has_generic())
+            }
             AcornValue::Lambda(args, value)
             | AcornValue::ForAll(args, value)
             | AcornValue::Exists(args, value) => {
@@ -1290,6 +1433,9 @@ impl AcornValue {
             AcornValue::Variable(_, t) => t.has_arbitrary(),
             AcornValue::Application(app) => {
                 app.function.has_arbitrary() || app.args.iter().any(|x| x.has_arbitrary())
+            }
+            AcornValue::TypeApplication(ta) => {
+                ta.function.has_arbitrary() || ta.type_args.iter().any(|x| x.has_arbitrary())
             }
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
@@ -1320,6 +1466,9 @@ impl AcornValue {
                 for arg in &app.args {
                     arg.for_each_constant(f);
                 }
+            }
+            AcornValue::TypeApplication(app) => {
+                app.function.for_each_constant(f);
             }
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
@@ -1359,6 +1508,14 @@ impl AcornValue {
                     arg.for_each_type(f);
                 }
                 // Process the application's result type
+                let app_type = app.get_type();
+                f(&app_type);
+            }
+            AcornValue::TypeApplication(app) => {
+                app.function.for_each_type(f);
+                for type_arg in &app.type_args {
+                    f(type_arg);
+                }
                 let app_type = app.get_type();
                 f(&app_type);
             }
@@ -1447,6 +1604,12 @@ impl AcornValue {
                 function: Box::new(app.function.to_arbitrary()),
                 args: app.args.iter().map(|x| x.to_arbitrary()).collect(),
             }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.to_arbitrary()),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app.type_args.iter().map(|x| x.to_arbitrary()).collect(),
+            }),
             AcornValue::Lambda(args, value) => AcornValue::Lambda(
                 args.iter().map(|x| x.to_arbitrary()).collect(),
                 Box::new(value.to_arbitrary()),
@@ -1499,6 +1662,12 @@ impl AcornValue {
             AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
                 function: Box::new(app.function.genericize(params)),
                 args: app.args.iter().map(|x| x.genericize(params)).collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.genericize(params)),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app.type_args.iter().map(|x| x.genericize(params)).collect(),
             }),
             AcornValue::Lambda(args, value) => AcornValue::Lambda(
                 args.iter().map(|x| x.genericize(params)).collect(),
@@ -1562,6 +1731,12 @@ impl AcornValue {
                     .into_iter()
                     .map(|x| x.set_params(name, params))
                     .collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.set_params(name, params)),
+                type_param_names: app.type_param_names,
+                type_param_constraints: app.type_param_constraints,
+                type_args: app.type_args,
             }),
             AcornValue::Lambda(args, value) => {
                 AcornValue::Lambda(args, Box::new(value.set_params(name, params)))
@@ -1636,6 +1811,7 @@ impl AcornValue {
     pub fn as_attribute(&self) -> Option<(ModuleId, &str, &str)> {
         match &self {
             AcornValue::Constant(c) => c.name.as_attribute(),
+            AcornValue::TypeApplication(app) => app.function.as_attribute(),
             _ => None,
         }
     }
@@ -1645,6 +1821,7 @@ impl AcornValue {
     pub fn as_name(&self) -> Option<&ConstantName> {
         match &self {
             AcornValue::Constant(c) => Some(&c.name),
+            AcornValue::TypeApplication(app) => app.function.as_name(),
             _ => None,
         }
     }
@@ -1653,6 +1830,7 @@ impl AcornValue {
     pub fn is_named_function_call(&self) -> Option<&ConstantName> {
         match self {
             AcornValue::Application(fa) => fa.function.as_name(),
+            AcornValue::TypeApplication(app) => app.function.is_named_function_call(),
             _ => None,
         }
     }
@@ -1769,6 +1947,12 @@ impl AcornValue {
                 app.function.find_type_vars(vars, source)?;
                 for arg in &app.args {
                     arg.find_type_vars(vars, source)?;
+                }
+            }
+            AcornValue::TypeApplication(app) => {
+                app.function.find_type_vars(vars, source)?;
+                for type_arg in &app.type_args {
+                    type_arg.find_type_vars(vars, source)?;
                 }
             }
             AcornValue::Lambda(args, value)

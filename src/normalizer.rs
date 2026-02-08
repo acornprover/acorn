@@ -776,6 +776,10 @@ impl<'a> NormalizationContext<'a> {
                     context,
                 )
             }
+            AcornValue::TypeApplication(app) => {
+                let instantiated = app.instantiated_function();
+                self.value_to_cnf(&instantiated, negate, stack, next_var_id, synth, context)
+            }
             AcornValue::Variable(..) | AcornValue::Constant(..) | AcornValue::Lambda(..) => {
                 let term = self
                     .value_to_extended_term(value, stack, next_var_id, synth, context)?

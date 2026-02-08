@@ -1978,6 +1978,9 @@ impl BindingMap {
                     self.find_unknown_scoped_constants(arg, answer);
                 }
             }
+            AcornValue::TypeApplication(app) => {
+                self.find_unknown_scoped_constants(&app.function, answer);
+            }
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value)

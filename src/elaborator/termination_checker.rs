@@ -42,6 +42,9 @@ impl TerminationChecker {
                     self.always_strict_sub = vec![false; self.always_strict_sub.len()];
                 }
             }
+            AcornValue::TypeApplication(app) => {
+                self.traverse(&app.function);
+            }
             AcornValue::Lambda(arg_types, value)
             | AcornValue::ForAll(arg_types, value)
             | AcornValue::Exists(arg_types, value) => {
