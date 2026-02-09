@@ -283,14 +283,16 @@ impl Checker {
             // and we want to match it against:
             //   g0(x0, x1, x2, x3, x4, x5) = x3(x4(x5))
             // by eliminating the common last argument x0 from both sides.
-            if let Some(reduced) = self.try_last_arg_elimination(clause) {
+            let mut reduced = self.try_last_arg_elimination(clause);
+            while let Some(reduced_clause) = reduced {
                 if let Some(step_id) = self
                     .generalization_set
-                    .find_generalization(reduced, kernel_context)
+                    .find_generalization(reduced_clause.clone(), kernel_context)
                 {
                     trace!(clause = %clause, result = "last_arg_elimination", "checking clause");
                     return Some(self.reasons[step_id].clone());
                 }
+                reduced = self.try_last_arg_elimination(&reduced_clause);
             }
         }
 
@@ -392,13 +394,12 @@ impl Checker {
             right_func.apply(&right_args[..right_args.len() - 1])
         };
 
-        // Create the reduced clause
+        // Create the reduced clause and normalize variable IDs/context.
+        // Normalization drops the eliminated variable if it is now unused.
         let new_lit = Literal::equals(new_left, new_right);
-
-        // Note: We keep the same context for now; the variable just won't be used
-        // in the reduced clause. A more thorough implementation would clean up
-        // the context, but this should work for matching purposes.
-        Some(Clause::new(vec![new_lit], &clause.context))
+        let mut reduced = Clause::new(vec![new_lit], &clause.context);
+        reduced.normalize_var_ids_no_flip();
+        Some(reduced)
     }
 
     /// Returns true if the checker has encountered a contradiction.
@@ -665,6 +666,33 @@ mod tests {
         // That should then reduce via truth table logic with "not c0 or c1" to yield "c1".
         let mut checker = TestChecker::with_clauses(&["c0 or c1 or c2", "not c0 or c1", "not c2"]);
         checker.check_clause_str("c1");
+    }
+
+    #[cfg(not(feature = "bigcert"))]
+    #[test]
+    fn test_checker_repeated_last_arg_elimination() {
+        let mut context = KernelContext::new();
+        context.parse_constant(
+            "g0",
+            "(Bool, Bool, Bool, (Bool, Bool, Bool) -> Bool, Bool -> Bool, Bool, Bool, Bool) -> Bool",
+        );
+        context.parse_constant("g3", "(Bool, Bool, Bool) -> Bool");
+        context.parse_constant("g4", "Bool -> Bool");
+        context.parse_constants(&["c0", "c1", "c2", "c3"], "Bool");
+
+        let mut checker = Checker::new();
+        let generic = context.parse_clause("g0(c0, c1, c2, g3, g4, x0) = g3(g4(x0))", &["Bool"]);
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        // Matching this clause requires two rounds of last-argument elimination:
+        //   g0(c0, c1, c2, g3, g4, c3, x0, x1) = g3(g4(c3), x0, x1)
+        // -> g0(c0, c1, c2, g3, g4, c3, x0) = g3(g4(c3), x0)
+        // -> g0(c0, c1, c2, g3, g4, c3) = g3(g4(c3))
+        let specialized = context.parse_clause(
+            "g0(c0, c1, c2, g3, g4, c3, x0, x1) = g3(g4(c3), x0, x1)",
+            &["Bool", "Bool"],
+        );
+        assert!(checker.check_clause(&specialized, &context).is_some());
     }
 
     #[cfg(feature = "bigcert")]
