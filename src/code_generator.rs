@@ -410,6 +410,10 @@ pub struct SyntheticNameSet {
     /// These are allocated during generation so claims can be made fully concrete.
     pub arbitrary_symbols: HashMap<Term, Symbol>,
 
+    /// Local aliases for scoped constants that originated in imported modules.
+    /// Keyed by the source scoped local id.
+    pub foreign_scoped_aliases: HashMap<AtomId, Symbol>,
+
     /// Synthetics we've already emitted a definition line for.
     defined_synthetics: HashSet<(ModuleId, AtomId)>,
 }
@@ -420,6 +424,7 @@ impl SyntheticNameSet {
             next_s: 0,
             synthetic_names: HashMap::new(),
             arbitrary_symbols: HashMap::new(),
+            foreign_scoped_aliases: HashMap::new(),
             defined_synthetics: HashSet::new(),
         }
     }
@@ -528,6 +533,40 @@ impl SyntheticNameSet {
         }
         let concrete_type = Self::concrete_type_for_term(normalizer, var_type, local_context)?;
         Ok(self.arbitrary_symbols.get(&concrete_type).copied())
+    }
+
+    fn ensure_arbitrary_for_foreign_scoped_id(
+        &mut self,
+        bindings: &BindingMap,
+        normalizer: &mut Normalizer,
+        foreign_local_id: AtomId,
+    ) -> Result<Option<Symbol>> {
+        if self.foreign_scoped_aliases.contains_key(&foreign_local_id) {
+            return Ok(None);
+        }
+
+        let source_symbol = Symbol::ScopedConstant(foreign_local_id);
+        let type_term = normalizer
+            .kernel_context()
+            .symbol_table
+            .get_type(source_symbol)
+            .clone();
+        let acorn_type = normalizer
+            .kernel_context()
+            .type_store
+            .type_term_to_acorn_type(&type_term);
+
+        let name = bindings.next_indexed_var('s', &mut self.next_s);
+        let cname = ConstantName::Unqualified(bindings.module_id(), name);
+        let atom = normalizer.add_scoped_constant(cname, &acorn_type, None);
+        let Atom::Symbol(alias) = atom else {
+            return Err(Error::internal(
+                "add_scoped_constant did not produce a symbol",
+            ));
+        };
+
+        self.foreign_scoped_aliases.insert(foreign_local_id, alias);
+        Ok(Some(alias))
     }
 
     fn add_arbitrary_for_term(
@@ -856,6 +895,17 @@ impl CodeGenerator<'_> {
         Ok(expr.to_string())
     }
 
+    /// Like value_to_code, but with explicit synthetic naming for replaced/imported synthetics.
+    pub fn value_to_code_with_synthetic_names(
+        &mut self,
+        value: &AcornValue,
+        synthetic_names: &HashMap<(ModuleId, AtomId), String>,
+    ) -> Result<String> {
+        let mut names = SyntheticNameSet::new();
+        names.synthetic_names = synthetic_names.clone();
+        self.value_to_code_with_names(value, &names)
+    }
+
     /// Generate code for one kernel-level synthetic definition step.
     fn generate_code_for_synthetic_step(
         &mut self,
@@ -1041,6 +1091,65 @@ impl CodeGenerator<'_> {
         }
     }
 
+    fn collect_foreign_scoped_ids(
+        clause: &Clause,
+        normalizer: &Normalizer,
+        current_module: ModuleId,
+    ) -> Vec<AtomId> {
+        let mut ids = HashSet::new();
+        for atom in clause.iter_atoms() {
+            let Atom::Symbol(Symbol::ScopedConstant(local_id)) = atom else {
+                continue;
+            };
+            let name = normalizer
+                .kernel_context()
+                .symbol_table
+                .name_for_local_id(*local_id);
+            if name.module_id() != current_module {
+                ids.insert(*local_id);
+            }
+        }
+        let mut output: Vec<AtomId> = ids.into_iter().collect();
+        output.sort_unstable();
+        output
+    }
+
+    fn replace_foreign_scoped_constants_in_term(term: &Term, names: &SyntheticNameSet) -> Term {
+        let mut output = term.clone();
+        let mut ids: Vec<AtomId> = names.foreign_scoped_aliases.keys().copied().collect();
+        ids.sort_unstable();
+        for foreign_local_id in ids {
+            let replacement = names
+                .foreign_scoped_aliases
+                .get(&foreign_local_id)
+                .expect("foreign_scoped_alias should be present");
+            output = output.replace_atom(
+                &Atom::Symbol(Symbol::ScopedConstant(foreign_local_id)),
+                &Atom::Symbol(*replacement),
+            );
+        }
+        output
+    }
+
+    fn replace_foreign_scoped_constants_in_clause(
+        clause: &Clause,
+        names: &SyntheticNameSet,
+    ) -> Clause {
+        let literals = clause
+            .literals
+            .iter()
+            .map(|literal| crate::kernel::literal::Literal {
+                positive: literal.positive,
+                left: Self::replace_foreign_scoped_constants_in_term(&literal.left, names),
+                right: Self::replace_foreign_scoped_constants_in_term(&literal.right, names),
+            })
+            .collect();
+        Clause {
+            literals,
+            context: clause.context.clone(),
+        }
+    }
+
     /// Convert one specialization to certificate steps.
     /// The replacement_context is the context that the var_map's replacement terms reference.
     /// This is needed to look up variable types when specializing.
@@ -1082,6 +1191,22 @@ impl CodeGenerator<'_> {
         );
         clause.normalize_var_ids_no_flip();
 
+        // Scoped constants from imported modules are not directly referenceable in certificate
+        // code. Introduce local aliases for those symbols first, then rewrite the clause.
+        let foreign_scoped_ids =
+            Self::collect_foreign_scoped_ids(&clause, normalizer, self.bindings.module_id());
+        for foreign_local_id in foreign_scoped_ids {
+            if let Some(symbol) = names.ensure_arbitrary_for_foreign_scoped_id(
+                self.bindings,
+                normalizer,
+                foreign_local_id,
+            )? {
+                steps.push(CertificateStep::DefineArbitrary { symbol });
+            }
+        }
+        clause = Self::replace_foreign_scoped_constants_in_clause(&clause, names);
+        clause.normalize_var_ids_no_flip();
+
         // Create synthetic definition steps.
         let synthetic_ids =
             SyntheticNameSet::collect_synthetic_ids_from_clauses(std::slice::from_ref(&clause));
@@ -1118,7 +1243,10 @@ impl CodeGenerator<'_> {
             let var_type = generic_context
                 .get_var_type(var_id)
                 .expect("generic context should provide all var types");
-            let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
+            let specialized = Self::replace_foreign_scoped_constants_in_term(
+                &apply_to_term(term.as_ref(), &replacement_arbitrary_map),
+                names,
+            );
             if var_type.as_ref().is_type_param_kind() {
                 let specialized_type =
                     specialized.get_type_with_context(generic_context, normalizer.kernel_context());
@@ -2166,6 +2294,78 @@ mod tests {
         assert_eq!(codes[0], expected);
 
         processor.test_parse_code(&codes[0], &bindings, normalizer);
+    }
+
+    #[test]
+    fn test_foreign_scoped_constant_is_aliased_before_claim_codegen() {
+        use crate::elaborator::acorn_type::AcornType;
+        use crate::elaborator::names::ConstantName;
+        use crate::kernel::atom::Atom;
+        use crate::kernel::certificate_step::CertificateStep;
+        use crate::kernel::clause::Clause;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::symbol::Symbol;
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+        use crate::module::ModuleId;
+        use crate::processor::Processor;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+        let mut normalizer = normalized_goal.normalizer;
+
+        let foreign_name = ConstantName::Unqualified(ModuleId(999), "s0".to_string());
+        let foreign_atom = normalizer.add_scoped_constant(foreign_name, &AcornType::Bool, None);
+        let Atom::Symbol(Symbol::ScopedConstant(foreign_local_id)) = foreign_atom else {
+            panic!("expected scoped constant");
+        };
+
+        let clause = Clause::new(
+            vec![Literal::positive(Term::atom(Atom::Symbol(
+                Symbol::ScopedConstant(foreign_local_id),
+            )))],
+            &LocalContext::empty(),
+        );
+
+        let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
+        let mut steps = vec![];
+        generator
+            .specialization_to_certificate_steps(
+                &mut names,
+                &clause,
+                &VariableMap::new(),
+                &LocalContext::empty(),
+                &mut normalizer,
+                &mut steps,
+            )
+            .expect("specialization should generate certificate steps");
+
+        assert!(
+            steps
+                .iter()
+                .any(|step| matches!(step, CertificateStep::DefineArbitrary { .. })),
+            "expected a DefineArbitrary step for foreign scoped constant aliasing"
+        );
+
+        let lines: Vec<String> = steps
+            .iter()
+            .map(|step| {
+                generator
+                    .certificate_step_to_code(&names, step, &normalizer)
+                    .expect("generated step should be representable as code")
+            })
+            .collect();
+        assert!(
+            lines.iter().any(|line| line == "s0"),
+            "expected claim line to use local alias, got {:?}",
+            lines
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("lib(")),
+            "foreign scoped constant leaked into generated code: {:?}",
+            lines
+        );
     }
 
     #[test]

@@ -492,7 +492,11 @@ impl Certificate {
         if let Some(synthetic_names) = synthetic_names {
             generic_value = generic_value.replace_synthetics(synthetic_names);
         }
-        let generic_code = generator.value_to_code(&generic_value)?;
+        let generic_code = if let Some(synthetic_names) = synthetic_names {
+            generator.value_to_code_with_synthetic_names(&generic_value, synthetic_names)?
+        } else {
+            generator.value_to_code(&generic_value)?
+        };
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
             match generic_expr {
@@ -589,7 +593,12 @@ impl Certificate {
             } else {
                 arg_value
             };
-            value_arg_codes.push(generator.value_to_code(&arg_value)?);
+            let arg_code = if let Some(synthetic_names) = synthetic_names {
+                generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
+            } else {
+                generator.value_to_code(&arg_value)?
+            };
+            value_arg_codes.push(arg_code);
         }
 
         if value_decl_codes.is_empty() {
@@ -601,7 +610,12 @@ impl Certificate {
                 if let Some(synthetic_names) = synthetic_names {
                     specialized_value = specialized_value.replace_synthetics(synthetic_names);
                 }
-                return generator.value_to_code(&specialized_value);
+                return if let Some(synthetic_names) = synthetic_names {
+                    generator
+                        .value_to_code_with_synthetic_names(&specialized_value, synthetic_names)
+                } else {
+                    generator.value_to_code(&specialized_value)
+                };
             }
             return Ok(format!(
                 "function[{}] {{ {} }}[{}]",
@@ -953,6 +967,11 @@ impl CertificateWorklist {
                 self.indexes_for_goal.remove(goal);
             }
         }
+    }
+
+    /// Remove all certificates for a goal from the worklist.
+    pub fn remove_goal(&mut self, goal: &str) {
+        self.indexes_for_goal.remove(goal);
     }
 
     /// Get the number of unused certificates remaining in the worklist
@@ -1450,5 +1469,47 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_serialize_claim_with_names_uses_local_name_for_replaced_synthetic_args() {
+        use crate::kernel::atom::Atom;
+        use crate::module::ModuleId;
+
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (_project, bindings, mut normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let clause = kernel.parse_clause("x0", &["Bool"]);
+
+        let synthetic_symbol = normalizer
+            .kernel_context_mut()
+            .symbol_table
+            .declare_synthetic(ModuleId(7), Term::bool_type());
+        let synthetic_term = Term::atom(Atom::Symbol(synthetic_symbol));
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, synthetic_term);
+        let claim = Claim { clause, var_map };
+
+        let mut synthetic_names = HashMap::new();
+        synthetic_names.insert((ModuleId(7), 0), "s0".to_string());
+
+        let serialized = Certificate::serialize_claim_with_names(
+            &claim,
+            &normalizer,
+            &bindings,
+            Some(&synthetic_names),
+        )
+        .expect("serialization should succeed");
+
+        assert_eq!(serialized, "function(x0: Bool) { x0 }(s0)");
+
+        // Ensure the replacement name itself does not need to resolve through lib(module).
+        assert!(!serialized.contains("lib("));
     }
 }
