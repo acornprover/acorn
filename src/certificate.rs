@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
@@ -89,6 +90,27 @@ pub struct Certificate {
 }
 
 impl Certificate {
+    fn dequalify_synthetic_name_refs(
+        code: String,
+        synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
+    ) -> String {
+        let Some(synthetic_names) = synthetic_names else {
+            return code;
+        };
+        let mut normalized = code;
+        for synthetic_name in synthetic_names.values() {
+            let pattern = format!(
+                r"(?:lib\([^)]+\)|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.{}\b",
+                regex::escape(synthetic_name)
+            );
+            let re = Regex::new(&pattern).expect("synthetic dequalification regex should compile");
+            normalized = re
+                .replace_all(&normalized, synthetic_name.as_str())
+                .into_owned();
+        }
+        normalized
+    }
+
     /// Create a new certificate with proof steps
     pub fn new(goal: String, proof: Vec<String>) -> Self {
         Certificate {
@@ -488,15 +510,13 @@ impl Certificate {
         }
 
         let mut generator = CodeGenerator::new(bindings);
-        let mut generic_value = normalizer.denormalize(&claim.clause, None, None, false);
-        if let Some(synthetic_names) = synthetic_names {
-            generic_value = generic_value.replace_synthetics(synthetic_names);
-        }
+        let generic_value = normalizer.denormalize(&claim.clause, None, None, false);
         let generic_code = if let Some(synthetic_names) = synthetic_names {
             generator.value_to_code_with_synthetic_names(&generic_value, synthetic_names)?
         } else {
             generator.value_to_code(&generic_value)?
         };
+        let generic_code = Self::dequalify_synthetic_name_refs(generic_code, synthetic_names);
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
             match generic_expr {
@@ -588,17 +608,15 @@ impl Certificate {
 
             let arg_value =
                 normalizer.denormalize_term_with_context(arg_term, local_context, false);
-            let arg_value = if let Some(synthetic_names) = synthetic_names {
-                arg_value.replace_synthetics(synthetic_names)
-            } else {
-                arg_value
-            };
             let arg_code = if let Some(synthetic_names) = synthetic_names {
                 generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
             } else {
                 generator.value_to_code(&arg_value)?
             };
-            value_arg_codes.push(arg_code);
+            value_arg_codes.push(Self::dequalify_synthetic_name_refs(
+                arg_code,
+                synthetic_names,
+            ));
         }
 
         if value_decl_codes.is_empty() {
@@ -606,13 +624,13 @@ impl Certificate {
                 let specialized = claim
                     .var_map
                     .specialize_clause(&claim.clause, kernel_context);
-                let mut specialized_value = normalizer.denormalize(&specialized, None, None, true);
-                if let Some(synthetic_names) = synthetic_names {
-                    specialized_value = specialized_value.replace_synthetics(synthetic_names);
-                }
+                let specialized_value = normalizer.denormalize(&specialized, None, None, true);
                 return if let Some(synthetic_names) = synthetic_names {
                     generator
                         .value_to_code_with_synthetic_names(&specialized_value, synthetic_names)
+                        .map(|code| {
+                            Self::dequalify_synthetic_name_refs(code, Some(synthetic_names))
+                        })
                 } else {
                     generator.value_to_code(&specialized_value)
                 };
@@ -1511,5 +1529,23 @@ mod tests {
 
         // Ensure the replacement name itself does not need to resolve through lib(module).
         assert!(!serialized.contains("lib("));
+    }
+
+    #[test]
+    fn test_dequalify_synthetic_name_refs_rewrites_module_qualified_calls() {
+        use crate::module::ModuleId;
+
+        let mut synthetic_names = HashMap::new();
+        synthetic_names.insert((ModuleId(7), 0), "s0".to_string());
+        let code =
+            "function(x0: Nat) { not f(x0) or f(x0.suc) }(lib(nat.nat_base).s0(f))".to_string();
+
+        let normalized = Certificate::dequalify_synthetic_name_refs(code, Some(&synthetic_names));
+
+        assert_eq!(
+            normalized,
+            "function(x0: Nat) { not f(x0) or f(x0.suc) }(s0(f))"
+        );
+        assert!(!normalized.contains("lib(nat.nat_base).s0"));
     }
 }
