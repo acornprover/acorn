@@ -478,12 +478,13 @@ impl Checker {
     pub fn check_cert_steps(
         &mut self,
         cert_steps: &[CertificateStep],
+        source_lines: Option<&[String]>,
         normalizer: &Cow<crate::normalizer::Normalizer>,
     ) -> Result<Vec<CheckedStep>, Error> {
         let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
 
-        for step in cert_steps {
+        for (step_index, step) in cert_steps.iter().enumerate() {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
                 return Ok(checked_steps);
@@ -506,18 +507,24 @@ impl Checker {
                     let reason = self.check_clause(&clause, &kernel_context);
 
                     let Some(reason) = reason else {
+                        let cert_line_context = source_lines
+                            .and_then(|lines| lines.get(step_index))
+                            .map(|line| {
+                                format!("; certificate line {}: {:?}", step_index + 1, line)
+                            })
+                            .unwrap_or_default();
                         #[cfg(feature = "bigcert")]
                         {
                             return Err(Error::GeneratedBadCode(format!(
-                                "Claim '{}' is not obviously true (generic form: '{}')",
-                                clause, claim.clause
+                                "Claim '{}' is not obviously true{} (generic form: '{}')",
+                                clause, cert_line_context, claim.clause
                             )));
                         }
                         #[cfg(not(feature = "bigcert"))]
                         {
                             return Err(Error::GeneratedBadCode(format!(
-                                "Claim '{}' is not obviously true",
-                                clause
+                                "Claim '{}' is not obviously true{}",
+                                clause, cert_line_context
                             )));
                         }
                     };

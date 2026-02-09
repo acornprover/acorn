@@ -777,28 +777,68 @@ impl<'a> Builder<'a> {
                     #[cfg(feature = "validate")]
                     {
                         // Validate the cert immediately after generation.
-                        processor
-                            .check_cert(
-                                &cert,
-                                Some(normalized_goal),
-                                &normalized_goal.normalizer,
-                                self.project,
-                                &env.bindings,
-                            )
-                            .expect("newly generated cert should be checkable");
+                        if let Err(e) = processor.check_cert(
+                            &cert,
+                            Some(normalized_goal),
+                            &normalized_goal.normalizer,
+                            self.project,
+                            &env.bindings,
+                        ) {
+                            let module_name = self
+                                .current_module
+                                .as_ref()
+                                .map(|m| m.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let external_line = goal.first_line + 1;
+                            let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
+                                "<failed to serialize certificate>".to_string()
+                            });
+                            panic!(
+                                "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                 Repro command: acorn reprove {} --line {}\n\
+                                 Certificate JSON: {}",
+                                goal.name,
+                                module_name,
+                                external_line,
+                                e,
+                                module_name,
+                                external_line,
+                                cert_json
+                            );
+                        }
                     }
                     #[cfg(not(feature = "validate"))]
                     if self.verbose {
                         // Since we aren't performance-sensitive, check the cert.
-                        processor
-                            .check_cert(
-                                &cert,
-                                Some(normalized_goal),
-                                &normalized_goal.normalizer,
-                                self.project,
-                                &env.bindings,
-                            )
-                            .expect("newly generated cert should be checkable");
+                        if let Err(e) = processor.check_cert(
+                            &cert,
+                            Some(normalized_goal),
+                            &normalized_goal.normalizer,
+                            self.project,
+                            &env.bindings,
+                        ) {
+                            let module_name = self
+                                .current_module
+                                .as_ref()
+                                .map(|m| m.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let external_line = goal.first_line + 1;
+                            let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
+                                "<failed to serialize certificate>".to_string()
+                            });
+                            panic!(
+                                "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                 Repro command: acorn reprove {} --line {}\n\
+                                 Certificate JSON: {}",
+                                goal.name,
+                                module_name,
+                                external_line,
+                                e,
+                                module_name,
+                                external_line,
+                                cert_json
+                            );
+                        }
                     }
                     new_certs.push(cert);
                     self.metrics.certs_created += 1;

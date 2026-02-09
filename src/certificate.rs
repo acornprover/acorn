@@ -785,7 +785,7 @@ impl Certificate {
             return Err(CodeGenError::NoProof);
         };
         let cert_steps = Self::parse_cert_steps(proof, project, &mut bindings, &mut normalizer)?;
-        let checked_steps = checker.check_cert_steps(&cert_steps, &normalizer)?;
+        let checked_steps = checker.check_cert_steps(&cert_steps, Some(proof), &normalizer)?;
         Ok(checked_steps
             .into_iter()
             .map(|checked_step| CertificateLine {
