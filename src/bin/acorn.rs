@@ -10,6 +10,7 @@ use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use walkdir::WalkDir;
 
 /// Represents a line selection: either a single line or a range.
 #[derive(Clone, Debug)]
@@ -266,6 +267,9 @@ enum Command {
         #[clap(value_name = "MODULE")]
         module: Option<String>,
     },
+
+    /// List all module names in the library
+    List,
 }
 
 #[tokio::main]
@@ -675,6 +679,52 @@ async fn main() {
                         }
                     }
                 }
+            }
+        }
+
+        Some(Command::List) => {
+            let (src_dir, build_dir) = Project::find_local_acorn_library(&current_dir)
+                .unwrap_or_else(|| {
+                    println!(
+                        "Could not find acornlib.\n\
+                        Please run this from within the acornlib directory.\n\
+                        See https://github.com/acornprover/acornlib for details."
+                    );
+                    std::process::exit(1);
+                });
+
+            let project = Project::new(src_dir.clone(), build_dir, ProjectConfig::default())
+                .unwrap_or_else(|e| {
+                    println!("Error loading project: {}", e);
+                    std::process::exit(1);
+                });
+
+            let mut module_names = Vec::new();
+            for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("ac") {
+                    continue;
+                }
+
+                let descriptor = project.descriptor_from_path(path).unwrap_or_else(|e| {
+                    println!("Error reading module '{}': {}", path.display(), e);
+                    std::process::exit(1);
+                });
+
+                if let ModuleDescriptor::Name(parts) = descriptor {
+                    module_names.push(parts.join("."));
+                }
+            }
+
+            module_names.sort();
+            module_names.dedup();
+
+            for module_name in module_names {
+                println!("{}", module_name);
             }
         }
 

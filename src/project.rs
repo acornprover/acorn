@@ -366,13 +366,6 @@ impl Project {
         {
             if entry.file_type().is_file() {
                 let path = entry.path();
-
-                // TODO: remove this when we want to check problems
-                // Skip the file if it has the word "problems" in it
-                if path.to_str().unwrap().contains("problems") {
-                    continue;
-                }
-
                 if path.extension() == Some(std::ffi::OsStr::new("ac")) {
                     // Ignore errors when adding all targets
                     let _ = self.add_target_by_path(path);
