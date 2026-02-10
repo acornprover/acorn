@@ -557,7 +557,10 @@ impl Certificate {
         let mut type_arg_codes: Vec<String> = vec![];
         let mut value_decl_codes: Vec<String> = vec![];
         let mut value_arg_codes: Vec<String> = vec![];
-        let mut next_value_decl_id: usize = 0;
+        // Keep declaration names aligned with CodeGenerator's own naming strategy so the
+        // lambda body and argument declarations use the same identifiers, even when
+        // lower indices (e.g. x0, x1) are already occupied in bindings.
+        let mut next_value_decl_id: u32 = 0;
 
         for var_id in 0..used_var_count {
             let var_type = local_context
@@ -599,8 +602,7 @@ impl Certificate {
                 continue;
             }
 
-            let var_name = format!("x{}", next_value_decl_id);
-            next_value_decl_id += 1;
+            let var_name = bindings.next_indexed_var('x', &mut next_value_decl_id);
             let acorn_type =
                 normalizer.denormalize_type_with_context(var_type, local_context, false);
             let type_code = generator.type_to_expr(&acorn_type)?.to_string();
@@ -1332,6 +1334,47 @@ mod tests {
             Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &normalizer)
                 .expect("deserialization should succeed");
         assert_eq!(roundtrip, claim);
+    }
+
+    #[cfg(feature = "bigcert")]
+    #[test]
+    fn test_serialize_claim_with_args_avoids_colliding_lambda_arg_names() {
+        let code = r#"
+            let x0: Bool = axiom
+            let x1: Bool = axiom
+
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+
+        let clause = kernel.parse_clause("x0 or x1 or x2", &["Bool", "Bool", "Bool"]);
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_true());
+        var_map.set(1, Term::new_false());
+        var_map.set(2, Term::new_true());
+        let claim = Claim { clause, var_map };
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &normalizer, &bindings)
+            .expect("serialization should succeed");
+        assert!(!serialized.contains("function(x0: Bool"));
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut normalizer_cow = Cow::Borrowed(&normalizer);
+        let parsed = Certificate::parse_code_line(
+            &serialized,
+            &project,
+            &mut bindings_cow,
+            &mut normalizer_cow,
+        )
+        .expect("serialized line should parse even when x0/x1 are already bound");
+
+        match parsed {
+            CertificateStep::Claim(roundtrip_claim) => assert_eq!(roundtrip_claim, claim),
+            _ => panic!("expected claim step"),
+        }
     }
 
     #[test]
