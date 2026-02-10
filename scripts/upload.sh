@@ -60,11 +60,13 @@ done
 
 # Be sure to rebuild the assistant
 cd vscode/assistant
+npm install
 npm run build
 cd ../..
 
 # Rebuild the extension and release the vsix
 cd vscode/extension
+npm install
 npm run build
 vsce package
 gh release upload $TAG acornprover-$VERSION.vsix $CLOBBER
