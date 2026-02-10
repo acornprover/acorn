@@ -1294,8 +1294,14 @@ impl CodeGenerator<'_> {
                 None
             }
         });
-        if let Some((var_id, term, expected_type, expected_concrete, mapped_type, mapped_concrete)) =
-            incompatible_mapping
+        if let Some((
+            var_id,
+            term,
+            expected_type,
+            expected_concrete,
+            mapped_type,
+            mapped_concrete,
+        )) = incompatible_mapping
         {
             return Err(Error::GeneratedBadCode(format!(
                 "certificate claim map type mismatch for x{}: expected type '{}' (specialized '{}'), \
@@ -1859,41 +1865,40 @@ impl CodeGenerator<'_> {
                 // For overridden typeclass attributes, we need explicit parameters
                 // to distinguish from the datatype's own attributes
                 let inferrable = if let AcornValue::Constant(c) = fa.function.as_ref() {
-                    let requires_explicit_type_args = if let ConstantName::TypeclassAttribute(
-                        typeclass,
-                        _,
-                    ) = &c.name
-                    {
-                        c.name.module_id() != self.bindings.module_id()
-                            && self.bindings.constant_alias(&c.name).is_none()
-                            && self.bindings.typeclass_alias(typeclass).is_none()
-                    } else {
-                        false
-                    };
+                    let requires_explicit_type_args =
+                        if let ConstantName::TypeclassAttribute(typeclass, _) = &c.name {
+                            c.name.module_id() != self.bindings.module_id()
+                                && self.bindings.constant_alias(&c.name).is_none()
+                                && self.bindings.typeclass_alias(typeclass).is_none()
+                        } else {
+                            false
+                        };
                     if requires_explicit_type_args {
                         false
                     } else {
-                    // Synthetics can't have explicit type params in the syntax
-                    // Check both original synthetics and replaced ones (now named s0, s1, etc.)
-                    if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
-                        true
-                    } else if let ConstantName::TypeclassAttribute(typeclass, attr_name) = &c.name {
-                        if let AcornType::Data(datatype, _) = &receiver_type {
-                            if self.bindings.is_instance_of(datatype, typeclass) {
-                                let datatype_attr_name =
-                                    DefinedName::datatype_attr(datatype, attr_name);
-                                // If the datatype has its own attribute, don't infer parameters
-                                !self.bindings.constant_name_in_use(&datatype_attr_name)
+                        // Synthetics can't have explicit type params in the syntax
+                        // Check both original synthetics and replaced ones (now named s0, s1, etc.)
+                        if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
+                            true
+                        } else if let ConstantName::TypeclassAttribute(typeclass, attr_name) =
+                            &c.name
+                        {
+                            if let AcornType::Data(datatype, _) = &receiver_type {
+                                if self.bindings.is_instance_of(datatype, typeclass) {
+                                    let datatype_attr_name =
+                                        DefinedName::datatype_attr(datatype, attr_name);
+                                    // If the datatype has its own attribute, don't infer parameters
+                                    !self.bindings.constant_name_in_use(&datatype_attr_name)
+                                } else {
+                                    true
+                                }
                             } else {
                                 true
                             }
                         } else {
-                            true
+                            // For regular functions, check if we can infer type parameters from arguments
+                            self.can_infer_type_params_from_args(&fa.function, &fa.args)
                         }
-                    } else {
-                        // For regular functions, check if we can infer type parameters from arguments
-                        self.can_infer_type_params_from_args(&fa.function, &fa.args)
-                    }
                     }
                 } else {
                     true
@@ -2349,7 +2354,9 @@ mod tests {
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
         let mut normalizer = normalized_goal.normalizer;
-        let generic = normalizer.kernel_context().parse_clause("x0 = x0", &["Bool"]);
+        let generic = normalizer
+            .kernel_context()
+            .parse_clause("x0 = x0", &["Bool"]);
 
         let mut bad_map = VariableMap::new();
         bad_map.set(0, Term::type_sort());
@@ -2367,9 +2374,13 @@ mod tests {
                 &mut steps,
             )
             .expect_err("incompatible mappings should fail certificate specialization");
-        assert!(steps.is_empty(), "failing specialization should not emit steps");
         assert!(
-            err.to_string().contains("certificate claim map type mismatch"),
+            steps.is_empty(),
+            "failing specialization should not emit steps"
+        );
+        assert!(
+            err.to_string()
+                .contains("certificate claim map type mismatch"),
             "unexpected error: {}",
             err
         );

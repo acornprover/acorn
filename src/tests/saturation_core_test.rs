@@ -1459,7 +1459,6 @@ fn test_proving_with_equality_resolution() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    #[cfg(feature = "bigcert")]
     assert_proof_lines(
         proof,
         &[
@@ -1467,18 +1466,7 @@ fn test_proving_with_equality_resolution() {
             "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(g(x), x)",
             "not f(g(x), x)",
             "function(x0: Foo, x1: Foo) { g(x0) != g(x1) or f(x0, x1) }(x, x)",
-            "f(x, x)",
-        ],
-    );
-    #[cfg(not(feature = "bigcert"))]
-    assert_proof_lines(
-        proof,
-        &[
-            "not f(x, x) or f(g(x), x)",
-            "not f(g(x), x) or f(g(g(x)), x)",
-            "not f(g(x), x)",
-            "g(x) != g(x) or f(x, x)",
-            "f(x, x)",
+            "function(x0: Foo) { f(x0, x0) }(x)",
         ],
     );
 }

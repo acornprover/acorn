@@ -31,7 +31,7 @@ use crate::syntax::expression::{Declaration, Expression};
 use crate::syntax::statement::{Statement, StatementInfo};
 use crate::syntax::token::TokenType;
 
-#[cfg(all(test, feature = "bigcert"))]
+#[cfg(test)]
 use crate::kernel::local_context::LocalContext;
 
 /// Information about a single line in a checked certificate proof.
@@ -160,7 +160,6 @@ impl Certificate {
 
         let mut answer = Vec::new();
         for step in &ordered_steps {
-            #[cfg(feature = "bigcert")]
             let line = match step {
                 CertificateStep::Claim(claim) => {
                     if claim.clause.get_local_context().is_empty() || claim.var_map.len() == 0 {
@@ -176,9 +175,6 @@ impl Certificate {
                 }
                 _ => generator.certificate_step_to_code(&names, step, &generation_normalizer)?,
             };
-
-            #[cfg(not(feature = "bigcert"))]
-            let line = generator.certificate_step_to_code(&names, step, &generation_normalizer)?;
 
             answer.push(line);
         }
@@ -239,32 +235,33 @@ impl Certificate {
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new(project, bindings, None);
-        let mut claim_step_from_expr = |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
-            let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
-            if let Some(claim) = Self::try_deserialize_claim_with_args_value(
-                value.clone(),
-                bindings.as_ref(),
-                normalizer.as_ref(),
-            )? {
-                return Ok(CertificateStep::Claim(claim));
-            }
-            let module_id = bindings.module_id();
-            let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-            let clauses = view.value_to_denormalized_clauses(&value)?;
-            if clauses.len() != 1 {
-                return Err(CodeGenError::GeneratedBadCode(format!(
-                    "claim must normalize to exactly one clause, got {}",
-                    clauses.len()
-                )));
-            }
-            Ok(CertificateStep::Claim(Claim {
-                clause: clauses
-                    .into_iter()
-                    .next()
-                    .expect("clauses has exactly one element"),
-                var_map: VariableMap::new(),
-            }))
-        };
+        let mut claim_step_from_expr =
+            |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
+                let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
+                if let Some(claim) = Self::try_deserialize_claim_with_args_value(
+                    value.clone(),
+                    bindings.as_ref(),
+                    normalizer.as_ref(),
+                )? {
+                    return Ok(CertificateStep::Claim(claim));
+                }
+                let module_id = bindings.module_id();
+                let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
+                let clauses = view.value_to_denormalized_clauses(&value)?;
+                if clauses.len() != 1 {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "claim must normalize to exactly one clause, got {}",
+                        clauses.len()
+                    )));
+                }
+                Ok(CertificateStep::Claim(Claim {
+                    clause: clauses
+                        .into_iter()
+                        .next()
+                        .expect("clauses has exactly one element"),
+                    var_map: VariableMap::new(),
+                }))
+            };
 
         match statement.statement {
             StatementInfo::VariableSatisfy(vss) => {
@@ -1301,7 +1298,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_parse_code_line_accepts_claim_with_type_args_only_shape() {
         let code = r#"
@@ -1337,7 +1333,6 @@ mod tests {
         assert_eq!(roundtrip, claim);
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_serialize_claim_with_args_avoids_colliding_lambda_arg_names() {
         let code = r#"
@@ -1405,38 +1400,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "bigcert"))]
-    #[test]
-    fn test_from_concrete_steps_uses_legacy_claim_serialization_without_bigcert() {
-        let code = r#"
-            theorem goal {
-                false = false
-            }
-        "#;
-        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
-        let generic = kernel.parse_clause("x0", &["Bool"]);
-
-        let mut var_map = VariableMap::new();
-        var_map.set(0, Term::new_false());
-        let concrete_steps = vec![ConcreteStep {
-            generic: generic.clone(),
-            var_maps: vec![(var_map, generic.get_local_context().clone())],
-        }];
-
-        let cert = Certificate::from_concrete_steps(
-            "goal".to_string(),
-            &concrete_steps,
-            &normalizer,
-            &bindings,
-        )
-        .expect("certificate generation should succeed");
-        let proof = cert.proof.expect("proof should exist");
-        assert_eq!(proof.len(), 1);
-        assert_eq!(proof[0], "false");
-    }
-
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_from_concrete_steps_uses_bigcert_claim_serialization() {
         let code = r#"
@@ -1467,7 +1430,6 @@ mod tests {
         assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_from_concrete_steps_bigcert_falls_back_to_plain_claim_when_no_args() {
         let code = r#"
@@ -1499,7 +1461,6 @@ mod tests {
         assert_eq!(proof[0], "false");
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_from_concrete_steps_bigcert_infers_type_arg_from_value_mapping() {
         let code = r#"
@@ -1533,7 +1494,6 @@ mod tests {
         assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_serialize_claim_with_names_uses_local_name_for_replaced_synthetic_args() {
         use crate::kernel::atom::Atom;

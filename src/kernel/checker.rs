@@ -1,20 +1,13 @@
 use std::borrow::Cow;
-#[cfg(feature = "bigcert")]
 use std::collections::HashMap;
 use std::collections::HashSet;
-#[cfg(not(feature = "bigcert"))]
-use std::sync::Arc;
 
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
 use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::Clause;
-#[cfg(not(feature = "bigcert"))]
-use crate::kernel::generalization_set::GeneralizationSet;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
-#[cfg(not(feature = "bigcert"))]
-use crate::kernel::literal::Literal;
 use crate::kernel::proof_step::Rule;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
@@ -115,13 +108,8 @@ pub struct Checker {
     /// For deductions among concrete clauses.
     term_graph: EqualityGraph,
 
-    /// For looking up specializations of clauses with free variables.
-    #[cfg(not(feature = "bigcert"))]
-    generalization_set: Arc<GeneralizationSet>,
-
-    /// In bigcert mode, variable clauses are matched by exact canonical equality only.
+    /// Variable clauses are matched by exact canonical equality only.
     /// The `usize` value is the `step_id` (index into `self.reasons`) for that clause.
-    #[cfg(feature = "bigcert")]
     exact_variable_clauses: HashMap<Clause, usize>,
 
     /// Whether a contradiction was directly inserted into the checker.
@@ -139,9 +127,6 @@ impl Checker {
     pub fn new() -> Checker {
         Checker {
             term_graph: EqualityGraph::new(),
-            #[cfg(not(feature = "bigcert"))]
-            generalization_set: Arc::new(GeneralizationSet::new()),
-            #[cfg(feature = "bigcert")]
             exact_variable_clauses: HashMap::new(),
             direct_contradiction: false,
             past_boolean_reductions: HashSet::new(),
@@ -167,26 +152,14 @@ impl Checker {
         self.reasons.push(reason.clone());
 
         if clause.has_any_variable() {
-            // The clause has free variables, so it can be a generalization.
-            #[cfg(not(feature = "bigcert"))]
-            Arc::make_mut(&mut self.generalization_set).insert(
-                clause.clone(),
-                step_id,
-                kernel_context,
-            );
+            // Normalize before exact matching so we do not depend on literal ordering
+            // or variable numbering conventions at insertion sites.
+            let mut canonical_clause = clause.clone();
+            canonical_clause.normalize();
+            self.exact_variable_clauses
+                .entry(canonical_clause)
+                .or_insert(step_id);
 
-            #[cfg(feature = "bigcert")]
-            {
-                // Normalize before exact matching so we do not depend on literal ordering
-                // or variable numbering conventions at insertion sites.
-                let mut canonical_clause = clause.clone();
-                canonical_clause.normalize();
-                self.exact_variable_clauses
-                    .entry(canonical_clause)
-                    .or_insert(step_id);
-            }
-
-            #[cfg(feature = "bigcert")]
             if let Some(reduced_clause) =
                 self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
             {
@@ -266,55 +239,21 @@ impl Checker {
             return Some(StepReason::EqualityGraph);
         }
 
-        #[cfg(not(feature = "bigcert"))]
-        {
-            // If not found in term graph, check if there's a generalization in the clause set
-            if let Some(step_id) = self
-                .generalization_set
-                .find_generalization(clause.clone(), kernel_context)
-            {
-                trace!(clause = %clause, result = "generalization_set", "checking clause");
-                return Some(self.reasons[step_id].clone());
-            }
-
-            // Try last-argument elimination as a fallback.
-            // This handles cases where we have:
-            //   g0(T0, T0, (T0 -> T0), c1, c2, c3, x0) = c1(c2(c3), x0)
-            // and we want to match it against:
-            //   g0(x0, x1, x2, x3, x4, x5) = x3(x4(x5))
-            // by eliminating the common last argument x0 from both sides.
-            let mut reduced = self.try_last_arg_elimination(clause);
-            while let Some(reduced_clause) = reduced {
-                if let Some(step_id) = self
-                    .generalization_set
-                    .find_generalization(reduced_clause.clone(), kernel_context)
-                {
-                    trace!(clause = %clause, result = "last_arg_elimination", "checking clause");
-                    return Some(self.reasons[step_id].clone());
-                }
-                reduced = self.try_last_arg_elimination(&reduced_clause);
-            }
-        }
-
-        #[cfg(feature = "bigcert")]
-        {
-            let mut canonical_clause = clause.clone();
-            canonical_clause.normalize();
-            if let Some(step_id) = self.exact_variable_clauses.get(&canonical_clause) {
-                trace!(
-                    clause = %clause,
-                    result = "exact_variable_clause",
-                    "checking clause"
-                );
-                return Some(self.reasons[*step_id].clone());
-            }
+        let mut canonical_clause = clause.clone();
+        canonical_clause.normalize();
+        if let Some(step_id) = self.exact_variable_clauses.get(&canonical_clause) {
+            trace!(
+                clause = %clause,
+                result = "exact_variable_clause",
+                "checking clause"
+            );
+            return Some(self.reasons[*step_id].clone());
         }
 
         trace!(clause = %clause, result = "failed", "checking clause");
         None
     }
 
-    #[cfg(feature = "bigcert")]
     fn simplify_variable_clause_with_concrete_facts(
         &mut self,
         clause: &Clause,
@@ -333,73 +272,6 @@ impl Checker {
             return None;
         }
         Some(Clause::new(reduced_literals, clause.get_local_context()))
-    }
-
-    /// Try to eliminate the last argument from both sides of an equality.
-    /// Returns Some(reduced_clause) if:
-    /// - The clause is a single positive equality
-    /// - Both sides are applications
-    /// - The last argument of both sides is the same variable
-    /// - That variable doesn't appear elsewhere in the terms
-    #[cfg(not(feature = "bigcert"))]
-    fn try_last_arg_elimination(&self, clause: &Clause) -> Option<Clause> {
-        // Must be a single literal
-        if clause.literals.len() != 1 {
-            return None;
-        }
-
-        let lit = &clause.literals[0];
-
-        // Must be a positive equality
-        if !lit.positive {
-            return None;
-        }
-
-        // Both sides must be applications
-        let left_ref = lit.left.as_ref();
-        let right_ref = lit.right.as_ref();
-
-        let (left_func, left_args) = left_ref.split_application_multi()?;
-        let (right_func, right_args) = right_ref.split_application_multi()?;
-
-        // Both must have at least one argument
-        if left_args.is_empty() || right_args.is_empty() {
-            return None;
-        }
-
-        // Get the last arguments
-        let left_last = left_args.last()?;
-        let right_last = right_args.last()?;
-
-        // They must be equal
-        if left_last != right_last {
-            return None;
-        }
-
-        // The last argument must be a variable
-        if !left_last.as_ref().is_variable() {
-            return None;
-        }
-
-        // Build new terms without the last argument
-        let new_left = if left_args.len() == 1 {
-            left_func
-        } else {
-            left_func.apply(&left_args[..left_args.len() - 1])
-        };
-
-        let new_right = if right_args.len() == 1 {
-            right_func
-        } else {
-            right_func.apply(&right_args[..right_args.len() - 1])
-        };
-
-        // Create the reduced clause and normalize variable IDs/context.
-        // Normalization drops the eliminated variable if it is now unused.
-        let new_lit = Literal::equals(new_left, new_right);
-        let mut reduced = Clause::new(vec![new_lit], &clause.context);
-        reduced.normalize_var_ids_no_flip();
-        Some(reduced)
     }
 
     /// Returns true if the checker has encountered a contradiction.
@@ -499,13 +371,9 @@ impl Checker {
                         continue;
                     }
 
-                    #[cfg(feature = "bigcert")]
                     let reason = self
                         .check_clause(&claim.clause, &kernel_context)
                         .or_else(|| self.check_clause(&clause, &kernel_context));
-
-                    #[cfg(not(feature = "bigcert"))]
-                    let reason = self.check_clause(&clause, &kernel_context);
 
                     let Some(reason) = reason else {
                         let cert_line_context = source_lines
@@ -514,20 +382,10 @@ impl Checker {
                                 format!("; certificate line {}: {:?}", step_index + 1, line)
                             })
                             .unwrap_or_default();
-                        #[cfg(feature = "bigcert")]
-                        {
-                            return Err(Error::GeneratedBadCode(format!(
-                                "Claim '{}' is not obviously true{} (generic form: '{}')",
-                                clause, cert_line_context, claim.clause
-                            )));
-                        }
-                        #[cfg(not(feature = "bigcert"))]
-                        {
-                            return Err(Error::GeneratedBadCode(format!(
-                                "Claim '{}' is not obviously true{}",
-                                clause, cert_line_context
-                            )));
-                        }
+                        return Err(Error::GeneratedBadCode(format!(
+                            "Claim '{}' is not obviously true{} (generic form: '{}')",
+                            clause, cert_line_context, claim.clause
+                        )));
                     };
 
                     checked_steps.push(CheckedStep {
@@ -535,16 +393,9 @@ impl Checker {
                         reason,
                     });
 
-                    #[cfg(feature = "bigcert")]
-                    {
-                        let mut generic_clause = claim.clause.clone();
-                        generic_clause.normalize();
-                        self.insert_clause(
-                            &generic_clause,
-                            StepReason::PreviousClaim,
-                            &kernel_context,
-                        );
-                    }
+                    let mut generic_clause = claim.clause.clone();
+                    generic_clause.normalize();
+                    self.insert_clause(&generic_clause, StepReason::PreviousClaim, &kernel_context);
 
                     clause.normalize();
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
@@ -668,34 +519,6 @@ mod tests {
         checker.check_clause_str("c1");
     }
 
-    #[cfg(not(feature = "bigcert"))]
-    #[test]
-    fn test_checker_repeated_last_arg_elimination() {
-        let mut context = KernelContext::new();
-        context.parse_constant(
-            "g0",
-            "(Bool, Bool, Bool, (Bool, Bool, Bool) -> Bool, Bool -> Bool, Bool, Bool, Bool) -> Bool",
-        );
-        context.parse_constant("g3", "(Bool, Bool, Bool) -> Bool");
-        context.parse_constant("g4", "Bool -> Bool");
-        context.parse_constants(&["c0", "c1", "c2", "c3"], "Bool");
-
-        let mut checker = Checker::new();
-        let generic = context.parse_clause("g0(c0, c1, c2, g3, g4, x0) = g3(g4(x0))", &["Bool"]);
-        checker.insert_clause(&generic, StepReason::Testing, &context);
-
-        // Matching this clause requires two rounds of last-argument elimination:
-        //   g0(c0, c1, c2, g3, g4, c3, x0, x1) = g3(g4(c3), x0, x1)
-        // -> g0(c0, c1, c2, g3, g4, c3, x0) = g3(g4(c3), x0)
-        // -> g0(c0, c1, c2, g3, g4, c3) = g3(g4(c3))
-        let specialized = context.parse_clause(
-            "g0(c0, c1, c2, g3, g4, c3, x0, x1) = g3(g4(c3), x0, x1)",
-            &["Bool", "Bool"],
-        );
-        assert!(checker.check_clause(&specialized, &context).is_some());
-    }
-
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_checker_bigcert_requires_exact_variable_clause_match() {
         let mut context = KernelContext::new();
@@ -714,7 +537,6 @@ mod tests {
         assert!(checker.check_clause(&specialized, &context).is_none());
     }
 
-    #[cfg(feature = "bigcert")]
     #[test]
     fn test_checker_bigcert_simplifies_variable_clause_using_concrete_literal() {
         let mut context = KernelContext::new();
