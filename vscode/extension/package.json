@@ -1,7 +1,7 @@
 {
   "name": "acornprover",
   "displayName": "Acorn Prover",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "description": "The Acorn theorem prover, including an AI assistant and general language support.",
   "engines": {
     "vscode": "^1.75.0"
