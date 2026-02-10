@@ -88,7 +88,7 @@ impl ModuleCleaner {
                 // Return empty ranges for now
                 return Ok(Vec::new());
             }
-            LoadState::Loading => return Err(CleanerError::ModuleLoading),
+            LoadState::Loading | LoadState::Registered => return Err(CleanerError::ModuleLoading),
             LoadState::None => return Err(CleanerError::ModuleNotLoaded),
         };
 

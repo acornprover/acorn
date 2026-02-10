@@ -481,6 +481,13 @@ async fn main() {
                 None => None,
             };
 
+            // --write-cache with a line selection doesn't make sense:
+            // it would overwrite the full module cache with only the selected lines.
+            if write_cache && line_selection.is_some() {
+                println!("Error: --write-cache cannot be used with a line number selection");
+                std::process::exit(1);
+            }
+
             // Reprove doesn't read from cache; optionally writes with --write-cache
             let config = ProjectConfig {
                 use_filesystem: true,

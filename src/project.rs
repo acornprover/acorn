@@ -346,20 +346,28 @@ impl Project {
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
     pub fn add_target_by_name(&mut self, module_name: &str) -> Result<(), ImportError> {
+        self.register_all_modules();
         self.add_target_by_descriptor(&ModuleDescriptor::name(module_name))
     }
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
     pub fn add_target_by_path(&mut self, path: &Path) -> Result<(), ImportError> {
+        self.register_all_modules();
         let descriptor = self.descriptor_from_path(path)?;
         self.add_target_by_descriptor(&descriptor)
     }
 
-    // Adds a target for all files in the 'src' directory.
-    pub fn add_src_targets(&mut self) {
-        if !self.config.use_filesystem {
-            panic!("cannot add_src_targets without filesystem access")
+    // Pre-registers all modules from the src directory with stable ModuleIds.
+    // This ensures that every module always gets the same ModuleId regardless of
+    // whether we're verifying one module or all modules.
+    // Idempotent: does nothing if modules are already registered.
+    fn register_all_modules(&mut self) {
+        if !self.config.use_filesystem || !self.modules.is_empty() {
+            return;
         }
+
+        // Collect all .ac file paths
+        let mut paths: Vec<PathBuf> = Vec::new();
         for entry in WalkDir::new(&self.src_dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -367,10 +375,70 @@ impl Project {
             if entry.file_type().is_file() {
                 let path = entry.path();
                 if path.extension() == Some(std::ffi::OsStr::new("ac")) {
-                    // Ignore errors when adding all targets
-                    let _ = self.add_target_by_path(path);
+                    paths.push(path.to_path_buf());
                 }
             }
+        }
+
+        // Convert to descriptors, separating prelude from the rest
+        let mut prelude_descriptor = None;
+        let mut descriptors: Vec<ModuleDescriptor> = Vec::new();
+        for path in &paths {
+            if let Ok(descriptor) = self.descriptor_from_path(path) {
+                if matches!(&descriptor, ModuleDescriptor::Name(parts) if parts.len() == 1 && parts[0] == "prelude")
+                {
+                    prelude_descriptor = Some(descriptor);
+                } else {
+                    descriptors.push(descriptor);
+                }
+            }
+        }
+
+        // Sort non-prelude descriptors for deterministic ordering
+        descriptors.sort();
+
+        // Reserve slot 0 for prelude
+        if let Some(desc) = prelude_descriptor {
+            self.modules.push(Module::new_registered(desc.clone()));
+            self.module_map.insert(desc, ModuleId::PRELUDE);
+        } else {
+            self.modules.push(Module::anonymous());
+        }
+
+        // Assign sequential IDs to remaining modules in sorted order
+        for descriptor in descriptors {
+            let id = ModuleId(self.modules.len() as u16);
+            self.modules
+                .push(Module::new_registered(descriptor.clone()));
+            self.module_map.insert(descriptor, id);
+        }
+    }
+
+    // Adds a target for all files in the 'src' directory.
+    pub fn add_src_targets(&mut self) {
+        if !self.config.use_filesystem {
+            panic!("cannot add_src_targets without filesystem access")
+        }
+        self.register_all_modules();
+
+        // Collect and sort paths for deterministic loading order
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in WalkDir::new(&self.src_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if path.extension() == Some(std::ffi::OsStr::new("ac")) {
+                    paths.push(path.to_path_buf());
+                }
+            }
+        }
+        paths.sort();
+
+        for path in paths {
+            // Ignore errors when adding all targets
+            let _ = self.add_target_by_path(&path);
         }
     }
 
@@ -1074,12 +1142,19 @@ impl Project {
         descriptor: &ModuleDescriptor,
         strict: bool,
     ) -> Result<ModuleId, ImportError> {
-        if let Some(module_id) = self.module_map.get(&descriptor) {
-            if let LoadState::Loading = self.get_module_by_id(*module_id) {
-                return Err(ImportError::Circular(*module_id));
+        // Check if this module is already known (pre-registered or loaded).
+        let preassigned_id = if let Some(&module_id) = self.module_map.get(&descriptor) {
+            match self.get_module_by_id(module_id) {
+                LoadState::Loading => return Err(ImportError::Circular(module_id)),
+                LoadState::Registered => {
+                    // Pre-registered but not loaded yet. Continue loading with this ID.
+                    Some(module_id)
+                }
+                _ => return Ok(module_id), // Already loaded (Ok, Error, None)
             }
-            return Ok(*module_id);
-        }
+        } else {
+            None
+        };
 
         let path = self.path_from_descriptor(descriptor)?;
         let mut text = String::new();
@@ -1132,7 +1207,11 @@ impl Project {
         // Prelude always gets ModuleId::PRELUDE. Other modules get subsequent IDs.
         let is_prelude = matches!(descriptor, ModuleDescriptor::Name(parts) if parts.len() == 1 && parts[0] == "prelude");
 
-        let module_id = if is_prelude {
+        let module_id = if let Some(id) = preassigned_id {
+            // Use the pre-assigned ID, transition state to Loading
+            self.modules[id.get() as usize] = Module::new(descriptor.clone());
+            id
+        } else if is_prelude {
             // Prelude always gets the reserved slot
             if self.modules.is_empty() {
                 self.modules.push(Module::new(descriptor.clone()));

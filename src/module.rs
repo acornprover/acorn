@@ -60,6 +60,16 @@ impl Module {
         }
     }
 
+    // Pre-registered modules start in the Registered state.
+    // They have an assigned ID but haven't been loaded yet.
+    pub fn new_registered(descriptor: ModuleDescriptor) -> Module {
+        Module {
+            descriptor,
+            state: LoadState::Registered,
+            hash: None,
+        }
+    }
+
     pub fn load_error(&mut self, error: error::Error) {
         self.state = LoadState::Error(error);
     }
@@ -82,6 +92,10 @@ impl Module {
 pub enum LoadState {
     // There is no such module, not even an id for it
     None,
+
+    // The module has been assigned an ID but hasn't been loaded yet.
+    // Used during pre-registration to ensure stable ModuleIds.
+    Registered,
 
     // The module is in the process of being loaded.
     Loading,

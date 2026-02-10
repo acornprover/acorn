@@ -1092,7 +1092,7 @@ impl<'a> Builder<'a> {
                     // Targets are supposed to be loaded already.
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                LoadState::Loading => {
+                LoadState::Loading | LoadState::Registered => {
                     // Happens if there's a circular import. A more localized error should
                     // show up elsewhere, so let's just log.
                     self.log_global(format!("error: module {} stuck in loading", target));
