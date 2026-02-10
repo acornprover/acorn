@@ -1,6 +1,9 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::collections::HashSet;
+
+use im::HashMap as ImHashMap;
+use im::HashSet as ImHashSet;
+use im::Vector as ImVector;
 
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
@@ -110,27 +113,27 @@ pub struct Checker {
 
     /// Variable clauses are matched by exact canonical equality only.
     /// The `usize` value is the `step_id` (index into `self.reasons`) for that clause.
-    exact_variable_clauses: HashMap<Clause, usize>,
+    exact_variable_clauses: ImHashMap<Clause, usize>,
 
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
 
     /// A hack, but we need to break out of loops, since equality factoring and boolean
     /// reduction can create cycles.
-    past_boolean_reductions: HashSet<Clause>,
+    past_boolean_reductions: ImHashSet<Clause>,
 
     /// The reason for each step. The step_id is the index in this vector.
-    reasons: Vec<StepReason>,
+    reasons: ImVector<StepReason>,
 }
 
 impl Checker {
     pub fn new() -> Checker {
         Checker {
             term_graph: EqualityGraph::new(),
-            exact_variable_clauses: HashMap::new(),
+            exact_variable_clauses: ImHashMap::new(),
             direct_contradiction: false,
-            past_boolean_reductions: HashSet::new(),
-            reasons: Vec::new(),
+            past_boolean_reductions: ImHashSet::new(),
+            reasons: ImVector::new(),
         }
     }
 
@@ -149,7 +152,7 @@ impl Checker {
         }
 
         let step_id = self.reasons.len();
-        self.reasons.push(reason.clone());
+        self.reasons.push_back(reason.clone());
 
         if clause.has_any_variable() {
             // Normalize before exact matching so we do not depend on literal ordering
