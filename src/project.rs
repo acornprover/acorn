@@ -315,9 +315,7 @@ impl Project {
         if self.config.write_cache {
             // Save and merge: writes only new JSONL files, preserves manifest based on build type,
             // and merges old certificates back into memory
-            if let Err(e) = new_cache.save_merging_old(&self.build_cache, is_partial_build) {
-                eprintln!("warning: failed to update build cache: {}", e);
-            }
+            let _ = new_cache.save_merging_old(&self.build_cache, is_partial_build);
         } else {
             // Even if we're not writing to disk, we need to merge the old certificates
             // into memory so they're available for future builds
