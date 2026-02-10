@@ -1271,6 +1271,45 @@ impl CodeGenerator<'_> {
                 .map(|id| id as usize >= generic_len)
                 .unwrap_or(false)
         });
+        let incompatible_mapping = claim_var_map.iter().find_map(|(var_id, term)| {
+            let expected_type = generic_context.get_var_type(var_id).cloned()?;
+            if expected_type.as_ref().is_type_param_kind() {
+                return None;
+            }
+
+            let expected_concrete = apply_to_term(expected_type.as_ref(), &claim_var_map);
+            let mapped_type =
+                term.get_type_with_context(generic_context, normalizer.kernel_context());
+            let mapped_concrete = apply_to_term(mapped_type.as_ref(), &claim_var_map);
+            if expected_concrete != mapped_concrete {
+                Some((
+                    var_id,
+                    term.clone(),
+                    expected_type,
+                    expected_concrete,
+                    mapped_type,
+                    mapped_concrete,
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some((var_id, term, expected_type, expected_concrete, mapped_type, mapped_concrete)) =
+            incompatible_mapping
+        {
+            return Err(Error::GeneratedBadCode(format!(
+                "certificate claim map type mismatch for x{}: expected type '{}' (specialized '{}'), \
+                 mapped term '{}' has type '{}' (specialized '{}'); generic clause '{}'; concrete clause '{}'",
+                var_id,
+                expected_type,
+                expected_concrete,
+                term,
+                mapped_type,
+                mapped_concrete,
+                generic,
+                clause
+            )));
+        }
         let claim =
             if has_out_of_scope_terms || has_missing_used_mappings || has_placeholder_type_bindings
             {
@@ -1820,6 +1859,20 @@ impl CodeGenerator<'_> {
                 // For overridden typeclass attributes, we need explicit parameters
                 // to distinguish from the datatype's own attributes
                 let inferrable = if let AcornValue::Constant(c) = fa.function.as_ref() {
+                    let requires_explicit_type_args = if let ConstantName::TypeclassAttribute(
+                        typeclass,
+                        _,
+                    ) = &c.name
+                    {
+                        c.name.module_id() != self.bindings.module_id()
+                            && self.bindings.constant_alias(&c.name).is_none()
+                            && self.bindings.typeclass_alias(typeclass).is_none()
+                    } else {
+                        false
+                    };
+                    if requires_explicit_type_args {
+                        false
+                    } else {
                     // Synthetics can't have explicit type params in the syntax
                     // Check both original synthetics and replaced ones (now named s0, s1, etc.)
                     if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
@@ -1840,6 +1893,7 @@ impl CodeGenerator<'_> {
                     } else {
                         // For regular functions, check if we can infer type parameters from arguments
                         self.can_infer_type_params_from_args(&fa.function, &fa.args)
+                    }
                     }
                 } else {
                     true
@@ -1971,7 +2025,8 @@ impl CodeGenerator<'_> {
                 // Only add type params if the constant itself is polymorphic.
                 // A constant like `item: T` (theorem parameter) has params but empty
                 // type_param_names - it uses types from enclosing scope but isn't polymorphic.
-                let is_polymorphic = !c.type_param_names.is_empty();
+                let is_polymorphic = !c.type_param_names.is_empty()
+                    || matches!(c.name, ConstantName::TypeclassAttribute(..));
                 if !inferrable && !c.params.is_empty() && !is_synthetic_const && is_polymorphic {
                     self.parametrize_expr(const_expr, &c.params)
                 } else {
@@ -2281,6 +2336,40 @@ mod tests {
             .expect_err("foreign scoped constants should fail certificate generation");
         assert!(
             err.to_string().contains("foreign scoped constant"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_incompatible_claim_mapping_is_rejected() {
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+        use crate::processor::Processor;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+        let mut normalizer = normalized_goal.normalizer;
+        let generic = normalizer.kernel_context().parse_clause("x0 = x0", &["Bool"]);
+
+        let mut bad_map = VariableMap::new();
+        bad_map.set(0, Term::type_sort());
+
+        let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
+        let mut steps = vec![];
+        let err = generator
+            .specialization_to_certificate_steps(
+                &mut names,
+                &generic,
+                &bad_map,
+                &crate::kernel::local_context::LocalContext::empty(),
+                &mut normalizer,
+                &mut steps,
+            )
+            .expect_err("incompatible mappings should fail certificate specialization");
+        assert!(steps.is_empty(), "failing specialization should not emit steps");
+        assert!(
+            err.to_string().contains("certificate claim map type mismatch"),
             "unexpected error: {}",
             err
         );

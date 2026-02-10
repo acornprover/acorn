@@ -239,6 +239,32 @@ impl Certificate {
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new(project, bindings, None);
+        let mut claim_step_from_expr = |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
+            let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
+            if let Some(claim) = Self::try_deserialize_claim_with_args_value(
+                value.clone(),
+                bindings.as_ref(),
+                normalizer.as_ref(),
+            )? {
+                return Ok(CertificateStep::Claim(claim));
+            }
+            let module_id = bindings.module_id();
+            let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
+            let clauses = view.value_to_denormalized_clauses(&value)?;
+            if clauses.len() != 1 {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "claim must normalize to exactly one clause, got {}",
+                    clauses.len()
+                )));
+            }
+            Ok(CertificateStep::Claim(Claim {
+                clause: clauses
+                    .into_iter()
+                    .next()
+                    .expect("clauses has exactly one element"),
+                var_map: VariableMap::new(),
+            }))
+        };
 
         match statement.statement {
             StatementInfo::VariableSatisfy(vss) => {
@@ -447,32 +473,7 @@ impl Certificate {
 
                 result
             }
-            StatementInfo::Claim(claim) => {
-                let value = evaluator.evaluate_value(&claim.claim, Some(&AcornType::Bool))?;
-                if let Some(claim) = Self::try_deserialize_claim_with_args_value(
-                    value.clone(),
-                    bindings.as_ref(),
-                    normalizer.as_ref(),
-                )? {
-                    return Ok(CertificateStep::Claim(claim));
-                }
-                let module_id = bindings.module_id();
-                let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-                let clauses = view.value_to_denormalized_clauses(&value)?;
-                if clauses.len() != 1 {
-                    return Err(CodeGenError::GeneratedBadCode(format!(
-                        "claim must normalize to exactly one clause, got {}",
-                        clauses.len()
-                    )));
-                }
-                Ok(CertificateStep::Claim(Claim {
-                    clause: clauses
-                        .into_iter()
-                        .next()
-                        .expect("clauses has exactly one element"),
-                    var_map: VariableMap::new(),
-                }))
-            }
+            StatementInfo::Claim(claim) => claim_step_from_expr(&claim.claim),
             _ => Err(CodeGenError::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
                 code
