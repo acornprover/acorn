@@ -315,8 +315,9 @@ impl Project {
         if self.config.write_cache {
             // Save and merge: writes only new JSONL files, preserves manifest based on build type,
             // and merges old certificates back into memory
-            // TODO: how should we handle errors here?
-            let _ = new_cache.save_merging_old(&self.build_cache, is_partial_build);
+            if let Err(e) = new_cache.save_merging_old(&self.build_cache, is_partial_build) {
+                eprintln!("warning: failed to update build cache: {}", e);
+            }
         } else {
             // Even if we're not writing to disk, we need to merge the old certificates
             // into memory so they're available for future builds
@@ -339,8 +340,9 @@ impl Project {
         &mut self,
         descriptor: &ModuleDescriptor,
     ) -> Result<(), ImportError> {
-        let result = self.load_module(descriptor, false);
-        self.targets.insert(descriptor.clone());
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        let result = self.load_module(&canonical_descriptor, false);
+        self.targets.insert(canonical_descriptor);
         result.map(|_| ())
     }
 
@@ -549,9 +551,9 @@ impl Project {
     }
 
     pub fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId> {
-        self.module_map
-            .get(&ModuleDescriptor::name(module_name))
-            .copied()
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        self.module_map.get(&canonical_descriptor).copied()
     }
 
     pub fn get_env_by_id(&self, module_id: ModuleId) -> Option<&Environment> {
@@ -1069,6 +1071,35 @@ impl Project {
         unreachable!("should have returned in the loop")
     }
 
+    // Returns true if this path should be considered present for module resolution.
+    // In mock mode, only open files are considered present.
+    fn module_path_exists(&self, path: &Path) -> bool {
+        if self.config.use_filesystem {
+            path.exists()
+        } else {
+            self.open_files.contains_key(path)
+        }
+    }
+
+    // Resolves aliases like `foo.default` to the canonical descriptor (`foo`) when
+    // the named module file exists.
+    fn canonicalize_name_descriptor(&self, descriptor: &ModuleDescriptor) -> ModuleDescriptor {
+        let ModuleDescriptor::Name(_) = descriptor else {
+            return descriptor.clone();
+        };
+
+        let Ok(path) = self.path_from_descriptor(descriptor) else {
+            return descriptor.clone();
+        };
+
+        if !self.module_path_exists(&path) {
+            return descriptor.clone();
+        }
+
+        self.descriptor_from_path(&path)
+            .unwrap_or_else(|_| descriptor.clone())
+    }
+
     pub fn path_from_descriptor(
         &self,
         descriptor: &ModuleDescriptor,
@@ -1142,6 +1173,9 @@ impl Project {
         descriptor: &ModuleDescriptor,
         strict: bool,
     ) -> Result<ModuleId, ImportError> {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        let descriptor = &canonical_descriptor;
+
         // Check if this module is already known (pre-registered or loaded).
         let preassigned_id = if let Some(&module_id) = self.module_map.get(&descriptor) {
             match self.get_module_by_id(module_id) {

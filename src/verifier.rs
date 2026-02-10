@@ -920,6 +920,60 @@ mod tests {
     }
 
     #[test]
+    fn test_reprove_default_alias_writes_canonical_cache_path() {
+        let (acornlib, src, build) = setup();
+
+        src.child("rat").create_dir_all().unwrap();
+        src.child("rat")
+            .child("default.ac")
+            .write_str(
+                r#"
+                theorem t {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: true,
+        };
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            reprove_config,
+            Some("rat.default".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.builder.reverify = false;
+        verifier.builder.operation_verb = "reproved";
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+
+        assert!(
+            build.child("rat.jsonl").exists(),
+            "canonical cache file should be written for rat/default.ac"
+        );
+        assert!(
+            !build.child("rat").child("default.jsonl").exists(),
+            "default.jsonl should never be written for default.ac modules"
+        );
+
+        let mut reverify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        reverify.builder.reverify = true;
+        reverify.builder.check_hashes = false;
+        let reverify_output = reverify.run().unwrap();
+        assert_eq!(reverify_output.status, BuildStatus::Good);
+    }
+
+    #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
 
