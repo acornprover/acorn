@@ -246,7 +246,7 @@ impl<'a> Proof<'a> {
                     generic, var_maps, ..
                 } = cs;
                 for (var_map, replacement_context) in var_maps {
-                    let mut concrete_step = ConcreteStep {
+                    let concrete_step = ConcreteStep {
                         generic: generic.clone(),
                         var_maps: vec![(var_map, replacement_context)],
                     };
@@ -254,18 +254,6 @@ impl<'a> Proof<'a> {
                     else {
                         continue;
                     };
-                    if matches!(concrete_id, ConcreteStepId::ProofStep(_)) {
-                        // A reconstructed proof-step output is a derived concrete fact, not a
-                        // direct instantiation of a known generic premise. Keep it concrete so
-                        // certificate serialization does not invent a generic claim form.
-                        concrete_step = ConcreteStep {
-                            generic: clause.clone(),
-                            var_maps: vec![(
-                                VariableMap::new(),
-                                clause.get_local_context().clone(),
-                            )],
-                        };
-                    }
                     if skip_clauses.contains(&clause) {
                         continue;
                     }
@@ -443,10 +431,12 @@ mod tests {
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
-    use crate::kernel::proof_step::{ProofStep, Rule, Truthiness};
+    use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
+    use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
+    use crate::normalizer::Normalizer;
     use crate::prover::active_set::ActiveSet;
-    use crate::prover::proof::{add_var_map, ProofResolver};
+    use crate::prover::proof::{add_var_map, Proof, ProofResolver};
     use std::collections::HashMap;
 
     /// Test that resolution followed by simplification produces correct results.
@@ -556,6 +546,80 @@ mod tests {
             .expect("concrete step");
         let (_, replacement_context) = entry.var_maps.first().expect("replacement context");
         assert_eq!(replacement_context.len(), clause.get_local_context().len());
+    }
+
+    #[test]
+    fn test_collect_concrete_steps_preserves_proof_step_specialization_maps() {
+        let mut normalizer = Normalizer::new();
+        let (base_step, mid_step, final_step, mid_clause, c1_term) = {
+            let kernel = normalizer.kernel_context_mut();
+            kernel
+                .parse_constant("g0", "(Bool, Bool) -> Bool")
+                .parse_constant("c0", "Bool")
+                .parse_constant("c1", "Bool");
+
+            let base_clause = kernel.parse_clause("g0(x0, x1)", &["Bool", "Bool"]);
+            let base_step = ProofStep::mock_from_clause(base_clause.clone());
+
+            let mid_clause = kernel.parse_clause("g0(c0, x0)", &["Bool"]);
+            let mut base_map = VariableMap::new();
+            base_map.set(0, kernel.parse_term("c0"));
+            base_map.set(1, Term::new_variable(0));
+            let mid_step = ProofStep::specialization(
+                0,
+                0,
+                &base_step,
+                mid_clause.clone(),
+                PremiseMap::new(
+                    vec![base_map],
+                    vec![0],
+                    mid_clause.get_local_context().clone(),
+                ),
+            );
+
+            let final_clause = kernel.parse_clause("g0(c0, c1)", &[]);
+            let mut mid_map = VariableMap::new();
+            mid_map.set(0, kernel.parse_term("c1"));
+            let final_step = ProofStep::specialization(
+                1,
+                1,
+                &mid_step,
+                final_clause,
+                PremiseMap::new(vec![mid_map], vec![], LocalContext::empty()),
+            );
+
+            (
+                base_step,
+                mid_step,
+                final_step,
+                mid_clause,
+                kernel.parse_term("c1"),
+            )
+        };
+
+        // Add Active(1) before Active(0) so the first emitted concrete step is from Active(1).
+        let mut proof = Proof::new(&normalizer);
+        proof.add_step(ProofStepId::Active(1), &mid_step);
+        proof.add_step(ProofStepId::Active(0), &base_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let steps = proof
+            .collect_concrete_steps()
+            .expect("concrete step collection should succeed");
+
+        let has_mid_specialization = steps.iter().any(|step| {
+            if step.generic != mid_clause {
+                return false;
+            }
+            step.var_maps
+                .iter()
+                .any(|(var_map, _)| var_map.get_mapping(0) == Some(&c1_term))
+        });
+
+        assert!(
+            has_mid_specialization,
+            "expected to keep Active(1)'s generic clause with specialization x0 -> c1"
+        );
     }
 
     /// Test that resolution with polymorphic simplification works correctly.
