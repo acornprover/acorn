@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use im::HashMap;
 use tokio_util::sync::CancellationToken;
-use tower_lsp::lsp_types::{Location, Position, Range, Url};
+use tower_lsp::lsp_types::{HoverContents, Location, MarkedString, Position, Range, Url};
 
 use crate::builder::{BuildEvent, BuildStatus, Builder};
 use crate::elaborator::environment::LineType;
@@ -1634,6 +1634,41 @@ fn test_hover_typeclass_method_with_doc_comment() {
     assert!(
         generic_hover_str.contains("do_something_doc_comment"),
         "Hover should include the doc comment for the typeclass method in generic context"
+    );
+}
+
+#[test]
+fn test_hover_preserves_explicit_type_args_on_partial_application() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/main.ac",
+        indoc! {r#"
+    define constant[T, U](u: U, t: T) -> U {
+        u
+    }
+
+    define uses_constant[T, U](u: U, t: T) -> U {
+        constant[T, U](u, t)                           // line 6
+    }
+    // 345678901234567890123456789012345678901234567890
+    "#},
+    );
+    p.expect_ok("main");
+    let desc = ModuleDescriptor::name("main");
+    let env = p.get_env(&desc).expect("no env for main");
+
+    let hover = p.hover(&env, 5, 6).expect("hover on constant should exist");
+    let HoverContents::Array(parts) = hover.contents else {
+        panic!("expected array hover contents");
+    };
+    let first = match &parts[0] {
+        MarkedString::LanguageString(s) => s.value.clone(),
+        MarkedString::String(s) => s.clone(),
+    };
+    assert!(
+        first.contains("constant["),
+        "hover should preserve explicit type arguments, got: {}",
+        first
     );
 }
 

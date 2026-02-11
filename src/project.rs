@@ -674,6 +674,17 @@ impl Project {
         ))
     }
 
+    /// Strip value-level applications while preserving explicit type applications.
+    ///
+    /// For hover display of partially-applied functions, we want to show the base function,
+    /// but still keep `[T, U]` if it was explicitly applied.
+    fn unapplied_value(value: &AcornValue) -> &AcornValue {
+        match value {
+            AcornValue::Application(app) => Self::unapplied_value(&app.function),
+            _ => value,
+        }
+    }
+
     /// env should be the environment in which the token was evaluated.
     fn hover_for_info(
         &self,
@@ -691,8 +702,9 @@ impl Project {
                     let type_expr = gen.type_to_expr(&t)?;
                     CodeGenerator::marked(format!("{}: {}", info.text, type_expr))
                 } else {
-                    // For partial applications, show the base function instead
-                    let base_value = value.unapply();
+                    // For partial applications, show the base function while preserving
+                    // explicit type applications like `f[T]`.
+                    let base_value = Self::unapplied_value(value);
                     gen.value_to_marked(base_value)?
                 }
             }
@@ -722,11 +734,10 @@ impl Project {
         // Get definition string based on entity type
         let definition_string = match &info.entity {
             NamedEntity::Value(value) => {
-                let base_value = value.unapply();
-                match base_value {
-                    AcornValue::Constant(ci) => self.get_constant_definition_string(env, &ci.name),
-                    _ => None,
-                }
+                let base_value = Self::unapplied_value(value);
+                base_value
+                    .as_name()
+                    .and_then(|name| self.get_constant_definition_string(env, name))
             }
             NamedEntity::UnresolvedValue(unresolved) => {
                 self.get_constant_definition_string(env, &unresolved.name)
@@ -756,15 +767,11 @@ impl Project {
         // Get doc comments based on entity type
         let doc_comments = match &info.entity {
             NamedEntity::Value(value) => {
-                // Use the unapplied value to get the base constant name for doc comments
-                let base_value = value.unapply();
-                match base_value {
-                    AcornValue::Constant(ci) => {
-                        // For constants (including those with type parameters), look up doc comments
-                        self.get_constant_doc_comments(env, &ci.name)
-                    }
-                    _ => None,
-                }
+                // Use the unapplied value to get the base constant name for doc comments.
+                let base_value = Self::unapplied_value(value);
+                base_value
+                    .as_name()
+                    .and_then(|name| self.get_constant_doc_comments(env, name))
             }
             NamedEntity::UnresolvedValue(unresolved) => {
                 self.get_constant_doc_comments(env, &unresolved.name)
