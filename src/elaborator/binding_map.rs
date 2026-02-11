@@ -18,6 +18,7 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::termination_checker::TerminationChecker;
 use crate::elaborator::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
+use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -140,6 +141,40 @@ impl BindingMap {
     /// Gets the local alias to use for a given constant.
     pub fn constant_alias(&self, name: &ConstantName) -> Option<&String> {
         self.constant_to_alias.get(name)
+    }
+
+    /// Returns preferred unqualified names for synthetic IDs visible in this scope.
+    ///
+    /// This is used for user-facing code generation so checked proof steps can reuse
+    /// names that came from parsed certificate lines.
+    pub fn synthetic_name_map(&self) -> HashMap<(ModuleId, AtomId), String> {
+        let mut names = HashMap::new();
+        for (name, info) in &self.constant_defs {
+            let ConstantName::Unqualified(_, alias) = name else {
+                continue;
+            };
+
+            let synthetic_id = match &info.value {
+                PotentialValue::Unresolved(unresolved) => unresolved.name.synthetic_id(),
+                PotentialValue::Resolved(value) => {
+                    value.as_name().and_then(|name| name.synthetic_id())
+                }
+            };
+
+            let Some(synthetic_id) = synthetic_id else {
+                continue;
+            };
+
+            names
+                .entry(synthetic_id)
+                .and_modify(|existing: &mut String| {
+                    if alias < existing {
+                        *existing = alias.clone();
+                    }
+                })
+                .or_insert_with(|| alias.clone());
+        }
+        names
     }
 
     /// Gets the local alias to use for a given datatype.

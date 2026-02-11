@@ -96,6 +96,9 @@ pub struct CheckedStep {
 
     /// The reason this step was accepted.
     pub reason: StepReason,
+
+    /// The original certificate code line for this step, when available.
+    pub code_line: Option<String>,
 }
 
 /// The checker quickly checks if a clause can be proven in a single step from known clauses.
@@ -354,7 +357,7 @@ impl Checker {
     pub fn check_cert_steps(
         &mut self,
         cert_steps: &[CertificateStep],
-        source_lines: Option<&[String]>,
+        code_lines: Option<&[String]>,
         normalizer: &Cow<crate::normalizer::Normalizer>,
     ) -> Result<Vec<CheckedStep>, Error> {
         let mut checked_steps = Vec::new();
@@ -379,7 +382,7 @@ impl Checker {
                         .or_else(|| self.check_clause(&clause, &kernel_context));
 
                     let Some(reason) = reason else {
-                        let cert_line_context = source_lines
+                        let cert_line_context = code_lines
                             .and_then(|lines| lines.get(step_index))
                             .map(|line| {
                                 format!("; certificate line {}: {:?}", step_index + 1, line)
@@ -394,6 +397,7 @@ impl Checker {
                     checked_steps.push(CheckedStep {
                         clause: clause.clone(),
                         reason,
+                        code_line: code_lines.and_then(|lines| lines.get(step_index)).cloned(),
                     });
 
                     let mut generic_clause = claim.clause.clone();

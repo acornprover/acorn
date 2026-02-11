@@ -24,7 +24,6 @@ use crate::interfaces::{GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
-use crate::syntax::statement::Statement;
 use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
 
@@ -1534,10 +1533,9 @@ impl Project {
                     };
                     let reason = cert_step.reason.description();
 
-                    // Pretty-print the statement by parsing and formatting it
-                    let statement = Statement::parse_str_with_options(&cert_step.statement, true)
-                        .map(|s| s.to_string())
-                        .unwrap_or(cert_step.statement);
+                    // Certificate::check already returns a display-ready statement.
+                    // Keep it as-is instead of reparsing/reformatting here.
+                    let statement = cert_step.statement;
 
                     Step {
                         statement,

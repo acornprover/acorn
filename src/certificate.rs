@@ -48,12 +48,30 @@ fn clause_to_code(
     clause: &crate::kernel::clause::Clause,
     normalizer: &Normalizer,
     bindings: &Cow<BindingMap>,
+    synthetic_names: &HashMap<(ModuleId, AtomId), String>,
+    code_line: Option<&str>,
 ) -> String {
     let value = normalizer.denormalize(clause, None, None, false);
+
+    // First try normal code generation.
     let mut code_gen = CodeGenerator::new(bindings);
-    code_gen
-        .value_to_code(&value)
-        .unwrap_or_else(|_| format!("{} (internal)", clause))
+    if let Ok(code) = code_gen.value_to_code(&value) {
+        return code;
+    }
+
+    if !synthetic_names.is_empty() {
+        let mut code_gen = CodeGenerator::new(bindings);
+        if let Ok(code) = code_gen.value_to_code_with_synthetic_names(&value, synthetic_names) {
+            return code;
+        }
+    }
+
+    // If we have the original certificate line, prefer it over reconstructed internal output.
+    if let Some(code_line) = code_line {
+        return code_line.to_string();
+    }
+
+    "<missing>".to_string()
 }
 
 /// A proof certificate containing the concrete proof steps as strings.
@@ -818,11 +836,21 @@ impl Certificate {
         };
         let cert_steps = Self::parse_cert_steps(proof, project, &mut bindings, &mut normalizer)?;
         let checked_steps = checker.check_cert_steps(&cert_steps, Some(proof), &normalizer)?;
+        let synthetic_names = bindings.synthetic_name_map();
         Ok(checked_steps
             .into_iter()
-            .map(|checked_step| CertificateLine {
-                statement: clause_to_code(&checked_step.clause, &normalizer, &bindings),
-                reason: checked_step.reason,
+            .map(|checked_step| {
+                let statement = clause_to_code(
+                    &checked_step.clause,
+                    &normalizer,
+                    &bindings,
+                    &synthetic_names,
+                    checked_step.code_line.as_deref(),
+                );
+                CertificateLine {
+                    statement,
+                    reason: checked_step.reason,
+                }
             })
             .collect())
     }
