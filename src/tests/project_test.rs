@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 use crate::builder::{BuildEvent, BuildStatus, Builder};
 use crate::elaborator::environment::LineType;
 use crate::elaborator::names::ConstantName;
-use crate::module::ModuleDescriptor;
+use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::{localize_mock_filename, Project, ProjectConfig};
 use indoc::indoc;
 
@@ -99,6 +99,55 @@ fn test_update_file_first_call_drops_modules() {
         initial_searches,
         searches_after_update
     );
+}
+
+#[test]
+fn test_update_file_preserves_module_ids() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&build_dir).unwrap();
+
+    fs::write(
+        src_dir.join("prelude.ac"),
+        "let prelude_true: Bool = true\n",
+    )
+    .unwrap();
+    fs::write(src_dir.join("a.ac"), "theorem a_goal { true }\n").unwrap();
+    fs::write(src_dir.join("z.ac"), "theorem z_goal { true }\n").unwrap();
+    let main_file = src_dir.join("main.ac");
+    let main_content = "import z\nimport a\n\ntheorem main_goal { true }\n";
+    fs::write(&main_file, main_content).unwrap();
+
+    let mut p = Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    p.add_target_by_path(&main_file).unwrap();
+
+    let initial_ids = (
+        p.get_module_id_by_name("prelude").unwrap(),
+        p.get_module_id_by_name("a").unwrap(),
+        p.get_module_id_by_name("main").unwrap(),
+        p.get_module_id_by_name("z").unwrap(),
+    );
+    assert_eq!(
+        initial_ids,
+        (ModuleId::PRELUDE, ModuleId(1), ModuleId(2), ModuleId(3))
+    );
+
+    let touched_main = format!("// touch\n{}", main_content);
+    p.update_file(main_file, &touched_main, 1)
+        .expect("update should succeed");
+
+    let updated_ids = (
+        p.get_module_id_by_name("prelude").unwrap(),
+        p.get_module_id_by_name("a").unwrap(),
+        p.get_module_id_by_name("main").unwrap(),
+        p.get_module_id_by_name("z").unwrap(),
+    );
+    assert_eq!(updated_ids, initial_ids);
 }
 
 #[test]

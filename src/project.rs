@@ -1171,6 +1171,10 @@ impl Project {
         descriptor: &ModuleDescriptor,
         strict: bool,
     ) -> Result<ModuleId, ImportError> {
+        // Ensure filesystem-backed projects always assign stable module IDs
+        // before loading starts (including reloads after update_file/close_file).
+        self.register_all_modules();
+
         let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
         let descriptor = &canonical_descriptor;
 
