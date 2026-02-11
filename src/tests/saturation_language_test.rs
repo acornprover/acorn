@@ -499,6 +499,31 @@ fn test_prove_member_equation_requires_constraint() {
 }
 
 #[test]
+fn test_prove_constrained_new_option_equations() {
+    let text = r#"
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
+    structure Foo {
+        value: Bool
+    } constraint {
+        value
+    }
+
+    theorem goal_some(b: Bool) {
+        b implies Foo.new_option(b) = Option.some(Foo.new(b))
+    }
+
+    theorem goal_none(b: Bool) {
+        not b implies Foo.new_option(b) = Option.none[Foo]
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
 fn test_proving_boolean_equality() {
     let text = r#"
     let a: Bool = axiom

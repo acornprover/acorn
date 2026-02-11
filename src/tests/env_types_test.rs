@@ -449,6 +449,27 @@ fn test_structure_with_constraint_and_by_block() {
 }
 
 #[test]
+fn test_structure_new_option_syntax() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        structure Thing {
+            foo: Bool
+        } constraint {
+            foo
+        }
+
+        let value: Option[Thing] = Thing.new_option(true)
+        "#,
+    );
+}
+
+#[test]
 fn test_typechecking_try_option() {
     let mut env = Environment::test();
     env.add(

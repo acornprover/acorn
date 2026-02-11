@@ -1031,8 +1031,8 @@ impl Environment {
                 .apply_potential(new_fn.clone(), member_args, None, &ss.name_token)?;
         let new_eq =
             AcornValue::Binary(BinaryOp::Equals, Box::new(recreated), Box::new(object_var));
-        let new_claim =
-            AcornValue::ForAll(vec![struct_type], Box::new(new_eq)).genericize(&type_params);
+        let new_claim = AcornValue::ForAll(vec![struct_type.clone()], Box::new(new_eq))
+            .genericize(&type_params);
         let source = Source::type_definition(
             self.module_id,
             range,
@@ -1043,18 +1043,124 @@ impl Environment {
         let prop = Proposition::new(new_claim, type_params.clone(), source);
         self.add_node(Node::structural(project, self, prop));
 
+        let var_args = (0..ss.fields.len())
+            .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
+            .collect::<Vec<_>>();
+        let new_application = self.bindings.apply_potential(
+            new_fn.clone(),
+            var_args.clone(),
+            None,
+            &ss.name_token,
+        )?;
+
+        // If Option is available in scope, add a "new_option" function for constrained
+        // structures that returns some(new(...)) when the constraint holds and none otherwise.
+        if let Some(constraint) = &unbound_constraint {
+            if let Some(option_type) = self.bindings.get_type_for_typename("Option").cloned() {
+                let option_datatype = option_type.as_base_datatype().cloned().ok_or_else(|| {
+                    ss.name_token
+                        .error("Option must be a datatype to auto-generate constrained new_option")
+                })?;
+                let option_struct_type =
+                    option_type.resolve(vec![struct_type.clone()], &ss.name_token)?;
+
+                let (some_module_id, some_name) = self
+                    .bindings
+                    .resolve_datatype_attr(&option_datatype, "some")
+                    .map_err(|e| ss.name_token.error(&e))?;
+                let option_some = self
+                    .bindings
+                    .get_bindings(some_module_id, project)
+                    .get_constant_value(&DefinedName::Constant(some_name))
+                    .map_err(|e| ss.name_token.error(&e))?;
+
+                let (none_module_id, none_name) = self
+                    .bindings
+                    .resolve_datatype_attr(&option_datatype, "none")
+                    .map_err(|e| ss.name_token.error(&e))?;
+                let option_none = self
+                    .bindings
+                    .get_bindings(none_module_id, project)
+                    .get_constant_value(&DefinedName::Constant(none_name))
+                    .map_err(|e| ss.name_token.error(&e))?;
+
+                let new_option_fn_type =
+                    AcornType::functional(field_types.clone(), option_struct_type.clone());
+                let def_str = format!(
+                    "{}.new_option: {}",
+                    ss.name_token.text(),
+                    new_option_fn_type
+                );
+                let new_option_fn = self.bindings.add_datatype_attribute(
+                    &datatype,
+                    "new_option",
+                    type_params.clone(),
+                    new_option_fn_type.genericize(&type_params),
+                    None,
+                    None,
+                    vec![],
+                    def_str,
+                );
+
+                let new_option_application = self.bindings.apply_potential(
+                    new_option_fn.clone(),
+                    var_args.clone(),
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+                let some_value = self.bindings.apply_potential(
+                    option_some,
+                    vec![new_application.clone()],
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+                let none_value = self.bindings.apply_potential(
+                    option_none,
+                    vec![],
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+
+                let some_eq = AcornValue::equals(new_option_application.clone(), some_value);
+                let some_claim = AcornValue::ForAll(
+                    field_types.clone(),
+                    Box::new(AcornValue::implies(constraint.clone(), some_eq)),
+                )
+                .genericize(&type_params);
+                let source = Source::type_definition(
+                    self.module_id,
+                    range,
+                    self.depth,
+                    ss.name_token.text().to_string(),
+                    "new_option".to_string(),
+                );
+                let prop = Proposition::new(some_claim, type_params.clone(), source);
+                self.add_node(Node::structural(project, self, prop));
+
+                let none_eq = AcornValue::equals(new_option_application, none_value);
+                let none_claim = AcornValue::ForAll(
+                    field_types.clone(),
+                    Box::new(AcornValue::implies(constraint.clone().negate(), none_eq)),
+                )
+                .genericize(&type_params);
+                let source = Source::type_definition(
+                    self.module_id,
+                    range,
+                    self.depth,
+                    ss.name_token.text().to_string(),
+                    "new_option".to_string(),
+                );
+                let prop = Proposition::new(none_claim, type_params.clone(), source);
+                self.add_node(Node::structural(project, self, prop));
+            }
+        }
+
         // There are also formulas for new followed by member functions. Ie:
         //   Pair.first(Pair.new(a, b)) = a.
         // These are the "member equations".
         //
         // When there's a constraint, we need to add it as a condition here, like:
         //   constraint(a, b) -> Pair.first(Pair.new(a, b)) = a.
-        let var_args = (0..ss.fields.len())
-            .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
-            .collect::<Vec<_>>();
-        let new_application =
-            self.bindings
-                .apply_potential(new_fn, var_args, None, &ss.name_token)?;
         for i in 0..ss.fields.len() {
             let (field_name_token, field_type_expr, _) = &ss.fields[i];
             let member_fn = &member_fns[i];
