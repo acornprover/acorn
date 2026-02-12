@@ -228,7 +228,9 @@ impl Source {
             },
             SourceType::Anonymous => format!("line {}", self.user_visible_line()),
             SourceType::TypeDefinition(type_name, _) => format!("the '{}' definition", type_name),
-            SourceType::ConstantDefinition(value, _) => format!("the '{}' definition", value),
+            SourceType::ConstantDefinition(_, name) => {
+                format!("the '{}' definition", name)
+            }
             SourceType::Extends(tc) => format!("the '{}' definition", tc),
             SourceType::Instance(instance, tc) => {
                 format!("the '{}: {}' relationship", instance, tc)
@@ -280,5 +282,31 @@ impl Source {
         } else {
             Truthiness::Hypothetical
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::elaborator::acorn_value::AcornValue;
+    use crate::module::ModuleId;
+    use tower_lsp::lsp_types::Range;
+
+    use super::{Source, SourceType};
+
+    #[test]
+    fn test_constant_definition_description_uses_root_name() {
+        let source = Source::new(
+            ModuleId(0),
+            Range::default(),
+            SourceType::ConstantDefinition(
+                Arc::new(AcornValue::Bool(true)),
+                "List.length".to_string(),
+            ),
+            true,
+            0,
+        );
+        assert_eq!(source.description(), "the 'List.length' definition");
     }
 }
