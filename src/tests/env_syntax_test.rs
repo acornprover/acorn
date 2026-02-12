@@ -908,3 +908,33 @@ fn test_env_destructuring_with_attribute() {
         "#,
     );
 }
+
+#[test]
+fn test_env_destructuring_with_polymorphic_constructor() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        type Int: axiom
+
+        structure Rat {
+            value: Int
+        }
+
+        inductive Option[T] {
+            some(T)
+            none
+        }
+
+        define make_rat_option(i: Int) -> Option[Rat] {
+            Option.some(Rat.new(i))
+        }
+
+        let i: Int = axiom
+        let Option.some(rat_zero) = make_rat_option(i)
+
+        theorem rat_zero_is_well_typed {
+            rat_zero = rat_zero
+        }
+        "#,
+    );
+}

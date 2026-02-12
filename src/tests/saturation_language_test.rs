@@ -1222,6 +1222,30 @@ fn test_proving_can_fail_with_destructuring() {
 }
 
 #[test]
+fn test_proving_with_polymorphic_destructuring() {
+    let text = r#"
+    type Int: axiom
+
+    structure Rat {
+        value: Int
+    }
+
+    inductive Option[T] {
+        some(T)
+        none
+    }
+
+    let i: Int = axiom
+    let Option.some(rat_zero) = Option.some(Rat.new(i))
+
+    theorem goal {
+        rat_zero = Rat.new(i)
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
 fn test_prover_can_use_instance_forwards() {
     // One of two paired tests.
     // This direction should work - we can use instance relationship in subsequent proofs.

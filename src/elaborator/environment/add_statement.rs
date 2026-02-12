@@ -2624,11 +2624,46 @@ impl Environment {
                 .check_unqualified_name_available(&arg_name, arg_token)?;
         }
 
-        // Evaluate the function being called
-        let function = self.evaluator(project).evaluate_value(&ds.function, None)?;
-
         // Evaluate the value being destructured
         let value = self.evaluator(project).evaluate_value(&ds.value, None)?;
+        let value_type = value.get_type();
+
+        // Evaluate the function in generic form so polymorphic constructors like Option.some
+        // can be inferred from the value type on the right-hand side.
+        let mut empty_stack = Stack::new();
+        let mut function = self
+            .evaluator(project)
+            .evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
+
+        // Infer type arguments for generic functions using the right-hand side type.
+        // We compare the function's return type to the value type, then instantiate
+        // any inferred type parameters on the function value itself.
+        let function_type_before = function.get_type();
+        let function_ftype_before = match &function_type_before {
+            AcornType::Function(ft) => ft,
+            _ => {
+                return Err(ds.function.error(&format!(
+                    "expected a function type, but got {}",
+                    function_type_before
+                )));
+            }
+        };
+
+        let return_type_before = function_ftype_before.return_type.as_ref().clone();
+        if return_type_before != value_type {
+            let mut unifier = self.bindings.unifier();
+            unifier.user_match_instance(
+                &return_type_before,
+                &value_type,
+                "destructuring function return type",
+                &ds.value,
+            )?;
+
+            if !unifier.mapping.is_empty() {
+                let substitutions: Vec<_> = unifier.mapping.into_iter().collect();
+                function = function.instantiate(&substitutions);
+            }
+        }
 
         // The function should be a function type
         let function_type = function.get_type();
@@ -2652,12 +2687,19 @@ impl Environment {
         }
 
         // Check that the return type matches the value type
-        if return_type != value.get_type() {
+        if return_type != value_type {
             return Err(ds.value.error(&format!(
                 "type mismatch: function returns {} but value has type {}",
-                return_type,
-                value.get_type()
+                return_type, value_type
             )));
+        }
+
+        // If type arguments could not be inferred from the value type, we'd be introducing
+        // generic local constants here, which is unsupported.
+        if arg_types.iter().any(|t| t.has_generic()) {
+            return Err(ds
+                .function
+                .error("could not infer all argument types for destructuring pattern"));
         }
 
         // Create the general existence claim: exists args... . function(args...) = value
@@ -2674,13 +2716,6 @@ impl Environment {
             .collect();
 
         // Create the equality value: function(args...) = value
-        // Evaluate the function and value with the stack
-        let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
-        let general_function =
-            no_token_evaluator.evaluate_value_with_stack(&mut stack, &ds.function, None)?;
-        let general_value =
-            no_token_evaluator.evaluate_value_with_stack(&mut stack, &ds.value, None)?;
-
         // Create variable values using atom IDs
         let general_arg_values: Vec<_> = atom_ids
             .iter()
@@ -2688,8 +2723,8 @@ impl Environment {
             .map(|(atom_id, arg_type)| AcornValue::Variable(*atom_id, arg_type.clone()))
             .collect();
 
-        let general_applied = AcornValue::apply(general_function, general_arg_values);
-        let general_equality = AcornValue::equals(general_applied, general_value);
+        let general_applied = AcornValue::apply(function.clone(), general_arg_values);
+        let general_equality = AcornValue::equals(general_applied, value.clone());
 
         // Wrap in exists quantifier
         let general_claim = AcornValue::Exists(quant_types.clone(), Box::new(general_equality));
