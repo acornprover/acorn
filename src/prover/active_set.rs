@@ -383,9 +383,10 @@ impl ActiveSet {
             literals.push(new_literal);
         }
 
-        // Check inhabitedness for eliminated short clause variables.
-        // A variable is "eliminated" if it doesn't appear in any output literal.
-        // This resolution is only sound if eliminated variables have inhabited types.
+        // Check inhabitedness for eliminated variables from BOTH premises.
+        // A variable is "eliminated" if, after unification, it contributes no
+        // output variables to the resulting clause. Resolution is only sound
+        // when such eliminated variables have inhabited types.
         let mut output_vars: HashSet<AtomId> = HashSet::new();
         for literal in &literals {
             for atom in literal.iter_atoms() {
@@ -395,38 +396,49 @@ impl ActiveSet {
             }
         }
 
-        let short_context = short_clause.get_local_context();
-        for var_id in 0..short_context.len() {
-            // Apply the unifier to a variable term to get its mapped value
-            let var_term = Term::new_variable(var_id as AtomId);
-            let mapped_term = unifier.apply(Scope::LEFT, &var_term);
+        let mut check_eliminated_vars = |scope: Scope, context: &LocalContext| -> bool {
+            for var_id in 0..context.len() {
+                // Apply the unifier to a variable term to get its mapped value.
+                let var_term = Term::new_variable(var_id as AtomId);
+                let mapped_term = unifier.apply(scope, &var_term);
 
-            // If mapped to concrete term (no variables), the variable was instantiated - OK
-            if !mapped_term.has_any_variable() {
-                continue;
-            }
-
-            // Check if any output variables in mapped_term appear in output literals
-            let appears_in_output = mapped_term.iter_atoms().any(|atom| {
-                if let Atom::FreeVariable(out_var) = atom {
-                    output_vars.contains(out_var)
-                } else {
-                    false
+                // If mapped to concrete term (no variables), the variable was instantiated.
+                if !mapped_term.has_any_variable() {
+                    continue;
                 }
-            });
 
-            // If no output variables appear in output, this variable is eliminated
-            if !appears_in_output {
-                if let Some(var_type) = short_context.get_var_type(var_id) {
-                    // Translate the type to output scope for the inhabitedness check
-                    let translated_type = unifier.apply(Scope::LEFT, var_type);
-                    if !kernel_context
-                        .provably_inhabited(&translated_type, Some(unifier.output_context()))
-                    {
-                        return None; // Reject the resolution
+                // Check if any output variables in mapped_term appear in output literals.
+                let appears_in_output = mapped_term.iter_atoms().any(|atom| {
+                    if let Atom::FreeVariable(out_var) = atom {
+                        output_vars.contains(out_var)
+                    } else {
+                        false
+                    }
+                });
+
+                // If no output variables appear in output, this variable is eliminated.
+                if !appears_in_output {
+                    if let Some(var_type) = context.get_var_type(var_id) {
+                        // Translate the type to output scope for inhabitedness check.
+                        let translated_type = unifier.apply(scope, var_type);
+                        if !kernel_context
+                            .provably_inhabited(&translated_type, Some(unifier.output_context()))
+                        {
+                            return false;
+                        }
                     }
                 }
             }
+            true
+        };
+
+        let short_context = short_clause.get_local_context();
+        if !check_eliminated_vars(Scope::LEFT, short_context) {
+            return None;
+        }
+        let long_context = long_clause.get_local_context();
+        if !check_eliminated_vars(Scope::RIGHT, long_context) {
+            return None;
         }
 
         // Gather the output data including variable maps for reconstruction
@@ -1957,6 +1969,50 @@ mod tests {
         assert!(
             results.is_empty(),
             "Resolution should be rejected when eliminating variable with uninhabited type, got {} results",
+            results.len()
+        );
+    }
+
+    /// Regression test: resolution must reject eliminating a long-clause variable
+    /// whose concrete type is not provably inhabited.
+    ///
+    /// Short clause: not g0(x0), with x0: SetType (inhabited by c0).
+    /// Long clause:  g0(g1(x0)), with x0: FiniteSetType (uninhabited).
+    ///
+    /// If accepted, resolution would derive contradiction from vacuous truth.
+    #[test]
+    fn test_resolution_rejects_eliminated_long_variable_with_concrete_uninhabited_type() {
+        let mut kctx = KernelContext::new();
+
+        // Uninterpreted concrete types.
+        kctx.parse_type_constructor("SetType", 0);
+        kctx.parse_type_constructor("FiniteSetType", 0);
+
+        // Make SetType inhabited so short-side elimination remains sound.
+        kctx.parse_constant("c0", "SetType");
+
+        // Predicates/functions.
+        kctx.parse_constant("g0", "SetType -> Bool");
+        kctx.parse_constant("g1", "FiniteSetType -> SetType");
+
+        let mut set = ActiveSet::new();
+
+        // Short clause: not g0(x0), context x0: SetType.
+        let short_clause = kctx.parse_clause("not g0(x0)", &["SetType"]);
+        set.activate(ProofStep::mock_from_clause(short_clause), &kctx);
+
+        // Long clause: g0(g1(x0)), context x0: FiniteSetType.
+        // Mark as non-factual so resolution is actually attempted.
+        let long_clause = kctx.parse_clause("g0(g1(x0))", &["FiniteSetType"]);
+        let mut long_step = ProofStep::mock_from_clause(long_clause);
+        long_step.truthiness = Truthiness::Counterfactual;
+
+        let mut results = vec![];
+        set.find_resolutions(&long_step, &mut results, &kctx);
+
+        assert!(
+            results.is_empty(),
+            "Resolution should be rejected when eliminating concrete uninhabited long-clause variables, got {} results",
             results.len()
         );
     }
