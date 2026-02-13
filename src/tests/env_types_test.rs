@@ -138,7 +138,7 @@ fn test_cant_reuse_type_param_name() {
     // Reusing a global name is not.
     env.bad(
         r#"
-            structure T[Pair, U] {
+            structure PairHolder[Pair, U] {
                 first: Pair
                 second: U
             }

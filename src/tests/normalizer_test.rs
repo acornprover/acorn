@@ -227,20 +227,20 @@ fn test_functional_skolemization() {
     let mut env = Environment::test();
     env.add(
         r#"
-        type T: axiom
+        type Elem: axiom
         type List: axiom
-        let contains: (List, T) -> Bool = axiom
-        define finite_constraint(p: T -> Bool) -> Bool {
+        let contains: (List, Elem) -> Bool = axiom
+        define finite_constraint(p: Elem -> Bool) -> Bool {
             exists(lst: List) {
-                forall(x: T) {
+                forall(x: Elem) {
                     p(x) implies contains(lst, x)
                 }
             }
         }
-        theorem test_finite(p: T -> Bool) {
+        theorem test_finite(p: Elem -> Bool) {
             not finite_constraint(p) or
             exists(lst: List) {
-                forall(x: T) {
+                forall(x: Elem) {
                     p(x) implies contains(lst, x)
                 }
             }
@@ -318,10 +318,10 @@ fn test_if_then_else_normalization_with_variables() {
     let mut env = Environment::test();
     env.add(
         r#"
-        type T: axiom
-        let foo: (T -> Bool, T, T) -> Bool = axiom
+        type Elem: axiom
+        let foo: (Elem -> Bool, Elem, Elem) -> Bool = axiom
 
-        theorem goal(f: T -> Bool, item: T, x: T) {
+        theorem goal(f: Elem -> Bool, item: Elem, x: Elem) {
             foo(f, item, x) = if x = item {
                 true
             } else {

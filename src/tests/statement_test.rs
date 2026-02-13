@@ -293,6 +293,40 @@ mod tests {
     }
 
     #[test]
+    fn test_single_character_type_definition_names_forbidden() {
+        fail_with(
+            "type T: axiom",
+            "single-character type names are reserved for type variables",
+        );
+        fail_with(
+            indoc! {"
+            structure T {
+                value: Nat
+            }"},
+            "single-character type names are reserved for type variables",
+        );
+        fail_with(
+            indoc! {"
+            inductive T {
+                base
+            }"},
+            "single-character type names are reserved for type variables",
+        );
+    }
+
+    #[test]
+    fn test_single_character_typeclass_definition_names_forbidden() {
+        fail_with(
+            "typeclass M: T extends Foo",
+            "single-character typeclass names are reserved for type variables",
+        );
+        fail_with(
+            "typeclass T extends Foo",
+            "single-character typeclass names are reserved for type variables",
+        );
+    }
+
+    #[test]
     fn test_only_declarations_in_signatures() {
         fail("theorem foo(x: int, x > 0): x + 1 > 0");
     }

@@ -791,9 +791,20 @@ fn parse_define_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
     Ok(statement)
 }
 
+fn reject_single_character_type_name(name_token: &Token, kind: &str) -> Result<()> {
+    if name_token.text().chars().count() == 1 {
+        return Err(name_token.error(&format!(
+            "single-character {} names are reserved for type variables",
+            kind
+        )));
+    }
+    Ok(())
+}
+
 /// Parses a type statement where the "type" keyword has already been found.
 fn parse_type_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> Result<Statement> {
     let name_token = tokens.expect_type_name()?;
+    reject_single_character_type_name(&name_token, "type")?;
     tokens.expect_type(TokenType::Colon)?;
     tokens.skip_newlines();
     let (type_expr, _) = Expression::parse_type(tokens, Terminator::Is(TokenType::NewLine))?;
@@ -890,6 +901,7 @@ fn parse_if_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statemen
 /// Parses a structure statement where the "structure" keyword has already been found.
 fn parse_structure_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statement> {
     let name_token = tokens.expect_type_name()?;
+    reject_single_character_type_name(&name_token, "type")?;
     let type_params = TypeParamExpr::parse_list(tokens)?;
     tokens.expect_type(TokenType::LeftBrace)?;
     let mut fields = vec![];
@@ -963,6 +975,7 @@ fn parse_structure_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
 /// Parses an inductive statement where the "inductive" keyword has already been found.
 fn parse_inductive_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statement> {
     let type_token = tokens.expect_type_name()?;
+    reject_single_character_type_name(&type_token, "type")?;
     let type_params = TypeParamExpr::parse_list(tokens)?;
     tokens.expect_type(TokenType::LeftBrace)?;
     let mut constructors = vec![];
@@ -1187,6 +1200,7 @@ fn parse_typeclass_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
                 .error("expected ':' for block syntax or 'extends'/'{'  for no-block syntax"));
         }
     };
+    reject_single_character_type_name(&typeclass_name, "typeclass")?;
 
     // Check for "extends" keyword and parse the extended typeclasses
     let mut extends = vec![];

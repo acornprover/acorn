@@ -2193,7 +2193,7 @@ fn test_proving_functional_structure_identity() {
 /// 1. Using extensionality to derive `a.value = b.value` from `a.value(x) = b.value(x)`
 /// 2. Using the structure identity axiom to conclude `a = b`
 ///
-/// Importantly, T is uninhabited (an axiom type with no constructors), so the prover
+/// Importantly, Elem is uninhabited (an axiom type with no constructors), so the prover
 /// cannot instantiate x with a concrete value. Extensionality must work on the
 /// universally quantified clause directly.
 #[test]
@@ -2202,12 +2202,12 @@ fn test_extensionality_without_witness_for_uninhabited_type() {
     p.mock(
         "/mock/main.ac",
         r#"
-        // T is uninhabited - it's an axiom type with no constructors
-        type T: axiom
+        // Elem is uninhabited - it's an axiom type with no constructors
+        type Elem: axiom
 
-        // A wrapper structure containing a function over T
+        // A wrapper structure containing a function over Elem
         structure Wrapper {
-            value: T -> T
+            value: Elem -> Elem
         }
 
         let a: Wrapper = axiom
@@ -2225,7 +2225,7 @@ fn test_extensionality_without_witness_for_uninhabited_type() {
         "#,
     );
 
-    // This should succeed without needing a witness for T
+    // This should succeed without needing a witness for Elem
     prove(&mut p, "main", "goal");
 }
 
