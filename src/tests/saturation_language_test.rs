@@ -1469,6 +1469,38 @@ fn test_cannot_avoid_inhabitedness_through_resolution() {
 }
 
 #[test]
+fn test_cannot_avoid_inhabitedness_through_resolution_with_concrete_uninhabited_type() {
+    // This should be rejected: FiniteSet might be empty, so we cannot derive a
+    // contradiction by instantiating forall(x: FiniteSet) clauses with an arbitrary witness.
+    let text = r#"
+    inductive Set {
+        empty
+    }
+
+    let is_finite: Set -> Bool = axiom
+
+    type FiniteSet: axiom
+    let underlying_set: FiniteSet -> Set = axiom
+
+    axiom finite_underlying(s: FiniteSet) {
+        is_finite(underlying_set(s))
+    }
+
+    axiom all_equal(x: Set, y: Set) {
+        x = y
+    }
+
+    theorem goal {
+        is_finite(Set.empty)
+    }
+    "#;
+
+    // The correct result is Exhausted. Current behavior returns Success by deriving
+    // an unsound contradiction via an arbitrary FiniteSet witness.
+    assert_eq!(prove_text(text, "goal"), Outcome::Exhausted);
+}
+
+#[test]
 fn test_cannot_avoid_inhabitedness_through_equality_reduction() {
     // This should be rejected because T might not be inhabited at all.
     let text = r#"
