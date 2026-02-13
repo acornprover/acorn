@@ -524,6 +524,40 @@ fn test_prove_constrained_new_option_equations() {
 }
 
 #[test]
+fn test_destructuring_constrained_new_option_cannot_prove_member_equation() {
+    let text = r#"
+    type Int: axiom
+
+    let zero: Int = axiom
+    let one: Int = axiom
+    let is_reduced: (Int, Int) -> Bool = axiom
+
+    axiom zero_one_is_reduced {
+        is_reduced(zero, one)
+    }
+
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
+    structure Rat {
+        num: Int
+        denom: Int
+    } constraint {
+        is_reduced(num, denom)
+    }
+
+    let Option.some(alt_zero) = Rat.new_option(zero, one)
+
+    theorem alt_zero_num {
+        alt_zero.num = zero
+    }
+    "#;
+    verify_fails(text);
+}
+
+#[test]
 fn test_proving_boolean_equality() {
     let text = r#"
     let a: Bool = axiom
