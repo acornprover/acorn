@@ -1074,11 +1074,17 @@ impl Environment {
         // An object can be recreated by new'ing from its members. Ie:
         // Pair.new(Pair.first(p), Pair.second(p)) = p.
         // This is the "new equation" for a struct type.
-        let recreated =
-            self.bindings
-                .apply_potential(new_fn.clone(), member_args, None, &ss.name_token)?;
-        let new_eq =
-            AcornValue::Binary(BinaryOp::Equals, Box::new(recreated), Box::new(object_var));
+        let recreated = self.bindings.apply_potential(
+            new_fn.clone(),
+            member_args.clone(),
+            None,
+            &ss.name_token,
+        )?;
+        let new_eq = AcornValue::Binary(
+            BinaryOp::Equals,
+            Box::new(recreated),
+            Box::new(object_var.clone()),
+        );
         let new_claim = AcornValue::ForAll(vec![struct_type.clone()], Box::new(new_eq))
             .genericize(&type_params);
         let source = Source::type_definition(
@@ -1243,6 +1249,35 @@ impl Environment {
                     "new_option".to_string(),
                 );
                 let prop = Proposition::new(none_claim, type_params.clone(), source);
+                self.add_node(Node::structural(project, self, prop));
+
+                // Round-trip: decomposing a struct into its fields and passing them to
+                // new_option always returns Some of the original struct.
+                // forall r: Struct . Struct.new_option(r.field1, r.field2, ...) = Some(r)
+                let round_trip_application = self.bindings.apply_potential(
+                    new_option_fn.clone(),
+                    member_args.clone(),
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+                let some_object = self.bindings.apply_potential(
+                    option_some.clone(),
+                    vec![object_var.clone()],
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+                let round_trip_eq = AcornValue::equals(round_trip_application, some_object);
+                let round_trip_claim =
+                    AcornValue::ForAll(vec![struct_type.clone()], Box::new(round_trip_eq))
+                        .genericize(&type_params);
+                let source = Source::type_definition(
+                    self.module_id,
+                    range,
+                    self.depth,
+                    ss.name_token.text().to_string(),
+                    "new_option".to_string(),
+                );
+                let prop = Proposition::new(round_trip_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));
             }
         }

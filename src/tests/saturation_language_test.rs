@@ -606,7 +606,7 @@ fn test_constrained_new_option_round_trips_all_rats() {
         Rat.new_option(r1.num, r1.denom) = Option.some(r1)
     }
     "#;
-    verify_fails(text);
+    verify_succeeds(text);
 }
 
 #[test]
