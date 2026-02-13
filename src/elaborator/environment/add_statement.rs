@@ -999,6 +999,54 @@ impl Environment {
             end: ss.name_token.end_pos(),
         };
 
+        // Expose the structure constraint as a datatype attribute:
+        //   TypeName.constraint(args...) = <constraint expression>.
+        let constraint_fn = if let Some(unbound_constraint) = &unbound_constraint {
+            let constraint_fn_type = AcornType::functional(field_types.clone(), AcornType::Bool);
+            let def_str = format!(
+                "{}.constraint: {}",
+                ss.name_token.text(),
+                constraint_fn_type
+            );
+            let constraint_fn = self.bindings.add_datatype_attribute(
+                &datatype,
+                "constraint",
+                type_params.clone(),
+                constraint_fn_type.genericize(&type_params),
+                None,
+                None,
+                vec![],
+                def_str,
+            );
+
+            let constraint_args = (0..ss.fields.len())
+                .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
+                .collect::<Vec<_>>();
+            let constraint_application = self.bindings.apply_potential(
+                constraint_fn.clone(),
+                constraint_args,
+                Some(&AcornType::Bool),
+                &ss.name_token,
+            )?;
+            let constraint_eq =
+                AcornValue::equals(constraint_application, unbound_constraint.clone());
+            let constraint_eq_claim =
+                AcornValue::ForAll(field_types.clone(), Box::new(constraint_eq))
+                    .genericize(&type_params);
+            let source = Source::type_definition(
+                self.module_id,
+                range,
+                self.depth,
+                ss.name_token.text().to_string(),
+                "constraint".to_string(),
+            );
+            let prop = Proposition::new(constraint_eq_claim, type_params.clone(), source);
+            self.add_node(Node::structural(project, self, prop));
+            Some(constraint_fn)
+        } else {
+            None
+        };
+
         // If there is a constraint, it applies to all instances of the type.
         // constraint(Pair.first(p), Pair.second(p))
         // This is the "constraint equation".
@@ -1052,10 +1100,20 @@ impl Environment {
             None,
             &ss.name_token,
         )?;
+        let constraint_for_args = if let Some(constraint_fn) = &constraint_fn {
+            Some(self.bindings.apply_potential(
+                constraint_fn.clone(),
+                var_args.clone(),
+                Some(&AcornType::Bool),
+                &ss.name_token,
+            )?)
+        } else {
+            None
+        };
 
         // If Option is available in scope, add a "new_option" function for constrained
-        // structures that returns some(new(...)) when the constraint holds and none otherwise.
-        if let Some(constraint) = &unbound_constraint {
+        // structures.
+        if let Some(constraint) = &constraint_for_args {
             if let Some(option_type) = self.bindings.get_type_for_typename("Option").cloned() {
                 let option_datatype = option_type.as_base_datatype().cloned().ok_or_else(|| {
                     ss.name_token
@@ -1108,12 +1166,6 @@ impl Environment {
                     Some(&option_struct_type),
                     &ss.name_token,
                 )?;
-                let some_value = self.bindings.apply_potential(
-                    option_some,
-                    vec![new_application.clone()],
-                    Some(&option_struct_type),
-                    &ss.name_token,
-                )?;
                 let none_value = self.bindings.apply_potential(
                     option_none,
                     vec![],
@@ -1121,10 +1173,22 @@ impl Environment {
                     &ss.name_token,
                 )?;
 
-                let some_eq = AcornValue::equals(new_option_application.clone(), some_value);
+                // If the constraint holds, there exists a witness in Some(...).
+                let witness =
+                    AcornValue::Variable(field_types.len() as AtomId, struct_type.clone());
+                let some_witness = self.bindings.apply_potential(
+                    option_some.clone(),
+                    vec![witness.clone()],
+                    Some(&option_struct_type),
+                    &ss.name_token,
+                )?;
+                let witness_match =
+                    AcornValue::equals(new_option_application.clone(), some_witness.clone());
+                let exists_some =
+                    AcornValue::Exists(vec![struct_type.clone()], Box::new(witness_match.clone()));
                 let some_claim = AcornValue::ForAll(
                     field_types.clone(),
-                    Box::new(AcornValue::implies(constraint.clone(), some_eq)),
+                    Box::new(AcornValue::implies(constraint.clone(), exists_some)),
                 )
                 .genericize(&type_params);
                 let source = Source::type_definition(
@@ -1136,6 +1200,34 @@ impl Environment {
                 );
                 let prop = Proposition::new(some_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));
+
+                // If new_option returns Some(r), then r's members match the input arguments.
+                for i in 0..ss.fields.len() {
+                    let witness_member = self.bindings.apply_potential(
+                        member_fns[i].clone(),
+                        vec![witness.clone()],
+                        None,
+                        &ss.fields[i].0,
+                    )?;
+                    let field_eq = AcornValue::equals(
+                        witness_member,
+                        AcornValue::Variable(i as AtomId, field_types[i].clone()),
+                    );
+                    let projection_claim = AcornValue::ForAll(
+                        [field_types.clone(), vec![struct_type.clone()]].concat(),
+                        Box::new(AcornValue::implies(witness_match.clone(), field_eq)),
+                    )
+                    .genericize(&type_params);
+                    let source = Source::type_definition(
+                        self.module_id,
+                        range,
+                        self.depth,
+                        ss.name_token.text().to_string(),
+                        "new_option".to_string(),
+                    );
+                    let prop = Proposition::new(projection_claim, type_params.clone(), source);
+                    self.add_node(Node::structural(project, self, prop));
+                }
 
                 let none_eq = AcornValue::equals(new_option_application, none_value);
                 let none_claim = AcornValue::ForAll(

@@ -464,6 +464,7 @@ fn test_structure_new_option_syntax() {
             foo
         }
 
+        let condition: Bool = Thing.constraint(true)
         let value: Option[Thing] = Thing.new_option(true)
         "#,
     );

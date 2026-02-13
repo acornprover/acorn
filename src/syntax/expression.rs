@@ -955,7 +955,7 @@ fn parse_partial_expressions(
                 partials.push_back(PartialExpression::Expression(group));
             }
 
-            TokenType::Identifier | TokenType::Axiom | TokenType::Lib => {
+            TokenType::Identifier | TokenType::Axiom | TokenType::Lib | TokenType::Constraint => {
                 partials.push_back(PartialExpression::Expression(Expression::Singleton(token)));
             }
             TokenType::Numeral | TokenType::True | TokenType::False | TokenType::SelfToken => {
@@ -1759,6 +1759,7 @@ mod tests {
         check_value("(foo).bar");
         check_value("(a + b).c");
         check_value("a.b.c = Foo.bar(baz).qux");
+        check_value("Rat.constraint(a, b)");
     }
 
     #[test]

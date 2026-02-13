@@ -512,8 +512,12 @@ fn test_prove_constrained_new_option_equations() {
         value
     }
 
-    theorem goal_some(b: Bool) {
-        b implies Foo.new_option(b) = Option.some(Foo.new(b))
+    theorem goal_some_exists(b: Bool) {
+        b implies exists(f: Foo) { Foo.new_option(b) = Option.some(f) }
+    }
+
+    theorem goal_some_value(b: Bool, f: Foo) {
+        Foo.new_option(b) = Option.some(f) implies f.value = b
     }
 
     theorem goal_none(b: Bool) {
@@ -524,7 +528,23 @@ fn test_prove_constrained_new_option_equations() {
 }
 
 #[test]
-fn test_destructuring_constrained_new_option_cannot_prove_member_equation() {
+fn test_prove_structure_constraint_attribute_equation() {
+    let text = r#"
+    structure Foo {
+        value: Bool
+    } constraint {
+        value
+    }
+
+    theorem goal(b: Bool) {
+        Foo.constraint(b) = b
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
+fn test_destructuring_constrained_new_option_proves_member_equation() {
     let text = r#"
     type Int: axiom
 
@@ -554,7 +574,7 @@ fn test_destructuring_constrained_new_option_cannot_prove_member_equation() {
         alt_zero.num = zero
     }
     "#;
-    verify_fails(text);
+    verify_succeeds(text);
 }
 
 #[test]
