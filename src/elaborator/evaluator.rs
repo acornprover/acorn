@@ -2,12 +2,11 @@ use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, TypePara
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::error::{self, ErrorContext};
+use crate::elaborator::inference::InferenceEngine;
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
-use crate::elaborator::type_unifier::TypeUnifier;
-use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -63,37 +62,8 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn unifier(&self) -> TypeUnifier<'_> {
-        self.bindings.unifier()
-    }
-
-    /// Resolve an unresolved potential value using an expected type, if provided.
-    fn maybe_resolve_potential_value(
-        &self,
-        potential: PotentialValue,
-        expected_type: Option<&AcornType>,
-        source: &dyn ErrorContext,
-    ) -> error::Result<PotentialValue> {
-        self.unifier()
-            .maybe_resolve_value(potential, expected_type, source)
-    }
-
-    /// Apply an unresolved constant to argument expressions, inferring type arguments.
-    fn infer_and_apply_unresolved(
-        &mut self,
-        stack: &mut Stack,
-        unresolved: UnresolvedConstant,
-        arg_exprs: Vec<&Expression>,
-        expected_type: Option<&AcornType>,
-        source: &dyn ErrorContext,
-    ) -> error::Result<AcornValue> {
-        // Evaluate args as generic values so inference can use in-scope type variables.
-        let mut args = vec![];
-        for arg_expr in &arg_exprs {
-            args.push(self.evaluate_as_generic_value(stack, arg_expr)?);
-        }
-        self.unifier()
-            .resolve_with_inference(unresolved, args, expected_type, source)
+    fn inference(&self) -> InferenceEngine<'_> {
+        InferenceEngine::new(self.bindings)
     }
 
     /// Tracks token information for the given entity.
@@ -904,7 +874,9 @@ impl<'a> Evaluator<'a> {
         expected_type: Option<&AcornType>,
     ) -> error::Result<AcornValue> {
         let potential = self.evaluate_potential_value(stack, expression, expected_type)?;
-        let resolved = self.maybe_resolve_potential_value(potential, expected_type, expression)?;
+        let resolved =
+            self.inference()
+                .maybe_resolve_value(potential, expected_type, expression)?;
         resolved.as_value(expression)
     }
 
@@ -942,7 +914,7 @@ impl<'a> Evaluator<'a> {
             }
             (PotentialValue::Unresolved(lu), PotentialValue::Resolved(rv)) => {
                 // Left is unresolved, right is resolved - use right's type to resolve left
-                let left_resolved = self.maybe_resolve_potential_value(
+                let left_resolved = self.inference().maybe_resolve_value(
                     PotentialValue::Unresolved(lu.clone()),
                     Some(&rv.get_type()),
                     left,
@@ -951,7 +923,7 @@ impl<'a> Evaluator<'a> {
             }
             (PotentialValue::Resolved(lv), PotentialValue::Unresolved(ru)) => {
                 // Left is resolved, right is unresolved - use left's type to resolve right
-                let right_resolved = self.maybe_resolve_potential_value(
+                let right_resolved = self.inference().maybe_resolve_value(
                     PotentialValue::Unresolved(ru.clone()),
                     Some(&lv.get_type()),
                     right,
@@ -998,7 +970,7 @@ impl<'a> Evaluator<'a> {
                         }
                         NamedEntity::UnresolvedValue(u) => {
                             let potential = PotentialValue::Unresolved(u);
-                            return self.maybe_resolve_potential_value(
+                            return self.inference().maybe_resolve_value(
                                 potential,
                                 expected_type,
                                 token,
@@ -1182,7 +1154,9 @@ impl<'a> Evaluator<'a> {
                 TokenType::Dot => {
                     let entity = self.evaluate_dot_expression(stack, left, right)?;
                     let potential = entity.expect_potential_value(expected_type, expression)?;
-                    return self.maybe_resolve_potential_value(potential, expected_type, token);
+                    return self
+                        .inference()
+                        .maybe_resolve_value(potential, expected_type, token);
                 }
                 token_type => match token_type.to_infix_magic_method_name() {
                     Some(name) => self.evaluate_infix(
@@ -1317,13 +1291,19 @@ impl<'a> Evaluator<'a> {
 
                 // Check if we have to do type inference.
                 match function {
-                    PotentialValue::Unresolved(unresolved) => self.infer_and_apply_unresolved(
-                        stack,
-                        unresolved,
-                        arg_exprs,
-                        expected_type,
-                        expression,
-                    )?,
+                    PotentialValue::Unresolved(unresolved) => {
+                        // Evaluate args as generic values so inference can use in-scope type vars.
+                        let mut args = vec![];
+                        for arg_expr in &arg_exprs {
+                            args.push(self.evaluate_as_generic_value(stack, arg_expr)?);
+                        }
+                        self.inference().resolve_unresolved_call(
+                            unresolved,
+                            args,
+                            expected_type,
+                            expression,
+                        )?
+                    }
                     PotentialValue::Resolved(function) => {
                         // Simple, no-type-inference-necessary construction
                         let mut args = vec![];

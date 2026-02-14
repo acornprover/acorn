@@ -7,6 +7,7 @@ pub mod error;
 pub mod evaluator;
 pub mod fact;
 pub mod goal;
+pub mod inference;
 pub mod named_entity;
 pub mod names;
 pub mod node;
