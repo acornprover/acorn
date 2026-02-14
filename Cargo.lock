@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acorn"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "assert_fs",
  "async-trait",
