@@ -1207,6 +1207,13 @@ impl CodeGenerator<'_> {
             let Some(mapped_term) = claim_var_map.get_mapping(var_id as AtomId).cloned() else {
                 continue;
             };
+            if mapped_term
+                .max_variable()
+                .map(|id| id as usize >= generic_len)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let generic_type = generic_context
                 .get_var_type(var_id)
                 .expect("generic context should provide all var types");
@@ -1253,13 +1260,34 @@ impl CodeGenerator<'_> {
             .max()
             .map(|max| (max + 1) as usize)
             .unwrap_or(0);
-        let has_missing_used_mappings =
-            (0..used_var_count).any(|var_id| !claim_var_map.has_mapping(var_id as AtomId));
-        let has_out_of_scope_terms = claim_var_map.iter().any(|(_, term)| {
+        let missing_used_mappings: Vec<usize> = (0..used_var_count)
+            .filter(|var_id| {
+                let var_type = generic_context
+                    .get_var_type(*var_id)
+                    .expect("generic context should provide all variable types");
+                !var_type.as_ref().is_type_param_kind()
+                    && !claim_var_map.has_mapping(*var_id as AtomId)
+            })
+            .collect();
+        if !missing_used_mappings.is_empty() {
+            return Err(Error::GeneratedBadCode(format!(
+                "certificate claim map is missing mappings for used value vars {:?}; generic clause '{}'; concrete clause '{}'",
+                missing_used_mappings, generic, clause
+            )));
+        }
+
+        let out_of_scope_mapping = claim_var_map.iter().find_map(|(var_id, term)| {
             term.max_variable()
-                .map(|id| id as usize >= generic_len)
-                .unwrap_or(false)
+                .filter(|id| *id as usize >= generic_len)
+                .map(|max_id| (var_id, term.clone(), max_id))
         });
+        if let Some((var_id, term, max_id)) = out_of_scope_mapping {
+            return Err(Error::GeneratedBadCode(format!(
+                "certificate claim map has out-of-scope term for x{}: '{}' references x{} (generic context size {}); generic clause '{}'; concrete clause '{}'",
+                var_id, term, max_id, generic_len, generic, clause
+            )));
+        }
+
         let incompatible_mapping = claim_var_map.iter().find_map(|(var_id, term)| {
             let expected_type = generic_context.get_var_type(var_id).cloned()?;
             if expected_type.as_ref().is_type_param_kind() {
@@ -1305,29 +1333,20 @@ impl CodeGenerator<'_> {
                 clause
             )));
         }
-        let claim = if has_out_of_scope_terms || has_missing_used_mappings {
-            Claim {
-                clause: clause.clone(),
-                var_map: VariableMap::new(),
-            }
-        } else {
-            let mut replayed =
-                claim_var_map.specialize_clause(generic, normalizer.kernel_context());
-            replayed.normalize_var_ids_no_flip();
-            let mut concretized_clause =
-                claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
-            concretized_clause.normalize_var_ids_no_flip();
-            if replayed == concretized_clause {
-                Claim {
-                    clause: generic.clone(),
-                    var_map: claim_var_map,
-                }
-            } else {
-                Claim {
-                    clause: clause.clone(),
-                    var_map: VariableMap::new(),
-                }
-            }
+        let mut replayed = claim_var_map.specialize_clause(generic, normalizer.kernel_context());
+        replayed.normalize_var_ids_no_flip();
+        let mut concretized_clause =
+            claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
+        concretized_clause.normalize_var_ids_no_flip();
+        if replayed != concretized_clause {
+            return Err(Error::GeneratedBadCode(format!(
+                "certificate claim map replay mismatch: generic clause '{}' with map '{}' replays to '{}', but concrete clause is '{}'",
+                generic, claim_var_map, replayed, clause
+            )));
+        }
+        let claim = Claim {
+            clause: generic.clone(),
+            var_map: claim_var_map,
         };
 
         steps.push(CertificateStep::Claim(claim));
@@ -2368,6 +2387,49 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("certificate claim map type mismatch"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_out_of_scope_claim_mapping_is_rejected() {
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+        use crate::processor::Processor;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+        let mut normalizer = normalized_goal.normalizer;
+        let generic = normalizer
+            .kernel_context()
+            .parse_clause("x0 = x0", &["Bool"]);
+
+        // Invalid var map: x1 survives specialization and is out of scope for the generic clause.
+        let mut bad_map = VariableMap::new();
+        bad_map.set(0, Term::new_variable(1));
+        let replacement_context =
+            LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
+
+        let mut generator = CodeGenerator::new(&bindings);
+        let mut names = SyntheticNameSet::new();
+        let mut steps = vec![];
+        let err = generator
+            .specialization_to_certificate_steps(
+                &mut names,
+                &generic,
+                &bad_map,
+                &replacement_context,
+                &mut normalizer,
+                &mut steps,
+            )
+            .expect_err("out-of-scope mappings should fail certificate specialization");
+        assert!(
+            steps.is_empty(),
+            "failing specialization should not emit steps"
+        );
+        assert!(
+            err.to_string().contains("out-of-scope term"),
             "unexpected error: {}",
             err
         );

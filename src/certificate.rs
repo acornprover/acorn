@@ -184,25 +184,12 @@ impl Certificate {
                     if claim.clause.get_local_context().is_empty() {
                         generator.certificate_step_to_code(&names, step, &generation_normalizer)?
                     } else {
-                        match Self::serialize_claim_with_names(
+                        Self::serialize_claim_with_names(
                             claim,
                             &generation_normalizer,
                             bindings,
                             Some(&names.synthetic_names),
-                        ) {
-                            Ok(line) => line,
-                            Err(e) if claim.var_map.len() == 0 => {
-                                // Fallback for map-less claims if we cannot synthesize a stable
-                                // claim-with-args representation.
-                                let _ = e;
-                                generator.certificate_step_to_code(
-                                    &names,
-                                    step,
-                                    &generation_normalizer,
-                                )?
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        )?
                     }
                 }
                 _ => generator.certificate_step_to_code(&names, step, &generation_normalizer)?,
@@ -1526,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_concrete_steps_bigcert_falls_back_to_plain_claim_when_no_args() {
+    fn test_from_concrete_steps_bigcert_serializes_plain_claim_when_no_local_context() {
         let code = r#"
             theorem goal {
                 false
@@ -1554,6 +1541,40 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0], "false");
+    }
+
+    #[test]
+    fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (_project, bindings, normalizer) = setup_claim_codec_env(code);
+        let kernel = normalizer.kernel_context();
+        let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
+
+        let mut bad_map = VariableMap::new();
+        bad_map.set(0, Term::new_variable(1));
+        let replacement_context =
+            LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
+        let concrete_steps = vec![ConcreteStep {
+            generic,
+            var_maps: vec![(bad_map, replacement_context)],
+        }];
+
+        let err = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &normalizer,
+            &bindings,
+        )
+        .expect_err("out-of-scope var maps should fail certificate generation");
+        assert!(
+            err.to_string().contains("out-of-scope term"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
