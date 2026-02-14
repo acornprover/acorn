@@ -66,6 +66,17 @@ impl<'a> Evaluator<'a> {
         self.bindings.unifier()
     }
 
+    /// Resolve an unresolved potential value using an expected type, if provided.
+    fn maybe_resolve_potential_value(
+        &self,
+        potential: PotentialValue,
+        expected_type: Option<&AcornType>,
+        source: &dyn ErrorContext,
+    ) -> error::Result<PotentialValue> {
+        self.unifier()
+            .maybe_resolve_value(potential, expected_type, source)
+    }
+
     /// Tracks token information for the given entity.
     fn track_token(&mut self, token: &Token, entity: &NamedEntity) {
         if let Some(token_map) = self.token_map.as_mut() {
@@ -874,24 +885,8 @@ impl<'a> Evaluator<'a> {
         expected_type: Option<&AcornType>,
     ) -> error::Result<AcornValue> {
         let potential = self.evaluate_potential_value(stack, expression, expected_type)?;
-        match potential {
-            PotentialValue::Resolved(v) => Ok(v),
-            PotentialValue::Unresolved(u) => {
-                // Try to resolve using the expected type
-                if let Some(expected) = expected_type {
-                    let mut unifier = self.bindings.unifier();
-                    let result = unifier.try_resolve_with_inference(
-                        u,
-                        vec![],
-                        Some(expected),
-                        expression,
-                    )?;
-                    result.as_value(expression)
-                } else {
-                    Err(expression.error(&format!("value {} has unresolved type", u.name)))
-                }
-            }
-        }
+        let resolved = self.maybe_resolve_potential_value(potential, expected_type, expression)?;
+        resolved.as_value(expression)
     }
 
     /// Evaluates an expression as a generic value, converting unresolved constants
@@ -928,10 +923,8 @@ impl<'a> Evaluator<'a> {
             }
             (PotentialValue::Unresolved(lu), PotentialValue::Resolved(rv)) => {
                 // Left is unresolved, right is resolved - use right's type to resolve left
-                let mut unifier = self.bindings.unifier();
-                let left_resolved = unifier.try_resolve_with_inference(
-                    lu.clone(),
-                    vec![],
+                let left_resolved = self.maybe_resolve_potential_value(
+                    PotentialValue::Unresolved(lu.clone()),
                     Some(&rv.get_type()),
                     left,
                 )?;
@@ -939,10 +932,8 @@ impl<'a> Evaluator<'a> {
             }
             (PotentialValue::Resolved(lv), PotentialValue::Unresolved(ru)) => {
                 // Left is resolved, right is unresolved - use left's type to resolve right
-                let mut unifier = self.bindings.unifier();
-                let right_resolved = unifier.try_resolve_with_inference(
-                    ru.clone(),
-                    vec![],
+                let right_resolved = self.maybe_resolve_potential_value(
+                    PotentialValue::Unresolved(ru.clone()),
                     Some(&lv.get_type()),
                     right,
                 )?;
@@ -988,7 +979,7 @@ impl<'a> Evaluator<'a> {
                         }
                         NamedEntity::UnresolvedValue(u) => {
                             let potential = PotentialValue::Unresolved(u);
-                            return self.unifier().maybe_resolve_value(
+                            return self.maybe_resolve_potential_value(
                                 potential,
                                 expected_type,
                                 token,
@@ -1172,9 +1163,7 @@ impl<'a> Evaluator<'a> {
                 TokenType::Dot => {
                     let entity = self.evaluate_dot_expression(stack, left, right)?;
                     let potential = entity.expect_potential_value(expected_type, expression)?;
-                    return self
-                        .unifier()
-                        .maybe_resolve_value(potential, expected_type, token);
+                    return self.maybe_resolve_potential_value(potential, expected_type, token);
                 }
                 token_type => match token_type.to_infix_magic_method_name() {
                     Some(name) => self.evaluate_infix(
