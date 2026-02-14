@@ -351,6 +351,106 @@ fn test_class_variables() {
 }
 
 #[test]
+fn test_attribute_let_satisfy_exports_names() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+            define foo(x: Nat) -> Bool { axiom }
+            attributes Nat {
+                let z: Nat satisfy { foo(z) }
+            }
+            theorem goal {
+                foo(Nat.z)
+            } by {
+                foo(Nat.z)
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_attribute_function_satisfy_statement() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+            attributes Nat {
+                let flip(a: Bool) -> b: Bool satisfy {
+                    a != b
+                }
+            }
+            theorem goal(a: Bool) {
+                Nat.flip(a) != a
+            } by {
+                Nat.flip(a) != a
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_generic_attribute_with_let_satisfy() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            structure Box[T] {
+                item: T
+            }
+            let can_pick[T]: T -> Bool = axiom
+            attributes Box[T] {
+                let witness: T satisfy {
+                    can_pick[T](witness)
+                }
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_specific_attribute_with_let_satisfy() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            inductive Color {
+                red
+                blue
+            }
+            structure Box[T] {
+                item: T
+            }
+            let is_primary: Color -> Bool = axiom
+            attributes Box[Color] {
+                let witness: Color satisfy {
+                    is_primary(witness)
+                }
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_generic_attribute_let_satisfy_disallows_extra_type_params() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            structure Box[T] {
+                item: T
+            }
+        "#,
+    );
+    env.bad(
+        r#"
+            attributes Box[T] {
+                let witness[U]: U satisfy {
+                    true
+                }
+            }
+        "#,
+    );
+}
+
+#[test]
 fn test_instance_methods() {
     let mut env = Environment::test();
     env.add(

@@ -413,6 +413,98 @@ mod tests {
     }
 
     #[test]
+    fn test_variable_satisfy_statement_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let x: Nat satisfy {
+                x > 0
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_variable_satisfy_multivar_statement_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let (x: Nat, y: Nat) satisfy {
+                x > y
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_single_line_variable_satisfy_statement_in_attributes() {
+        should_parse("attributes Nat { let x: Nat satisfy { x > 0 } }");
+    }
+
+    #[test]
+    fn test_single_line_variable_satisfy_multivar_statement_in_attributes() {
+        should_parse("attributes Nat { let (x: Nat, y: Nat) satisfy { x > y } }");
+    }
+
+    #[test]
+    fn test_function_satisfy_statement_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let foo(a: Nat, m: Nat) -> r: Nat satisfy {
+                r = a + m
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_function_satisfy_statement_with_by_block_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let foo(a: Nat, m: Nat) -> r: Nat satisfy {
+                r > a + m
+            } by {
+                a + m + 1 > a + m
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_polymorphic_variable_satisfy_statement_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let foo[T]: T satisfy {
+                bar(foo)
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_polymorphic_variable_satisfy_with_typeclass_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let foo[T: Monoid]: T satisfy {
+                foo = T.identity
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_polymorphic_function_satisfy_statement_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let flip[T](a: T) -> b: T satisfy {
+                a = b
+            }
+        }"});
+    }
+
+    #[test]
+    fn test_polymorphic_function_satisfy_with_typeclass_in_attributes() {
+        ok(indoc! {"
+        attributes Nat {
+            let combine[T: Monoid](a: T, b: T) -> r: T satisfy {
+                r = a.mul(b)
+            }
+        }"});
+    }
+
+    #[test]
     fn test_if_statement() {
         ok(indoc! {"
         if x > 1 {

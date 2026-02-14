@@ -218,6 +218,42 @@ fn test_proving_with_generic_let_attribute() {
 }
 
 #[test]
+fn test_proving_with_let_satisfy_attribute() {
+    let text = r#"
+    inductive One {
+        one
+    }
+    attributes One {
+        let witness: One satisfy {
+            witness = One.one
+        }
+    }
+    theorem goal {
+        One.witness = One.one
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
+fn test_proving_with_function_satisfy_attribute() {
+    let text = r#"
+    inductive One {
+        one
+    }
+    attributes One {
+        let identity(a: Bool) -> b: Bool satisfy {
+            b = a
+        }
+    }
+    theorem goal(a: Bool) {
+        One.identity(a) = a
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
 fn test_proving_with_if_inside_match() {
     let text = r#"
     inductive List[T] {

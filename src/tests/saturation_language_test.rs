@@ -1276,6 +1276,90 @@ fn test_proving_with_anonymous_function() {
 }
 
 #[test]
+fn test_semantics_of_let_satisfy_syntax() {
+    let text = r#"
+    type Nat: axiom
+    let zero: Nat = axiom
+    let one: Nat = axiom
+    axiom zero_neq_one {
+        zero != one
+    }
+
+    let witness: Nat satisfy {
+        witness != one
+    }
+
+    theorem goal {
+        witness != one
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
+fn test_semantics_of_destructuring_unwrap_syntax() {
+    let text = r#"
+    type Nat: axiom
+
+    inductive Option[T] {
+        some(T)
+        none
+    }
+
+    let n: Nat = axiom
+    let wrapped = Option.some(n)
+    let Option.some(unwrapped) = wrapped
+
+    theorem goal {
+        unwrapped = n
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
+fn test_semantics_of_function_satisfy_syntax() {
+    let text = r#"
+    type Nat: axiom
+    let zero: Nat = axiom
+    let one: Nat = axiom
+    axiom zero_neq_one {
+        zero != one
+    }
+
+    let flip(a: Nat) -> b: Nat satisfy {
+        a != b
+    }
+
+    theorem goal(a: Nat) {
+        a != flip(a)
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
+fn test_semantics_of_multivar_let_satisfy_syntax() {
+    let text = r#"
+    type Nat: axiom
+    let zero: Nat = axiom
+    let one: Nat = axiom
+    axiom zero_neq_one {
+        zero != one
+    }
+
+    let (x: Nat, y: Nat) satisfy {
+        x != y
+    }
+
+    theorem goal {
+        x != y
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[test]
 fn test_proving_with_destructuring() {
     let text = r#"
     inductive Nat {

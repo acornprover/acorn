@@ -975,6 +975,74 @@ fn test_env_basic_typeclass_attributes() {
 }
 
 #[test]
+fn test_env_typeclass_attributes_with_let_satisfy() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            typeclass F: Foo {
+                trivial(x: F) {
+                    x = x
+                }
+            }
+
+            define ok[T: Foo](x: T) -> Bool {
+                axiom
+            }
+
+            attributes F: Foo {
+                let witness: F satisfy {
+                    ok[F](witness)
+                }
+            }
+
+            inductive Bar {
+                bar
+            }
+
+            instance Bar: Foo
+
+            theorem goal {
+                ok[Bar](Foo.witness[Bar])
+            } by {
+                ok[Bar](Foo.witness[Bar])
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_env_typeclass_attributes_with_function_satisfy() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            typeclass F: Foo {
+                trivial(x: F) {
+                    x = x
+                }
+            }
+
+            attributes F: Foo {
+                let choose(a: F) -> b: F satisfy {
+                    a = b
+                }
+            }
+
+            inductive Bar {
+                bar
+            }
+
+            instance Bar: Foo
+
+            theorem goal(b: Bar) {
+                Foo.choose[Bar](b) = b
+            } by {
+                Foo.choose[Bar](b) = b
+            }
+        "#,
+    );
+}
+
+#[test]
 fn test_env_typeclass_attributes_require_instance_name() {
     let mut env = Environment::test();
     env.add(

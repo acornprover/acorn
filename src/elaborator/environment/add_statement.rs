@@ -599,6 +599,23 @@ impl Environment {
         statement: &Statement,
         vss: &VariableSatisfyStatement,
     ) -> error::Result<()> {
+        let module_id = self.module_id;
+        self.add_variable_satisfy_statement_named(project, statement, vss, None, move |name| {
+            DefinedName::unqualified(module_id, name)
+        })
+    }
+
+    fn add_variable_satisfy_statement_named<F>(
+        &mut self,
+        project: &mut Project,
+        statement: &Statement,
+        vss: &VariableSatisfyStatement,
+        datatype_params: Option<&Vec<TypeParam>>,
+        mut defined_name_for: F,
+    ) -> error::Result<()>
+    where
+        F: FnMut(&str) -> DefinedName,
+    {
         // Handle type parameters for polymorphic variable satisfy
         if self.depth > 0 && !vss.type_params.is_empty() {
             return Err(vss.declarations[0]
@@ -632,8 +649,19 @@ impl Environment {
         )?;
         let general_claim =
             AcornValue::Exists(quant_types.clone(), Box::new(general_claim_value.clone()));
+        let definition_type_params = match datatype_params {
+            Some(p) => {
+                if !local_type_params.is_empty() {
+                    return Err(vss.declarations[0]
+                        .token()
+                        .error("datatype parameters and let parameters cannot be used together"));
+                }
+                p.clone()
+            }
+            None => local_type_params.clone(),
+        };
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let general_prop = Proposition::new(general_claim, local_type_params.clone(), source);
+        let general_prop = Proposition::new(general_claim, definition_type_params.clone(), source);
         let index = self
             .add_node(Node::claim(project, self, general_prop).map_err(|e| statement.error(&e))?);
         self.add_node_lines(index, &statement.range());
@@ -641,28 +669,45 @@ impl Environment {
         // Define the polymorphic constants.
         // Like function satisfy, we build constant values with Arbitrary types for internal use.
         let mut constant_values = Vec::new();
-        for (quant_name, quant_type) in quant_names.iter().zip(quant_types.iter()) {
+        for ((declaration, quant_name), quant_type) in vss
+            .declarations
+            .iter()
+            .zip(quant_names.iter())
+            .zip(quant_types.iter())
+        {
+            let defined_name = defined_name_for(quant_name);
+            if self.bindings.constant_name_in_use(&defined_name) {
+                return Err(declaration.token().error(&format!(
+                    "constant name '{}' already defined in this scope",
+                    &defined_name
+                )));
+            }
+
             // Genericize the type so it uses Variable instead of Arbitrary
-            let generic_type = quant_type.clone().genericize(&local_type_params);
+            let generic_type = quant_type.clone().genericize(&definition_type_params);
             let def_str = format!("{}: {}", quant_name, generic_type);
-            self.bindings.add_unqualified_constant(
-                quant_name,
-                local_type_params.clone(),
+            self.bindings.add_defined_name(
+                &defined_name,
+                definition_type_params.clone(),
                 generic_type.clone(),
                 None,
                 None,
                 vec![],
-                None,
-                def_str,
+                Some(declaration.token().range()),
+                Some(def_str),
             );
 
             // Build constant value with Arbitrary types (like function satisfy does)
-            let const_name = ConstantName::unqualified(self.module_id, quant_name);
-            let type_args: Vec<_> = local_type_params
+            let const_name = defined_name
+                .as_constant()
+                .ok_or_else(|| {
+                    statement.error("let ... satisfy cannot define instance attributes")
+                })?
+                .clone();
+            let type_args: Vec<_> = definition_type_params
                 .iter()
                 .map(|p| AcornType::Arbitrary(p.clone()))
                 .collect();
-            // Note: constant() args are (name, params, instance_type, generic_type, type_param_names)
             let constant_value = AcornValue::constant(
                 const_name,
                 type_args,
@@ -678,9 +723,9 @@ impl Environment {
         let num_vars = quant_names.len() as AtomId;
         let specific_claim_value = general_claim_value.bind_values(0, num_vars, &constant_values);
         // Genericize for the external proposition (converts Arbitrary to Variable)
-        let external_claim = specific_claim_value.genericize(&local_type_params);
+        let external_claim = specific_claim_value.genericize(&definition_type_params);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let specific_prop = Proposition::new(external_claim, local_type_params.clone(), source);
+        let specific_prop = Proposition::new(external_claim, definition_type_params, source);
         self.add_node(Node::structural(project, self, specific_prop));
 
         // Clean up the arbitrary types (but keep the polymorphic constants)
@@ -697,15 +742,24 @@ impl Environment {
         statement: &Statement,
         fss: &FunctionSatisfyStatement,
     ) -> error::Result<()> {
-        fss.name_token.check_not_reserved()?;
-        self.bindings
-            .check_unqualified_name_available(fss.name_token.text(), statement)?;
+        let defined_name = DefinedName::unqualified(self.module_id, fss.name_token.text());
+        self.add_function_satisfy_statement_named(project, statement, fss, defined_name, None)
+    }
 
-        // Handle type parameters for polymorphic function satisfy
-        if self.depth > 0 && !fss.type_params.is_empty() {
-            return Err(fss
-                .name_token
-                .error("parameterized functions may only be defined at the top level"));
+    fn add_function_satisfy_statement_named(
+        &mut self,
+        project: &mut Project,
+        statement: &Statement,
+        fss: &FunctionSatisfyStatement,
+        defined_name: DefinedName,
+        datatype_params: Option<&Vec<TypeParam>>,
+    ) -> error::Result<()> {
+        fss.name_token.check_not_reserved()?;
+        if self.bindings.constant_name_in_use(&defined_name) {
+            return Err(fss.name_token.error(&format!(
+                "function name '{}' already defined in this scope",
+                defined_name
+            )));
         }
 
         // Figure out the range for this function definition.
@@ -716,15 +770,23 @@ impl Environment {
             end: fss.satisfy_token.end_pos(),
         };
 
-        let (type_params, mut arg_names, mut arg_types, condition, _) =
+        // Handle type parameters for polymorphic function satisfy
+        if self.depth > 0 && !fss.type_params.is_empty() {
+            return Err(fss
+                .name_token
+                .error("parameterized functions may only be defined at the top level"));
+        }
+
+        let recursion_name = defined_name.recursion_name();
+        let (fn_type_params, mut arg_names, mut arg_types, condition, _) =
             self.bindings.evaluate_scoped_value(
                 &fss.type_params,
                 &fss.declarations,
                 None,
                 &fss.condition,
                 None,
-                None,
-                None,
+                recursion_name.as_ref(),
+                datatype_params,
                 project,
                 Some(&mut self.token_map),
             )?;
@@ -748,7 +810,7 @@ impl Environment {
         let block = Block::new(
             project,
             &self,
-            type_params.clone(),
+            fn_type_params.clone(),
             block_args,
             BlockParams::FunctionSatisfy(
                 unbound_condition.clone(),
@@ -761,31 +823,35 @@ impl Environment {
         )?;
 
         // We define this function not with an equality, but via the condition.
-        // For polymorphic functions, we need to genericize the type.
         let function_type = AcornType::functional(arg_types.clone(), return_type);
-        let generic_function_type = function_type.clone().genericize(&type_params);
+        let mut all_type_params = datatype_params.cloned().unwrap_or_default();
+        all_type_params.extend(fn_type_params);
+        let generic_function_type = function_type.clone().genericize(&all_type_params);
         let doc_comments = self.take_doc_comments();
-        self.bindings.add_unqualified_constant(
-            fss.name_token.text(),
-            type_params.clone(),
+        self.bindings.add_defined_name(
+            &defined_name,
+            all_type_params.clone(),
             generic_function_type.clone(),
             None,
             None,
             doc_comments,
             Some(fss.name_token.range()),
-            statement.to_string(),
+            Some(statement.to_string()),
         );
-        let const_name = ConstantName::unqualified(self.module_id, fss.name_token.text());
+        let const_name = defined_name
+            .as_constant()
+            .ok_or_else(|| statement.error("function satisfy cannot define instance attributes"))?
+            .clone();
         // Build the condition with arbitrary types first, then genericize for the external prop
-        let type_args: Vec<_> = type_params
+        let type_args: Vec<_> = all_type_params
             .iter()
             .map(|p| AcornType::Arbitrary(p.clone()))
             .collect();
         let function_constant = AcornValue::constant(
             const_name,
             type_args,
-            generic_function_type,
             function_type.clone(),
+            generic_function_type,
             vec![],
         );
         let function_term = AcornValue::apply(
@@ -800,17 +866,17 @@ impl Environment {
         let arb_condition = AcornValue::ForAll(arg_types, Box::new(return_bound));
 
         // Genericize for the external proposition (converts Arbitrary to Variable)
-        let external_condition = arb_condition.genericize(&type_params);
-        let generic_constant = function_constant.genericize(&type_params);
+        let external_condition = arb_condition.genericize(&all_type_params);
+        let generic_constant = function_constant.genericize(&all_type_params);
 
         let source = Source::constant_definition(
             self.module_id,
             definition_range,
             self.depth,
             Arc::new(generic_constant),
-            fss.name_token.text(),
+            &defined_name.to_string(),
         );
-        let prop = Proposition::new(external_condition, type_params, source);
+        let prop = Proposition::new(external_condition, all_type_params, source);
 
         let index = self.add_node(Node::block(project, self, block, Some(prop)));
         self.add_node_lines(index, &statement.range());
@@ -1845,7 +1911,9 @@ impl Environment {
                     params.push(self.bindings.add_arbitrary_type(param.clone()));
                 }
                 let instance_type = potential.resolve_with_arbitrary(params, &ats.name_token)?;
-                let datatype = self.check_can_add_attributes(&ats.name_token, &instance_type)?;
+                let datatype = self
+                    .check_can_add_attributes(&ats.name_token, &instance_type)?
+                    .clone();
 
                 for substatement in &ats.body.statements {
                     match &substatement.statement {
@@ -1853,9 +1921,28 @@ impl Environment {
                             self.add_let_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_attr(datatype, ls.name_token.text()),
+                                DefinedName::datatype_attr(&datatype, ls.name_token.text()),
                                 ls,
                                 ls.name_token.range(),
+                                Some(&type_params),
+                            )?;
+                        }
+                        StatementInfo::VariableSatisfy(vss) => {
+                            let datatype = datatype.clone();
+                            self.add_variable_satisfy_statement_named(
+                                project,
+                                substatement,
+                                vss,
+                                Some(&type_params),
+                                move |name| DefinedName::datatype_attr(&datatype, name),
+                            )?;
+                        }
+                        StatementInfo::FunctionSatisfy(fss) => {
+                            self.add_function_satisfy_statement_named(
+                                project,
+                                substatement,
+                                fss,
+                                DefinedName::datatype_attr(&datatype, fss.name_token.text()),
                                 Some(&type_params),
                             )?;
                         }
@@ -1863,7 +1950,7 @@ impl Environment {
                             self.add_define_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_attr(datatype, ds.name_token.text()),
+                                DefinedName::datatype_attr(&datatype, ds.name_token.text()),
                                 Some(&instance_type),
                                 Some(&type_params),
                                 ds,
@@ -1876,7 +1963,7 @@ impl Environment {
                         }
                         _ => {
                             return Err(substatement
-                                .error("only let, define, and doc comment statements are allowed in attributes bodies"));
+                                .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
                         }
                     }
                 }
@@ -1889,10 +1976,12 @@ impl Environment {
                 // Specific case: attributes Set[Color]
                 // Use resolve instead of invertible_resolve for concrete types
                 let instance_type = potential.resolve(concrete_types.clone(), &ats.name_token)?;
-                let datatype = self.check_can_add_attributes(&ats.name_token, &instance_type)?;
+                let datatype = self
+                    .check_can_add_attributes(&ats.name_token, &instance_type)?
+                    .clone();
 
                 // Check for conflicts with existing generic attributes
-                self.check_no_conflicting_attributes(datatype, &ats.body)?;
+                self.check_no_conflicting_attributes(&datatype, &ats.body)?;
 
                 for substatement in &ats.body.statements {
                     match &substatement.statement {
@@ -1908,6 +1997,36 @@ impl Environment {
                                 ls,
                                 ls.name_token.range(),
                                 None, // No type parameters for specific attributes
+                            )?;
+                        }
+                        StatementInfo::VariableSatisfy(vss) => {
+                            let datatype = datatype.clone();
+                            let concrete_types = concrete_types.clone();
+                            self.add_variable_satisfy_statement_named(
+                                project,
+                                substatement,
+                                vss,
+                                None,
+                                move |name| {
+                                    DefinedName::datatype_specific_attr(
+                                        datatype.clone(),
+                                        &concrete_types,
+                                        name,
+                                    )
+                                },
+                            )?;
+                        }
+                        StatementInfo::FunctionSatisfy(fss) => {
+                            self.add_function_satisfy_statement_named(
+                                project,
+                                substatement,
+                                fss,
+                                DefinedName::datatype_specific_attr(
+                                    datatype.clone(),
+                                    &concrete_types,
+                                    fss.name_token.text(),
+                                ),
+                                None,
                             )?;
                         }
                         StatementInfo::Define(ds) => {
@@ -1931,7 +2050,7 @@ impl Environment {
                         }
                         _ => {
                             return Err(substatement
-                                .error("only let, define, and doc comment statements are allowed in attributes bodies"));
+                                .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
                         }
                     }
                 }
@@ -1981,6 +2100,25 @@ impl Environment {
                         Some(&type_params),
                     )?;
                 }
+                StatementInfo::VariableSatisfy(vss) => {
+                    let typeclass = typeclass.clone();
+                    self.add_variable_satisfy_statement_named(
+                        project,
+                        substatement,
+                        vss,
+                        Some(&type_params),
+                        move |name| DefinedName::typeclass_attr(&typeclass, name),
+                    )?;
+                }
+                StatementInfo::FunctionSatisfy(fss) => {
+                    self.add_function_satisfy_statement_named(
+                        project,
+                        substatement,
+                        fss,
+                        DefinedName::typeclass_attr(&typeclass, fss.name_token.text()),
+                        Some(&type_params),
+                    )?;
+                }
                 StatementInfo::Define(ds) => {
                     self.add_define_statement(
                         project,
@@ -1998,7 +2136,7 @@ impl Environment {
                 }
                 _ => {
                     return Err(substatement
-                        .error("only let, define, and doc comment statements are allowed in attributes bodies"));
+                        .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
                 }
             }
         }
