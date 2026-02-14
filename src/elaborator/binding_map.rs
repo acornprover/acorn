@@ -1739,31 +1739,6 @@ impl BindingMap {
         }
     }
 
-    /// Apply an unresolved name to arguments, inferring the types.
-    pub fn infer_and_apply(
-        &self,
-        stack: &mut Stack,
-        unresolved: UnresolvedConstant,
-        arg_exprs: Vec<&Expression>,
-        expected_type: Option<&AcornType>,
-        project: &Project,
-        source: &dyn ErrorContext,
-        token_map: Option<&mut TokenMap>,
-    ) -> error::Result<AcornValue> {
-        // Evaluate the arguments as generic values, allowing unresolved constants
-        // to be converted to their generic form. This is needed for type inference
-        // when arguments may contain in-scope type variables.
-        let mut args = vec![];
-        let mut evaluator = Evaluator::new(project, self, token_map);
-        for arg_expr in &arg_exprs {
-            let arg = evaluator.evaluate_as_generic_value(stack, arg_expr)?;
-            args.push(arg);
-        }
-
-        self.unifier()
-            .resolve_with_inference(unresolved, args, expected_type, source)
-    }
-
     /// This creates a version of a typeclass condition that is specialized to a particular
     /// class that isn't an instance of the typeclass.
     /// The *class* must be defined in this module. The typeclass may not be.

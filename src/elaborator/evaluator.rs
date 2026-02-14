@@ -7,6 +7,7 @@ use crate::elaborator::names::DefinedName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::type_unifier::TypeUnifier;
+use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -75,6 +76,24 @@ impl<'a> Evaluator<'a> {
     ) -> error::Result<PotentialValue> {
         self.unifier()
             .maybe_resolve_value(potential, expected_type, source)
+    }
+
+    /// Apply an unresolved constant to argument expressions, inferring type arguments.
+    fn infer_and_apply_unresolved(
+        &mut self,
+        stack: &mut Stack,
+        unresolved: UnresolvedConstant,
+        arg_exprs: Vec<&Expression>,
+        expected_type: Option<&AcornType>,
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        // Evaluate args as generic values so inference can use in-scope type variables.
+        let mut args = vec![];
+        for arg_expr in &arg_exprs {
+            args.push(self.evaluate_as_generic_value(stack, arg_expr)?);
+        }
+        self.unifier()
+            .resolve_with_inference(unresolved, args, expected_type, source)
     }
 
     /// Tracks token information for the given entity.
@@ -1298,14 +1317,12 @@ impl<'a> Evaluator<'a> {
 
                 // Check if we have to do type inference.
                 match function {
-                    PotentialValue::Unresolved(unresolved) => self.bindings.infer_and_apply(
+                    PotentialValue::Unresolved(unresolved) => self.infer_and_apply_unresolved(
                         stack,
                         unresolved,
                         arg_exprs,
                         expected_type,
-                        &self.project,
                         expression,
-                        self.token_map.as_deref_mut(),
                     )?,
                     PotentialValue::Resolved(function) => {
                         // Simple, no-type-inference-necessary construction
