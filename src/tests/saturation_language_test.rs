@@ -2105,3 +2105,61 @@ fn test_certificate_type_params_are_step_local() {
     )
     .expect("second line should parse");
 }
+
+// Regression test for a certificate generation bug where a generated claim mixed
+// a concrete type argument with an unresolved type parameter (T0), yielding
+// invalid code that the certificate parser rejects.
+#[test]
+fn test_subgroup_identity_existence_cert_generation() {
+    use crate::certificate::Certificate;
+    use crate::processor::Processor;
+    use crate::project::Project;
+    use std::borrow::Cow;
+
+    let (_processor, bindings, normalized_goal) = Processor::test_goal(
+        r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        typeclass G: Group {
+            1: G
+        }
+
+        define is_identity[G: Group](g: G) -> Bool {
+            g = G.1
+        }
+
+        structure Subgroup[G: Group] {
+            contains: G -> Bool
+        } constraint {
+            true
+        }
+
+        theorem goal[G: Group] {
+            true
+        }
+        "#,
+    );
+
+    let project = Project::new_mock();
+    let mut normalizer_cow = Cow::Owned(normalized_goal.normalizer.clone());
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+
+    Certificate::parse_code_line(
+        "let s0[T0: Group]: (T0 -> Bool) -> Subgroup[T0] satisfy { forall(x0: T0 -> Bool) { not Subgroup.constraint[T0](x0) or Option.some[Subgroup[T0]](s0(x0)) = Subgroup.new_option[T0](x0) } }",
+        &project,
+        &mut bindings_cow,
+        &mut normalizer_cow,
+    )
+    .expect("synthetic definition should parse");
+
+    Certificate::parse_code_line(
+        "Option.some[Subgroup[T0]](s0(is_identity[Bool])) != Subgroup.new_option[Bool](is_identity[Bool])",
+        &project,
+        &mut bindings_cow,
+        &mut normalizer_cow,
+    )
+    .expect("generated claim line should parse");
+}
