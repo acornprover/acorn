@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
@@ -6,6 +7,7 @@ use super::passive_set::PassiveSet;
 use super::proof::Proof;
 use crate::certificate::Certificate;
 use crate::code_generator::{CodeGenerator, Error};
+use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::goal::Goal;
 use crate::kernel::clause::Clause;
@@ -57,6 +59,37 @@ pub struct Prover {
 }
 
 impl Prover {
+    fn bindings_with_type_params<'a>(
+        bindings: &'a BindingMap,
+        type_params: &[TypeParam],
+    ) -> Cow<'a, BindingMap> {
+        if type_params.is_empty() {
+            return Cow::Borrowed(bindings);
+        }
+
+        let missing_params: Vec<TypeParam> = type_params
+            .iter()
+            .filter(|param| !bindings.has_typename(&param.name))
+            .cloned()
+            .collect();
+        if missing_params.is_empty() {
+            return Cow::Borrowed(bindings);
+        }
+
+        let mut extended = bindings.clone();
+        for param in missing_params {
+            extended.add_arbitrary_type(param);
+        }
+        Cow::Owned(extended)
+    }
+
+    fn bindings_with_goal_type_params<'a>(&self, bindings: &'a BindingMap) -> Cow<'a, BindingMap> {
+        let Some(goal) = self.goal.as_ref() else {
+            return Cow::Borrowed(bindings);
+        };
+        Self::bindings_with_type_params(bindings, &goal.proposition.params)
+    }
+
     /// Creates a new Prover instance.
     /// The prover must stop when any of its cancellation tokens are canceled.
     pub fn new(tokens: Vec<CancellationToken>) -> Prover {
@@ -74,6 +107,12 @@ impl Prover {
     /// Returns an iterator over the active proof steps
     pub fn iter_active_steps(&self) -> impl Iterator<Item = (usize, &ProofStep)> {
         self.active_set.iter_steps()
+    }
+
+    pub fn goal_type_params(&self) -> Option<&[TypeParam]> {
+        self.goal
+            .as_ref()
+            .map(|goal| goal.proposition.params.as_slice())
     }
 
     /// (description, id) for every clause this rule depends on.
@@ -264,22 +303,22 @@ impl Prover {
         normalizer: &Normalizer,
         print: bool,
     ) -> Result<Certificate, Error> {
-        let goal_name = self
+        let goal = self
             .goal
             .as_ref()
-            .ok_or_else(|| Error::internal("no goal set"))?
-            .name
-            .clone();
+            .ok_or_else(|| Error::internal("no goal set"))?;
+        let goal_name = goal.name.clone();
+        let cert_bindings = self.bindings_with_goal_type_params(bindings);
 
         let proof = self
             .get_proof(&normalizer, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
         if print {
-            self.print_proof(&proof, bindings, normalizer);
+            self.print_proof(&proof, cert_bindings.as_ref(), normalizer);
         }
 
-        let cert = proof.make_cert(goal_name, bindings)?;
+        let cert = proof.make_cert(goal_name, cert_bindings.as_ref())?;
         if print {
             println!("concrete proof:");
             if let Some(proof) = &cert.proof {

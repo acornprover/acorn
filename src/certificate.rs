@@ -10,6 +10,7 @@ use std::borrow::Cow;
 
 use crate::code_generator::{CodeGenerator, Error as CodeGenError, SyntheticNameSet};
 use crate::elaborator::acorn_type::AcornType;
+use crate::elaborator::acorn_type::PotentialType;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
@@ -22,7 +23,7 @@ use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::term::Term;
-use crate::kernel::variable_map::VariableMap;
+use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::normalizer::{NormalizationContext, Normalizer};
 use crate::project::Project;
@@ -180,15 +181,28 @@ impl Certificate {
         for step in &ordered_steps {
             let line = match step {
                 CertificateStep::Claim(claim) => {
-                    if claim.clause.get_local_context().is_empty() || claim.var_map.len() == 0 {
+                    if claim.clause.get_local_context().is_empty() {
                         generator.certificate_step_to_code(&names, step, &generation_normalizer)?
                     } else {
-                        Self::serialize_claim_with_names(
+                        match Self::serialize_claim_with_names(
                             claim,
                             &generation_normalizer,
                             bindings,
                             Some(&names.synthetic_names),
-                        )?
+                        ) {
+                            Ok(line) => line,
+                            Err(e) if claim.var_map.len() == 0 => {
+                                // Fallback for map-less claims if we cannot synthesize a stable
+                                // claim-with-args representation.
+                                let _ = e;
+                                generator.certificate_step_to_code(
+                                    &names,
+                                    step,
+                                    &generation_normalizer,
+                                )?
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 _ => generator.certificate_step_to_code(&names, step, &generation_normalizer)?,
@@ -511,6 +525,27 @@ impl Certificate {
         Self::serialize_claim_with_names(claim, normalizer, bindings, None)
     }
 
+    fn infer_in_scope_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
+        let mut candidates: Vec<(String, AcornType)> = vec![];
+        for (name, potential_type) in bindings.iter_types() {
+            let PotentialType::Resolved(AcornType::Arbitrary(type_param)) = potential_type else {
+                continue;
+            };
+            let compatible = match kind {
+                AcornType::TypeclassConstraint(typeclass) => {
+                    type_param.typeclass.as_ref() == Some(typeclass)
+                }
+                AcornType::Type0 => true,
+                _ => false,
+            };
+            if compatible {
+                candidates.push((name.clone(), AcornType::Arbitrary(type_param.clone())));
+            }
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.into_iter().next().map(|(_, ty)| ty)
+    }
+
     fn serialize_claim_with_names(
         claim: &Claim,
         normalizer: &Normalizer,
@@ -571,6 +606,7 @@ impl Certificate {
 
         let mut type_param_decl_codes: Vec<String> = vec![];
         let mut type_arg_codes: Vec<String> = vec![];
+        let mut resolved_type_var_map = VariableMap::new();
         let mut value_decl_codes: Vec<String> = vec![];
         let mut value_arg_codes: Vec<String> = vec![];
         // Keep declaration names aligned with CodeGenerator's own naming strategy so the
@@ -584,12 +620,7 @@ impl Certificate {
                 .expect("local context should provide all variable types")
                 .clone();
 
-            let arg_term = claim.var_map.get_mapping(var_id as AtomId).ok_or_else(|| {
-                CodeGenError::GeneratedBadCode(format!(
-                    "missing claim var map entry for x{}",
-                    var_id
-                ))
-            })?;
+            let arg_term = claim.var_map.get_mapping(var_id as AtomId);
 
             if var_type.as_ref().is_type_param_kind() {
                 let type_param_name = format!("T{}", var_id);
@@ -609,14 +640,46 @@ impl Certificate {
                 };
                 type_param_decl_codes.push(decl_code);
 
-                let concrete_type = normalizer.denormalize_type_with_context(
-                    arg_term.clone(),
-                    local_context,
-                    false,
-                );
-                type_arg_codes.push(generator.type_to_expr(&concrete_type)?.to_string());
+                let mapped_type = arg_term.map(|term| {
+                    normalizer.denormalize_type_with_context(term.clone(), local_context, false)
+                });
+                let (selected_type, type_arg_code) = match mapped_type {
+                    Some(mapped) if !matches!(mapped, AcornType::Variable(_)) => (
+                        Some(mapped.clone()),
+                        generator.type_to_expr(&mapped)?.to_string(),
+                    ),
+                    Some(_) | None => {
+                        if let Some(in_scope_type) = Self::infer_in_scope_type_arg(&kind, bindings)
+                        {
+                            (
+                                Some(in_scope_type.clone()),
+                                generator.type_to_expr(&in_scope_type)?.to_string(),
+                            )
+                        } else {
+                            // No concrete in-scope type to instantiate with. Keep this line
+                            // self-contained by applying the type lambda to its own local type
+                            // parameter (e.g. function[T0: C] { ... }[T0]).
+                            (None, type_param_name.clone())
+                        }
+                    }
+                };
+                if let Some(selected_type) = selected_type {
+                    let selected_term = normalizer
+                        .kernel_context()
+                        .type_store
+                        .to_type_term_with_vars(&selected_type, None);
+                    resolved_type_var_map.set(var_id as AtomId, selected_term);
+                }
+                type_arg_codes.push(type_arg_code);
                 continue;
             }
+
+            let arg_term = arg_term.ok_or_else(|| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "missing claim var map entry for x{}",
+                    var_id
+                ))
+            })?;
 
             let var_name = bindings.next_indexed_var('x', &mut next_value_decl_id);
             let acorn_type =
@@ -624,8 +687,12 @@ impl Certificate {
             let type_code = generator.type_to_expr(&acorn_type)?.to_string();
             value_decl_codes.push(format!("{}: {}", var_name, type_code));
 
-            let arg_value =
-                normalizer.denormalize_term_with_context(arg_term, local_context, false);
+            let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
+            let arg_value = normalizer.denormalize_term_with_context(
+                &substituted_arg_term,
+                local_context,
+                false,
+            );
             let arg_code = if let Some(synthetic_names) = synthetic_names {
                 generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
             } else {

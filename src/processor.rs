@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::builder::BuildError;
 use crate::certificate::{Certificate, CertificateLine};
 use crate::code_generator::Error;
+use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::node::NodeCursor;
 use crate::kernel::checker::{Checker, StepReason};
@@ -20,6 +21,30 @@ pub struct Processor {
 }
 
 impl Processor {
+    fn bindings_with_type_params<'a>(
+        bindings: &'a BindingMap,
+        type_params: &[TypeParam],
+    ) -> Cow<'a, BindingMap> {
+        if type_params.is_empty() {
+            return Cow::Borrowed(bindings);
+        }
+
+        let missing_params: Vec<TypeParam> = type_params
+            .iter()
+            .filter(|param| !bindings.has_typename(&param.name))
+            .cloned()
+            .collect();
+        if missing_params.is_empty() {
+            return Cow::Borrowed(bindings);
+        }
+
+        let mut extended = bindings.clone();
+        for param in missing_params {
+            extended.add_arbitrary_type(param);
+        }
+        Cow::Owned(extended)
+    }
+
     pub fn new() -> Processor {
         Processor {
             prover: Prover::new(vec![]),
@@ -154,14 +179,18 @@ impl Processor {
     ) -> Result<Vec<CertificateLine>, Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = normalizer.clone();
+        let mut cert_bindings = Cow::Borrowed(bindings);
 
         if let Some(normalized_goal) = normalized_goal {
             checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
+            cert_bindings =
+                Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
+        } else if let Some(type_params) = self.prover.goal_type_params() {
+            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
         }
 
-        let bindings = Cow::Borrowed(bindings);
         let normalizer = Cow::Owned(normalizer);
-        cert.check(checker, project, bindings, normalizer)
+        cert.check(checker, project, cert_bindings, normalizer)
     }
 
     /// Cleans a certificate by removing unnecessary steps.
@@ -176,14 +205,18 @@ impl Processor {
     ) -> Result<(Certificate, Vec<CertificateLine>), Error> {
         let mut checker = self.checker.clone();
         let mut normalizer = normalizer.clone();
+        let mut cert_bindings = Cow::Borrowed(bindings);
 
         if let Some(normalized_goal) = normalized_goal {
             checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
+            cert_bindings =
+                Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
+        } else if let Some(type_params) = self.prover.goal_type_params() {
+            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
         }
 
-        let bindings = Cow::Borrowed(bindings);
         let normalizer = Cow::Owned(normalizer);
-        cert.clean(checker, project, bindings, normalizer)
+        cert.clean(checker, project, cert_bindings, normalizer)
     }
 
     /// Creates a test Processor from code containing a theorem named "goal".

@@ -1255,17 +1255,6 @@ impl CodeGenerator<'_> {
             .unwrap_or(0);
         let has_missing_used_mappings =
             (0..used_var_count).any(|var_id| !claim_var_map.has_mapping(var_id as AtomId));
-        let has_placeholder_type_bindings = claim_var_map.iter().any(|(var_id, term)| {
-            let is_type_param = generic_context
-                .get_var_type(var_id)
-                .map(|t| t.as_ref().is_type_param_kind())
-                .unwrap_or(false);
-            is_type_param
-                && matches!(
-                    term.as_ref().decompose(),
-                    Decomposition::Atom(Atom::FreeVariable(_))
-                )
-        });
         let has_out_of_scope_terms = claim_var_map.iter().any(|(_, term)| {
             term.max_variable()
                 .map(|id| id as usize >= generic_len)
@@ -1316,32 +1305,30 @@ impl CodeGenerator<'_> {
                 clause
             )));
         }
-        let claim =
-            if has_out_of_scope_terms || has_missing_used_mappings || has_placeholder_type_bindings
-            {
+        let claim = if has_out_of_scope_terms || has_missing_used_mappings {
+            Claim {
+                clause: clause.clone(),
+                var_map: VariableMap::new(),
+            }
+        } else {
+            let mut replayed =
+                claim_var_map.specialize_clause(generic, normalizer.kernel_context());
+            replayed.normalize_var_ids_no_flip();
+            let mut concretized_clause =
+                claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
+            concretized_clause.normalize_var_ids_no_flip();
+            if replayed == concretized_clause {
+                Claim {
+                    clause: generic.clone(),
+                    var_map: claim_var_map,
+                }
+            } else {
                 Claim {
                     clause: clause.clone(),
                     var_map: VariableMap::new(),
                 }
-            } else {
-                let mut replayed =
-                    claim_var_map.specialize_clause(generic, normalizer.kernel_context());
-                replayed.normalize_var_ids_no_flip();
-                let mut concretized_clause =
-                    claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
-                concretized_clause.normalize_var_ids_no_flip();
-                if replayed == concretized_clause {
-                    Claim {
-                        clause: generic.clone(),
-                        var_map: claim_var_map,
-                    }
-                } else {
-                    Claim {
-                        clause: clause.clone(),
-                        var_map: VariableMap::new(),
-                    }
-                }
-            };
+            }
+        };
 
         steps.push(CertificateStep::Claim(claim));
         Ok(())
