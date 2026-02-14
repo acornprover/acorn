@@ -1079,6 +1079,8 @@ fn parse_from_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statem
             }
             TokenType::Comma => {
                 names.push(token);
+                // Allow line breaks after commas in import lists.
+                tokens.skip_newlines();
                 continue;
             }
             _ => {

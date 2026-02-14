@@ -612,6 +612,11 @@ mod tests {
         ok("from foo import bar");
         ok("from foo.bar import baz");
         ok("from foo.bar.qux import baz, zip");
+        should_parse(indoc! {"
+        from foo.bar.qux import baz,
+            zip,
+            zap
+        "});
         fail("from foo");
     }
 
