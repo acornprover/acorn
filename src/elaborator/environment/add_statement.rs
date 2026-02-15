@@ -9,6 +9,7 @@ use crate::elaborator::block::{Block, BlockParams};
 use crate::elaborator::error::{self, Error, ErrorContext};
 use crate::elaborator::evaluator::{AttributesTypeArgs, Evaluator};
 use crate::elaborator::fact::Fact;
+use crate::elaborator::inference::InferenceEngine;
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::node::Node;
@@ -2916,18 +2917,12 @@ impl Environment {
 
         let return_type_before = function_ftype_before.return_type.as_ref().clone();
         if return_type_before != value_type {
-            let mut unifier = self.bindings.unifier();
-            unifier.user_match_instance(
-                &return_type_before,
+            function = InferenceEngine::new(&self.bindings).infer_function_return_type(
+                function,
                 &value_type,
                 "destructuring function return type",
                 &ds.value,
             )?;
-
-            if !unifier.mapping.is_empty() {
-                let substitutions: Vec<_> = unifier.mapping.into_iter().collect();
-                function = function.instantiate(&substitutions);
-            }
         }
 
         // The function should be a function type

@@ -297,7 +297,8 @@ impl<'a> Evaluator<'a> {
                         &uc.name, datatype.name
                     )));
                 }
-                uc.resolve(pattern, params.clone())?
+                self.inference()
+                    .resolve_unresolved_with_type_params(uc, params.clone(), pattern)?
             }
         };
         let (i, total) = self.expect_constructor(expected_type, &constructor, pattern)?;
@@ -399,14 +400,18 @@ impl<'a> Evaluator<'a> {
         };
 
         // If this is a typeclass attribute, instantiate it with the datatype.
-        if let Some(u) = value.as_unresolved() {
-            // Resolve the typeclass attribute with the specific datatype
-            let instance_type = AcornType::Data(datatype.clone(), vec![]);
-            let resolved = u.resolve(source, vec![instance_type])?;
-            return Ok(PotentialValue::Resolved(resolved));
+        match value {
+            PotentialValue::Unresolved(unresolved) => {
+                let instance_type = AcornType::Data(datatype.clone(), vec![]);
+                let resolved = self.inference().resolve_unresolved_with_type_params(
+                    unresolved,
+                    vec![instance_type],
+                    source,
+                )?;
+                Ok(PotentialValue::Resolved(resolved))
+            }
+            potential => Ok(potential),
         }
-
-        Ok(value)
     }
 
     /// Evalutes a name scoped by a typeclass name, like Group.foo
@@ -475,10 +480,13 @@ impl<'a> Evaluator<'a> {
                     value
                 } else {
                     // If this is a typeclass attribute, instantiate it with the datatype.
-                    if let Some(u) = value.as_unresolved() {
-                        // Resolve the typeclass attribute with the specific datatype
+                    if let PotentialValue::Unresolved(unresolved) = value {
                         let instance_type = AcornType::Data(datatype.clone(), vec![]);
-                        let resolved = u.resolve(source, vec![instance_type])?;
+                        let resolved = self.inference().resolve_unresolved_with_type_params(
+                            unresolved,
+                            vec![instance_type],
+                            source,
+                        )?;
                         PotentialValue::Resolved(resolved)
                     } else {
                         value
@@ -512,7 +520,7 @@ impl<'a> Evaluator<'a> {
                 )));
             }
         };
-        self.bindings
+        self.inference()
             .try_apply_potential(function, vec![receiver], None, source)
     }
 
@@ -557,7 +565,12 @@ impl<'a> Evaluator<'a> {
                                         NamedEntity::UnresolvedValue(u)
                                     } else {
                                         // Resolve it with the params from the type name
-                                        let value = u.resolve(name_token, params.clone())?;
+                                        let value =
+                                            self.inference().resolve_unresolved_with_type_params(
+                                                u,
+                                                params.clone(),
+                                                name_token,
+                                            )?;
                                         NamedEntity::Value(value)
                                     }
                                 }
@@ -570,7 +583,11 @@ impl<'a> Evaluator<'a> {
                             PotentialValue::Resolved(value) => NamedEntity::Value(value),
                             PotentialValue::Unresolved(u) => {
                                 // Resolve it with the arbitrary type itself
-                                let value = u.resolve(name_token, vec![t.clone()])?;
+                                let value = self.inference().resolve_unresolved_with_type_params(
+                                    u,
+                                    vec![t.clone()],
+                                    name_token,
+                                )?;
                                 NamedEntity::Value(value)
                             }
                         }
@@ -838,25 +855,13 @@ impl<'a> Evaluator<'a> {
                 fa.args.push(right_value);
                 AcornValue::apply(*fa.function, fa.args)
             }
-            PotentialValue::Unresolved(_) => {
-                // Unresolved case: use type inference to resolve the method
-                let applied_potential = self.bindings.try_apply_potential(
-                    potential,
-                    vec![right_value],
-                    expected_type,
-                    expression,
-                )?;
-
-                match applied_potential {
-                    PotentialValue::Resolved(v) => v,
-                    PotentialValue::Unresolved(_) => {
-                        return Err(expression.error(&format!(
-                            "cannot infer type parameters for '{}' operator",
-                            token
-                        )))
-                    }
-                }
-            }
+            unresolved_potential => self.inference().apply_potential_or_error(
+                unresolved_potential,
+                vec![right_value],
+                expected_type,
+                &format!("cannot infer type parameters for '{}' operator", token),
+                expression,
+            )?,
         };
 
         value.check_type(expected_type, expression)?;
@@ -902,39 +907,10 @@ impl<'a> Evaluator<'a> {
         right: &Expression,
         left_expected: Option<&AcornType>,
     ) -> error::Result<(AcornValue, AcornValue)> {
-        // Evaluate both sides as potential values
         let left_potential = self.evaluate_potential_value(stack, left, left_expected)?;
         let right_potential = self.evaluate_potential_value(stack, right, None)?;
-
-        match (&left_potential, &right_potential) {
-            (PotentialValue::Resolved(lv), PotentialValue::Resolved(rv)) => {
-                // Both resolved - just check type compatibility
-                rv.check_type(Some(&lv.get_type()), right)?;
-                Ok((lv.clone(), rv.clone()))
-            }
-            (PotentialValue::Unresolved(lu), PotentialValue::Resolved(rv)) => {
-                // Left is unresolved, right is resolved - use right's type to resolve left
-                let left_resolved = self.inference().maybe_resolve_value(
-                    PotentialValue::Unresolved(lu.clone()),
-                    Some(&rv.get_type()),
-                    left,
-                )?;
-                Ok((left_resolved.as_value(left)?, rv.clone()))
-            }
-            (PotentialValue::Resolved(lv), PotentialValue::Unresolved(ru)) => {
-                // Left is resolved, right is unresolved - use left's type to resolve right
-                let right_resolved = self.inference().maybe_resolve_value(
-                    PotentialValue::Unresolved(ru.clone()),
-                    Some(&lv.get_type()),
-                    right,
-                )?;
-                Ok((lv.clone(), right_resolved.as_value(right)?))
-            }
-            (PotentialValue::Unresolved(lu), PotentialValue::Unresolved(_)) => {
-                // Both unresolved - we can't infer the types from each other
-                Err(left.error(&format!("value {} has unresolved type", lu.name)))
-            }
-        }
+        self.inference()
+            .resolve_equality_operands(left_potential, left, right_potential, right)
     }
 
     /// Evaluates an expression that could describe a value, but could also describe
@@ -1028,10 +1004,9 @@ impl<'a> Evaluator<'a> {
                     // Resolve the constructor with the type parameters
                     let some_value = match some_potential {
                         PotentialValue::Resolved(v) => v,
-                        PotentialValue::Unresolved(u) => {
-                            // Instantiate the generic constructor with the type parameters
-                            u.resolve(token, type_params.clone())?
-                        }
+                        PotentialValue::Unresolved(u) => self
+                            .inference()
+                            .resolve_unresolved_with_type_params(u, type_params.clone(), token)?,
                     };
 
                     // Verify that .some is a function of type T -> inner_type
@@ -1259,7 +1234,12 @@ impl<'a> Evaluator<'a> {
                                 for expr in exprs {
                                     type_params.push(self.evaluate_type(expr)?);
                                 }
-                                let resolved = unresolved.resolve(left_delimiter, type_params)?;
+                                let resolved =
+                                    self.inference().resolve_unresolved_with_type_params(
+                                        unresolved,
+                                        type_params,
+                                        left_delimiter,
+                                    )?;
                                 resolved.check_type(expected_type, expression)?;
                                 return Ok(PotentialValue::Resolved(resolved));
                             }
@@ -1292,16 +1272,13 @@ impl<'a> Evaluator<'a> {
                 // Check if we have to do type inference.
                 match function {
                     PotentialValue::Unresolved(unresolved) => {
-                        // Evaluate args as generic values so inference can use in-scope type vars.
-                        let mut args = vec![];
-                        for arg_expr in &arg_exprs {
-                            args.push(self.evaluate_as_generic_value(stack, arg_expr)?);
-                        }
-                        self.inference().resolve_unresolved_call(
+                        let inference = InferenceEngine::new(self.bindings);
+                        inference.resolve_unresolved_call_from_exprs(
                             unresolved,
-                            args,
+                            &arg_exprs,
                             expected_type,
                             expression,
+                            |arg_expr| self.evaluate_as_generic_value(stack, arg_expr),
                         )?
                     }
                     PotentialValue::Resolved(function) => {
