@@ -370,6 +370,33 @@ fn test_attribute_let_satisfy_exports_names() {
 }
 
 #[test]
+fn test_attribute_let_satisfy_rejects_outer_name_collision() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Foo: axiom
+            let bar: Foo = axiom
+        "#,
+    );
+
+    let error = env.bad(
+        r#"
+            attributes Foo {
+                let bar: Foo satisfy {
+                    true
+                }
+            }
+        "#,
+    );
+
+    assert!(
+        error.contains("constant name bar is already in use"),
+        "unexpected error message: {}",
+        error
+    );
+}
+
+#[test]
 fn test_attribute_function_satisfy_statement() {
     let mut env = Environment::test();
     env.add(
