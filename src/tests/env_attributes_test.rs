@@ -370,29 +370,24 @@ fn test_attribute_let_satisfy_exports_names() {
 }
 
 #[test]
-fn test_attribute_let_satisfy_rejects_outer_name_collision() {
+fn test_attribute_let_satisfy_allows_outer_name_collision() {
     let mut env = Environment::test();
     env.add(
         r#"
             type Foo: axiom
-            let bar: Foo = axiom
-        "#,
-    );
-
-    let error = env.bad(
-        r#"
+            let bar: Bool = axiom
+            define ok(x: Foo) -> Bool { axiom }
             attributes Foo {
                 let bar: Foo satisfy {
-                    true
+                    ok(bar)
                 }
             }
+            theorem goal {
+                ok(Foo.bar)
+            } by {
+                ok(Foo.bar)
+            }
         "#,
-    );
-
-    assert!(
-        error.contains("constant name bar is already in use"),
-        "unexpected error message: {}",
-        error
     );
 }
 

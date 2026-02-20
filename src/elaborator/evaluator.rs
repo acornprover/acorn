@@ -201,6 +201,32 @@ impl<'a> Evaluator<'a> {
     where
         I: IntoIterator<Item = &'b Declaration>,
     {
+        self.bind_args_internal(stack, declarations, datatype_type, false)
+    }
+
+    /// Like bind_args, but allows argument names to shadow existing unqualified constants.
+    pub fn bind_args_may_shadow<'b, I>(
+        &mut self,
+        stack: &mut Stack,
+        declarations: I,
+        datatype_type: Option<&AcornType>,
+    ) -> error::Result<(Vec<String>, Vec<AcornType>)>
+    where
+        I: IntoIterator<Item = &'b Declaration>,
+    {
+        self.bind_args_internal(stack, declarations, datatype_type, true)
+    }
+
+    fn bind_args_internal<'b, I>(
+        &mut self,
+        stack: &mut Stack,
+        declarations: I,
+        datatype_type: Option<&AcornType>,
+        allow_shadowing: bool,
+    ) -> error::Result<(Vec<String>, Vec<AcornType>)>
+    where
+        I: IntoIterator<Item = &'b Declaration>,
+    {
         let mut names = Vec::new();
         let mut types = Vec::new();
         for (i, declaration) in declarations.into_iter().enumerate() {
@@ -219,8 +245,10 @@ impl<'a> Evaluator<'a> {
                 }
             }
             let (name, acorn_type) = self.evaluate_declaration(declaration)?;
-            self.bindings
-                .check_unqualified_name_available(&name, declaration.token())?;
+            if !allow_shadowing {
+                self.bindings
+                    .check_unqualified_name_available(&name, declaration.token())?;
+            }
             if stack.get(&name).is_some() {
                 return Err(declaration
                     .token()

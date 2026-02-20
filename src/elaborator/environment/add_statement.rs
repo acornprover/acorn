@@ -641,8 +641,10 @@ impl Environment {
         // We need to prove the general existence claim
         let mut stack = Stack::new();
         let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
+        // Declarations in let ... satisfy are local witnesses. We check collisions against the
+        // eventual defined names below, so these local binders may shadow outer unqualified names.
         let (quant_names, quant_types) =
-            no_token_evaluator.bind_args(&mut stack, &vss.declarations, None)?;
+            no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
         let general_claim_value = no_token_evaluator.evaluate_value_with_stack(
             &mut stack,
             &vss.condition,
