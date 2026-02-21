@@ -1171,6 +1171,26 @@ impl CodeGenerator<'_> {
             }
         }
 
+        // Infer replacement-context type variables from value-variable arbitraries.
+        // Example: if x1: x0 and x1 is mapped to a Bool witness symbol, infer x0 = Bool.
+        let mut replacement_type_map = VariableMap::new();
+        for var_id in 0..replacement_context.len() {
+            let Some(mapped_term) = replacement_arbitrary_map.get_mapping(var_id as AtomId) else {
+                continue;
+            };
+            let expected_type = replacement_context
+                .get_var_type(var_id)
+                .expect("replacement context should provide all var types");
+            let mapped_type =
+                mapped_term.get_type_with_context(replacement_context, normalizer.kernel_context());
+            Self::infer_type_param_bindings_from_type_pattern(
+                expected_type.as_ref(),
+                mapped_type.as_ref(),
+                replacement_context,
+                &mut replacement_type_map,
+            );
+        }
+
         let generic_context = generic.get_local_context();
         let generic_len = generic_context.len();
         let mut claim_var_map = VariableMap::new();
@@ -1182,6 +1202,7 @@ impl CodeGenerator<'_> {
                 .get_var_type(var_id)
                 .expect("generic context should provide all var types");
             let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
+            let specialized = apply_to_term(specialized.as_ref(), &replacement_type_map);
             Self::ensure_no_foreign_scoped_constants_in_term(
                 &specialized,
                 normalizer,
@@ -1335,8 +1356,10 @@ impl CodeGenerator<'_> {
         }
         let mut replayed = claim_var_map.specialize_clause(generic, normalizer.kernel_context());
         replayed.normalize_var_ids_no_flip();
+        // Compare against the concrete clause after only applying inferred replacement-type
+        // substitutions; applying claim_var_map here can incorrectly capture overlapping IDs.
         let mut concretized_clause =
-            claim_var_map.specialize_clause(&clause, normalizer.kernel_context());
+            replacement_type_map.specialize_clause(&clause, normalizer.kernel_context());
         concretized_clause.normalize_var_ids_no_flip();
         if replayed != concretized_clause {
             return Err(Error::GeneratedBadCode(format!(
@@ -1478,7 +1501,7 @@ impl CodeGenerator<'_> {
                         // E.g., has_finite_order(s0) where s0 has type Variable(T0)
                         // can't infer T from s0's type because T0 is not concrete.
                         let arg_type = arg.get_type();
-                        if !arg_type.has_generic() {
+                        if !arg_type.has_generic() && arg_type == *param_type {
                             found_in_args = true;
                             break;
                         }
@@ -2432,6 +2455,87 @@ mod tests {
             err.to_string().contains("out-of-scope term"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_claim_replay_handles_replacement_type_var_inference() {
+        use crate::elaborator::acorn_type::AcornType;
+        use crate::elaborator::names::ConstantName;
+        use crate::kernel::atom::Atom;
+        use crate::kernel::certificate_step::CertificateStep;
+        use crate::kernel::variable_map::VariableMap;
+        use crate::processor::Processor;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+        let mut normalizer = normalized_goal.normalizer;
+
+        {
+            let kctx = normalizer.kernel_context_mut();
+            kctx.parse_polymorphic_constant("g0", "T: Type", "T -> Bool");
+            kctx.parse_polymorphic_constant("g1", "A: Type, B: Type", "A -> B");
+        }
+
+        let generic = normalizer
+            .kernel_context()
+            .parse_clause("g0(x0, x1)", &["Type", "x0"]);
+        let replacement_context = normalizer.kernel_context().parse_local(&["Type", "x0"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, normalizer.kernel_context().parse_term("Empty"));
+        // x0 and x1 here are in replacement_context; x0 should be inferred as Bool from x1's symbol.
+        var_map.set(
+            1,
+            normalizer.kernel_context().parse_term("g1(x0, Empty, x1)"),
+        );
+
+        let mut names = SyntheticNameSet::new();
+        let type_key = SyntheticNameSet::concrete_type_for_term(
+            &normalizer,
+            replacement_context
+                .get_var_type(1)
+                .expect("replacement var type should exist"),
+            &replacement_context,
+        )
+        .expect("replacement type key should resolve");
+        let bool_symbol_atom = normalizer.add_scoped_constant(
+            ConstantName::Unqualified(bindings.module_id(), "s_test".to_string()),
+            &AcornType::Bool,
+            None,
+        );
+        let Atom::Symbol(bool_symbol) = bool_symbol_atom else {
+            panic!("expected symbol");
+        };
+        names.arbitrary_symbols.insert(type_key, bool_symbol);
+
+        let mut generator = CodeGenerator::new(&bindings);
+        let mut steps = vec![];
+        generator
+            .specialization_to_certificate_steps(
+                &mut names,
+                &generic,
+                &var_map,
+                &replacement_context,
+                &mut normalizer,
+                &mut steps,
+            )
+            .expect("specialization should succeed without replay mismatch");
+
+        let claim = steps
+            .iter()
+            .find_map(|step| match step {
+                CertificateStep::Claim(claim) => Some(claim),
+                _ => None,
+            })
+            .expect("expected claim step");
+        let mapped_x1 = claim
+            .var_map
+            .get_mapping(1)
+            .expect("expected x1 mapping in claim");
+        assert!(
+            mapped_x1.max_variable().is_none(),
+            "mapped term should have no free replacement vars left, got {}",
+            mapped_x1
         );
     }
 
