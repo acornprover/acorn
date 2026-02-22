@@ -382,6 +382,7 @@ fn test_conjunction_goal() {
     verify_succeeds(text);
 }
 
+// This currently fails due to lack of step completeness.
 // Unfortunately we normalize this in such a way that it is not obvious.
 // The normalized task is to derive a contradiction from:
 //
@@ -393,24 +394,55 @@ fn test_conjunction_goal() {
 //
 // It seems like some sort of monotonic-complexity-reducing reasoning might do it.
 //
-// #[test]
-// fn test_complex_boolean() {
-//     let text = r#"
-//     let a: Bool = axiom
-//     let b: Bool = axiom
-//     let c: Bool = axiom
-//     let d: Bool = axiom
+#[test]
+#[ignore = "known normalization/prover gap: axiom and identical theorem normalize into a hard search shape"]
+fn test_complex_boolean() {
+    let text = r#"
+    let a: Bool = axiom
+    let b: Bool = axiom
+    let c: Bool = axiom
+    let d: Bool = axiom
 
-//     axiom ax {
-//         (a and b) or (c and d)
-//     }
+    axiom ax {
+        (a and b) or (c and d)
+    }
 
-//     theorem goal {
-//         (a and b) or (c and d)
-//     }
-//     "#;
-//     verify_succeeds(text);
-// }
+    theorem goal {
+        (a and b) or (c and d)
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+// Similar lack-of-step-completeness issue, but with an existential witness.
+// Intuitively this should be immediate from the axiom, but after normalization
+// and negation we may get clause sets that don't line up in an obvious way for
+// the current prover search strategy.
+//
+#[test]
+#[ignore = "known normalization/prover gap with existential disjunction shape"]
+fn test_exists_disjunction_same_as_axiom() {
+    let text = r#"
+    type Nat: axiom
+    let f: Nat -> Bool = axiom
+    let g: Nat -> Bool = axiom
+    let h: Nat -> Bool = axiom
+    let i: Nat -> Bool = axiom
+
+    axiom ax {
+        exists(x: Nat) {
+            (f(x) and g(x)) or (h(x) and i(x))
+        }
+    }
+
+    theorem goal {
+        exists(x: Nat) {
+            (f(x) and g(x)) or (h(x) and i(x))
+        }
+    }
+    "#;
+    verify_succeeds(text);
+}
 
 // This test exercises bugs where structures with methods containing
 // nested lambdas with if-then-else expressions would crash during normalization.
