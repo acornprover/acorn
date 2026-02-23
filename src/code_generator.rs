@@ -10,7 +10,7 @@ use crate::elaborator::acorn_value::{
     AcornValue, BinaryOp, ConstantInstance, TypeApplication as ValueTypeApplication,
 };
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::names::{ConstantName, DefinedName};
+use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
@@ -1583,10 +1583,10 @@ impl CodeGenerator<'_> {
         // Handle numeric literals for datatype attributes (not typeclass attributes).
         // Typeclass attribute numerals are handled in value_to_expr where we have
         // more context about whether the datatype has its own override.
-        if let Some((_, datatype_name, attr)) = ci.name.as_attribute() {
+        if let Some((receiver_module_id, datatype_name, attr)) = ci.name.as_attribute() {
             if attr.chars().all(|ch| ch.is_ascii_digit()) && !ci.name.is_typeclass_attr() {
                 let datatype = Datatype {
-                    module_id: ci.name.module_id(),
+                    module_id: receiver_module_id,
                     name: datatype_name.to_string(),
                 };
 
@@ -1610,10 +1610,10 @@ impl CodeGenerator<'_> {
         if ci.name.module_id() == self.bindings.module_id() {
             return Ok(match &ci.name {
                 ConstantName::Unqualified(_, word) => Expression::generate_identifier(word),
-                ConstantName::DatatypeAttribute(datatype, attr) => {
+                ConstantName::DatatypeAttribute(_, datatype, attr) => {
                     Expression::generate_identifier(&datatype.name).add_dot_str(attr)
                 }
-                ConstantName::SpecificDatatypeAttribute(datatype, _types, attr) => {
+                ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                     // Generate the same expression as for generic attributes
                     // The specific type information is not needed in the generated code
                     Expression::generate_identifier(&datatype.name).add_dot_str(attr)
@@ -1632,10 +1632,10 @@ impl CodeGenerator<'_> {
 
         // If it's a member function, check if there's a local alias for its receiver.
         // Note that the receiver could be either a class or a typeclass.
-        if let Some((_, rname, attr)) = ci.name.as_attribute() {
+        if let Some((receiver_module_id, rname, attr)) = ci.name.as_attribute() {
             // Check if this is a datatype attribute
             let datatype = Datatype {
-                module_id: ci.name.module_id(),
+                module_id: receiver_module_id,
                 name: rname.to_string(),
             };
             if let Some(alias) = self.bindings.datatype_alias(&datatype) {
@@ -1645,7 +1645,7 @@ impl CodeGenerator<'_> {
 
             // Check if this is a typeclass attribute
             let typeclass = Typeclass {
-                module_id: ci.name.module_id(),
+                module_id: receiver_module_id,
                 name: rname.to_string(),
             };
             if let Some(alias) = self.bindings.typeclass_alias(&typeclass) {
@@ -1658,10 +1658,10 @@ impl CodeGenerator<'_> {
         let module = self.module_to_expr(ci.name.module_id())?;
         match &ci.name {
             ConstantName::Unqualified(_, name) => Ok(module.add_dot_str(name)),
-            ConstantName::DatatypeAttribute(datatype, attr) => {
+            ConstantName::DatatypeAttribute(_, datatype, attr) => {
                 Ok(module.add_dot_str(&datatype.name).add_dot_str(attr))
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, _types, attr) => {
+            ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                 Ok(module.add_dot_str(&datatype.name).add_dot_str(attr))
             }
             ConstantName::TypeclassAttribute(tc, attr) => {
@@ -1816,9 +1816,7 @@ impl CodeGenerator<'_> {
                                 if let AcornType::Data(datatype, _) = &receiver_type {
                                     if self.bindings.is_instance_of(datatype, typeclass) {
                                         // Check if the datatype has its own attribute with the same name
-                                        let datatype_attr_name =
-                                            DefinedName::datatype_attr(datatype, &attr);
-                                        !self.bindings.constant_name_in_use(&datatype_attr_name)
+                                        !self.bindings.has_type_attr(datatype, &attr)
                                     } else {
                                         false
                                     }
@@ -1914,10 +1912,8 @@ impl CodeGenerator<'_> {
                         {
                             if let AcornType::Data(datatype, _) = &receiver_type {
                                 if self.bindings.is_instance_of(datatype, typeclass) {
-                                    let datatype_attr_name =
-                                        DefinedName::datatype_attr(datatype, attr_name);
                                     // If the datatype has its own attribute, don't infer parameters
-                                    !self.bindings.constant_name_in_use(&datatype_attr_name)
+                                    !self.bindings.has_type_attr(datatype, attr_name)
                                 } else {
                                     true
                                 }
@@ -2017,10 +2013,8 @@ impl CodeGenerator<'_> {
                             if let AcornType::Data(datatype, _) = &c.params[0] {
                                 if self.bindings.is_instance_of(datatype, typeclass) {
                                     // Check if the datatype has its own attribute with the same name
-                                    let datatype_attr_name =
-                                        DefinedName::datatype_attr(datatype, &attr);
                                     let datatype_has_own_attr =
-                                        self.bindings.constant_name_in_use(&datatype_attr_name);
+                                        self.bindings.has_type_attr(datatype, &attr);
 
                                     // Special case for digit attributes
                                     if attr.chars().all(|ch| ch.is_ascii_digit()) {

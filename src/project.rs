@@ -578,17 +578,11 @@ impl Project {
         name: &ConstantName,
     ) -> Option<&'a Environment> {
         match name {
-            ConstantName::DatatypeAttribute(datatype, attr_name) => {
-                let attr_module_id = env
-                    .bindings
-                    .get_datatype_attribute_module(datatype, attr_name)?;
-                self.get_env_by_id(attr_module_id)
+            ConstantName::DatatypeAttribute(module_id, _datatype, _attr_name) => {
+                self.get_env_by_id(*module_id)
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, _types, attr_name) => {
-                let attr_module_id = env
-                    .bindings
-                    .get_datatype_attribute_module(datatype, attr_name)?;
-                self.get_env_by_id(attr_module_id)
+            ConstantName::SpecificDatatypeAttribute(module_id, _datatype, _types, _attr_name) => {
+                self.get_env_by_id(*module_id)
             }
             ConstantName::TypeclassAttribute(typeclass, attr_name) => {
                 let attr_module_id = env

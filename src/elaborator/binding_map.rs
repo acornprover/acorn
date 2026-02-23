@@ -232,10 +232,10 @@ impl BindingMap {
                         self.unqualified.contains_key(name)
                             || self.name_to_module.contains_key(name)
                     }
-                    ConstantName::DatatypeAttribute(datatype, attr) => {
+                    ConstantName::DatatypeAttribute(_, datatype, attr) => {
                         self.has_type_attr(datatype, attr)
                     }
-                    ConstantName::SpecificDatatypeAttribute(datatype, _types, attr) => {
+                    ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                         // For specific attributes, check if they're in the constant_defs
                         // (already checked above, so this should always be false here)
                         self.has_type_attr(datatype, attr)
@@ -429,7 +429,7 @@ impl BindingMap {
         attr_name: &str,
     ) -> Result<(ModuleId, ConstantName), String> {
         if let Some(module_id) = self.get_module_for_datatype_attr(datatype, attr_name) {
-            let name = ConstantName::datatype_attr(datatype.clone(), attr_name);
+            let name = ConstantName::datatype_attr(module_id, datatype.clone(), attr_name);
             return Ok((module_id, name));
         }
 
@@ -483,6 +483,7 @@ impl BindingMap {
         // First, try to find a specific attribute that matches the exact type parameters
         if !type_params.is_empty() {
             let specific_name = ConstantName::datatype_specific_attr(
+                self.module_id,
                 datatype.clone(),
                 type_params.to_vec(),
                 attr_name,
@@ -518,12 +519,12 @@ impl BindingMap {
                 // This is a local name, so it was defined in this module.
                 Some((*module_id, name.clone()))
             }
-            ConstantName::DatatypeAttribute(datatype, attr) => {
+            ConstantName::DatatypeAttribute(_, datatype, attr) => {
                 self.resolve_datatype_attr(datatype, attr).ok()
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, _types, _attr) => {
+            ConstantName::SpecificDatatypeAttribute(module_id, _datatype, _types, _attr) => {
                 // Specific attributes are always defined locally
-                Some((datatype.module_id, name.clone()))
+                Some((*module_id, name.clone()))
             }
             ConstantName::TypeclassAttribute(typeclass, attr) => {
                 self.resolve_typeclass_attr(typeclass, attr)
@@ -942,7 +943,7 @@ impl BindingMap {
         doc_comments: Vec<String>,
         definition_string: String,
     ) -> PotentialValue {
-        let constant_name = ConstantName::datatype_attr(datatype.clone(), attr);
+        let constant_name = ConstantName::datatype_attr(self.module_id, datatype.clone(), attr);
         self.add_constant_name(
             &constant_name,
             params,
@@ -1107,22 +1108,22 @@ impl BindingMap {
     /// Adds information for either a newly defined constant, or an alias.
     fn add_constant_def(&mut self, constant_name: ConstantName, info: ConstantDefinition) {
         match &constant_name {
-            ConstantName::DatatypeAttribute(datatype, attribute) => {
+            ConstantName::DatatypeAttribute(module_id, datatype, attribute) => {
                 // We are defining a new datatype attribute.
                 self.datatype_defs
                     .entry(datatype.clone())
                     .or_insert_with(DatatypeDefinition::new)
                     .attributes
-                    .insert(attribute.clone(), self.module_id);
+                    .insert(attribute.clone(), *module_id);
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, _types, attribute) => {
+            ConstantName::SpecificDatatypeAttribute(module_id, datatype, _types, attribute) => {
                 // For specific attributes, we also add them to the datatype's attribute list
                 // This allows them to be found during resolution
                 self.datatype_defs
                     .entry(datatype.clone())
                     .or_insert_with(DatatypeDefinition::new)
                     .attributes
-                    .insert(attribute.clone(), self.module_id);
+                    .insert(attribute.clone(), *module_id);
             }
             ConstantName::TypeclassAttribute(typeclass, attribute) => {
                 self.typeclass_defs

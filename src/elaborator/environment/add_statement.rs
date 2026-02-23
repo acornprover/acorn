@@ -238,16 +238,19 @@ impl Environment {
                     match &defined_name {
                         DefinedName::Constant(constant_name) => {
                             // Regular datatype attribute
-                            let datatype_name = match constant_name.as_attribute() {
-                                Some((_, datatype_name, _)) => datatype_name.to_string(),
-                                _ => {
-                                    return Err(ls
-                                        .name_token
-                                        .error("numeric literals must be datatype members"))
-                                }
-                            };
+                            let (datatype_module_id, datatype_name) =
+                                match constant_name.as_attribute() {
+                                    Some((datatype_module_id, datatype_name, _)) => {
+                                        (datatype_module_id, datatype_name.to_string())
+                                    }
+                                    _ => {
+                                        return Err(ls
+                                            .name_token
+                                            .error("numeric literals must be datatype members"))
+                                    }
+                                };
                             let datatype = Datatype {
-                                module_id: self.module_id,
+                                module_id: datatype_module_id,
                                 name: datatype_name,
                             };
                             if acorn_type != AcornType::Data(datatype, vec![]) {
@@ -1724,7 +1727,7 @@ impl Environment {
         let unbound_claim = AcornValue::implies(conjunction, conclusion);
 
         // The lambda form is the functional form, which we bind in the environment.
-        let name = ConstantName::datatype_attr(datatype.clone(), "induction");
+        let name = ConstantName::datatype_attr(self.module_id, datatype.clone(), "induction");
         let arb_lambda_claim = AcornValue::lambda(vec![hyp_type.clone()], unbound_claim.clone());
         let gen_lambda_claim = arb_lambda_claim.genericize(&type_params);
         let def_str = format!(
@@ -1902,6 +1905,7 @@ impl Environment {
         ats: &AttributesStatement,
         potential: crate::elaborator::acorn_type::PotentialType,
     ) -> error::Result<()> {
+        let defining_module = self.module_id;
         let type_args = self
             .evaluator(project)
             .evaluate_attributes_type_args(&ats.type_params)?;
@@ -1924,7 +1928,11 @@ impl Environment {
                             self.add_let_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_attr(&datatype, ls.name_token.text()),
+                                DefinedName::datatype_attr_defined(
+                                    defining_module,
+                                    &datatype,
+                                    ls.name_token.text(),
+                                ),
                                 ls,
                                 ls.name_token.range(),
                                 Some(&type_params),
@@ -1937,7 +1945,13 @@ impl Environment {
                                 substatement,
                                 vss,
                                 Some(&type_params),
-                                move |name| DefinedName::datatype_attr(&datatype, name),
+                                move |name| {
+                                    DefinedName::datatype_attr_defined(
+                                        defining_module,
+                                        &datatype,
+                                        name,
+                                    )
+                                },
                             )?;
                         }
                         StatementInfo::FunctionSatisfy(fss) => {
@@ -1945,7 +1959,11 @@ impl Environment {
                                 project,
                                 substatement,
                                 fss,
-                                DefinedName::datatype_attr(&datatype, fss.name_token.text()),
+                                DefinedName::datatype_attr_defined(
+                                    defining_module,
+                                    &datatype,
+                                    fss.name_token.text(),
+                                ),
                                 Some(&type_params),
                             )?;
                         }
@@ -1953,7 +1971,11 @@ impl Environment {
                             self.add_define_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_attr(&datatype, ds.name_token.text()),
+                                DefinedName::datatype_attr_defined(
+                                    defining_module,
+                                    &datatype,
+                                    ds.name_token.text(),
+                                ),
                                 Some(&instance_type),
                                 Some(&type_params),
                                 ds,
@@ -1992,7 +2014,8 @@ impl Environment {
                             self.add_let_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_specific_attr(
+                                DefinedName::datatype_specific_attr_defined(
+                                    defining_module,
                                     datatype.clone(),
                                     &concrete_types,
                                     ls.name_token.text(),
@@ -2011,7 +2034,8 @@ impl Environment {
                                 vss,
                                 None,
                                 move |name| {
-                                    DefinedName::datatype_specific_attr(
+                                    DefinedName::datatype_specific_attr_defined(
+                                        defining_module,
                                         datatype.clone(),
                                         &concrete_types,
                                         name,
@@ -2024,7 +2048,8 @@ impl Environment {
                                 project,
                                 substatement,
                                 fss,
-                                DefinedName::datatype_specific_attr(
+                                DefinedName::datatype_specific_attr_defined(
+                                    defining_module,
                                     datatype.clone(),
                                     &concrete_types,
                                     fss.name_token.text(),
@@ -2036,7 +2061,8 @@ impl Environment {
                             self.add_define_statement(
                                 project,
                                 substatement,
-                                DefinedName::datatype_specific_attr(
+                                DefinedName::datatype_specific_attr_defined(
+                                    defining_module,
                                     datatype.clone(),
                                     &concrete_types,
                                     ds.name_token.text(),
@@ -2486,8 +2512,16 @@ impl Environment {
                 DefinedName::instance(typeclass.clone(), attr_name, instance_datatype.clone());
             if !self.bindings.constant_name_in_use(&name) {
                 // Check if a datatype attribute with the same name exists
-                let datatype_attr_name = DefinedName::datatype_attr(&instance_datatype, attr_name);
-                if self.bindings.constant_name_in_use(&datatype_attr_name) {
+                if self.bindings.has_type_attr(&instance_datatype, attr_name) {
+                    let defining_module = self
+                        .bindings
+                        .get_module_for_datatype_attr(&instance_datatype, attr_name)
+                        .expect("has_type_attr should imply module exists");
+                    let datatype_attr_name = DefinedName::datatype_attr_defined(
+                        defining_module,
+                        &instance_datatype,
+                        attr_name,
+                    );
                     // Check that the types match
                     let tc_attr_name = DefinedName::typeclass_attr(&typeclass, attr_name);
                     let tc_attr = self

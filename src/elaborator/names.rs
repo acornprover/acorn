@@ -44,10 +44,23 @@ impl fmt::Display for InstanceName {
 #[derive(Debug, Eq, PartialEq, Clone, Hash, PartialOrd, Ord)]
 pub enum ConstantName {
     /// An attribute of a datatype.
-    DatatypeAttribute(Datatype, String),
+    /// Fields are:
+    /// - defining module id: where this constant was defined
+    /// - receiver datatype: the type on the left side of `.` in `Type.attr`
+    /// - attribute name
+    ///
+    /// The defining module is not always the receiver datatype's module.
+    DatatypeAttribute(ModuleId, Datatype, String),
 
-    /// An attribute of a specifically parameterized datatype (e.g., Set[Color].has_red).
-    SpecificDatatypeAttribute(Datatype, Vec<AcornType>, String),
+    /// An attribute of a specifically parameterized datatype (e.g., `Set[Color].has_red`).
+    /// Fields are:
+    /// - defining module id
+    /// - receiver datatype
+    /// - concrete type arguments used for specialization
+    /// - attribute name
+    ///
+    /// As with `DatatypeAttribute`, defining module and receiver module can differ.
+    SpecificDatatypeAttribute(ModuleId, Datatype, Vec<AcornType>, String),
 
     /// An attribute of a typeclass.
     TypeclassAttribute(Typeclass, String),
@@ -61,16 +74,21 @@ pub enum ConstantName {
 }
 
 impl ConstantName {
-    pub fn datatype_attr(datatype: Datatype, attr: &str) -> ConstantName {
-        ConstantName::DatatypeAttribute(datatype, attr.to_string())
+    pub fn datatype_attr(
+        defining_module: ModuleId,
+        datatype: Datatype,
+        attr: &str,
+    ) -> ConstantName {
+        ConstantName::DatatypeAttribute(defining_module, datatype, attr.to_string())
     }
 
     pub fn datatype_specific_attr(
+        defining_module: ModuleId,
         datatype: Datatype,
         types: Vec<AcornType>,
         attr: &str,
     ) -> ConstantName {
-        ConstantName::SpecificDatatypeAttribute(datatype, types, attr.to_string())
+        ConstantName::SpecificDatatypeAttribute(defining_module, datatype, types, attr.to_string())
     }
 
     pub fn typeclass_attr(tc: Typeclass, attr: &str) -> ConstantName {
@@ -81,12 +99,16 @@ impl ConstantName {
         ConstantName::Unqualified(module_id, name.to_string())
     }
 
+    /// Returns attribute receiver information as `(receiver_module_id, receiver_name, attr_name)`.
+    ///
+    /// This is for receiver-side behavior (inheritance, member syntax, etc.), not for locating
+    /// the module that defined the constant.
     pub fn as_attribute(&self) -> Option<(ModuleId, &str, &str)> {
         match self {
-            ConstantName::DatatypeAttribute(datatype, attr) => {
+            ConstantName::DatatypeAttribute(_, datatype, attr) => {
                 Some((datatype.module_id, &datatype.name, attr))
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, _types, attr) => {
+            ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                 Some((datatype.module_id, &datatype.name, attr))
             }
             ConstantName::TypeclassAttribute(tc, attr) => Some((tc.module_id, &tc.name, attr)),
@@ -114,10 +136,14 @@ impl ConstantName {
         }
     }
 
+    /// Returns the defining module id for this constant.
+    ///
+    /// For datatype attributes, this can differ from `as_attribute().0`, which is the receiver's
+    /// module id.
     pub fn module_id(&self) -> ModuleId {
         match self {
-            ConstantName::DatatypeAttribute(datatype, _) => datatype.module_id,
-            ConstantName::SpecificDatatypeAttribute(datatype, _, _) => datatype.module_id,
+            ConstantName::DatatypeAttribute(module_id, _, _) => *module_id,
+            ConstantName::SpecificDatatypeAttribute(module_id, _, _, _) => *module_id,
             ConstantName::TypeclassAttribute(tc, _) => tc.module_id,
             ConstantName::Unqualified(module_id, _) => *module_id,
             ConstantName::Synthetic(module_id, _) => *module_id,
@@ -126,8 +152,8 @@ impl ConstantName {
 
     pub fn is_attribute_of(&self, datatype: &Datatype) -> bool {
         match self {
-            ConstantName::DatatypeAttribute(datatype_attr, _) => datatype_attr == datatype,
-            ConstantName::SpecificDatatypeAttribute(datatype_attr, _, _) => {
+            ConstantName::DatatypeAttribute(_, datatype_attr, _) => datatype_attr == datatype,
+            ConstantName::SpecificDatatypeAttribute(_, datatype_attr, _, _) => {
                 datatype_attr == datatype
             }
             _ => false,
@@ -138,10 +164,10 @@ impl ConstantName {
 impl fmt::Display for ConstantName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ConstantName::DatatypeAttribute(datatype, attr) => {
+            ConstantName::DatatypeAttribute(_, datatype, attr) => {
                 write!(f, "{}.{}", datatype.name, attr)
             }
-            ConstantName::SpecificDatatypeAttribute(datatype, types, attr) => {
+            ConstantName::SpecificDatatypeAttribute(_, datatype, types, attr) => {
                 write!(f, "{}[", datatype.name)?;
                 for (i, t) in types.iter().enumerate() {
                     if i > 0 {
@@ -185,7 +211,19 @@ impl DefinedName {
     }
 
     pub fn datatype_attr(datatype: &Datatype, attr: &str) -> DefinedName {
-        DefinedName::Constant(ConstantName::datatype_attr(datatype.clone(), attr))
+        Self::datatype_attr_defined(datatype.module_id, datatype, attr)
+    }
+
+    pub fn datatype_attr_defined(
+        defining_module: ModuleId,
+        datatype: &Datatype,
+        attr: &str,
+    ) -> DefinedName {
+        DefinedName::Constant(ConstantName::datatype_attr(
+            defining_module,
+            datatype.clone(),
+            attr,
+        ))
     }
 
     pub fn datatype_specific_attr(
@@ -193,7 +231,17 @@ impl DefinedName {
         types: &[AcornType],
         attr: &str,
     ) -> DefinedName {
+        Self::datatype_specific_attr_defined(datatype.module_id, datatype, types, attr)
+    }
+
+    pub fn datatype_specific_attr_defined(
+        defining_module: ModuleId,
+        datatype: Datatype,
+        types: &[AcornType],
+        attr: &str,
+    ) -> DefinedName {
         DefinedName::Constant(ConstantName::datatype_specific_attr(
+            defining_module,
             datatype,
             types.to_vec(),
             attr,

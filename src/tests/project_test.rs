@@ -1739,12 +1739,20 @@ fn test_doc_comment_lookup() {
     assert_eq!(comments.unwrap(), &vec!["Foo_doc_comment".to_string()]);
 
     // Check Foo.bar
-    let bar_constant_name = ConstantName::datatype_attr(foo_datatype.clone(), "bar");
+    let bar_module = main_env
+        .bindings
+        .get_datatype_attribute_module(&foo_datatype, "bar")
+        .expect("Foo.bar module");
+    let bar_constant_name = ConstantName::datatype_attr(bar_module, foo_datatype.clone(), "bar");
     let comments = p.get_constant_doc_comments(main_env, &bar_constant_name);
     assert_eq!(comments.unwrap(), &vec!["bar_doc_comment".to_string()]);
 
     // Check Foo.foo
-    let foo_constant_name = ConstantName::datatype_attr(foo_datatype.clone(), "foo");
+    let foo_module = main_env
+        .bindings
+        .get_datatype_attribute_module(&foo_datatype, "foo")
+        .expect("Foo.foo module");
+    let foo_constant_name = ConstantName::datatype_attr(foo_module, foo_datatype.clone(), "foo");
     let comments = p.get_constant_doc_comments(main_env, &foo_constant_name);
     assert_eq!(comments.unwrap(), &vec!["foo_doc_comment".to_string()]);
 
@@ -1755,7 +1763,11 @@ fn test_doc_comment_lookup() {
     assert_eq!(comments.unwrap(), &vec!["Baz_doc_comment".to_string()]);
 
     // Check Baz.baz
-    let baz_constant_name = ConstantName::datatype_attr(baz_datatype.clone(), "baz");
+    let baz_module = main_env
+        .bindings
+        .get_datatype_attribute_module(&baz_datatype, "baz")
+        .expect("Baz.baz module");
+    let baz_constant_name = ConstantName::datatype_attr(baz_module, baz_datatype.clone(), "baz");
     let comments = p.get_constant_doc_comments(main_env, &baz_constant_name);
     assert_eq!(comments.unwrap(), &vec!["baz_doc_comment".to_string()]);
 

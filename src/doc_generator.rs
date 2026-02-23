@@ -230,7 +230,12 @@ impl<'a> DocGenerator<'a> {
 
         // Write methods
         for method_name in methods {
-            let constant_name = ConstantName::datatype_attr(datatype.clone(), &method_name);
+            let defining_module = env
+                .bindings
+                .get_datatype_attribute_module(datatype, &method_name)
+                .unwrap_or(datatype.module_id);
+            let constant_name =
+                ConstantName::datatype_attr(defining_module, datatype.clone(), &method_name);
             self.write_section(&mut file, env, &constant_name, &method_name)?;
         }
 
