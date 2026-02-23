@@ -1344,6 +1344,100 @@ fn test_typeclass_attributes_across_files() {
 }
 
 #[test]
+fn test_import_normalization_handles_conflicting_typeclass_attribute_ids() {
+    let mut p = Project::new_mock();
+
+    p.mock(
+        "/mock/thing/base.ac",
+        indoc! {"
+            typeclass T: Thing {
+                unit: T
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/thing/left.ac",
+        indoc! {"
+            from thing.base import Thing
+
+            attributes T: Thing {
+                define left(self, other: T) -> T {
+                    self
+                }
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/thing/right.ac",
+        indoc! {"
+            from thing.base import Thing
+
+            attributes T: Thing {
+                define is_unit(self) -> Bool {
+                    self = T.unit
+                }
+            }
+
+            define check_unit[T: Thing](x: T) -> Bool {
+                x.is_unit
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/main.ac",
+        indoc! {"
+            from thing.left import Thing
+            from thing.right import check_unit
+
+            inductive Item {
+                mk
+            }
+
+            instance Item: Thing {
+                let unit: Item = Item.mk
+            }
+
+            define use_left(x: Item, y: Item) -> Item {
+                x.left(y)
+            }
+
+            define use_is_unit(x: Item) -> Bool {
+                check_unit(x)
+            }
+
+            let mixed_attribute_use: Bool = use_is_unit(use_left(Item.mk, Item.mk))
+        "},
+    );
+
+    p.add_target_by_name("main").expect("target should load");
+
+    // This should be a valid build: we import two different typeclass attributes and use both.
+    // Today this fails in import normalization due to module-id collisions in constant ids.
+    let mut logs = vec![];
+    let status = {
+        let mut builder = Builder::new(&p, CancellationToken::new(), |event| {
+            if let Some(message) = event.log_message {
+                logs.push(message);
+            }
+            if let Some(diag) = event.diagnostic {
+                logs.push(diag.message);
+            }
+        });
+        builder.build();
+        builder.status
+    };
+    assert_eq!(
+        status,
+        BuildStatus::Good,
+        "build logs:\n{}",
+        logs.join("\n")
+    );
+}
+
+#[test]
 fn test_diamond_typeclass_attribute_conflict() {
     // Similar to test_diamond_attribute_conflict but for typeclass attributes
     let mut p = Project::new_mock();
