@@ -2034,3 +2034,113 @@ fn test_polymorphic_function_satisfy() {
     );
     p.expect_ok("main");
 }
+
+#[test]
+fn test_import_normalization_handles_conflicting_attribute_ids() {
+    let mut p = Project::new_mock();
+
+    p.mock(
+        "/mock/nat/base.ac",
+        indoc! {"
+            inductive Nat {
+                0
+                suc(Nat)
+            }
+
+            attributes Nat {
+                define add(self, other: Nat) -> Nat {
+                    self
+                }
+
+                define mul(self, other: Nat) -> Nat {
+                    self
+                }
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/nat/divide.ac",
+        indoc! {"
+            from nat.base import Nat
+
+            attributes Nat {
+                define divides(self, other: Nat) -> Bool {
+                    exists(x: Nat) { self * x = other }
+                }
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/list/base.ac",
+        indoc! {"
+            from nat.base import Nat
+
+            inductive List[T] {
+                nil
+                cons(T, List[T])
+            }
+
+            attributes Nat {
+                define range(self) -> List[Nat] {
+                    List.nil[Nat]
+                }
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/int/base.ac",
+        indoc! {"
+            from nat.base import Nat
+
+            inductive Int {
+                0
+                wrap(Nat)
+            }
+
+            attributes Int {
+                define mul(self, other: Int) -> Int {
+                    self
+                }
+            }
+
+            define abs(a: Int) -> Nat {
+                Nat.0
+            }
+        "},
+    );
+
+    p.mock(
+        "/mock/int/default.ac",
+        indoc! {"
+            from nat.divide import Nat
+            from int.base import Int, abs
+            from list.base import List
+
+            attributes Int {
+                define divides(self, other: Int) -> Bool {
+                    exists(d: Int) { d * self = other }
+                }
+            }
+
+            theorem div_imp_div_abs(a: Int, b: Int) {
+                a.divides(b) implies abs(a).divides(abs(b))
+            } by {
+                if a.divides(b) {
+                    abs(a).divides(abs(b))
+                }
+            }
+        "},
+    );
+
+    p.add_target_by_name("int.default")
+        .expect("target should load");
+
+    // This used to panic in normalization import merge with:
+    // "Function type expected but not found during type application".
+    let mut builder = Builder::new(&p, CancellationToken::new(), |_| {});
+    builder.build();
+    assert_eq!(builder.status, BuildStatus::Good);
+}
