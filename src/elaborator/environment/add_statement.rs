@@ -2094,6 +2094,7 @@ impl Environment {
         ats: &AttributesStatement,
         typeclass: crate::elaborator::acorn_type::Typeclass,
     ) -> error::Result<()> {
+        let defining_module = self.module_id;
         // Typeclasses don't support type parameters yet
         if !ats.type_params.is_empty() {
             return Err(ats.type_params[0]
@@ -2123,7 +2124,11 @@ impl Environment {
                     self.add_let_statement(
                         project,
                         substatement,
-                        DefinedName::typeclass_attr(&typeclass, ls.name_token.text()),
+                        DefinedName::typeclass_attr_defined(
+                            defining_module,
+                            &typeclass,
+                            ls.name_token.text(),
+                        ),
                         ls,
                         ls.name_token.range(),
                         Some(&type_params),
@@ -2136,7 +2141,9 @@ impl Environment {
                         substatement,
                         vss,
                         Some(&type_params),
-                        move |name| DefinedName::typeclass_attr(&typeclass, name),
+                        move |name| {
+                            DefinedName::typeclass_attr_defined(defining_module, &typeclass, name)
+                        },
                     )?;
                 }
                 StatementInfo::FunctionSatisfy(fss) => {
@@ -2144,7 +2151,11 @@ impl Environment {
                         project,
                         substatement,
                         fss,
-                        DefinedName::typeclass_attr(&typeclass, fss.name_token.text()),
+                        DefinedName::typeclass_attr_defined(
+                            defining_module,
+                            &typeclass,
+                            fss.name_token.text(),
+                        ),
                         Some(&type_params),
                     )?;
                 }
@@ -2152,7 +2163,11 @@ impl Environment {
                     self.add_define_statement(
                         project,
                         substatement,
-                        DefinedName::typeclass_attr(&typeclass, ds.name_token.text()),
+                        DefinedName::typeclass_attr_defined(
+                            defining_module,
+                            &typeclass,
+                            ds.name_token.text(),
+                        ),
                         Some(&instance_type),
                         Some(&type_params),
                         ds,
@@ -2357,8 +2372,11 @@ impl Environment {
                 );
                 let prop = Proposition::new(external_claim, vec![type_param.clone()], source);
                 self.add_node(Node::structural(project, self, prop));
-                let constant_name =
-                    ConstantName::typeclass_attr(typeclass.clone(), &condition.name_token.text());
+                let constant_name = ConstantName::typeclass_attr(
+                    self.module_id,
+                    typeclass.clone(),
+                    &condition.name_token.text(),
+                );
                 self.bindings.mark_as_theorem(&constant_name);
             }
         }
@@ -2471,7 +2489,8 @@ impl Environment {
                 continue;
             }
 
-            let tc_attr_name = ConstantName::typeclass_attr(typeclass.clone(), attr_name);
+            let tc_attr_name =
+                ConstantName::typeclass_attr(typeclass.module_id, typeclass.clone(), attr_name);
             let tc_bindings = self.bindings.get_bindings(typeclass.module_id, project);
             if tc_bindings.is_theorem(&tc_attr_name) {
                 // Conditions don't have an implementation.

@@ -508,7 +508,7 @@ impl BindingMap {
         // Check if this attribute is defined anywhere (including inherited ones)
         let info = self.typeclass_defs.get(typeclass)?;
         let (attr_module_id, attr_typeclass) = info.attributes.get(attr_name)?;
-        let name = ConstantName::typeclass_attr(attr_typeclass.clone(), attr_name);
+        let name = ConstantName::typeclass_attr(*attr_module_id, attr_typeclass.clone(), attr_name);
         Some((*attr_module_id, name))
     }
 
@@ -526,7 +526,7 @@ impl BindingMap {
                 // Specific attributes are always defined locally
                 Some((*module_id, name.clone()))
             }
-            ConstantName::TypeclassAttribute(typeclass, attr) => {
+            ConstantName::TypeclassAttribute(_, typeclass, attr) => {
                 self.resolve_typeclass_attr(typeclass, attr)
             }
             ConstantName::Synthetic(..) => None,
@@ -967,7 +967,7 @@ impl BindingMap {
         doc_comments: Vec<String>,
         definition_string: String,
     ) -> PotentialValue {
-        let constant_name = ConstantName::typeclass_attr(typeclass.clone(), attr);
+        let constant_name = ConstantName::typeclass_attr(self.module_id, typeclass.clone(), attr);
         self.add_constant_name(
             &constant_name,
             params,
@@ -1125,12 +1125,12 @@ impl BindingMap {
                     .attributes
                     .insert(attribute.clone(), *module_id);
             }
-            ConstantName::TypeclassAttribute(typeclass, attribute) => {
+            ConstantName::TypeclassAttribute(module_id, typeclass, attribute) => {
                 self.typeclass_defs
                     .entry(typeclass.clone())
                     .or_insert_with(TypeclassDefinition::new)
                     .attributes
-                    .insert(attribute.clone(), (self.module_id, typeclass.clone()));
+                    .insert(attribute.clone(), (*module_id, typeclass.clone()));
             }
             ConstantName::Unqualified(_, name) => {
                 self.unqualified.insert(name.clone(), ());
@@ -1758,7 +1758,8 @@ impl BindingMap {
         project: &Project,
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
-        let tc_condition_name = ConstantName::typeclass_attr(typeclass.clone(), condition_name);
+        let tc_condition_name =
+            ConstantName::typeclass_attr(typeclass.module_id, typeclass.clone(), condition_name);
         let tc_bindings = self.get_bindings(typeclass.module_id, project);
         let (def, params) = match tc_bindings.get_definition_and_params(&tc_condition_name) {
             Some((def, params)) => (def, params),

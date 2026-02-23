@@ -574,7 +574,7 @@ impl Project {
     /// Given a name in one environment, find the environment where it was originally defined.
     pub fn get_env_for_name<'a>(
         &'a self,
-        env: &'a Environment,
+        _env: &'a Environment,
         name: &ConstantName,
     ) -> Option<&'a Environment> {
         match name {
@@ -584,11 +584,8 @@ impl Project {
             ConstantName::SpecificDatatypeAttribute(module_id, _datatype, _types, _attr_name) => {
                 self.get_env_by_id(*module_id)
             }
-            ConstantName::TypeclassAttribute(typeclass, attr_name) => {
-                let attr_module_id = env
-                    .bindings
-                    .get_typeclass_attribute_module(typeclass, attr_name)?;
-                self.get_env_by_id(attr_module_id)
+            ConstantName::TypeclassAttribute(module_id, _typeclass, _attr_name) => {
+                self.get_env_by_id(*module_id)
             }
             ConstantName::Unqualified(module_id, _name) => self.get_env_by_id(*module_id),
             ConstantName::Synthetic(..) => None,

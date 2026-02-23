@@ -277,7 +277,12 @@ impl<'a> DocGenerator<'a> {
 
         // Write attributes
         for attribute_name in attribute_names {
-            let constant_name = ConstantName::typeclass_attr(typeclass.clone(), &attribute_name);
+            let defining_module = env
+                .bindings
+                .get_typeclass_attribute_module(typeclass, &attribute_name)
+                .unwrap_or(typeclass.module_id);
+            let constant_name =
+                ConstantName::typeclass_attr(defining_module, typeclass.clone(), &attribute_name);
             self.write_section(&mut file, env, &constant_name, &attribute_name)?;
         }
 

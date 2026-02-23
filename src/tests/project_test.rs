@@ -1871,12 +1871,14 @@ fn test_doc_comment_lookup() {
     assert_eq!(comments.unwrap(), &vec!["Qux_doc_comment".to_string()]);
 
     // Check Qux.qux
-    let qux_constant_name = ConstantName::typeclass_attr(qux_typeclass.clone(), "qux");
+    let qux_constant_name =
+        ConstantName::typeclass_attr(qux_typeclass.module_id, qux_typeclass.clone(), "qux");
     let comments = p.get_constant_doc_comments(main_env, &qux_constant_name);
     assert_eq!(comments.unwrap(), &vec!["qux_doc_comment".to_string()]);
 
     // Check Qux.quux
-    let quux_constant_name = ConstantName::typeclass_attr(qux_typeclass.clone(), "quux");
+    let quux_constant_name =
+        ConstantName::typeclass_attr(qux_typeclass.module_id, qux_typeclass.clone(), "quux");
     let comments = p.get_constant_doc_comments(main_env, &quux_constant_name);
     assert_eq!(comments.unwrap(), &vec!["quux_doc_comment".to_string()]);
 }

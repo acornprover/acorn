@@ -298,11 +298,11 @@ impl ConstantInstance {
         typeclass: &Typeclass,
         datatype: &Datatype,
     ) -> Option<DefinedName> {
-        if self.name.module_id() != typeclass.module_id {
-            return None;
-        }
-        if let Some((_, receiver, attribute)) = self.name.as_attribute() {
-            if receiver == typeclass.name && self.params.len() == 1 {
+        if let Some((receiver_module_id, receiver, attribute)) = self.name.as_attribute() {
+            if receiver_module_id == typeclass.module_id
+                && receiver == typeclass.name
+                && self.params.len() == 1
+            {
                 if let AcornType::Data(param_datatype, _) = &self.params[0] {
                     if param_datatype == datatype {
                         return Some(DefinedName::Instance(InstanceName {
@@ -693,8 +693,11 @@ impl AcornValue {
 
     /// Make a constant for an instance attribute.
     pub fn instance_constant(instance_name: InstanceName, instance_type: AcornType) -> AcornValue {
-        let name =
-            ConstantName::typeclass_attr(instance_name.typeclass.clone(), &instance_name.attribute);
+        let name = ConstantName::typeclass_attr(
+            instance_name.typeclass.module_id,
+            instance_name.typeclass.clone(),
+            &instance_name.attribute,
+        );
         let param = AcornType::Data(instance_name.datatype.clone(), vec![]);
 
         // Create the type parameter for the generic form

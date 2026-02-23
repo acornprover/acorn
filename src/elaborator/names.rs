@@ -23,7 +23,11 @@ impl InstanceName {
     /// Converts the instance name to a typeclass attribute name.
     /// This is used for enabling recursion in instance function definitions.
     pub fn to_typeclass_attribute(&self) -> ConstantName {
-        ConstantName::TypeclassAttribute(self.typeclass.clone(), self.attribute.clone())
+        ConstantName::typeclass_attr(
+            self.typeclass.module_id,
+            self.typeclass.clone(),
+            &self.attribute,
+        )
     }
 }
 
@@ -63,7 +67,13 @@ pub enum ConstantName {
     SpecificDatatypeAttribute(ModuleId, Datatype, Vec<AcornType>, String),
 
     /// An attribute of a typeclass.
-    TypeclassAttribute(Typeclass, String),
+    /// Fields are:
+    /// - defining module id
+    /// - receiver typeclass
+    /// - attribute name
+    ///
+    /// The defining module is not always the receiver typeclass's module.
+    TypeclassAttribute(ModuleId, Typeclass, String),
 
     /// A name for a constant that is not an attribute.
     Unqualified(ModuleId, String),
@@ -91,8 +101,8 @@ impl ConstantName {
         ConstantName::SpecificDatatypeAttribute(defining_module, datatype, types, attr.to_string())
     }
 
-    pub fn typeclass_attr(tc: Typeclass, attr: &str) -> ConstantName {
-        ConstantName::TypeclassAttribute(tc, attr.to_string())
+    pub fn typeclass_attr(defining_module: ModuleId, tc: Typeclass, attr: &str) -> ConstantName {
+        ConstantName::TypeclassAttribute(defining_module, tc, attr.to_string())
     }
 
     pub fn unqualified(module_id: ModuleId, name: &str) -> ConstantName {
@@ -111,7 +121,7 @@ impl ConstantName {
             ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                 Some((datatype.module_id, &datatype.name, attr))
             }
-            ConstantName::TypeclassAttribute(tc, attr) => Some((tc.module_id, &tc.name, attr)),
+            ConstantName::TypeclassAttribute(_, tc, attr) => Some((tc.module_id, &tc.name, attr)),
             ConstantName::Unqualified(..) => None,
             ConstantName::Synthetic(..) => None,
         }
@@ -138,13 +148,13 @@ impl ConstantName {
 
     /// Returns the defining module id for this constant.
     ///
-    /// For datatype attributes, this can differ from `as_attribute().0`, which is the receiver's
-    /// module id.
+    /// For datatype/typeclass attributes, this can differ from `as_attribute().0`, which is the
+    /// receiver's module id.
     pub fn module_id(&self) -> ModuleId {
         match self {
             ConstantName::DatatypeAttribute(module_id, _, _) => *module_id,
             ConstantName::SpecificDatatypeAttribute(module_id, _, _, _) => *module_id,
-            ConstantName::TypeclassAttribute(tc, _) => tc.module_id,
+            ConstantName::TypeclassAttribute(module_id, _, _) => *module_id,
             ConstantName::Unqualified(module_id, _) => *module_id,
             ConstantName::Synthetic(module_id, _) => *module_id,
         }
@@ -177,7 +187,7 @@ impl fmt::Display for ConstantName {
                 }
                 write!(f, "].{}", attr)
             }
-            ConstantName::TypeclassAttribute(tc, attr) => {
+            ConstantName::TypeclassAttribute(_, tc, attr) => {
                 write!(f, "{}.{}", tc.name, attr)
             }
             ConstantName::Unqualified(_, name) => write!(f, "{}", name),
@@ -249,7 +259,19 @@ impl DefinedName {
     }
 
     pub fn typeclass_attr(tc: &Typeclass, attr: &str) -> DefinedName {
-        DefinedName::Constant(ConstantName::typeclass_attr(tc.clone(), attr))
+        Self::typeclass_attr_defined(tc.module_id, tc, attr)
+    }
+
+    pub fn typeclass_attr_defined(
+        defining_module: ModuleId,
+        tc: &Typeclass,
+        attr: &str,
+    ) -> DefinedName {
+        DefinedName::Constant(ConstantName::typeclass_attr(
+            defining_module,
+            tc.clone(),
+            attr,
+        ))
     }
 
     pub fn instance(tc: Typeclass, attr: &str, datatype: Datatype) -> DefinedName {

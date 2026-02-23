@@ -1618,7 +1618,7 @@ impl CodeGenerator<'_> {
                     // The specific type information is not needed in the generated code
                     Expression::generate_identifier(&datatype.name).add_dot_str(attr)
                 }
-                ConstantName::TypeclassAttribute(tc, attr) => {
+                ConstantName::TypeclassAttribute(_, tc, attr) => {
                     Expression::generate_identifier(&tc.name).add_dot_str(attr)
                 }
                 ConstantName::Synthetic(..) => panic!("control should not get here"),
@@ -1664,7 +1664,7 @@ impl CodeGenerator<'_> {
             ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
                 Ok(module.add_dot_str(&datatype.name).add_dot_str(attr))
             }
-            ConstantName::TypeclassAttribute(tc, attr) => {
+            ConstantName::TypeclassAttribute(_, tc, attr) => {
                 Ok(module.add_dot_str(&tc.name).add_dot_str(attr))
             }
             ConstantName::Synthetic(..) => panic!("control should not get here"),
@@ -1812,7 +1812,7 @@ impl CodeGenerator<'_> {
                 if let Some((module_id, entity, attr)) = fa.function.as_attribute() {
                     let is_typeclass_instance =
                         if let AcornValue::Constant(c) = fa.function.as_ref() {
-                            if let ConstantName::TypeclassAttribute(typeclass, _) = &c.name {
+                            if let ConstantName::TypeclassAttribute(_, typeclass, _) = &c.name {
                                 if let AcornType::Data(datatype, _) = &receiver_type {
                                     if self.bindings.is_instance_of(datatype, typeclass) {
                                         // Check if the datatype has its own attribute with the same name
@@ -1893,7 +1893,7 @@ impl CodeGenerator<'_> {
                 // to distinguish from the datatype's own attributes
                 let inferrable = if let AcornValue::Constant(c) = fa.function.as_ref() {
                     let requires_explicit_type_args =
-                        if let ConstantName::TypeclassAttribute(typeclass, _) = &c.name {
+                        if let ConstantName::TypeclassAttribute(_, typeclass, _) = &c.name {
                             c.name.module_id() != self.bindings.module_id()
                                 && self.bindings.constant_alias(&c.name).is_none()
                                 && self.bindings.typeclass_alias(typeclass).is_none()
@@ -1907,7 +1907,7 @@ impl CodeGenerator<'_> {
                         // Check both original synthetics and replaced ones (now named s0, s1, etc.)
                         if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
                             true
-                        } else if let ConstantName::TypeclassAttribute(typeclass, attr_name) =
+                        } else if let ConstantName::TypeclassAttribute(_, typeclass, attr_name) =
                             &c.name
                         {
                             if let AcornType::Data(datatype, _) = &receiver_type {
@@ -2009,7 +2009,7 @@ impl CodeGenerator<'_> {
                         }
 
                         // Check if this is a typeclass attribute being accessed on an instance type
-                        if let ConstantName::TypeclassAttribute(typeclass, _) = &c.name {
+                        if let ConstantName::TypeclassAttribute(_, typeclass, _) = &c.name {
                             if let AcornType::Data(datatype, _) = &c.params[0] {
                                 if self.bindings.is_instance_of(datatype, typeclass) {
                                     // Check if the datatype has its own attribute with the same name
