@@ -489,7 +489,7 @@ fn test_skolem_should_not_demonstrate_inhabitedness() {
     let baz[T]: Foo[T] -> Bool = axiom
 
     // This axiom doesn't mean much, for example it's trivially true if bar is always false.
-    // The bug is that normalizing it can accidentally introduce a Foo[T] inhabitant. 
+    // The bug is that normalizing it can accidentally introduce a Foo[T] inhabitant.
     axiom ax1[T] {
         exists(t: T) {
             bar(t)
