@@ -456,14 +456,14 @@ fn test_unwrapping_new_option() {
         none
     }
 
+    axiom foo_zero {
+        foo(zero)
+    }
+
     structure FooNat {
         n: Nat
     } constraint {
         foo(n)
-    }
-
-    axiom foo_zero {
-        foo(zero)
     }
 
     let Option.some(bar) = FooNat.new_option(zero)
