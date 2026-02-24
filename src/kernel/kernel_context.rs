@@ -28,6 +28,10 @@ impl KernelContext {
         match atom {
             Atom::Symbol(Symbol::True) => "true".to_string(),
             Atom::Symbol(Symbol::False) => "false".to_string(),
+            Atom::Symbol(Symbol::Not) => "not".to_string(),
+            Atom::Symbol(Symbol::And) => "and".to_string(),
+            Atom::Symbol(Symbol::Or) => "or".to_string(),
+            Atom::Symbol(Symbol::Eq) => "eq".to_string(),
             Atom::Symbol(Symbol::Empty) => "Empty".to_string(),
             Atom::Symbol(Symbol::Bool) => "Bool".to_string(),
             Atom::Symbol(Symbol::Type0) => "Type".to_string(),
@@ -911,6 +915,10 @@ impl KernelContext {
             "Type" => Term::type_sort(),
             "true" => Term::atom(Atom::Symbol(Symbol::True)),
             "false" => Term::atom(Atom::Symbol(Symbol::False)),
+            "not" => Term::atom(Atom::Symbol(Symbol::Not)),
+            "and" => Term::atom(Atom::Symbol(Symbol::And)),
+            "or" => Term::atom(Atom::Symbol(Symbol::Or)),
+            "eq" => Term::atom(Atom::Symbol(Symbol::Eq)),
             _ => {
                 // Fall back to Term::parse for anything else
                 Term::parse(s)

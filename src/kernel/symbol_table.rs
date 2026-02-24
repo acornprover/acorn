@@ -12,6 +12,39 @@ use crate::kernel::type_store::TypeStore;
 use crate::kernel::types::{GroundTypeId, TypeclassId};
 use crate::module::ModuleId;
 
+fn not_symbol_type_ref() -> &'static Term {
+    use std::sync::LazyLock;
+    static NOT_TYPE: LazyLock<Term> =
+        LazyLock::new(|| Term::pi(Term::bool_type(), Term::bool_type()));
+    &NOT_TYPE
+}
+
+fn bool_binary_symbol_type_ref() -> &'static Term {
+    use std::sync::LazyLock;
+    static BOOL_BINARY_TYPE: LazyLock<Term> = LazyLock::new(|| {
+        Term::pi(
+            Term::bool_type(),
+            Term::pi(Term::bool_type(), Term::bool_type()),
+        )
+    });
+    &BOOL_BINARY_TYPE
+}
+
+fn eq_symbol_type_ref() -> &'static Term {
+    use std::sync::LazyLock;
+    static EQ_TYPE: LazyLock<Term> = LazyLock::new(|| {
+        // forall(T: Type0). T -> T -> Bool
+        // Inside the second arrow, the type parameter T is at de Bruijn index 1.
+        let first_arg_type = Term::atom(Atom::BoundVariable(0));
+        let second_arg_type = Term::atom(Atom::BoundVariable(1));
+        Term::pi(
+            Term::type_sort(),
+            Term::pi(first_arg_type, Term::pi(second_arg_type, Term::bool_type())),
+        )
+    });
+    &EQ_TYPE
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NewConstantType {
     Global,
@@ -193,6 +226,9 @@ impl SymbolTable {
     pub fn get_type(&self, symbol: Symbol) -> &Term {
         match symbol {
             Symbol::True | Symbol::False => Term::bool_type_ref(),
+            Symbol::Not => not_symbol_type_ref(),
+            Symbol::And | Symbol::Or => bool_binary_symbol_type_ref(),
+            Symbol::Eq => eq_symbol_type_ref(),
             Symbol::Empty
             | Symbol::Bool
             | Symbol::Type0
@@ -211,6 +247,9 @@ impl SymbolTable {
     pub fn get_symbol_type(&self, symbol: Symbol, type_store: &TypeStore) -> Term {
         let result = match symbol {
             Symbol::True | Symbol::False => Term::bool_type(),
+            Symbol::Not => not_symbol_type_ref().clone(),
+            Symbol::And | Symbol::Or => bool_binary_symbol_type_ref().clone(),
+            Symbol::Eq => eq_symbol_type_ref().clone(),
             Symbol::Empty | Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => {
                 Term::type_sort()
             }

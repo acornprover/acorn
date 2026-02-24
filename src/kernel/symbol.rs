@@ -15,6 +15,18 @@ pub enum Symbol {
     // The boolean constant false.
     False,
 
+    // Logical negation: Bool -> Bool.
+    Not,
+
+    // Logical conjunction: Bool -> Bool -> Bool.
+    And,
+
+    // Logical disjunction: Bool -> Bool -> Bool.
+    Or,
+
+    // Polymorphic equality: Pi(T: Type0). T -> T -> Bool.
+    Eq,
+
     // The Empty type (bottom type).
     Empty,
 
@@ -56,6 +68,10 @@ impl fmt::Display for Symbol {
         match self {
             Symbol::True => write!(f, "true"),
             Symbol::False => write!(f, "false"),
+            Symbol::Not => write!(f, "not"),
+            Symbol::And => write!(f, "and"),
+            Symbol::Or => write!(f, "or"),
+            Symbol::Eq => write!(f, "eq"),
             Symbol::Empty => write!(f, "Empty"),
             Symbol::Bool => write!(f, "Bool"),
             Symbol::Type0 => write!(f, "Type0"),

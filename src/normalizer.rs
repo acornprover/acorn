@@ -2259,6 +2259,12 @@ impl Normalizer {
         match atom {
             Atom::Symbol(Symbol::True) => AcornValue::Bool(true),
             Atom::Symbol(Symbol::False) => AcornValue::Bool(false),
+            Atom::Symbol(Symbol::Not)
+            | Atom::Symbol(Symbol::And)
+            | Atom::Symbol(Symbol::Or)
+            | Atom::Symbol(Symbol::Eq) => {
+                panic!("logical symbols should be handled in denormalize_term")
+            }
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
                 let name = self
                     .kernel_context
@@ -2395,6 +2401,14 @@ impl Normalizer {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
+        let logical_head_symbol = match term.get_head_atom() {
+            Atom::Symbol(Symbol::Not) => Some(Symbol::Not),
+            Atom::Symbol(Symbol::And) => Some(Symbol::And),
+            Atom::Symbol(Symbol::Or) => Some(Symbol::Or),
+            Atom::Symbol(Symbol::Eq) => Some(Symbol::Eq),
+            _ => None,
+        };
+
         // Get the type of the head atom
         let head_type = match term.get_head_atom() {
             Atom::FreeVariable(i) => local_context
@@ -2492,6 +2506,40 @@ impl Normalizer {
                     type_var_id_to_name,
                     instantiate_type_vars,
                 ));
+            }
+        }
+
+        if let Some(symbol) = logical_head_symbol {
+            match symbol {
+                Symbol::Not => {
+                    if !type_args.is_empty() || value_args.len() != 1 {
+                        panic!("malformed not term during denormalization: {}", term);
+                    }
+                    return AcornValue::Not(Box::new(value_args.into_iter().next().unwrap()));
+                }
+                Symbol::And => {
+                    if !type_args.is_empty() || value_args.len() != 2 {
+                        panic!("malformed and term during denormalization: {}", term);
+                    }
+                    let mut args = value_args.into_iter();
+                    return AcornValue::and(args.next().unwrap(), args.next().unwrap());
+                }
+                Symbol::Or => {
+                    if !type_args.is_empty() || value_args.len() != 2 {
+                        panic!("malformed or term during denormalization: {}", term);
+                    }
+                    let mut args = value_args.into_iter();
+                    return AcornValue::or(args.next().unwrap(), args.next().unwrap());
+                }
+                Symbol::Eq => {
+                    // Eq may carry one explicit type argument in term form.
+                    if type_args.len() > 1 || value_args.len() != 2 {
+                        panic!("malformed eq term during denormalization: {}", term);
+                    }
+                    let mut args = value_args.into_iter();
+                    return AcornValue::equals(args.next().unwrap(), args.next().unwrap());
+                }
+                _ => unreachable!("unexpected logical symbol: {}", symbol),
             }
         }
 

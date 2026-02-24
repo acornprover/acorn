@@ -77,6 +77,10 @@ const ATOM_SYMBOL_TYPESORT: u8 = 11;
 const ATOM_SYMBOL_TYPE: u8 = 12;
 const ATOM_SYMBOL_TYPECLASS: u8 = 13;
 const ARROW: u8 = 14;
+const ATOM_SYMBOL_NOT: u8 = 15;
+const ATOM_SYMBOL_AND: u8 = 16;
+const ATOM_SYMBOL_OR: u8 = 17;
+const ATOM_SYMBOL_EQ: u8 = 18;
 
 impl Edge {
     /// Returns the discriminant byte for this edge.
@@ -97,6 +101,10 @@ impl Edge {
                 Atom::Symbol(Symbol::Type0) => ATOM_SYMBOL_TYPESORT,
                 Atom::Symbol(Symbol::Type(_)) => ATOM_SYMBOL_TYPE,
                 Atom::Symbol(Symbol::Typeclass(_)) => ATOM_SYMBOL_TYPECLASS,
+                Atom::Symbol(Symbol::Not) => ATOM_SYMBOL_NOT,
+                Atom::Symbol(Symbol::And) => ATOM_SYMBOL_AND,
+                Atom::Symbol(Symbol::Or) => ATOM_SYMBOL_OR,
+                Atom::Symbol(Symbol::Eq) => ATOM_SYMBOL_EQ,
                 Atom::Symbol(Symbol::GlobalConstant(..)) => ATOM_SYMBOL_GLOBAL,
                 Atom::Symbol(Symbol::ScopedConstant(_)) => ATOM_SYMBOL_SCOPED,
                 Atom::Symbol(Symbol::Synthetic(..)) => ATOM_SYMBOL_SYNTHETIC,
@@ -122,6 +130,10 @@ impl Edge {
                 Atom::Symbol(Symbol::Empty) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Bool) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Type0) => v.extend_from_slice(&0u16.to_ne_bytes()),
+                Atom::Symbol(Symbol::Not) => v.extend_from_slice(&0u16.to_ne_bytes()),
+                Atom::Symbol(Symbol::And) => v.extend_from_slice(&0u16.to_ne_bytes()),
+                Atom::Symbol(Symbol::Or) => v.extend_from_slice(&0u16.to_ne_bytes()),
+                Atom::Symbol(Symbol::Eq) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Type(t)) => {
                     // Type uses 4 bytes: module_id (2) + local_id (2)
                     v.extend_from_slice(&t.module_id().get().to_ne_bytes());
@@ -194,6 +206,10 @@ impl Edge {
             ATOM_SYMBOL_EMPTY => (Edge::Atom(Atom::Symbol(Symbol::Empty)), 3),
             ATOM_SYMBOL_BOOL => (Edge::Atom(Atom::Symbol(Symbol::Bool)), 3),
             ATOM_SYMBOL_TYPESORT => (Edge::Atom(Atom::Symbol(Symbol::Type0)), 3),
+            ATOM_SYMBOL_NOT => (Edge::Atom(Atom::Symbol(Symbol::Not)), 3),
+            ATOM_SYMBOL_AND => (Edge::Atom(Atom::Symbol(Symbol::And)), 3),
+            ATOM_SYMBOL_OR => (Edge::Atom(Atom::Symbol(Symbol::Or)), 3),
+            ATOM_SYMBOL_EQ => (Edge::Atom(Atom::Symbol(Symbol::Eq)), 3),
             ATOM_SYMBOL_TYPE => {
                 // Type uses 5 bytes: 1 discriminant + 2 module_id + 2 local_id
                 let module_id = u16::from_ne_bytes([bytes[1], bytes[2]]);
