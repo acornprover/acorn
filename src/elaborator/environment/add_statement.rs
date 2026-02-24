@@ -1550,6 +1550,47 @@ impl Environment {
             constructor_fns.push(arb_constructor_fn);
         }
 
+        // Non-dependent eliminator for this datatype.
+        // For constructors C_i : A_i1 -> ... -> A_ik -> D, we generate:
+        // D.match : [type params..., R] -> D -> case_1 -> ... -> case_n -> R
+        // where case_i : A_i1 -> ... -> A_ik -> R.
+        let mut match_result_param_name = "R".to_string();
+        let mut match_result_suffix = 0;
+        while type_params
+            .iter()
+            .any(|p| p.name == match_result_param_name)
+        {
+            match_result_suffix += 1;
+            match_result_param_name = format!("R{}", match_result_suffix);
+        }
+        let match_result_param = TypeParam {
+            name: match_result_param_name,
+            typeclass: None,
+        };
+        let arb_match_result_type = AcornType::Arbitrary(match_result_param.clone());
+        let mut arb_match_arg_types = vec![arb_inductive_type.clone()];
+        for (_, constructor_arg_types, _) in &constructors {
+            let case_type =
+                AcornType::functional(constructor_arg_types.clone(), arb_match_result_type.clone());
+            arb_match_arg_types.push(case_type);
+        }
+        let arb_match_type =
+            AcornType::functional(arb_match_arg_types, arb_match_result_type.clone());
+        let mut match_type_params = type_params.clone();
+        match_type_params.push(match_result_param);
+        let gen_match_type = arb_match_type.genericize(&match_type_params);
+        let match_def_str = format!("{}.match: {}", is.name_token.text(), gen_match_type);
+        self.bindings.add_datatype_attribute(
+            &datatype,
+            "match",
+            match_type_params,
+            gen_match_type,
+            None,
+            None,
+            vec![],
+            match_def_str,
+        );
+
         // The "no confusion" property. Different constructors give different results.
         for i in 0..constructors.len() {
             let (member_name, i_arg_types, _) = &constructors[i];

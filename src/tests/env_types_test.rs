@@ -94,6 +94,33 @@ fn test_inductive_negative_occurrence_through_wrapper() {
 }
 
 #[test]
+fn test_inductive_match_attribute_typechecks() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+        "#,
+    );
+    env.add(
+        r#"
+        define choose[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
+            Option.match(o, on_none, on_some)
+        }
+        "#,
+    );
+    env.bad(
+        r#"
+        define choose_bad[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
+            Option.match(o, on_some, on_none)
+        }
+        "#,
+    );
+}
+
+#[test]
 fn test_template_typechecking() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");

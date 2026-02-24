@@ -371,7 +371,7 @@ fn test_completions() {
     check("Nat.s", 7, &["suc"]);
     check("foo.s", 7, &["suc"]);
     check("(ba", 7, &["bar"]);
-    check("foo.", 7, &["0", "induction", "suc"]);
+    check("foo.", 7, &["0", "induction", "match", "suc"]);
 }
 
 #[test]
