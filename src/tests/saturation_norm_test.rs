@@ -444,6 +444,33 @@ fn test_exists_disjunction_same_as_axiom() {
     verify_succeeds(text);
 }
 
+#[test]
+fn test_unwrapping_new_option() {
+    let text = r#"
+    type Nat: axiom
+    let zero: Nat = axiom
+    let foo: Nat -> Bool = axiom
+
+    inductive Option[T] {
+        some(T)
+        none
+    }
+
+    structure FooNat {
+        n: Nat
+    } constraint {
+        foo(n)
+    }
+
+    axiom foo_zero {
+        foo(zero)
+    }
+
+    let Option.some(bar) = FooNat.new_option(zero)
+    "#;
+    verify_succeeds(text);
+}
+
 // This test exercises bugs where structures with methods containing
 // nested lambdas with if-then-else expressions would crash during normalization.
 // The issues were:
