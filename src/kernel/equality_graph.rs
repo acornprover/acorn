@@ -342,6 +342,14 @@ impl EqualityGraph {
                 // Lambda terms are currently treated as opaque terms.
                 self.opaque_map.get(term).copied()
             }
+            TermDecomposition::ForAll(_, _) => {
+                // Quantified formulas are currently treated as opaque terms.
+                self.opaque_map.get(term).copied()
+            }
+            TermDecomposition::Exists(_, _) => {
+                // Quantified formulas are currently treated as opaque terms.
+                self.opaque_map.get(term).copied()
+            }
         }
     }
 
@@ -558,6 +566,14 @@ impl EqualityGraph {
             }
             TermDecomposition::Lambda(_, _) => {
                 // Lambda terms are currently treated as opaque atoms.
+                self.insert_opaque_term(term.clone())
+            }
+            TermDecomposition::ForAll(_, _) => {
+                // Quantified formulas are currently treated as opaque atoms.
+                self.insert_opaque_term(term.clone())
+            }
+            TermDecomposition::Exists(_, _) => {
+                // Quantified formulas are currently treated as opaque atoms.
                 self.insert_opaque_term(term.clone())
             }
         };

@@ -263,6 +263,18 @@ impl<'a> Unifier<'a> {
                 let applied_body = self.apply_internal(scope, body);
                 Term::lambda(applied_input, applied_body)
             }
+            Decomposition::ForAll(binder_type, body) => {
+                // Recursively apply to quantifier binder type and body
+                let applied_binder_type = self.apply_internal(scope, binder_type);
+                let applied_body = self.apply_internal(scope, body);
+                Term::forall(applied_binder_type, applied_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                // Recursively apply to quantifier binder type and body
+                let applied_binder_type = self.apply_internal(scope, binder_type);
+                let applied_body = self.apply_internal(scope, body);
+                Term::exists(applied_binder_type, applied_body)
+            }
         }
     }
 

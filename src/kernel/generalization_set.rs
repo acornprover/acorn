@@ -106,9 +106,13 @@ pub fn sub_invariant_term_cmp(
         return None;
     }
 
-    // Lambda values are not currently part of term generalization ordering.
+    // Lambda values and quantifiers are not currently part of term generalization ordering.
     if matches!(left.decompose(), Decomposition::Lambda(_, _))
         || matches!(right.decompose(), Decomposition::Lambda(_, _))
+        || matches!(left.decompose(), Decomposition::ForAll(_, _))
+        || matches!(right.decompose(), Decomposition::ForAll(_, _))
+        || matches!(left.decompose(), Decomposition::Exists(_, _))
+        || matches!(right.decompose(), Decomposition::Exists(_, _))
     {
         return None;
     }
@@ -177,6 +181,8 @@ pub fn sub_invariant_term_cmp(
             }
         }
         (Decomposition::Lambda(_, _), Decomposition::Lambda(_, _)) => None,
+        (Decomposition::ForAll(_, _), Decomposition::ForAll(_, _)) => None,
+        (Decomposition::Exists(_, _), Decomposition::Exists(_, _)) => None,
         // Atom vs Application mismatch - shouldn't happen with equal heads and same num_args
         // But could happen with different structure, return based on which is simpler
         (Decomposition::Atom(_), Decomposition::Application(_, _)) => Some(Ordering::Less),
@@ -186,6 +192,10 @@ pub fn sub_invariant_term_cmp(
         (_, Decomposition::Pi(_, _)) => Some(Ordering::Greater),
         (Decomposition::Lambda(_, _), _) => None,
         (_, Decomposition::Lambda(_, _)) => None,
+        (Decomposition::ForAll(_, _), _) => None,
+        (_, Decomposition::ForAll(_, _)) => None,
+        (Decomposition::Exists(_, _), _) => None,
+        (_, Decomposition::Exists(_, _)) => None,
     }
 }
 

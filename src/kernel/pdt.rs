@@ -279,6 +279,12 @@ fn key_from_term_structure(term: TermRef, key: &mut Vec<u8>) {
         Decomposition::Lambda(_, _) => {
             panic!("Lambda in PDT term structure is not supported yet");
         }
+        Decomposition::ForAll(_, _) => {
+            panic!("ForAll in PDT term structure is not supported yet");
+        }
+        Decomposition::Exists(_, _) => {
+            panic!("Exists in PDT term structure is not supported yet");
+        }
     }
 }
 
@@ -882,6 +888,12 @@ where
         Decomposition::Lambda(_, _) => {
             panic!("Lambda in PDT search is not supported yet");
         }
+        Decomposition::ForAll(_, _) => {
+            panic!("ForAll in PDT search is not supported yet");
+        }
+        Decomposition::Exists(_, _) => {
+            panic!("Exists in PDT search is not supported yet");
+        }
     }
 
     key.truncate(initial_key_len);
@@ -989,6 +1001,20 @@ pub fn replace_term_variables(
                     replace_recursive(body, term_context, replacements, shift, output_types);
                 Term::lambda(replaced_input, replaced_body)
             }
+            Decomposition::ForAll(binder_type, body) => {
+                let replaced_binder_type =
+                    replace_recursive(binder_type, term_context, replacements, shift, output_types);
+                let replaced_body =
+                    replace_recursive(body, term_context, replacements, shift, output_types);
+                Term::forall(replaced_binder_type, replaced_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let replaced_binder_type =
+                    replace_recursive(binder_type, term_context, replacements, shift, output_types);
+                let replaced_body =
+                    replace_recursive(body, term_context, replacements, shift, output_types);
+                Term::exists(replaced_binder_type, replaced_body)
+            }
         }
     }
 
@@ -1049,6 +1075,16 @@ pub fn substitute_term(
                 let new_input = substitute_recursive(input, bindings, var_remap);
                 let new_body = substitute_recursive(body, bindings, var_remap);
                 Term::lambda(new_input, new_body)
+            }
+            Decomposition::ForAll(binder_type, body) => {
+                let new_binder_type = substitute_recursive(binder_type, bindings, var_remap);
+                let new_body = substitute_recursive(body, bindings, var_remap);
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let new_binder_type = substitute_recursive(binder_type, bindings, var_remap);
+                let new_body = substitute_recursive(body, bindings, var_remap);
+                Term::exists(new_binder_type, new_body)
             }
         }
     }

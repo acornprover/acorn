@@ -603,6 +603,22 @@ impl SyntheticNameSet {
                     new_entries,
                 )?;
             }
+            Decomposition::ForAll(binder_type, body) | Decomposition::Exists(binder_type, body) => {
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &binder_type.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &body.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
+            }
         }
         Ok(())
     }

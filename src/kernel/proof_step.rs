@@ -508,6 +508,20 @@ impl PremiseMap {
                     next_fresh,
                 );
             }
+            Decomposition::ForAll(binder_type, body) | Decomposition::Exists(binder_type, body) => {
+                self.assign_fresh_for_eliminated(
+                    binder_type,
+                    pre_norm_concrete,
+                    concrete_context,
+                    next_fresh,
+                );
+                self.assign_fresh_for_eliminated(
+                    body,
+                    pre_norm_concrete,
+                    concrete_context,
+                    next_fresh,
+                );
+            }
         }
     }
 }

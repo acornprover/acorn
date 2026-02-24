@@ -43,6 +43,18 @@ enum TermComponent {
     /// The body is interpreted under one additional bound variable binder.
     Lambda { right_offset: u16 },
 
+    /// A universal quantifier.
+    /// - Left child (binder type): always at index + 1
+    /// - Right child (body): at index + right_offset
+    /// The body is interpreted under one additional bound variable binder.
+    ForAll { right_offset: u16 },
+
+    /// An existential quantifier.
+    /// - Left child (binder type): always at index + 1
+    /// - Right child (body): at index + right_offset
+    /// The body is interpreted under one additional bound variable binder.
+    Exists { right_offset: u16 },
+
     /// A leaf atom in the term tree.
     Atom(Atom),
 }
@@ -68,6 +80,12 @@ pub enum Decomposition<'a> {
     /// A lambda value: fun (x : input) => body.
     /// Both input and body are borrowed slices - no allocation.
     Lambda(TermRef<'a>, TermRef<'a>),
+
+    /// A universal quantifier: forall (x : binder_type), body.
+    ForAll(TermRef<'a>, TermRef<'a>),
+
+    /// An existential quantifier: exists (x : binder_type), body.
+    Exists(TermRef<'a>, TermRef<'a>),
 }
 
 /// A borrowed reference to a term - wraps a slice of components.
@@ -95,7 +113,9 @@ impl<'a> TermRef<'a> {
             match self.components[0] {
                 TermComponent::Application { right_offset }
                 | TermComponent::Pi { right_offset }
-                | TermComponent::Lambda { right_offset } => {
+                | TermComponent::Lambda { right_offset }
+                | TermComponent::ForAll { right_offset }
+                | TermComponent::Exists { right_offset } => {
                     debug_assert!(
                         right_offset >= 2 && (right_offset as usize) < self.components.len(),
                         "to_owned: invalid right_offset {} for len {}",
@@ -104,7 +124,7 @@ impl<'a> TermRef<'a> {
                     );
                 }
                 _ => panic!(
-                    "to_owned: non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
+                    "to_owned: non-atomic term should start with Application, Pi, Lambda, ForAll, or Exists, got: {:?}",
                     self.components
                 ),
             }
@@ -135,6 +155,14 @@ impl<'a> TermRef<'a> {
                     // For Lambda values, the head atom is the input type's head atom
                     pos += 1;
                 }
+                TermComponent::ForAll { .. } => {
+                    // For quantifiers, the head atom is the binder type's head atom
+                    pos += 1;
+                }
+                TermComponent::Exists { .. } => {
+                    // For quantifiers, the head atom is the binder type's head atom
+                    pos += 1;
+                }
             }
         }
     }
@@ -151,12 +179,14 @@ impl<'a> TermRef<'a> {
     /// - `Decomposition::Application(func, arg)` if the term is an application
     /// - `Decomposition::Pi(input, output)` if the term is a Pi type
     /// - `Decomposition::Lambda(input, body)` if the term is a lambda value
+    /// - `Decomposition::ForAll(binder_type, body)` if the term is a universal quantifier
+    /// - `Decomposition::Exists(binder_type, body)` if the term is an existential quantifier
     ///
     /// All returned references are borrowed slices - no allocation needed.
     /// This provides a cleaner way to write recursive algorithms on terms
     /// by pattern matching on the structure rather than checking multiple conditions.
     pub fn decompose(&self) -> Decomposition<'a> {
-        // Handle atomic terms (single Atom, no Application/Pi/Lambda wrapper)
+        // Handle atomic terms (single Atom, no compound wrapper)
         if self.components.len() == 1 {
             let atom = match &self.components[0] {
                 TermComponent::Atom(atom) => atom,
@@ -165,7 +195,7 @@ impl<'a> TermRef<'a> {
             return Decomposition::Atom(atom);
         }
 
-        // Non-atomic terms start with Application, Pi, or Lambda
+        // Non-atomic terms start with a compound marker
         match self.components[0] {
             TermComponent::Application { right_offset } => {
                 // Left child (func) starts at position 1, ends at right_offset
@@ -194,8 +224,26 @@ impl<'a> TermRef<'a> {
 
                 Decomposition::Lambda(input, body)
             }
+            TermComponent::ForAll { right_offset } => {
+                // Left child (binder type) starts at position 1, ends at right_offset
+                let binder_type = TermRef::new(&self.components[1..right_offset as usize]);
+
+                // Right child (body) starts at right_offset, extends to end of slice
+                let body = TermRef::new(&self.components[right_offset as usize..]);
+
+                Decomposition::ForAll(binder_type, body)
+            }
+            TermComponent::Exists { right_offset } => {
+                // Left child (binder type) starts at position 1, ends at right_offset
+                let binder_type = TermRef::new(&self.components[1..right_offset as usize]);
+
+                // Right child (body) starts at right_offset, extends to end of slice
+                let body = TermRef::new(&self.components[right_offset as usize..]);
+
+                Decomposition::Exists(binder_type, body)
+            }
             TermComponent::Atom(_) => panic!(
-                "non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
+                "non-atomic term should start with Application, Pi, Lambda, ForAll, or Exists, got: {:?}",
                 self.components
             ),
         }
@@ -223,6 +271,16 @@ impl<'a> TermRef<'a> {
         matches!(self.components.first(), Some(TermComponent::Lambda { .. }))
     }
 
+    /// Check if this term is a universal quantifier.
+    pub fn is_forall(&self) -> bool {
+        matches!(self.components.first(), Some(TermComponent::ForAll { .. }))
+    }
+
+    /// Check if this term is an existential quantifier.
+    pub fn is_exists(&self) -> bool {
+        matches!(self.components.first(), Some(TermComponent::Exists { .. }))
+    }
+
     /// Split a Pi type into (input_type, output_type).
     /// Returns None if the term is not a Pi type.
     ///
@@ -239,6 +297,24 @@ impl<'a> TermRef<'a> {
     pub fn split_lambda(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
         match self.decompose() {
             Decomposition::Lambda(input, body) => Some((input, body)),
+            _ => None,
+        }
+    }
+
+    /// Split a universal quantifier into (binder_type, body).
+    /// Returns None if the term is not a ForAll.
+    pub fn split_forall(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
+        match self.decompose() {
+            Decomposition::ForAll(binder_type, body) => Some((binder_type, body)),
+            _ => None,
+        }
+    }
+
+    /// Split an existential quantifier into (binder_type, body).
+    /// Returns None if the term is not an Exists.
+    pub fn split_exists(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
+        match self.decompose() {
+            Decomposition::Exists(binder_type, body) => Some((binder_type, body)),
             _ => None,
         }
     }
@@ -417,6 +493,10 @@ impl<'a> TermRef<'a> {
             }
             Decomposition::Lambda(_, _) => {
                 panic!("Lambda terms should not reach get_type_with_context before normalization")
+            }
+            Decomposition::ForAll(_, _) | Decomposition::Exists(_, _) => {
+                // Quantifiers are propositions
+                Term::bool_type()
             }
         };
         result.validate();
@@ -602,6 +682,10 @@ impl<'a> TermRef<'a> {
                 }
                 TermComponent::Lambda { .. } => {
                     // Lambda nodes contribute similarly to Pi nodes
+                    weight1 += 1;
+                }
+                TermComponent::ForAll { .. } | TermComponent::Exists { .. } => {
+                    // Quantifier nodes contribute similarly to other binder nodes
                     weight1 += 1;
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::True))
@@ -839,6 +923,14 @@ fn format_term_at(f: &mut fmt::Formatter, components: &[TermComponent], pos: usi
             let end = find_subterm_end_at(components, pos);
             format_lambda_contents(f, components, pos + 1, end)
         }
+        TermComponent::ForAll { .. } => {
+            let end = find_subterm_end_at(components, pos);
+            format_quantifier_contents("forall", f, components, pos + 1, end)
+        }
+        TermComponent::Exists { .. } => {
+            let end = find_subterm_end_at(components, pos);
+            format_quantifier_contents("exists", f, components, pos + 1, end)
+        }
     }
 }
 
@@ -920,7 +1012,10 @@ fn format_application_contents(
                 current_start = inner_func_start;
                 current_end = inner_arg_start;
             }
-            TermComponent::Pi { .. } | TermComponent::Lambda { .. } => {
+            TermComponent::Pi { .. }
+            | TermComponent::Lambda { .. }
+            | TermComponent::ForAll { .. }
+            | TermComponent::Exists { .. } => {
                 return Err(fmt::Error);
             }
         }
@@ -986,12 +1081,37 @@ fn format_lambda_contents(
     write!(f, ")")
 }
 
+/// Format the contents of a quantifier (input => body) from start to end.
+fn format_quantifier_contents(
+    keyword: &str,
+    f: &mut fmt::Formatter,
+    components: &[TermComponent],
+    start: usize,
+    end: usize,
+) -> fmt::Result {
+    if start >= end {
+        return Ok(());
+    }
+
+    // Find where the binder type ends
+    let input_end = find_subterm_end_at(components, start);
+    let body_start = input_end;
+
+    write!(f, "{}(", keyword)?;
+    format_term_slice(f, components, start, input_end)?;
+    write!(f, " => ")?;
+    format_term_slice(f, components, body_start, end)?;
+    write!(f, ")")
+}
+
 /// Find the end position of a subterm starting at `start` in a components slice.
 fn find_subterm_end_at(components: &[TermComponent], start: usize) -> usize {
     match components[start] {
         TermComponent::Pi { right_offset }
         | TermComponent::Application { right_offset }
-        | TermComponent::Lambda { right_offset } => {
+        | TermComponent::Lambda { right_offset }
+        | TermComponent::ForAll { right_offset }
+        | TermComponent::Exists { right_offset } => {
             // Right child starts at start + right_offset, recursively find its end
             find_subterm_end_at(components, start + right_offset as usize)
         }
@@ -1023,6 +1143,12 @@ fn format_term_slice(
         }
         TermComponent::Pi { .. } => format_pi_contents(f, components, start + 1, end),
         TermComponent::Lambda { .. } => format_lambda_contents(f, components, start + 1, end),
+        TermComponent::ForAll { .. } => {
+            format_quantifier_contents("forall", f, components, start + 1, end)
+        }
+        TermComponent::Exists { .. } => {
+            format_quantifier_contents("exists", f, components, start + 1, end)
+        }
     }
 }
 
@@ -1053,7 +1179,7 @@ impl Term {
 
     /// Create a new Term from a vector of components.
     /// Atomic terms have a single Atom component.
-    /// Non-atomic terms start with an Application, Pi, or Lambda marker containing right_offset.
+    /// Non-atomic terms start with a compound marker containing right_offset.
     fn from_components(components: Vec<TermComponent>) -> Term {
         if components.is_empty() {
             panic!("from_components: empty components");
@@ -1061,7 +1187,7 @@ impl Term {
         // Basic validation: check first component
         match components[0] {
             TermComponent::Application { right_offset } => {
-                // Non-atomic term: position 1 can be Atom, Application, or Pi
+                // Non-atomic term: position 1 can start any subterm
                 if components.len() < 2 {
                     panic!(
                         "from_components: Application at start but no content. Components: {:?}",
@@ -1107,11 +1233,41 @@ impl Term {
                     );
                 }
             }
+            TermComponent::ForAll { right_offset } => {
+                // ForAll: must have at least binder type and body
+                if components.len() < 3 {
+                    panic!(
+                        "from_components: ForAll at start but not enough content. Components: {:?}",
+                        components
+                    );
+                }
+                if right_offset < 2 || right_offset as usize >= components.len() {
+                    panic!(
+                        "from_components: outer ForAll has invalid right_offset {} for len {}. Components: {:?}",
+                        right_offset, components.len(), components
+                    );
+                }
+            }
+            TermComponent::Exists { right_offset } => {
+                // Exists: must have at least binder type and body
+                if components.len() < 3 {
+                    panic!(
+                        "from_components: Exists at start but not enough content. Components: {:?}",
+                        components
+                    );
+                }
+                if right_offset < 2 || right_offset as usize >= components.len() {
+                    panic!(
+                        "from_components: outer Exists has invalid right_offset {} for len {}. Components: {:?}",
+                        right_offset, components.len(), components
+                    );
+                }
+            }
             TermComponent::Atom(_) => {
                 // Atomic term (len must be 1)
                 if components.len() != 1 {
                     panic!(
-                        "from_components: non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
+                        "from_components: non-atomic term should start with a compound marker, got: {:?}",
                         components
                     );
                 }
@@ -1124,7 +1280,9 @@ impl Term {
                 match components[start] {
                     TermComponent::Application { right_offset }
                     | TermComponent::Pi { right_offset }
-                    | TermComponent::Lambda { right_offset } => {
+                    | TermComponent::Lambda { right_offset }
+                    | TermComponent::ForAll { right_offset }
+                    | TermComponent::Exists { right_offset } => {
                         let right_start = start + right_offset as usize;
                         if right_start >= components.len() {
                             panic!(
@@ -1186,6 +1344,40 @@ impl Term {
             .into_iter()
             .rev()
             .fold(body, |acc, arg_type| Term::lambda(arg_type, acc))
+    }
+
+    /// Create a universal quantifier `forall (x : binder_type), body`.
+    pub fn forall(binder_type: Term, body: Term) -> Term {
+        let right_offset = (1 + binder_type.components.len()) as u16;
+        let mut components = vec![TermComponent::ForAll { right_offset }];
+        components.extend(binder_type.components);
+        components.extend(body.components);
+        Term { components }
+    }
+
+    /// Create nested universal quantifiers for multiple binders.
+    pub fn forall_multi(binder_types: Vec<Term>, body: Term) -> Term {
+        binder_types
+            .into_iter()
+            .rev()
+            .fold(body, |acc, binder_type| Term::forall(binder_type, acc))
+    }
+
+    /// Create an existential quantifier `exists (x : binder_type), body`.
+    pub fn exists(binder_type: Term, body: Term) -> Term {
+        let right_offset = (1 + binder_type.components.len()) as u16;
+        let mut components = vec![TermComponent::Exists { right_offset }];
+        components.extend(binder_type.components);
+        components.extend(body.components);
+        Term { components }
+    }
+
+    /// Create nested existential quantifiers for multiple binders.
+    pub fn exists_multi(binder_types: Vec<Term>, body: Term) -> Term {
+        binder_types
+            .into_iter()
+            .rev()
+            .fold(body, |acc, binder_type| Term::exists(binder_type, acc))
     }
 
     /// Create an Application term with a head and multiple arguments.
@@ -1324,7 +1516,9 @@ impl Term {
             match components[start] {
                 TermComponent::Application { right_offset }
                 | TermComponent::Pi { right_offset }
-                | TermComponent::Lambda { right_offset } => {
+                | TermComponent::Lambda { right_offset }
+                | TermComponent::ForAll { right_offset }
+                | TermComponent::Exists { right_offset } => {
                     let right_start = start + right_offset as usize;
                     if right_start >= components.len() {
                         return None;
@@ -1346,7 +1540,9 @@ impl Term {
             match self.components[0] {
                 TermComponent::Application { right_offset }
                 | TermComponent::Pi { right_offset }
-                | TermComponent::Lambda { right_offset } => {
+                | TermComponent::Lambda { right_offset }
+                | TermComponent::ForAll { right_offset }
+                | TermComponent::Exists { right_offset } => {
                     if right_offset < 2 || right_offset as usize >= self.components.len() {
                         return false;
                     }
@@ -1431,7 +1627,9 @@ impl Term {
         #[cfg(debug_assertions)]
         if let TermComponent::Application { right_offset }
         | TermComponent::Pi { right_offset }
-        | TermComponent::Lambda { right_offset } = self.components[0]
+        | TermComponent::Lambda { right_offset }
+        | TermComponent::ForAll { right_offset }
+        | TermComponent::Exists { right_offset } = self.components[0]
         {
             if right_offset < 2 || right_offset as usize >= self.components.len() {
                 panic!(
@@ -1460,6 +1658,14 @@ impl Term {
                 }
                 TermComponent::Lambda { .. } => {
                     // For Lambda values, the head atom is the input type's head atom
+                    pos += 1;
+                }
+                TermComponent::ForAll { .. } => {
+                    // For quantifiers, the head atom is the binder type's head atom
+                    pos += 1;
+                }
+                TermComponent::Exists { .. } => {
+                    // For quantifiers, the head atom is the binder type's head atom
                     pos += 1;
                 }
             }
@@ -1676,6 +1882,26 @@ impl Term {
 
                 Term::lambda(new_input, new_body)
             }
+            Decomposition::ForAll(binder_type_ref, body_ref) => {
+                // Recursively replace in binder type and quantifier body
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                let new_binder_type = binder_type.replace_variable_impl(id, value);
+                let new_body = body.replace_variable_impl(id, value);
+
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type_ref, body_ref) => {
+                // Recursively replace in binder type and quantifier body
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                let new_binder_type = binder_type.replace_variable_impl(id, value);
+                let new_body = body.replace_variable_impl(id, value);
+
+                Term::exists(new_binder_type, new_body)
+            }
         }
     }
 
@@ -1815,6 +2041,24 @@ impl Term {
                     .to_owned()
                     .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
                 Term::lambda(new_input, new_body)
+            }
+            Decomposition::ForAll(binder_type, body) => {
+                let new_binder_type = binder_type
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                let new_body = body
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let new_binder_type = binder_type
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                let new_body = body
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                Term::exists(new_binder_type, new_body)
             }
         }
     }
@@ -2106,6 +2350,22 @@ impl Term {
                         .to_owned()
                         .has_escaping_bound_variable_at_depth(depth + 1)
             }
+            Decomposition::ForAll(binder_type, body) => {
+                binder_type
+                    .to_owned()
+                    .has_escaping_bound_variable_at_depth(depth)
+                    || body
+                        .to_owned()
+                        .has_escaping_bound_variable_at_depth(depth + 1)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                binder_type
+                    .to_owned()
+                    .has_escaping_bound_variable_at_depth(depth)
+                    || body
+                        .to_owned()
+                        .has_escaping_bound_variable_at_depth(depth + 1)
+            }
         }
     }
 
@@ -2168,6 +2428,28 @@ impl Term {
 
                 Term::lambda(new_input, new_body)
             }
+            Decomposition::ForAll(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Substitute in binder type
+                let new_binder_type = binder_type.substitute_bound_impl(index, replacement);
+                // In the body, bound variables are shifted by 1 due to quantifier binder
+                let new_body = body.substitute_bound_impl(index + 1, replacement);
+
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Substitute in binder type
+                let new_binder_type = binder_type.substitute_bound_impl(index, replacement);
+                // In the body, bound variables are shifted by 1 due to quantifier binder
+                let new_body = body.substitute_bound_impl(index + 1, replacement);
+
+                Term::exists(new_binder_type, new_body)
+            }
         }
     }
 
@@ -2228,6 +2510,28 @@ impl Term {
 
                 Term::lambda(new_input, new_body)
             }
+            Decomposition::ForAll(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Shift in binder type
+                let new_binder_type = binder_type.shift_bound_impl(cutoff, amount);
+                // In the body, the cutoff increases by 1 (we're under a binder)
+                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Shift in binder type
+                let new_binder_type = binder_type.shift_bound_impl(cutoff, amount);
+                // In the body, the cutoff increases by 1 (we're under a binder)
+                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+
+                Term::exists(new_binder_type, new_body)
+            }
         }
     }
 
@@ -2262,6 +2566,20 @@ impl Term {
                 let new_input = input.replace_subterm(old, new);
                 let new_body = body.replace_subterm(old, new);
                 Term::lambda(new_input, new_body)
+            }
+            Decomposition::ForAll(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+                let new_binder_type = binder_type.replace_subterm(old, new);
+                let new_body = body.replace_subterm(old, new);
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+                let new_binder_type = binder_type.replace_subterm(old, new);
+                let new_body = body.replace_subterm(old, new);
+                Term::exists(new_binder_type, new_body)
             }
         }
     }
@@ -2340,6 +2658,26 @@ impl Term {
                 // Body is one level deeper due to the Lambda binder
                 let new_body = body.convert_free_to_bound_at_depth(num_type_params, depth + 1);
                 Term::lambda(new_input, new_body)
+            }
+            Decomposition::ForAll(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+                // Binder type is at the same depth
+                let new_binder_type =
+                    binder_type.convert_free_to_bound_at_depth(num_type_params, depth);
+                // Body is one level deeper due to the quantifier binder
+                let new_body = body.convert_free_to_bound_at_depth(num_type_params, depth + 1);
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type_ref, body_ref) => {
+                let binder_type = binder_type_ref.to_owned();
+                let body = body_ref.to_owned();
+                // Binder type is at the same depth
+                let new_binder_type =
+                    binder_type.convert_free_to_bound_at_depth(num_type_params, depth);
+                // Body is one level deeper due to the quantifier binder
+                let new_body = body.convert_free_to_bound_at_depth(num_type_params, depth + 1);
+                Term::exists(new_binder_type, new_body)
             }
         };
         result
@@ -2563,6 +2901,29 @@ mod tests {
     }
 
     #[test]
+    fn test_quantifier_decomposition_and_display() {
+        let forall = Term::forall(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+        assert!(forall.as_ref().is_forall());
+        let (forall_input, forall_body) = forall
+            .as_ref()
+            .split_forall()
+            .expect("expected forall split");
+        assert_eq!(format!("{}", forall_input), "Bool");
+        assert_eq!(format!("{}", forall_body), "b0");
+        assert_eq!(format!("{}", forall), "forall(Bool => b0)");
+
+        let exists = Term::exists(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+        assert!(exists.as_ref().is_exists());
+        let (exists_input, exists_body) = exists
+            .as_ref()
+            .split_exists()
+            .expect("expected exists split");
+        assert_eq!(format!("{}", exists_input), "Bool");
+        assert_eq!(format!("{}", exists_body), "b0");
+        assert_eq!(format!("{}", exists), "exists(Bool => b0)");
+    }
+
+    #[test]
     fn test_substitute_bound_simple() {
         // Replace b0 with c0
         let term = Term::parse("b0");
@@ -2598,6 +2959,20 @@ mod tests {
         let lambda_outer = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
         let result_outer = lambda_outer.substitute_bound(0, &replacement);
         assert_eq!(format!("{}", result_outer), "lambda(Bool => c0)");
+    }
+
+    #[test]
+    fn test_substitute_bound_in_quantifier_respects_binder() {
+        // forall(Bool => b0) binds b0 locally, so substituting index 0 should not change body.
+        let forall = Term::forall(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+        let replacement = Term::parse("c0");
+        let result = forall.substitute_bound(0, &replacement);
+        assert_eq!(format!("{}", result), "forall(Bool => b0)");
+
+        // b1 in quantifier body refers to the outer binder at index 0, so it should be replaced.
+        let forall_outer = Term::forall(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
+        let result_outer = forall_outer.substitute_bound(0, &replacement);
+        assert_eq!(format!("{}", result_outer), "forall(Bool => c0)");
     }
 
     #[test]

@@ -151,6 +151,7 @@ fn get_type_category(
         }
         Decomposition::Pi(_, _) => TypeCategory::Type0,
         Decomposition::Lambda(_, _) => TypeCategory::Variable,
+        Decomposition::ForAll(_, _) | Decomposition::Exists(_, _) => TypeCategory::Bool,
     }
 }
 
@@ -167,6 +168,9 @@ fn get_head_and_arg_count(term: TermRef<'_>) -> (&Atom, usize) {
             Decomposition::Atom(atom) => return (atom, count),
             Decomposition::Pi(_, _) => return (&Atom::FreeVariable(0), count),
             Decomposition::Lambda(_, _) => return (&Atom::FreeVariable(0), count),
+            Decomposition::ForAll(_, _) | Decomposition::Exists(_, _) => {
+                return (&Atom::FreeVariable(0), count);
+            }
         }
     }
 }

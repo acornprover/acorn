@@ -116,6 +116,34 @@ fn extract_type_bindings(
                 return false;
             }
         }
+        Decomposition::ForAll(pattern_binder_type, pattern_body) => {
+            if let Decomposition::ForAll(concrete_binder_type, concrete_body) =
+                concrete_type.decompose()
+            {
+                if !extract_type_bindings(pattern_binder_type, concrete_binder_type, bindings) {
+                    return false;
+                }
+                if !extract_type_bindings(pattern_body, concrete_body, bindings) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        Decomposition::Exists(pattern_binder_type, pattern_body) => {
+            if let Decomposition::Exists(concrete_binder_type, concrete_body) =
+                concrete_type.decompose()
+            {
+                if !extract_type_bindings(pattern_binder_type, concrete_binder_type, bindings) {
+                    return false;
+                }
+                if !extract_type_bindings(pattern_body, concrete_body, bindings) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
         Decomposition::Atom(pattern_atom) => {
             // Pattern type is a concrete atom (not a variable)
             // It must match the concrete type exactly, with one exception:

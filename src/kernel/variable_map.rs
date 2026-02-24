@@ -287,6 +287,28 @@ impl VariableMap {
                     self.specialize_term(body, input_context, output_context, kernel_context);
                 Term::lambda(specialized_input, specialized_body)
             }
+            Decomposition::ForAll(binder_type, body) => {
+                let specialized_binder_type = self.specialize_term(
+                    binder_type,
+                    input_context,
+                    output_context,
+                    kernel_context,
+                );
+                let specialized_body =
+                    self.specialize_term(body, input_context, output_context, kernel_context);
+                Term::forall(specialized_binder_type, specialized_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let specialized_binder_type = self.specialize_term(
+                    binder_type,
+                    input_context,
+                    output_context,
+                    kernel_context,
+                );
+                let specialized_body =
+                    self.specialize_term(body, input_context, output_context, kernel_context);
+                Term::exists(specialized_binder_type, specialized_body)
+            }
         }
     }
 
@@ -439,6 +461,16 @@ pub fn apply_to_term(term: TermRef, map: &VariableMap) -> Term {
             let new_input = apply_to_term(input, map);
             let new_body = apply_to_term(body, map);
             Term::lambda(new_input, new_body)
+        }
+        Decomposition::ForAll(binder_type, body) => {
+            let new_binder_type = apply_to_term(binder_type, map);
+            let new_body = apply_to_term(body, map);
+            Term::forall(new_binder_type, new_body)
+        }
+        Decomposition::Exists(binder_type, body) => {
+            let new_binder_type = apply_to_term(binder_type, map);
+            let new_body = apply_to_term(body, map);
+            Term::exists(new_binder_type, new_body)
         }
     }
 }

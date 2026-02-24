@@ -383,7 +383,7 @@ impl<'a> NormalizationContext<'a> {
     ///
     /// This function checks for invalid conversions where variables are dropped:
     /// - Exists skolems that don't appear in clauses (would assert existence over empty type)
-    /// - Forall variables that don't appear in clauses (would lose vacuous truth condition)
+    /// - ForAll variables that don't appear in clauses (would lose vacuous truth condition)
     pub fn nice_value_to_clauses(
         &mut self,
         value: &AcornValue,
@@ -437,7 +437,7 @@ impl<'a> NormalizationContext<'a> {
                     return Err("exists over a potentially uninhabited type".to_string());
                 }
 
-                // Forall variables: if dropped, the statement is vacuously true when the
+                // ForAll variables: if dropped, the statement is vacuously true when the
                 // type is empty. Return empty clauses since we can't represent this properly.
                 if self.has_uninhabited_dropped_variable(&local_context, &clauses, num_type_params)
                 {
@@ -655,7 +655,7 @@ impl<'a> NormalizationContext<'a> {
     /// x_i in the input gets mapped to stack[i] in the output.
     /// This method must reset the stack before returning.
     ///
-    /// Forall variables map into variables, but they may get renumbered, because the AcornValue
+    /// ForAll variables map into variables, but they may get renumbered, because the AcornValue
     /// a variable id can be used multiple times in different branches. In the output, variables
     /// in different branches may be combined. So each universal variable, anywhere in the value,
     /// gets a unique id.
