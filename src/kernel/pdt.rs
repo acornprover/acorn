@@ -276,6 +276,9 @@ fn key_from_term_structure(term: TermRef, key: &mut Vec<u8>) {
             key_from_term_structure(input, key);
             key_from_term_structure(output, key);
         }
+        Decomposition::Lambda(_, _) => {
+            panic!("Lambda in PDT term structure is not supported yet");
+        }
     }
 }
 
@@ -876,6 +879,9 @@ where
                 }
             }
         }
+        Decomposition::Lambda(_, _) => {
+            panic!("Lambda in PDT search is not supported yet");
+        }
     }
 
     key.truncate(initial_key_len);
@@ -976,6 +982,13 @@ pub fn replace_term_variables(
                     replace_recursive(output, term_context, replacements, shift, output_types);
                 Term::pi(replaced_input, replaced_output)
             }
+            Decomposition::Lambda(input, body) => {
+                let replaced_input =
+                    replace_recursive(input, term_context, replacements, shift, output_types);
+                let replaced_body =
+                    replace_recursive(body, term_context, replacements, shift, output_types);
+                Term::lambda(replaced_input, replaced_body)
+            }
         }
     }
 
@@ -1031,6 +1044,11 @@ pub fn substitute_term(
                 let new_input = substitute_recursive(input, bindings, var_remap);
                 let new_output = substitute_recursive(output, bindings, var_remap);
                 Term::pi(new_input, new_output)
+            }
+            Decomposition::Lambda(input, body) => {
+                let new_input = substitute_recursive(input, bindings, var_remap);
+                let new_body = substitute_recursive(body, bindings, var_remap);
+                Term::lambda(new_input, new_body)
             }
         }
     }

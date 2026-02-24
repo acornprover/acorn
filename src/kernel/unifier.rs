@@ -257,6 +257,12 @@ impl<'a> Unifier<'a> {
                 let applied_output = self.apply_internal(scope, output);
                 Term::pi(applied_input, applied_output)
             }
+            Decomposition::Lambda(input, body) => {
+                // Recursively apply to lambda input type and body
+                let applied_input = self.apply_internal(scope, input);
+                let applied_body = self.apply_internal(scope, body);
+                Term::lambda(applied_input, applied_body)
+            }
         }
     }
 
@@ -442,7 +448,10 @@ impl<'a> Unifier<'a> {
             }
             // Reject Pi types (function kinds like Type -> Type).
             // These are higher kinds, not types that can implement typeclasses.
-            if matches!(term.as_ref().decompose(), Decomposition::Pi(_, _)) {
+            if matches!(
+                term.as_ref().decompose(),
+                Decomposition::Pi(_, _) | Decomposition::Lambda(_, _)
+            ) {
                 return false;
             }
             // Check if the term itself is a ground type symbol (like MyType)
@@ -621,6 +630,10 @@ impl<'a> Unifier<'a> {
             (Decomposition::Pi(i1, o1), Decomposition::Pi(i2, o2)) => {
                 self.unify_internal(scope1, i1, scope2, i2)
                     && self.unify_internal(scope1, o1, scope2, o2)
+            }
+            (Decomposition::Lambda(i1, b1), Decomposition::Lambda(i2, b2)) => {
+                self.unify_internal(scope1, i1, scope2, i2)
+                    && self.unify_internal(scope1, b1, scope2, b2)
             }
             // Structural mismatch (e.g., Atom vs Application, Application vs Pi)
             _ => false,

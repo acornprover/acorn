@@ -106,6 +106,13 @@ pub fn sub_invariant_term_cmp(
         return None;
     }
 
+    // Lambda values are not currently part of term generalization ordering.
+    if matches!(left.decompose(), Decomposition::Lambda(_, _))
+        || matches!(right.decompose(), Decomposition::Lambda(_, _))
+    {
+        return None;
+    }
+
     // Compare the term types, but only if neither type involves a free variable.
     // If either type contains a FreeVariable, the comparison is not stable
     // under substitution (because FreeVariable ordering differs from Symbol ordering).
@@ -169,6 +176,7 @@ pub fn sub_invariant_term_cmp(
                 x => x,
             }
         }
+        (Decomposition::Lambda(_, _), Decomposition::Lambda(_, _)) => None,
         // Atom vs Application mismatch - shouldn't happen with equal heads and same num_args
         // But could happen with different structure, return based on which is simpler
         (Decomposition::Atom(_), Decomposition::Application(_, _)) => Some(Ordering::Less),
@@ -176,6 +184,8 @@ pub fn sub_invariant_term_cmp(
         // Pi vs other structures
         (Decomposition::Pi(_, _), _) => Some(Ordering::Less),
         (_, Decomposition::Pi(_, _)) => Some(Ordering::Greater),
+        (Decomposition::Lambda(_, _), _) => None,
+        (_, Decomposition::Lambda(_, _)) => None,
     }
 }
 

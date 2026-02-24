@@ -494,6 +494,20 @@ impl PremiseMap {
                     next_fresh,
                 );
             }
+            Decomposition::Lambda(input, body) => {
+                self.assign_fresh_for_eliminated(
+                    input,
+                    pre_norm_concrete,
+                    concrete_context,
+                    next_fresh,
+                );
+                self.assign_fresh_for_eliminated(
+                    body,
+                    pre_norm_concrete,
+                    concrete_context,
+                    next_fresh,
+                );
+            }
         }
     }
 }

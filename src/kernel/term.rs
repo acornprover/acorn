@@ -37,6 +37,12 @@ enum TermComponent {
     /// A non-dependent arrow `A -> B` is represented as `Pi(A, B)` where B doesn't use Var(0).
     Pi { right_offset: u16 },
 
+    /// A lambda value (dependent function value).
+    /// - Left child (input type): always at index + 1
+    /// - Right child (body): at index + right_offset
+    /// The body is interpreted under one additional bound variable binder.
+    Lambda { right_offset: u16 },
+
     /// A leaf atom in the term tree.
     Atom(Atom),
 }
@@ -58,6 +64,10 @@ pub enum Decomposition<'a> {
     /// For non-dependent arrow types, output doesn't reference the bound variable.
     /// Both input and output are borrowed slices - no allocation.
     Pi(TermRef<'a>, TermRef<'a>),
+
+    /// A lambda value: fun (x : input) => body.
+    /// Both input and body are borrowed slices - no allocation.
+    Lambda(TermRef<'a>, TermRef<'a>),
 }
 
 /// A borrowed reference to a term - wraps a slice of components.
@@ -84,7 +94,8 @@ impl<'a> TermRef<'a> {
         if self.components.len() > 1 {
             match self.components[0] {
                 TermComponent::Application { right_offset }
-                | TermComponent::Pi { right_offset } => {
+                | TermComponent::Pi { right_offset }
+                | TermComponent::Lambda { right_offset } => {
                     debug_assert!(
                         right_offset >= 2 && (right_offset as usize) < self.components.len(),
                         "to_owned: invalid right_offset {} for len {}",
@@ -93,7 +104,7 @@ impl<'a> TermRef<'a> {
                     );
                 }
                 _ => panic!(
-                    "to_owned: non-atomic term should start with Application or Pi, got: {:?}",
+                    "to_owned: non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
                     self.components
                 ),
             }
@@ -120,6 +131,10 @@ impl<'a> TermRef<'a> {
                     // For Pi types, the head atom is the input type's head atom
                     pos += 1;
                 }
+                TermComponent::Lambda { .. } => {
+                    // For Lambda values, the head atom is the input type's head atom
+                    pos += 1;
+                }
             }
         }
     }
@@ -135,12 +150,13 @@ impl<'a> TermRef<'a> {
     /// - `Decomposition::Atom(&atom)` if the term is atomic
     /// - `Decomposition::Application(func, arg)` if the term is an application
     /// - `Decomposition::Pi(input, output)` if the term is a Pi type
+    /// - `Decomposition::Lambda(input, body)` if the term is a lambda value
     ///
     /// All returned references are borrowed slices - no allocation needed.
     /// This provides a cleaner way to write recursive algorithms on terms
     /// by pattern matching on the structure rather than checking multiple conditions.
     pub fn decompose(&self) -> Decomposition<'a> {
-        // Handle atomic terms (single Atom, no Application/Pi wrapper)
+        // Handle atomic terms (single Atom, no Application/Pi/Lambda wrapper)
         if self.components.len() == 1 {
             let atom = match &self.components[0] {
                 TermComponent::Atom(atom) => atom,
@@ -149,7 +165,7 @@ impl<'a> TermRef<'a> {
             return Decomposition::Atom(atom);
         }
 
-        // Non-atomic terms start with Application or Pi
+        // Non-atomic terms start with Application, Pi, or Lambda
         match self.components[0] {
             TermComponent::Application { right_offset } => {
                 // Left child (func) starts at position 1, ends at right_offset
@@ -169,8 +185,17 @@ impl<'a> TermRef<'a> {
 
                 Decomposition::Pi(input, output)
             }
+            TermComponent::Lambda { right_offset } => {
+                // Left child (input type) starts at position 1, ends at right_offset
+                let input = TermRef::new(&self.components[1..right_offset as usize]);
+
+                // Right child (body) starts at right_offset, extends to end of slice
+                let body = TermRef::new(&self.components[right_offset as usize..]);
+
+                Decomposition::Lambda(input, body)
+            }
             TermComponent::Atom(_) => panic!(
-                "non-atomic term should start with Application or Pi, got: {:?}",
+                "non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
                 self.components
             ),
         }
@@ -193,6 +218,11 @@ impl<'a> TermRef<'a> {
         matches!(self.components.first(), Some(TermComponent::Pi { .. }))
     }
 
+    /// Check if this term is a Lambda value.
+    pub fn is_lambda(&self) -> bool {
+        matches!(self.components.first(), Some(TermComponent::Lambda { .. }))
+    }
+
     /// Split a Pi type into (input_type, output_type).
     /// Returns None if the term is not a Pi type.
     ///
@@ -200,6 +230,15 @@ impl<'a> TermRef<'a> {
     pub fn split_pi(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
         match self.decompose() {
             Decomposition::Pi(input, output) => Some((input, output)),
+            _ => None,
+        }
+    }
+
+    /// Split a Lambda value into (input_type, body).
+    /// Returns None if the term is not a Lambda.
+    pub fn split_lambda(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
+        match self.decompose() {
+            Decomposition::Lambda(input, body) => Some((input, body)),
             _ => None,
         }
     }
@@ -375,6 +414,9 @@ impl<'a> TermRef<'a> {
                 // Pi types are themselves types - this is used when the term IS a type
                 // Return the Type kind
                 Term::type_sort()
+            }
+            Decomposition::Lambda(_, _) => {
+                panic!("Lambda terms should not reach get_type_with_context before normalization")
             }
         };
         result.validate();
@@ -556,6 +598,10 @@ impl<'a> TermRef<'a> {
                 }
                 TermComponent::Pi { .. } => {
                     // Pi types contribute to weight like Application
+                    weight1 += 1;
+                }
+                TermComponent::Lambda { .. } => {
+                    // Lambda nodes contribute similarly to Pi nodes
                     weight1 += 1;
                 }
                 TermComponent::Atom(Atom::Symbol(Symbol::True))
@@ -788,6 +834,11 @@ fn format_term_at(f: &mut fmt::Formatter, components: &[TermComponent], pos: usi
             let end = find_subterm_end_at(components, pos);
             format_pi_contents(f, components, pos + 1, end)
         }
+        TermComponent::Lambda { .. } => {
+            // Lambda value: format as lambda(input => body)
+            let end = find_subterm_end_at(components, pos);
+            format_lambda_contents(f, components, pos + 1, end)
+        }
     }
 }
 
@@ -869,7 +920,7 @@ fn format_application_contents(
                 current_start = inner_func_start;
                 current_end = inner_arg_start;
             }
-            TermComponent::Pi { .. } => {
+            TermComponent::Pi { .. } | TermComponent::Lambda { .. } => {
                 return Err(fmt::Error);
             }
         }
@@ -913,10 +964,34 @@ fn format_pi_contents(
     write!(f, ")")
 }
 
+/// Format the contents of a Lambda value (input => body) from start to end.
+fn format_lambda_contents(
+    f: &mut fmt::Formatter,
+    components: &[TermComponent],
+    start: usize,
+    end: usize,
+) -> fmt::Result {
+    if start >= end {
+        return Ok(());
+    }
+
+    // Find where the input type ends
+    let input_end = find_subterm_end_at(components, start);
+    let body_start = input_end;
+
+    write!(f, "lambda(")?;
+    format_term_slice(f, components, start, input_end)?;
+    write!(f, " => ")?;
+    format_term_slice(f, components, body_start, end)?;
+    write!(f, ")")
+}
+
 /// Find the end position of a subterm starting at `start` in a components slice.
 fn find_subterm_end_at(components: &[TermComponent], start: usize) -> usize {
     match components[start] {
-        TermComponent::Pi { right_offset } | TermComponent::Application { right_offset } => {
+        TermComponent::Pi { right_offset }
+        | TermComponent::Application { right_offset }
+        | TermComponent::Lambda { right_offset } => {
             // Right child starts at start + right_offset, recursively find its end
             find_subterm_end_at(components, start + right_offset as usize)
         }
@@ -947,6 +1022,7 @@ fn format_term_slice(
             Ok(())
         }
         TermComponent::Pi { .. } => format_pi_contents(f, components, start + 1, end),
+        TermComponent::Lambda { .. } => format_lambda_contents(f, components, start + 1, end),
     }
 }
 
@@ -972,82 +1048,12 @@ impl Term {
     ///   f(a, b) becomes [App{5}, App{3}, f, a, b]
     /// where the inner App{3} represents f(a), and the outer applies that to b.
     pub fn new(head: Atom, args: Vec<Term>) -> Term {
-        if args.is_empty() {
-            return Term {
-                components: vec![TermComponent::Atom(head)],
-            };
-        }
-
-        // Build nested applications from left to right (curried form)
-        // f(a, b, c) = ((f a) b) c
-        // Start with the head atom
-        let mut func_components: Vec<TermComponent> = vec![TermComponent::Atom(head)];
-
-        for (i, arg) in args.iter().enumerate() {
-            if arg.components.is_empty() {
-                panic!("Term::new: arg {} is empty", i);
-            }
-
-            // Calculate sizes
-            let func_len = func_components.len();
-            let arg_len = arg.components.len();
-
-            // Build new application: [Application{right_offset}, func_components..., arg_components...]
-            // But we need to handle the func_components - if it's just an atom, no wrapper needed inside
-            // If it already has components > 1, we need to wrap it in Application
-            let mut new_components = Vec::with_capacity(1 + func_len + arg_len + 1);
-
-            // right_offset = 1 + func_len (marker + left child = position of right child)
-            let right_offset = (1 + func_len) as u16;
-
-            // Outer Application for the whole thing
-            new_components.push(TermComponent::Application { right_offset });
-
-            // Add the func part (left child)
-            if func_len == 1 {
-                // Atomic func - just add it directly
-                new_components.extend(func_components.iter().copied());
-            } else {
-                // Non-atomic func - must be a compound term (Application or Pi)
-                match func_components[0] {
-                    TermComponent::Application { .. } | TermComponent::Pi { .. } => {
-                        new_components.extend(func_components.iter().copied());
-                    }
-                    _ => panic!(
-                        "Term::new: non-atomic func should start with Application or Pi: {:?}",
-                        func_components
-                    ),
-                }
-            }
-
-            // Add the argument (right child)
-            if arg_len == 1 {
-                // Atomic argument
-                new_components.push(arg.components[0]);
-            } else {
-                // Compound argument - must be a compound term (Application or Pi)
-                match arg.components[0] {
-                    TermComponent::Application { .. } | TermComponent::Pi { .. } => {
-                        new_components.extend(arg.components.iter().copied());
-                    }
-                    _ => panic!(
-                        "Term::new: non-atomic arg {} should start with Application or Pi: {:?}",
-                        i, arg.components
-                    ),
-                }
-            }
-
-            func_components = new_components;
-        }
-
-        Term {
-            components: func_components,
-        }
+        Term::atom(head).apply(&args)
     }
 
     /// Create a new Term from a vector of components.
     /// Atomic terms have a single Atom component.
-    /// Non-atomic terms start with an Application or Pi marker containing right_offset.
+    /// Non-atomic terms start with an Application, Pi, or Lambda marker containing right_offset.
     fn from_components(components: Vec<TermComponent>) -> Term {
         if components.is_empty() {
             panic!("from_components: empty components");
@@ -1086,11 +1092,26 @@ impl Term {
                     );
                 }
             }
+            TermComponent::Lambda { right_offset } => {
+                // Lambda value: must have at least input type and body
+                if components.len() < 3 {
+                    panic!(
+                        "from_components: Lambda at start but not enough content. Components: {:?}",
+                        components
+                    );
+                }
+                if right_offset < 2 || right_offset as usize >= components.len() {
+                    panic!(
+                        "from_components: outer Lambda has invalid right_offset {} for len {}. Components: {:?}",
+                        right_offset, components.len(), components
+                    );
+                }
+            }
             TermComponent::Atom(_) => {
                 // Atomic term (len must be 1)
                 if components.len() != 1 {
                     panic!(
-                        "from_components: non-atomic term should start with Application or Pi, got: {:?}",
+                        "from_components: non-atomic term should start with Application, Pi, or Lambda, got: {:?}",
                         components
                     );
                 }
@@ -1102,7 +1123,8 @@ impl Term {
             fn check_subterm(components: &[TermComponent], start: usize) -> usize {
                 match components[start] {
                     TermComponent::Application { right_offset }
-                    | TermComponent::Pi { right_offset } => {
+                    | TermComponent::Pi { right_offset }
+                    | TermComponent::Lambda { right_offset } => {
                         let right_start = start + right_offset as usize;
                         if right_start >= components.len() {
                             panic!(
@@ -1145,6 +1167,25 @@ impl Term {
         components.extend(input.components);
         components.extend(output.components);
         Term { components }
+    }
+
+    /// Create a Lambda value `fun (x : input) => body`.
+    pub fn lambda(input: Term, body: Term) -> Term {
+        // right_offset points to where the body starts (after the marker and input type)
+        let right_offset = (1 + input.components.len()) as u16;
+        let mut components = vec![TermComponent::Lambda { right_offset }];
+        components.extend(input.components);
+        components.extend(body.components);
+        Term { components }
+    }
+
+    /// Create nested lambda values for multiple arguments.
+    /// The last entry in `arg_types` is the innermost binder.
+    pub fn lambda_multi(arg_types: Vec<Term>, body: Term) -> Term {
+        arg_types
+            .into_iter()
+            .rev()
+            .fold(body, |acc, arg_type| Term::lambda(arg_type, acc))
     }
 
     /// Create an Application term with a head and multiple arguments.
@@ -1282,7 +1323,8 @@ impl Term {
             }
             match components[start] {
                 TermComponent::Application { right_offset }
-                | TermComponent::Pi { right_offset } => {
+                | TermComponent::Pi { right_offset }
+                | TermComponent::Lambda { right_offset } => {
                     let right_start = start + right_offset as usize;
                     if right_start >= components.len() {
                         return None;
@@ -1303,7 +1345,8 @@ impl Term {
         if self.components.len() > 1 {
             match self.components[0] {
                 TermComponent::Application { right_offset }
-                | TermComponent::Pi { right_offset } => {
+                | TermComponent::Pi { right_offset }
+                | TermComponent::Lambda { right_offset } => {
                     if right_offset < 2 || right_offset as usize >= self.components.len() {
                         return false;
                     }
@@ -1386,10 +1429,13 @@ impl Term {
     pub fn as_ref(&self) -> TermRef<'_> {
         // Debug validation
         #[cfg(debug_assertions)]
-        if let TermComponent::Application { right_offset } = self.components[0] {
+        if let TermComponent::Application { right_offset }
+        | TermComponent::Pi { right_offset }
+        | TermComponent::Lambda { right_offset } = self.components[0]
+        {
             if right_offset < 2 || right_offset as usize >= self.components.len() {
                 panic!(
-                    "as_ref: Term has Application at start with invalid right_offset {} for len {}. Components: {:?}",
+                    "as_ref: Term has malformed top-level marker with right_offset {} for len {}. Components: {:?}",
                     right_offset, self.components.len(), self.components
                 );
             }
@@ -1410,6 +1456,10 @@ impl Term {
                 }
                 TermComponent::Pi { .. } => {
                     // For Pi types, the head atom is the input type's head atom
+                    pos += 1;
+                }
+                TermComponent::Lambda { .. } => {
+                    // For Lambda values, the head atom is the input type's head atom
                     pos += 1;
                 }
             }
@@ -1616,6 +1666,16 @@ impl Term {
                 // Rebuild the Pi type
                 Term::pi(new_input, new_output)
             }
+            Decomposition::Lambda(input_ref, body_ref) => {
+                // Recursively replace in lambda input type and body
+                let input = input_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                let new_input = input.replace_variable_impl(id, value);
+                let new_body = body.replace_variable_impl(id, value);
+
+                Term::lambda(new_input, new_body)
+            }
         }
     }
 
@@ -1747,6 +1807,15 @@ impl Term {
                     .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
                 Term::pi(new_input, new_output)
             }
+            Decomposition::Lambda(input, body) => {
+                let new_input = input
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                let new_body = body
+                    .to_owned()
+                    .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
+                Term::lambda(new_input, new_body)
+            }
         }
     }
 
@@ -1849,14 +1918,17 @@ impl Term {
         if args.is_empty() {
             return self.clone();
         }
-
-        // Get existing args and combine with new args
-        let existing_args = self.args();
-        let mut all_args = existing_args;
-        all_args.extend(args.iter().cloned());
-
-        // Use Term::new to build the result with proper Application wrapper
-        Term::new(*self.get_head_atom(), all_args)
+        let mut result = self.clone();
+        for arg in args {
+            let right_offset = (1 + result.components.len()) as u16;
+            let mut components =
+                Vec::with_capacity(1 + result.components.len() + arg.components.len());
+            components.push(TermComponent::Application { right_offset });
+            components.extend(result.components.iter().copied());
+            components.extend(arg.components.iter().copied());
+            result = Term::from_components(components);
+        }
+        result
     }
 
     /// Build a term from a spine (function + arguments).
@@ -1871,12 +1943,7 @@ impl Term {
             spine.pop().unwrap()
         } else {
             let func = spine.remove(0);
-            let func_args = func.args();
-            let mut all_args = func_args;
-            all_args.extend(spine);
-
-            // Use Term::new to build the result with proper Application wrapper
-            Term::new(*func.get_head_atom(), all_args)
+            func.apply(&spine)
         }
     }
 
@@ -2033,6 +2100,12 @@ impl Term {
                         .to_owned()
                         .has_escaping_bound_variable_at_depth(depth + 1)
             }
+            Decomposition::Lambda(input, body) => {
+                input.to_owned().has_escaping_bound_variable_at_depth(depth)
+                    || body
+                        .to_owned()
+                        .has_escaping_bound_variable_at_depth(depth + 1)
+            }
         }
     }
 
@@ -2084,6 +2157,17 @@ impl Term {
 
                 Term::pi(new_input, new_output)
             }
+            Decomposition::Lambda(input_ref, body_ref) => {
+                let input = input_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Substitute in input type
+                let new_input = input.substitute_bound_impl(index, replacement);
+                // In the body, bound variables are shifted by 1 due to lambda binder
+                let new_body = body.substitute_bound_impl(index + 1, replacement);
+
+                Term::lambda(new_input, new_body)
+            }
         }
     }
 
@@ -2133,6 +2217,17 @@ impl Term {
 
                 Term::pi(new_input, new_output)
             }
+            Decomposition::Lambda(input_ref, body_ref) => {
+                let input = input_ref.to_owned();
+                let body = body_ref.to_owned();
+
+                // Shift in input type
+                let new_input = input.shift_bound_impl(cutoff, amount);
+                // In the body, the cutoff increases by 1 (we're under a binder)
+                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+
+                Term::lambda(new_input, new_body)
+            }
         }
     }
 
@@ -2160,6 +2255,13 @@ impl Term {
                 let new_input = input.replace_subterm(old, new);
                 let new_output = output.replace_subterm(old, new);
                 Term::pi(new_input, new_output)
+            }
+            Decomposition::Lambda(input_ref, body_ref) => {
+                let input = input_ref.to_owned();
+                let body = body_ref.to_owned();
+                let new_input = input.replace_subterm(old, new);
+                let new_body = body.replace_subterm(old, new);
+                Term::lambda(new_input, new_body)
             }
         }
     }
@@ -2229,6 +2331,15 @@ impl Term {
                 // Output is one level deeper due to the Pi's binder
                 let new_output = output.convert_free_to_bound_at_depth(num_type_params, depth + 1);
                 Term::pi(new_input, new_output)
+            }
+            Decomposition::Lambda(input_ref, body_ref) => {
+                let input = input_ref.to_owned();
+                let body = body_ref.to_owned();
+                // Input type is at the same depth
+                let new_input = input.convert_free_to_bound_at_depth(num_type_params, depth);
+                // Body is one level deeper due to the Lambda binder
+                let new_body = body.convert_free_to_bound_at_depth(num_type_params, depth + 1);
+                Term::lambda(new_input, new_body)
             }
         };
         result
@@ -2438,6 +2549,20 @@ mod tests {
     }
 
     #[test]
+    fn test_lambda_decomposition_and_display() {
+        let lambda = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+        assert!(lambda.as_ref().is_lambda());
+
+        let (input, body) = lambda
+            .as_ref()
+            .split_lambda()
+            .expect("expected lambda split");
+        assert_eq!(format!("{}", input), "Bool");
+        assert_eq!(format!("{}", body), "b0");
+        assert_eq!(format!("{}", lambda), "lambda(Bool => b0)");
+    }
+
+    #[test]
     fn test_substitute_bound_simple() {
         // Replace b0 with c0
         let term = Term::parse("b0");
@@ -2459,6 +2584,20 @@ mod tests {
         // Should get c0(b0, c2)
         let result2 = term.substitute_bound(1, &replacement);
         assert_eq!(format!("{}", result2), "c0(b0, c1)");
+    }
+
+    #[test]
+    fn test_substitute_bound_in_lambda_respects_binder() {
+        // lambda(Bool => b0) binds b0 locally, so substituting index 0 should not change body.
+        let lambda = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+        let replacement = Term::parse("c0");
+        let result = lambda.substitute_bound(0, &replacement);
+        assert_eq!(format!("{}", result), "lambda(Bool => b0)");
+
+        // b1 in lambda body refers to the outer binder at index 0, so it should be replaced.
+        let lambda_outer = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
+        let result_outer = lambda_outer.substitute_bound(0, &replacement);
+        assert_eq!(format!("{}", result_outer), "lambda(Bool => c0)");
     }
 
     #[test]

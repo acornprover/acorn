@@ -157,6 +157,21 @@ impl VariableMap {
                     kernel_context,
                 )
             }
+            (Decomposition::Lambda(g_input, g_body), Decomposition::Lambda(s_input, s_body)) => {
+                self.match_terms(
+                    g_input,
+                    s_input,
+                    general_context,
+                    special_context,
+                    kernel_context,
+                ) && self.match_terms(
+                    g_body,
+                    s_body,
+                    general_context,
+                    special_context,
+                    kernel_context,
+                )
+            }
             // Atom vs Application mismatch
             _ => false,
         }
@@ -264,6 +279,13 @@ impl VariableMap {
                 let specialized_output =
                     self.specialize_term(output, input_context, output_context, kernel_context);
                 Term::pi(specialized_input, specialized_output)
+            }
+            Decomposition::Lambda(input, body) => {
+                let specialized_input =
+                    self.specialize_term(input, input_context, output_context, kernel_context);
+                let specialized_body =
+                    self.specialize_term(body, input_context, output_context, kernel_context);
+                Term::lambda(specialized_input, specialized_body)
             }
         }
     }
@@ -412,6 +434,11 @@ pub fn apply_to_term(term: TermRef, map: &VariableMap) -> Term {
             let new_input = apply_to_term(input, map);
             let new_output = apply_to_term(output, map);
             Term::pi(new_input, new_output)
+        }
+        Decomposition::Lambda(input, body) => {
+            let new_input = apply_to_term(input, map);
+            let new_body = apply_to_term(body, map);
+            Term::lambda(new_input, new_body)
         }
     }
 }

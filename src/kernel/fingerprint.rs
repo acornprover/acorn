@@ -150,6 +150,7 @@ fn get_type_category(
             TypeCategory::from_type_ref(current_type)
         }
         Decomposition::Pi(_, _) => TypeCategory::Type0,
+        Decomposition::Lambda(_, _) => TypeCategory::Variable,
     }
 }
 
@@ -165,6 +166,7 @@ fn get_head_and_arg_count(term: TermRef<'_>) -> (&Atom, usize) {
             }
             Decomposition::Atom(atom) => return (atom, count),
             Decomposition::Pi(_, _) => return (&Atom::FreeVariable(0), count),
+            Decomposition::Lambda(_, _) => return (&Atom::FreeVariable(0), count),
         }
     }
 }

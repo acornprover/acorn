@@ -108,9 +108,9 @@ enum Decomposition {
     // For f(a, b, c), this is stored as ((((f) a) b) c)
     Application(TermId, TermId),
 
-    // Pi type (function type), treated as an opaque atom.
-    // Not used for structural equality reasoning - just stores the marker.
-    Pi,
+    // Opaque term marker for terms not structurally decomposed by the e-graph.
+    // Currently includes Pi types and Lambda values.
+    Opaque,
 }
 
 #[derive(Clone)]
@@ -293,9 +293,9 @@ pub struct EqualityGraph {
     // But there is a chain of rewrites that proves that they are equal. This is a contradiction.
     contradiction_info: Option<(TermId, TermId, StepId)>,
 
-    // Maps Pi types (function types) to their TermIds.
-    // Pi types are treated as opaque atoms - we don't decompose them structurally.
-    pi_map: HashMap<Term, TermId>,
+    // Maps opaque terms to their TermIds.
+    // Opaque terms are treated as atoms - we don't decompose them structurally.
+    opaque_map: HashMap<Term, TermId>,
 }
 
 impl Default for EqualityGraph {
@@ -316,7 +316,7 @@ impl EqualityGraph {
             pending: Vec::new(),
             has_contradiction: false,
             contradiction_info: None,
-            pi_map: HashMap::new(),
+            opaque_map: HashMap::new(),
         }
     }
 
@@ -335,8 +335,12 @@ impl EqualityGraph {
                 self.decompositions.get(&key).copied()
             }
             TermDecomposition::Pi(_, _) => {
-                // Pi types are looked up in pi_map
-                self.pi_map.get(term).copied()
+                // Pi types are treated as opaque terms
+                self.opaque_map.get(term).copied()
+            }
+            TermDecomposition::Lambda(_, _) => {
+                // Lambda terms are currently treated as opaque terms.
+                self.opaque_map.get(term).copied()
             }
         }
     }
@@ -452,11 +456,11 @@ impl EqualityGraph {
         term_id
     }
 
-    // Inserts a Pi type (function type) into the graph.
-    // Pi types are treated as opaque atoms - no structural decomposition.
-    // Uses pi_map for lookup to ensure identical Pi types get the same TermId.
-    fn insert_pi(&mut self, pi_term: Term) -> TermId {
-        if let Some(&id) = self.pi_map.get(&pi_term) {
+    // Inserts an opaque term into the graph.
+    // Opaque terms are treated as atoms - no structural decomposition.
+    // Uses opaque_map for lookup to ensure identical opaque terms get the same TermId.
+    fn insert_opaque_term(&mut self, opaque_term: Term) -> TermId {
+        if let Some(&id) = self.opaque_map.get(&opaque_term) {
             return id;
         }
 
@@ -464,9 +468,9 @@ impl EqualityGraph {
         let term_id = TermId(self.terms.len() as u32);
         let group_id = GroupId(self.groups.len() as u32);
         let term_info = TermInfo {
-            term: pi_term.clone(),
+            term: opaque_term.clone(),
             group: group_id,
-            decomp: Decomposition::Pi,
+            decomp: Decomposition::Opaque,
             adjacent: vec![],
         };
         self.terms.push(term_info);
@@ -476,7 +480,7 @@ impl EqualityGraph {
             inequalities: HashMap::new(),
         });
         self.groups.push(group_info);
-        self.pi_map.insert(pi_term, term_id);
+        self.opaque_map.insert(opaque_term, term_id);
         term_id
     }
 
@@ -550,7 +554,11 @@ impl EqualityGraph {
             }
             TermDecomposition::Pi(_, _) => {
                 // Pi types are treated as opaque atoms
-                self.insert_pi(term.clone())
+                self.insert_opaque_term(term.clone())
+            }
+            TermDecomposition::Lambda(_, _) => {
+                // Lambda terms are currently treated as opaque atoms.
+                self.insert_opaque_term(term.clone())
             }
         };
         self.process_pending();

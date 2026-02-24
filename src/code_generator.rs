@@ -587,6 +587,22 @@ impl SyntheticNameSet {
                     new_entries,
                 )?;
             }
+            Decomposition::Lambda(input, body) => {
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &input.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
+                self.add_arbitrary_for_term(
+                    bindings,
+                    normalizer,
+                    &body.to_owned(),
+                    local_context,
+                    new_entries,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1044,6 +1060,22 @@ impl CodeGenerator<'_> {
                 ) && Self::infer_type_param_bindings_from_type_pattern(
                     pattern_output,
                     concrete_output,
+                    local_context,
+                    var_map,
+                )
+            }
+            (
+                Decomposition::Lambda(pattern_input, pattern_body),
+                Decomposition::Lambda(concrete_input, concrete_body),
+            ) => {
+                Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_input,
+                    concrete_input,
+                    local_context,
+                    var_map,
+                ) && Self::infer_type_param_bindings_from_type_pattern(
+                    pattern_body,
+                    concrete_body,
                     local_context,
                     var_map,
                 )

@@ -102,6 +102,20 @@ fn extract_type_bindings(
                 return false;
             }
         }
+        Decomposition::Lambda(pattern_input, pattern_body) => {
+            // Pattern type is a lambda - recursively match input and body.
+            if let Decomposition::Lambda(concrete_input, concrete_body) = concrete_type.decompose()
+            {
+                if !extract_type_bindings(pattern_input, concrete_input, bindings) {
+                    return false;
+                }
+                if !extract_type_bindings(pattern_body, concrete_body, bindings) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
         Decomposition::Atom(pattern_atom) => {
             // Pattern type is a concrete atom (not a variable)
             // It must match the concrete type exactly, with one exception:
