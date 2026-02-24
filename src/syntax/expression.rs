@@ -1035,6 +1035,16 @@ fn parse_partial_expressions(
             }
 
             TokenType::Match => {
+                // In dot position, allow `match` as an attribute name (e.g. `Foo.match(...)`).
+                // Otherwise, parse it as a match expression.
+                if matches!(
+                    partials.back(),
+                    Some(PartialExpression::Binary(op)) if op.token_type == TokenType::Dot
+                ) {
+                    partials.push_back(PartialExpression::Expression(Expression::Singleton(token)));
+                    continue;
+                }
+
                 if expected_type != ExpressionType::Value {
                     return Err(token.error("'match' cannot be used here"));
                 }
@@ -1760,6 +1770,8 @@ mod tests {
         check_value("(a + b).c");
         check_value("a.b.c = Foo.bar(baz).qux");
         check_value("Rat.constraint(a, b)");
+        check_value("Foo.match(a)");
+        check_value("x.match");
     }
 
     #[test]
