@@ -456,6 +456,7 @@ fn test_unwrapping_new_option() {
         none
     }
 
+    // TODO: move this after FooNat once empty constrained types are allowed
     axiom foo_zero {
         foo(zero)
     }
@@ -469,6 +470,42 @@ fn test_unwrapping_new_option() {
     let Option.some(bar) = FooNat.new_option(zero)
     "#;
     verify_succeeds(text);
+}
+
+#[test]
+fn test_skolem_should_not_demonstrate_inhabitedness() {
+    let text = r#"
+
+    inductive Option[T] {
+        some(T)
+        none
+    }
+
+    structure Foo[T] {
+        item: T
+    }
+
+    let bar[T]: T -> Bool = axiom
+    let baz[T]: Foo[T] -> Bool = axiom
+
+    // This axiom doesn't mean much, for example it's trivially true if bar is always false.
+    // The bug is that normalizing it can accidentally introduce a Foo[T] inhabitant. 
+    axiom ax1[T] {
+        exists(t: T) {
+            bar(t)
+        } implies exists(f: Foo[T]) {
+            baz(f)
+        }
+    }
+
+    // This should not be provable. It is not true that a Foo[T] exists for all T.
+    theorem goal[T] {
+        exists(f: Foo[T]) {
+            true
+        }
+    }
+    "#;
+    verify_fails(text);
 }
 
 // This test exercises bugs where structures with methods containing

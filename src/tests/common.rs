@@ -3,9 +3,23 @@ use crate::module::LoadState;
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
+use std::sync::Once;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+static TEST_TRACING_INIT: Once = Once::new();
+
+fn init_test_tracing() {
+    TEST_TRACING_INIT.call_once(|| {
+        let _ = tracing_subscriber::registry()
+            .with(fmt::layer().with_ansi(false).without_time())
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
+            .try_init();
+    });
+}
 
 /// Expects the proof to succeed, and a valid concrete proof to be generated.
 pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certificate {
+    init_test_tracing();
     let module_id = project
         .load_module_by_name(module_name)
         .expect("load failed");
@@ -47,6 +61,7 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
 
 // Does one proof on the provided text for a specific goal.
 pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
+    init_test_tracing();
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
@@ -81,6 +96,7 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
 
 // Verifies all the goals in the provided text, returning any non-Success outcome.
 pub fn verify(text: &str) -> Result<Outcome, String> {
+    init_test_tracing();
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
@@ -174,6 +190,7 @@ pub fn verify_fails(text: &str) {
 /// Verifies a single goal by name in the provided text.
 /// Returns the outcome of the search, and panics if cert generation/checking fails.
 pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
+    init_test_tracing();
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
