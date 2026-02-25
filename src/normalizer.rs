@@ -2550,23 +2550,56 @@ impl Normalizer {
 
         let mut type_args: Vec<AcornType> = vec![];
         let mut value_args: Vec<AcornValue> = vec![];
+        let mut remaining_head_type = head_type.clone();
+
+        fn is_syntactic_type_term(term: &Term, local_context: &LocalContext) -> bool {
+            fn go(term: crate::kernel::term::TermRef<'_>, local_context: &LocalContext) -> bool {
+                use crate::kernel::term::Decomposition;
+                match term.decompose() {
+                    Decomposition::Atom(atom) => match atom {
+                        Atom::Symbol(Symbol::Type(_))
+                        | Atom::Symbol(Symbol::Bool)
+                        | Atom::Symbol(Symbol::Empty)
+                        | Atom::Symbol(Symbol::Type0)
+                        | Atom::Symbol(Symbol::Typeclass(_)) => true,
+                        Atom::FreeVariable(i) => local_context
+                            .get_var_type(*i as usize)
+                            .is_some_and(|t| t.as_ref().is_type_param_kind()),
+                        Atom::BoundVariable(_) => false,
+                        _ => false,
+                    },
+                    Decomposition::Application(func, arg) => {
+                        go(func, local_context) && go(arg, local_context)
+                    }
+                    Decomposition::Pi(_, _) => true,
+                    Decomposition::Lambda(_, _)
+                    | Decomposition::ForAll(_, _)
+                    | Decomposition::Exists(_, _) => false,
+                }
+            }
+            go(term.as_ref(), local_context)
+        }
 
         for arg in term.args().iter() {
-            let arg_type = arg.get_type_with_context(local_context, &self.kernel_context);
-            // TypeSort is for unconstrained type params, Typeclass is for constrained type params
-            if arg_type.as_ref().is_type_param_kind() {
+            // Classify arguments from the function type spine instead of arg.get_type_with_context().
+            // This avoids panicking on lambda arguments (their type is not inferable this late).
+            let expected_input_type = remaining_head_type
+                .as_ref()
+                .split_pi()
+                .map(|(input, _)| input.to_owned());
+            let is_type_arg = expected_input_type
+                .as_ref()
+                .is_some_and(|input| input.as_ref().is_type_param_kind())
+                && is_syntactic_type_term(arg, local_context);
+
+            if is_type_arg {
                 // This is a type argument - convert it to an AcornType
-                // Extract the typeclass constraint from arg_type if it's a Typeclass
-                let typeclass = if let Atom::Symbol(Symbol::Typeclass(tc_id)) =
-                    arg_type.as_ref().get_head_atom()
-                {
-                    self.kernel_context
-                        .type_store
-                        .get_typeclass_by_id(*tc_id)
-                        .cloned()
-                } else {
-                    None
-                };
+                // Extract the typeclass constraint from the expected input kind.
+                let typeclass = expected_input_type
+                    .as_ref()
+                    .and_then(|input| input.as_ref().as_typeclass())
+                    .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                    .cloned();
                 // If it's a FreeVariable and we have a name mapping, use the proper name
                 let acorn_type = if let Some(var_id) = arg.as_ref().atomic_variable() {
                     if let Some(name) = type_var_id_to_name.and_then(|m| m.get(&var_id)) {
@@ -2604,6 +2637,10 @@ impl Normalizer {
                     type_var_id_to_name,
                     instantiate_type_vars,
                 ));
+            }
+
+            if let Some(next_type) = remaining_head_type.type_apply_with_arg(arg) {
+                remaining_head_type = next_type;
             }
         }
 

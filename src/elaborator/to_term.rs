@@ -1284,7 +1284,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known denormalization gap: eliminator applications with lambda args"]
     fn test_parity_roundtrip_match_value_in_context() {
         let nat = Datatype {
             module_id: ModuleId(0),
