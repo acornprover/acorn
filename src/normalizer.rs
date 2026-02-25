@@ -2385,6 +2385,114 @@ impl Normalizer {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
+        match term.as_ref().decompose() {
+            crate::kernel::term::Decomposition::Lambda(input, body) => {
+                let input_term = input.to_owned();
+                let input_type = self
+                    .kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_context(
+                        &input_term,
+                        local_context,
+                        instantiate_type_vars,
+                    );
+
+                let mut next_context = local_context.clone();
+                let fresh_var = next_context.push_type(input_term) as AtomId;
+                let opened_body = body
+                    .to_owned()
+                    .substitute_bound(0, &Term::new_variable(fresh_var))
+                    .shift_bound(0, -1);
+                let body_value = self.denormalize_term(
+                    &opened_body,
+                    &next_context,
+                    arbitrary_names,
+                    var_remapping,
+                    type_param_names,
+                    type_var_id_to_name,
+                    instantiate_type_vars,
+                );
+                return match body_value {
+                    AcornValue::Lambda(mut args, body) => {
+                        args.insert(0, input_type);
+                        AcornValue::Lambda(args, body)
+                    }
+                    other => AcornValue::Lambda(vec![input_type], Box::new(other)),
+                };
+            }
+            crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
+                let binder_type_term = binder_type.to_owned();
+                let binder_acorn_type = self
+                    .kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_context(
+                        &binder_type_term,
+                        local_context,
+                        instantiate_type_vars,
+                    );
+
+                let mut next_context = local_context.clone();
+                let fresh_var = next_context.push_type(binder_type_term) as AtomId;
+                let opened_body = body
+                    .to_owned()
+                    .substitute_bound(0, &Term::new_variable(fresh_var))
+                    .shift_bound(0, -1);
+                let body_value = self.denormalize_term(
+                    &opened_body,
+                    &next_context,
+                    arbitrary_names,
+                    var_remapping,
+                    type_param_names,
+                    type_var_id_to_name,
+                    instantiate_type_vars,
+                );
+                return match body_value {
+                    AcornValue::ForAll(mut quants, body) => {
+                        quants.insert(0, binder_acorn_type);
+                        AcornValue::ForAll(quants, body)
+                    }
+                    other => AcornValue::ForAll(vec![binder_acorn_type], Box::new(other)),
+                };
+            }
+            crate::kernel::term::Decomposition::Exists(binder_type, body) => {
+                let binder_type_term = binder_type.to_owned();
+                let binder_acorn_type = self
+                    .kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_context(
+                        &binder_type_term,
+                        local_context,
+                        instantiate_type_vars,
+                    );
+
+                let mut next_context = local_context.clone();
+                let fresh_var = next_context.push_type(binder_type_term) as AtomId;
+                let opened_body = body
+                    .to_owned()
+                    .substitute_bound(0, &Term::new_variable(fresh_var))
+                    .shift_bound(0, -1);
+                let body_value = self.denormalize_term(
+                    &opened_body,
+                    &next_context,
+                    arbitrary_names,
+                    var_remapping,
+                    type_param_names,
+                    type_var_id_to_name,
+                    instantiate_type_vars,
+                );
+                return match body_value {
+                    AcornValue::Exists(mut quants, body) => {
+                        quants.insert(0, binder_acorn_type);
+                        AcornValue::Exists(quants, body)
+                    }
+                    other => AcornValue::Exists(vec![binder_acorn_type], Box::new(other)),
+                };
+            }
+            crate::kernel::term::Decomposition::Atom(_)
+            | crate::kernel::term::Decomposition::Application(_, _)
+            | crate::kernel::term::Decomposition::Pi(_, _) => {}
+        }
+
         let logical_head_symbol = match term.get_head_atom() {
             Atom::Symbol(Symbol::Not) => Some(Symbol::Not),
             Atom::Symbol(Symbol::And) => Some(Symbol::And),
@@ -2420,13 +2528,18 @@ impl Normalizer {
             return AcornValue::Bool(true);
         }
 
-        let head = self.denormalize_atom(
-            &head_type,
-            &term.get_head_atom(),
-            arbitrary_names,
-            var_remapping,
-            type_param_names,
-            type_var_id_to_name,
+        let head = logical_head_symbol.map_or_else(
+            || {
+                Some(self.denormalize_atom(
+                    &head_type,
+                    &term.get_head_atom(),
+                    arbitrary_names,
+                    var_remapping,
+                    type_param_names,
+                    type_var_id_to_name,
+                ))
+            },
+            |_| None,
         );
 
         // Type arguments appear as the first few arguments.
@@ -2540,7 +2653,9 @@ impl Normalizer {
             }
         }
 
-        // Update the head with type parameters if needed
+        let head = head.expect("non-logical terms should have a denormalized head");
+
+        // Update the head with type parameters if needed.
         let head = if !type_args.is_empty() {
             match head {
                 AcornValue::Constant(c) => {
