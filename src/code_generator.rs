@@ -7,7 +7,7 @@ use crate::elaborator::acorn_type::{
     AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
 };
 use crate::elaborator::acorn_value::{
-    AcornValue, BinaryOp, ConstantInstance, TypeApplication as ValueTypeApplication,
+    AcornValue, BinaryOp, ConstantInstance, MatchCase, TypeApplication as ValueTypeApplication,
 };
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
@@ -116,12 +116,12 @@ fn collect_type_var_names_from_value_recursive(value: &AcornValue, names: &mut V
         }
         AcornValue::Match(scrutinee, cases) => {
             collect_type_var_names_from_value_recursive(scrutinee, names);
-            for (bound_types, pattern, result) in cases {
-                for t in bound_types {
+            for case in cases {
+                for t in &case.new_vars {
                     collect_type_var_names_recursive(t, names);
                 }
-                collect_type_var_names_from_value_recursive(pattern, names);
-                collect_type_var_names_from_value_recursive(result, names);
+                collect_type_var_names_from_value_recursive(&case.pattern, names);
+                collect_type_var_names_from_value_recursive(&case.result, names);
             }
         }
         AcornValue::Bool(_) => {}
@@ -352,16 +352,27 @@ fn rename_type_vars_in_value(
                 rename_type_vars_in_value(scrutinee, rename_map, defining_synthetics);
             let new_cases = cases
                 .iter()
-                .map(|(bound_types, pattern, body)| {
-                    let new_bound_types = bound_types
+                .map(|case| {
+                    let new_bound_types = case
+                        .new_vars
                         .iter()
                         .map(|t| rename_type_vars_in_type(t, rename_map))
                         .collect();
-                    (
-                        new_bound_types,
-                        rename_type_vars_in_value(pattern, rename_map, defining_synthetics),
-                        rename_type_vars_in_value(body, rename_map, defining_synthetics),
-                    )
+                    MatchCase {
+                        new_vars: new_bound_types,
+                        pattern: rename_type_vars_in_value(
+                            &case.pattern,
+                            rename_map,
+                            defining_synthetics,
+                        ),
+                        result: rename_type_vars_in_value(
+                            &case.result,
+                            rename_map,
+                            defining_synthetics,
+                        ),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    }
                 })
                 .collect();
             AcornValue::Match(Box::new(new_scrutinee), new_cases)

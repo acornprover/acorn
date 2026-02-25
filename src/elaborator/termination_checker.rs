@@ -116,12 +116,12 @@ impl TerminationChecker {
                     _ => None,
                 };
                 let stack_size = self.substructure_map.len();
-                for (args, pattern, result) in cases {
-                    for _ in args {
+                for case in cases {
+                    for _ in &case.new_vars {
                         self.substructure_map.push(superstructure);
                     }
-                    self.traverse(pattern);
-                    self.traverse(result);
+                    self.traverse(&case.pattern);
+                    self.traverse(&case.result);
                     self.substructure_map.truncate(stack_size);
                 }
             }

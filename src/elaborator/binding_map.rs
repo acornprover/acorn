@@ -2013,9 +2013,9 @@ impl BindingMap {
             }
             AcornValue::Match(scrutinee, cases) => {
                 self.find_unknown_scoped_constants(scrutinee, answer);
-                for (_, pattern, result) in cases {
-                    self.find_unknown_scoped_constants(pattern, answer);
-                    self.find_unknown_scoped_constants(result, answer);
+                for case in cases {
+                    self.find_unknown_scoped_constants(&case.pattern, answer);
+                    self.find_unknown_scoped_constants(&case.result, answer);
                 }
             }
         }

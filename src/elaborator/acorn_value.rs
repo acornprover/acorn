@@ -338,6 +338,22 @@ impl ConstantInstance {
 /// Two AcornValue compare to equal if they are structurally identical.
 /// Comparison doesn't do any evaluations.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct MatchCase {
+    /// Types introduced by this match branch (new pattern-bound variables).
+    pub new_vars: Vec<AcornType>,
+    /// The branch pattern value.
+    pub pattern: AcornValue,
+    /// The branch result value.
+    pub result: AcornValue,
+    /// Constructor index within the matched datatype (constructor order).
+    pub constructor_index: u16,
+    /// Total constructor count for the matched datatype.
+    pub constructor_total: u16,
+}
+
+/// Two AcornValue compare to equal if they are structurally identical.
+/// Comparison doesn't do any evaluations.
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum AcornValue {
     /// A variable that is bound to a value on the stack.
     /// Represented by (stack level, type).
@@ -378,12 +394,8 @@ pub enum AcornValue {
 
     /// The first value is the one being matched (the scrutinee).
     /// The scrutinee needs to be evaluated in the outside context.
-    /// Each triple represents a case. The types express which variables are getting bound,
-    /// the first value is the pattern, and the final value is the result.
-    Match(
-        Box<AcornValue>,
-        Vec<(Vec<AcornType>, AcornValue, AcornValue)>,
-    ),
+    /// Each case includes pattern/result plus constructor metadata for deterministic lowering.
+    Match(Box<AcornValue>, Vec<MatchCase>),
 }
 
 /// An AcornValue has an implicit stack size that determines what index new stack variables
@@ -479,13 +491,13 @@ impl fmt::Display for Subvalue<'_> {
             ),
             AcornValue::Match(scrutinee, cases) => {
                 write!(f, "match {} {{", Subvalue::new(scrutinee, self.stack_size))?;
-                for (new_vars, pattern, result) in cases {
-                    let new_stack_size = self.stack_size + new_vars.len();
+                for case in cases {
+                    let new_stack_size = self.stack_size + case.new_vars.len();
                     write!(
                         f,
                         " {} {{ {} }}",
-                        Subvalue::new(pattern, new_stack_size),
-                        Subvalue::new(result, new_stack_size)
+                        Subvalue::new(&case.pattern, new_stack_size),
+                        Subvalue::new(&case.result, new_stack_size)
                     )?;
                 }
                 write!(f, " }}")
@@ -554,8 +566,8 @@ impl AcornValue {
             AcornValue::Bool(_) => AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.get_type(),
             AcornValue::Match(_, cases) => {
-                if let Some((_, _, result)) = cases.first() {
-                    result.get_type()
+                if let Some(case) = cases.first() {
+                    case.result.get_type()
                 } else {
                     panic!("Match with no cases");
                 }
@@ -584,8 +596,8 @@ impl AcornValue {
             AcornValue::Bool(_) => *t == AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.is_type(t),
             AcornValue::Match(_, cases) => {
-                if let Some((_, _, result)) = cases.first() {
-                    result.is_type(t)
+                if let Some(case) = cases.first() {
+                    case.result.is_type(t)
                 } else {
                     false
                 }
@@ -916,13 +928,23 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.bind_values(first_binding_index, stack_size, values);
                 let new_cases = cases
                     .into_iter()
-                    .map(|(new_vars, pattern, result)| {
-                        let new_stack_size = stack_size + new_vars.len() as AtomId;
-                        (
-                            new_vars,
-                            pattern.bind_values(first_binding_index, new_stack_size, values),
-                            result.bind_values(first_binding_index, new_stack_size, values),
-                        )
+                    .map(|case| {
+                        let new_stack_size = stack_size + case.new_vars.len() as AtomId;
+                        MatchCase {
+                            new_vars: case.new_vars,
+                            pattern: case.pattern.bind_values(
+                                first_binding_index,
+                                new_stack_size,
+                                values,
+                            ),
+                            result: case.result.bind_values(
+                                first_binding_index,
+                                new_stack_size,
+                                values,
+                            ),
+                            constructor_index: case.constructor_index,
+                            constructor_total: case.constructor_total,
+                        }
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -996,12 +1018,12 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.insert_stack(index, increment);
                 let new_cases = cases
                     .into_iter()
-                    .map(|(new_vars, pattern, result)| {
-                        (
-                            new_vars,
-                            pattern.insert_stack(index, increment),
-                            result.insert_stack(index, increment),
-                        )
+                    .map(|case| MatchCase {
+                        new_vars: case.new_vars,
+                        pattern: case.pattern.insert_stack(index, increment),
+                        result: case.result.insert_stack(index, increment),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1075,13 +1097,15 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.expand_lambdas(stack_size);
                 let new_cases = cases
                     .iter()
-                    .map(|(new_vars, pattern, result)| {
-                        let new_stack_size = stack_size + new_vars.len() as AtomId;
-                        (
-                            new_vars.clone(),
-                            pattern.expand_lambdas(new_stack_size),
-                            result.expand_lambdas(new_stack_size),
-                        )
+                    .map(|case| {
+                        let new_stack_size = stack_size + case.new_vars.len() as AtomId;
+                        MatchCase {
+                            new_vars: case.new_vars.clone(),
+                            pattern: case.pattern.expand_lambdas(new_stack_size),
+                            result: case.result.expand_lambdas(new_stack_size),
+                            constructor_index: case.constructor_index,
+                            constructor_total: case.constructor_total,
+                        }
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1178,13 +1202,15 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.replace_constants(stack_size, replacer);
                 let new_cases = cases
                     .iter()
-                    .map(|(new_vars, pattern, result)| {
-                        let new_stack_size = stack_size + new_vars.len() as AtomId;
-                        (
-                            new_vars.clone(),
-                            pattern.replace_constants(new_stack_size, replacer),
-                            result.replace_constants(new_stack_size, replacer),
-                        )
+                    .map(|case| {
+                        let new_stack_size = stack_size + case.new_vars.len() as AtomId;
+                        MatchCase {
+                            new_vars: case.new_vars.clone(),
+                            pattern: case.pattern.replace_constants(new_stack_size, replacer),
+                            result: case.result.replace_constants(new_stack_size, replacer),
+                            constructor_index: case.constructor_index,
+                            constructor_total: case.constructor_total,
+                        }
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1257,11 +1283,11 @@ impl AcornValue {
             }
             AcornValue::Match(scrutinee, cases) => {
                 scrutinee.validate_against_stack(stack)?;
-                for (new_vars, pattern, result) in cases {
+                for case in cases {
                     let original_len = stack.len();
-                    stack.extend(new_vars.iter().cloned());
-                    pattern.validate_against_stack(stack)?;
-                    result.validate_against_stack(stack)?;
+                    stack.extend(case.new_vars.iter().cloned());
+                    case.pattern.validate_against_stack(stack)?;
+                    case.result.validate_against_stack(stack)?;
                     stack.truncate(original_len);
                 }
                 Ok(())
@@ -1379,12 +1405,16 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.instantiate(params);
                 let new_cases = cases
                     .iter()
-                    .map(|(vars, pattern, result)| {
-                        (
-                            vars.iter().map(|t| t.instantiate(params)).collect(),
-                            pattern.instantiate(params),
-                            result.instantiate(params),
-                        )
+                    .map(|case| MatchCase {
+                        new_vars: case
+                            .new_vars
+                            .iter()
+                            .map(|t| t.instantiate(params))
+                            .collect(),
+                        pattern: case.pattern.instantiate(params),
+                        result: case.result.instantiate(params),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1425,7 +1455,7 @@ impl AcornValue {
                 scrutinee.has_generic()
                     || cases
                         .iter()
-                        .any(|(_, pattern, result)| pattern.has_generic() || result.has_generic())
+                        .any(|case| case.pattern.has_generic() || case.result.has_generic())
             }
         }
     }
@@ -1453,9 +1483,9 @@ impl AcornValue {
             AcornValue::Bool(_) => false,
             AcornValue::Match(scrutinee, cases) => {
                 scrutinee.has_arbitrary()
-                    || cases.iter().any(|(_, pattern, result)| {
-                        pattern.has_arbitrary() || result.has_arbitrary()
-                    })
+                    || cases
+                        .iter()
+                        .any(|case| case.pattern.has_arbitrary() || case.result.has_arbitrary())
             }
         }
     }
@@ -1487,9 +1517,9 @@ impl AcornValue {
             }
             AcornValue::Match(scrutinee, cases) => {
                 scrutinee.for_each_constant(f);
-                for (_, pattern, result) in cases {
-                    pattern.for_each_constant(f);
-                    result.for_each_constant(f);
+                for case in cases {
+                    case.pattern.for_each_constant(f);
+                    case.result.for_each_constant(f);
                 }
             }
             AcornValue::Not(x) => x.for_each_constant(f),
@@ -1547,13 +1577,13 @@ impl AcornValue {
             }
             AcornValue::Match(scrutinee, cases) => {
                 scrutinee.for_each_type(f);
-                for (new_vars, pattern, result) in cases {
+                for case in cases {
                     // Process types introduced by the match
-                    for var_type in new_vars {
+                    for var_type in &case.new_vars {
                         f(var_type);
                     }
-                    pattern.for_each_type(f);
-                    result.for_each_type(f);
+                    case.pattern.for_each_type(f);
+                    case.result.for_each_type(f);
                 }
             }
             AcornValue::Not(x) => x.for_each_type(f),
@@ -1639,12 +1669,12 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.to_arbitrary();
                 let new_cases = cases
                     .iter()
-                    .map(|(new_vars, pattern, result)| {
-                        (
-                            new_vars.clone(),
-                            pattern.to_arbitrary(),
-                            result.to_arbitrary(),
-                        )
+                    .map(|case| MatchCase {
+                        new_vars: case.new_vars.clone(),
+                        pattern: case.pattern.to_arbitrary(),
+                        result: case.result.to_arbitrary(),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1697,14 +1727,21 @@ impl AcornValue {
             AcornValue::Match(scrutinee, cases) => {
                 let new_scrutinee = scrutinee.genericize(params);
                 let mut new_cases = vec![];
-                for (vars, pattern, result) in cases {
-                    let new_vars = vars
+                for case in cases {
+                    let new_vars = case
+                        .new_vars
                         .iter()
                         .map(|t| t.genericize(params))
                         .collect::<Vec<_>>();
-                    let new_pattern = pattern.genericize(params);
-                    let new_result = result.genericize(params);
-                    new_cases.push((new_vars, new_pattern, new_result));
+                    let new_pattern = case.pattern.genericize(params);
+                    let new_result = case.result.genericize(params);
+                    new_cases.push(MatchCase {
+                        new_vars,
+                        pattern: new_pattern,
+                        result: new_result,
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    });
                 }
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
             }
@@ -1764,12 +1801,12 @@ impl AcornValue {
                 let new_scrutinee = scrutinee.set_params(name, params);
                 let new_cases = cases
                     .into_iter()
-                    .map(|(new_vars, pattern, result)| {
-                        (
-                            new_vars,
-                            pattern.set_params(name, params),
-                            result.set_params(name, params),
-                        )
+                    .map(|case| MatchCase {
+                        new_vars: case.new_vars,
+                        pattern: case.pattern.set_params(name, params),
+                        result: case.result.set_params(name, params),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
                     })
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
@@ -1990,12 +2027,12 @@ impl AcornValue {
             }
             AcornValue::Match(scrutinee, cases) => {
                 scrutinee.find_type_vars(vars, source)?;
-                for (new_vars, pattern, result) in cases {
-                    for var_type in new_vars {
+                for case in cases {
+                    for var_type in &case.new_vars {
                         var_type.find_type_vars(vars, source)?;
                     }
-                    pattern.find_type_vars(vars, source)?;
-                    result.find_type_vars(vars, source)?;
+                    case.pattern.find_type_vars(vars, source)?;
+                    case.result.find_type_vars(vars, source)?;
                 }
             }
             AcornValue::Bool(_) => {

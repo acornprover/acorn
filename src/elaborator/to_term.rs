@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
-use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
+use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::names::ConstantName;
 use crate::kernel::atom::Atom;
 use crate::kernel::atom::AtomId;
@@ -316,7 +316,7 @@ fn elaborate_binder_to_term(
 fn lower_match_to_term(
     kernel_context: &mut KernelContext,
     scrutinee: &AcornValue,
-    cases: &[(Vec<AcornType>, AcornValue, AcornValue)],
+    cases: &[MatchCase],
     type_var_map: Option<&TypeVarMap>,
     stack: &mut Vec<Term>,
 ) -> Result<Term, String> {
@@ -334,9 +334,9 @@ fn lower_match_to_term(
         return Err("match must have at least one case".to_string());
     }
 
-    let result_type = cases[0].2.get_type();
-    for (_, _, case_result) in cases.iter().skip(1) {
-        if case_result.get_type() != result_type {
+    let result_type = cases[0].result.get_type();
+    for case in cases.iter().skip(1) {
+        if case.result.get_type() != result_type {
             return Err("all match cases must have the same result type".to_string());
         }
     }
@@ -362,13 +362,31 @@ fn lower_match_to_term(
     let scrutinee_term =
         elaborate_value_to_term_with_stack(kernel_context, scrutinee, type_var_map, stack)?;
 
-    // We currently rely on case order from elaboration to match constructor order.
+    let mut sorted_cases = cases.to_vec();
+    sorted_cases.sort_by_key(|case| case.constructor_index);
+    if let Some(first) = sorted_cases.first() {
+        let total = first.constructor_total;
+        let mut expected_index = 0u16;
+        for case in &sorted_cases {
+            if case.constructor_total != total {
+                return Err("match cases disagree about constructor_total".to_string());
+            }
+            if case.constructor_index != expected_index {
+                return Err(format!(
+                    "match cases are incomplete or duplicated at constructor index {}",
+                    expected_index
+                ));
+            }
+            expected_index += 1;
+        }
+    }
+
     let mut case_terms = vec![];
-    for (case_binders, _pattern, case_result) in cases {
+    for case in &sorted_cases {
         case_terms.push(elaborate_binder_to_term(
             kernel_context,
-            case_binders,
-            case_result,
+            &case.new_vars,
+            &case.result,
             type_var_map,
             stack,
             BinderKind::Lambda,
@@ -675,15 +693,23 @@ mod tests {
         let match_value = AcornValue::Match(
             Box::new(zero.clone()),
             vec![
-                (vec![], zero.clone(), zero.clone()),
-                (
-                    vec![nat_type.clone()],
-                    AcornValue::Application(FunctionApplication {
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero.clone(),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
                         function: Box::new(succ),
                         args: vec![AcornValue::Variable(0, nat_type.clone())],
                     }),
-                    AcornValue::Variable(0, nat_type.clone()),
-                ),
+                    result: AcornValue::Variable(0, nat_type.clone()),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
             ],
         );
 
@@ -711,6 +737,190 @@ mod tests {
             Term::lambda(nat_term, Term::atom(Atom::BoundVariable(0))),
         ]);
         assert_eq!(term, expected);
+    }
+
+    #[test]
+    fn test_elaborate_value_to_term_match_uses_constructor_index_order() {
+        let mut kernel_context = KernelContext::new();
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        kernel_context.type_store.add_type(&nat_type);
+        let nat_id = kernel_context
+            .type_store
+            .get_datatype_id(&nat)
+            .expect("nat type id should exist");
+
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let succ_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "succ");
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat, "match");
+
+        let nat_term = Term::ground_type(nat_id);
+        kernel_context.symbol_table.add_constant(
+            zero_name.clone(),
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        kernel_context.symbol_table.add_constant(
+            succ_name.clone(),
+            NewConstantType::Global,
+            Term::pi(nat_term.clone(), nat_term.clone()),
+        );
+        kernel_context.symbol_table.add_constant(
+            match_name.clone(),
+            NewConstantType::Global,
+            Term::pi(
+                Term::type_sort(),
+                Term::pi(
+                    nat_term.clone(),
+                    Term::pi(
+                        nat_term.clone(),
+                        Term::pi(
+                            Term::pi(nat_term.clone(), nat_term.clone()),
+                            nat_term.clone(),
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let zero = AcornValue::constant(
+            zero_name.clone(),
+            vec![],
+            nat_type.clone(),
+            nat_type.clone(),
+            vec![],
+        );
+        let succ = AcornValue::constant(
+            succ_name.clone(),
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
+        );
+
+        // Intentionally reverse source order; metadata should restore constructor order.
+        let match_value = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
+                        function: Box::new(succ),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    result: AcornValue::Variable(0, nat_type.clone()),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero.clone(),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+            ],
+        );
+
+        let term = elaborate_value_to_term(
+            &mut kernel_context,
+            &match_value,
+            NewConstantType::Local,
+            None,
+        )
+        .expect("match elaboration should succeed");
+
+        let match_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&match_name)
+            .expect("match symbol should exist");
+        let zero_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&zero_name)
+            .expect("zero symbol should exist");
+
+        let expected = Term::atom(Atom::Symbol(match_symbol)).apply(&[
+            nat_term.clone(),
+            Term::atom(Atom::Symbol(zero_symbol)),
+            Term::atom(Atom::Symbol(zero_symbol)),
+            Term::lambda(nat_term, Term::atom(Atom::BoundVariable(0))),
+        ]);
+        assert_eq!(term, expected);
+    }
+
+    #[test]
+    fn test_elaborate_value_to_term_match_rejects_duplicate_indices() {
+        let mut kernel_context = KernelContext::new();
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        kernel_context.type_store.add_type(&nat_type);
+
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat, "match");
+
+        let nat_id = kernel_context
+            .type_store
+            .get_datatype_id(&Datatype {
+                module_id: ModuleId(0),
+                name: "Nat".to_string(),
+            })
+            .expect("nat id should exist");
+        let nat_term = Term::ground_type(nat_id);
+        kernel_context.symbol_table.add_constant(
+            zero_name.clone(),
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        kernel_context.symbol_table.add_constant(
+            match_name,
+            NewConstantType::Global,
+            Term::pi(
+                Term::type_sort(),
+                Term::pi(
+                    nat_term.clone(),
+                    Term::pi(nat_term.clone(), nat_term.clone()),
+                ),
+            ),
+        );
+        let zero = AcornValue::constant(zero_name, vec![], nat_type.clone(), nat_type, vec![]);
+        let bad_match = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero.clone(),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero,
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+            ],
+        );
+
+        let err = elaborate_value_to_term(
+            &mut kernel_context,
+            &bad_match,
+            NewConstantType::Local,
+            None,
+        )
+        .expect_err("duplicate constructor indices should be rejected");
+        assert!(
+            err.contains("incomplete or duplicated"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

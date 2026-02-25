@@ -1077,7 +1077,7 @@ impl<'a> NormalizationContext<'a> {
         if let AcornValue::Match(scrutinee, cases) = right {
             // TODO: don't clone values here
             let mut answer = Cnf::true_value();
-            for (vars, pattern, result) in cases {
+            for case in cases {
                 // The meaning of the branch is:
                 //   scrutinee = pattern implies left (negate=) result
                 let op = if negate {
@@ -1085,11 +1085,11 @@ impl<'a> NormalizationContext<'a> {
                 } else {
                     BinaryOp::Equals
                 };
-                let condition = AcornValue::equals(*scrutinee.clone(), pattern.clone());
+                let condition = AcornValue::equals(*scrutinee.clone(), case.pattern.clone());
                 let conclusion =
-                    AcornValue::Binary(op, Box::new(left.clone()), Box::new(result.clone()));
+                    AcornValue::Binary(op, Box::new(left.clone()), Box::new(case.result.clone()));
                 let branch = AcornValue::implies(condition, conclusion);
-                let conjunct_value = AcornValue::forall(vars.clone(), branch);
+                let conjunct_value = AcornValue::forall(case.new_vars.clone(), branch);
                 let conjunct_cnf =
                     self.value_to_cnf(&conjunct_value, false, stack, next_var_id, synth, context)?;
                 answer = answer.and(conjunct_cnf);

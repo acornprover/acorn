@@ -1,5 +1,5 @@
 use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, TypeParam, Typeclass};
-use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
+use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::inference::InferenceEngine;
@@ -1419,7 +1419,13 @@ impl<'a> Evaluator<'a> {
                         stack.remove(&name);
                         arg_types.push(arg_type);
                     }
-                    cases.push((arg_types, pattern, result));
+                    cases.push(MatchCase {
+                        new_vars: arg_types,
+                        pattern,
+                        result,
+                        constructor_index: i as u16,
+                        constructor_total: total as u16,
+                    });
                 }
                 if !all_cases {
                     return Err(expression.error("not all constructors are covered in this match"));
