@@ -1419,12 +1419,18 @@ impl<'a> Evaluator<'a> {
                         stack.remove(&name);
                         arg_types.push(arg_type);
                     }
+                    let constructor_index = u16::try_from(i).map_err(|_| {
+                        expression.error("too many datatype constructors for match metadata")
+                    })?;
+                    let constructor_total = u16::try_from(total).map_err(|_| {
+                        expression.error("too many datatype constructors for match metadata")
+                    })?;
                     cases.push(MatchCase {
                         new_vars: arg_types,
                         pattern,
                         result,
-                        constructor_index: i as u16,
-                        constructor_total: total as u16,
+                        constructor_index,
+                        constructor_total,
                     });
                 }
                 if !all_cases {

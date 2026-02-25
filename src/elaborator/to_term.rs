@@ -366,6 +366,13 @@ fn lower_match_to_term(
     sorted_cases.sort_by_key(|case| case.constructor_index);
     if let Some(first) = sorted_cases.first() {
         let total = first.constructor_total;
+        if total as usize != sorted_cases.len() {
+            return Err(format!(
+                "match metadata expected {} cases but found {}",
+                total,
+                sorted_cases.len()
+            ));
+        }
         let mut expected_index = 0u16;
         for case in &sorted_cases {
             if case.constructor_total != total {
@@ -408,13 +415,18 @@ fn logical_head(symbol: Symbol) -> Term {
 mod tests {
     use crate::elaborator::acorn_type::{Datatype, Typeclass};
     use crate::elaborator::acorn_value::FunctionApplication;
+    use crate::elaborator::binding_map::{BindingMap, ConstructorInfo};
+    use crate::elaborator::evaluator::Evaluator;
     use crate::elaborator::names::ConstantName;
+    use crate::elaborator::stack::Stack;
     use crate::kernel::atom::Atom;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol::Symbol;
     use crate::kernel::symbol_table::NewConstantType;
     use crate::module::ModuleId;
     use crate::normalizer::Normalizer;
+    use crate::project::Project;
+    use crate::syntax::expression::Expression;
 
     use super::*;
 
@@ -921,6 +933,201 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_elaborate_value_to_term_match_rejects_case_count_mismatch() {
+        let mut kernel_context = KernelContext::new();
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        kernel_context.type_store.add_type(&nat_type);
+
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat, "match");
+
+        let nat_id = kernel_context
+            .type_store
+            .get_datatype_id(&Datatype {
+                module_id: ModuleId(0),
+                name: "Nat".to_string(),
+            })
+            .expect("nat id should exist");
+        let nat_term = Term::ground_type(nat_id);
+        kernel_context.symbol_table.add_constant(
+            zero_name.clone(),
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        kernel_context.symbol_table.add_constant(
+            match_name,
+            NewConstantType::Global,
+            Term::pi(
+                Term::type_sort(),
+                Term::pi(
+                    nat_term.clone(),
+                    Term::pi(nat_term.clone(), nat_term.clone()),
+                ),
+            ),
+        );
+        let zero = AcornValue::constant(zero_name, vec![], nat_type.clone(), nat_type, vec![]);
+        let bad_match = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![MatchCase {
+                new_vars: vec![],
+                pattern: zero.clone(),
+                result: zero,
+                constructor_index: 0,
+                constructor_total: 2,
+            }],
+        );
+
+        let err = elaborate_value_to_term(
+            &mut kernel_context,
+            &bad_match,
+            NewConstantType::Local,
+            None,
+        )
+        .expect_err("constructor_total mismatch should be rejected");
+        assert!(
+            err.contains("expected 2 cases but found 1"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_match_metadata_flows_from_evaluator_to_term_lowering() {
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = bindings.add_data_type("Nat", vec![], None, None);
+        let nat_datatype = match &nat_type {
+            AcornType::Data(datatype, params) => {
+                assert!(params.is_empty());
+                datatype.clone()
+            }
+            _ => panic!("Nat should be a datatype"),
+        };
+        bindings.add_datatype_attribute(
+            &nat_datatype,
+            "zero",
+            vec![],
+            nat_type.clone(),
+            None,
+            Some(ConstructorInfo {
+                datatype: nat_datatype.clone(),
+                index: 0,
+                total: 2,
+            }),
+            vec![],
+            "zero".to_string(),
+        );
+        bindings.add_datatype_attribute(
+            &nat_datatype,
+            "succ",
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            None,
+            Some(ConstructorInfo {
+                datatype: nat_datatype.clone(),
+                index: 1,
+                total: 2,
+            }),
+            vec![],
+            "succ".to_string(),
+        );
+
+        let project = Project::new_mock();
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+        let expression = Expression::expect_value(
+            r#"match n {
+                Nat.succ(k) {
+                    k
+                }
+                Nat.zero {
+                    Nat.zero
+                }
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("n".to_string(), nat_type.clone());
+        let match_value = evaluator
+            .evaluate_value_with_stack(&mut stack, &expression, Some(&nat_type))
+            .expect("match evaluation should succeed");
+        let cases = match &match_value {
+            AcornValue::Match(_, cases) => cases,
+            _ => panic!("expected match value"),
+        };
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].constructor_index, 1);
+        assert_eq!(cases[0].constructor_total, 2);
+        assert_eq!(cases[1].constructor_index, 0);
+        assert_eq!(cases[1].constructor_total, 2);
+
+        let mut kernel_context = KernelContext::new();
+        kernel_context.type_store.add_type(&nat_type);
+        let nat_id = kernel_context
+            .type_store
+            .get_datatype_id(&nat_datatype)
+            .expect("nat type id should exist");
+        let nat_term = Term::ground_type(nat_id);
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat_datatype.clone(), "zero");
+        let succ_name = ConstantName::datatype_attr(ModuleId(0), nat_datatype.clone(), "succ");
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat_datatype, "match");
+        kernel_context.symbol_table.add_constant(
+            zero_name.clone(),
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        kernel_context.symbol_table.add_constant(
+            succ_name,
+            NewConstantType::Global,
+            Term::pi(nat_term.clone(), nat_term.clone()),
+        );
+        kernel_context.symbol_table.add_constant(
+            match_name.clone(),
+            NewConstantType::Global,
+            Term::pi(
+                Term::type_sort(),
+                Term::pi(
+                    nat_term.clone(),
+                    Term::pi(
+                        nat_term.clone(),
+                        Term::pi(
+                            Term::pi(nat_term.clone(), nat_term.clone()),
+                            nat_term.clone(),
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let term = elaborate_value_to_term(
+            &mut kernel_context,
+            &AcornValue::lambda(vec![nat_type.clone()], match_value),
+            NewConstantType::Local,
+            None,
+        )
+        .expect("term elaboration should succeed");
+        let match_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&match_name)
+            .expect("match symbol should exist");
+        let zero_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&zero_name)
+            .expect("zero symbol should exist");
+        let expected = Term::lambda(
+            nat_term.clone(),
+            Term::atom(Atom::Symbol(match_symbol)).apply(&[
+                nat_term.clone(),
+                Term::atom(Atom::BoundVariable(0)),
+                Term::atom(Atom::Symbol(zero_symbol)),
+                Term::lambda(nat_term, Term::atom(Atom::BoundVariable(0))),
+            ]),
+        );
+        assert_eq!(term, expected);
     }
 
     #[test]
