@@ -46,6 +46,9 @@ default = ["bigcert"]
 validate = []
 # Enable claim serialization as `function(...) { generic }(args)` in generated certificates.
 bigcert = []
+# Enable experimental normalization bridge:
+# AcornValue -> Term -> (denormalize) -> legacy clause backend.
+term_normalization_bridge = []
 
 [lib]
 doctest = false

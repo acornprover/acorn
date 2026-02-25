@@ -13,6 +13,8 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::elaborator::synthetic::{SyntheticDefinition, SyntheticRegistry};
 use crate::elaborator::to_term::build_type_var_map;
+#[cfg(feature = "term_normalization_bridge")]
+use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::kernel::atom::{Atom, AtomId, INVALID_SYNTHETIC_MODULE};
 use crate::kernel::clause::Clause;
 use crate::kernel::cnf::Cnf;
@@ -2070,15 +2072,11 @@ impl Normalizer {
         Ok(output)
     }
 
-    /// Converts a value to CNF: Conjunctive Normal Form.
-    /// In other words, a successfully normalized value turns into a bunch of clauses.
-    /// Logically, this is an "and of ors".
-    /// Each Clause represents an implicit "forall", plus an "or" of its literals.
-    /// "true" is represented by an empty list, which is always satisfied.
-    /// "false" is represented by a single impossible clause.
-    /// This is kind of just a wrapper around convert_then_normalize which adds on
-    /// some verification and a hack for functional equality.
-    fn normalize_value(
+    /// Legacy value-based normalization backend.
+    ///
+    /// This path predates term-level elaboration and is still used as the clause
+    /// conversion backend while `normalize_term(...)` is being introduced.
+    fn normalize_value_legacy(
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
@@ -2095,6 +2093,123 @@ impl Normalizer {
 
         let clauses = self.ugly_value_to_clauses(value, ctype, source, type_var_map)?;
         Ok(clauses)
+    }
+
+    /// Normalize a term-level proposition into clauses.
+    ///
+    /// This is the bridge entrypoint for the migration to:
+    /// `AcornValue -> Term -> Vec<Clause>`.
+    /// The clause conversion backend is currently still value-based, so we
+    /// denormalize the term back into an AcornValue first.
+    #[cfg(feature = "term_normalization_bridge")]
+    fn normalize_term(
+        &mut self,
+        term: &Term,
+        ctype: NewConstantType,
+        source: &Source,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Vec<Clause>, String> {
+        term.validate();
+
+        // Build LocalContext entries for type variables in declaration order.
+        let mut local_context = LocalContext::empty();
+        if let Some(ref tvm) = type_var_map {
+            let mut entries: Vec<_> = tvm.values().collect();
+            entries.sort_by_key(|(id, _)| *id);
+            for (_, kind) in entries {
+                local_context.push_type(kind.clone());
+            }
+        }
+
+        let num_type_vars = type_var_map.as_ref().map_or(0usize, |tvm| tvm.len());
+        let legacy_type_var_map: Option<HashMap<String, (AtomId, Term)>> =
+            type_var_map.as_ref().map(|tvm| {
+                tvm.values()
+                    .map(|(id, kind)| (format!("T{}", id), (*id, kind.clone())))
+                    .collect()
+            });
+        fn binder_count(term: crate::kernel::term::TermRef<'_>) -> AtomId {
+            use crate::kernel::term::Decomposition;
+            match term.decompose() {
+                Decomposition::Atom(_) => 0,
+                Decomposition::Application(func, arg) | Decomposition::Pi(func, arg) => {
+                    binder_count(func) + binder_count(arg)
+                }
+                Decomposition::Lambda(input, body)
+                | Decomposition::ForAll(input, body)
+                | Decomposition::Exists(input, body) => {
+                    1 + binder_count(input) + binder_count(body)
+                }
+            }
+        }
+
+        let max_original_var = term.max_variable().unwrap_or(0);
+        let max_remap_var =
+            max_original_var + binder_count(term.as_ref()) + num_type_vars as AtomId + 1;
+        let var_remapping: Vec<Option<u16>> = (0..=max_remap_var)
+            .map(|i| {
+                if (i as usize) < num_type_vars {
+                    None
+                } else {
+                    Some((i - num_type_vars as AtomId) as u16)
+                }
+            })
+            .collect();
+
+        let value = self.denormalize_term(
+            term,
+            &local_context,
+            None,
+            Some(&var_remapping),
+            None,
+            None,
+            false,
+        );
+        if let Err(e) = value.validate() {
+            return Err(format!(
+                "term denormalization produced invalid value: {}. term={} value={}",
+                e, term, value
+            ));
+        }
+        self.normalize_value_legacy(&value, ctype, source, legacy_type_var_map)
+    }
+
+    /// Converts a value proposition to CNF clauses.
+    ///
+    /// With `term_normalization_bridge` enabled:
+    /// `AcornValue --elaborate--> Term --normalize_term--> Vec<Clause>`.
+    ///
+    /// Without that feature, this uses the legacy value-only normalization path.
+    fn normalize_value(
+        &mut self,
+        value: &AcornValue,
+        ctype: NewConstantType,
+        source: &Source,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Vec<Clause>, String> {
+        if let Err(e) = value.validate() {
+            return Err(format!(
+                "validation error: {} while normalizing: {}",
+                e, value
+            ));
+        }
+        assert!(value.is_bool_type());
+
+        #[cfg(feature = "term_normalization_bridge")]
+        {
+            let term = elaborate_value_to_term(
+                &mut self.kernel_context,
+                value,
+                ctype,
+                type_var_map.as_ref(),
+            )?;
+            return self.normalize_term(&term, ctype, source, type_var_map);
+        }
+
+        #[cfg(not(feature = "term_normalization_bridge"))]
+        {
+            self.normalize_value_legacy(value, ctype, source, type_var_map)
+        }
     }
 
     /// A single fact can turn into a bunch of proof steps.
@@ -2225,11 +2340,43 @@ impl Normalizer {
         &self,
         atom_type: &Term,
         atom: &Atom,
+        local_context: &LocalContext,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         var_remapping: Option<&[Option<u16>]>,
         type_param_names: Option<&[String]>,
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
+        instantiate_type_vars: bool,
     ) -> AcornValue {
+        #[cfg(not(feature = "term_normalization_bridge"))]
+        let _ = (local_context, instantiate_type_vars);
+
+        #[cfg(feature = "term_normalization_bridge")]
+        let acorn_type = if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
+            let typeclass = local_context
+                .get_var_type(*var_id as usize)
+                .and_then(|t| t.as_ref().as_typeclass())
+                .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                .cloned();
+            let name = type_var_id_to_name
+                .and_then(|m| m.get(var_id))
+                .cloned()
+                .unwrap_or_else(|| format!("T{}", var_id));
+            AcornType::Variable(TypeParam { name, typeclass })
+        } else if let Some(name_map) = type_var_id_to_name {
+            self.kernel_context
+                .type_store
+                .type_term_to_acorn_type_with_var_names(atom_type, name_map)
+        } else {
+            self.kernel_context
+                .type_store
+                .type_term_to_acorn_type_with_context(
+                    atom_type,
+                    local_context,
+                    instantiate_type_vars,
+                )
+        };
+
+        #[cfg(not(feature = "term_normalization_bridge"))]
         let acorn_type = if let Some(name_map) = type_var_id_to_name {
             self.kernel_context
                 .type_store
@@ -2358,7 +2505,10 @@ impl Normalizer {
             | Atom::Symbol(Symbol::Empty)
             | Atom::Symbol(Symbol::Bool)
             | Atom::Symbol(Symbol::Type0) => {
-                panic!("Type symbols should not appear in open terms")
+                panic!(
+                    "Type symbols should not appear in open terms (atom={:?}, atom_type={})",
+                    atom, atom_type
+                )
             }
             Atom::Symbol(Symbol::Typeclass(_)) => {
                 panic!("Typeclass atoms should not appear in open terms")
@@ -2385,6 +2535,35 @@ impl Normalizer {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
+        fn reduce_head_lambda_application(term: &Term) -> Option<Term> {
+            use crate::kernel::term::Decomposition;
+
+            match term.as_ref().decompose() {
+                Decomposition::Application(func, arg) => match func.decompose() {
+                    Decomposition::Lambda(_, body) => Some(
+                        body.to_owned()
+                            .substitute_bound(0, &arg.to_owned())
+                            .shift_bound(0, -1),
+                    ),
+                    _ => reduce_head_lambda_application(&func.to_owned())
+                        .map(|reduced_func| reduced_func.apply(&[arg.to_owned()])),
+                },
+                _ => None,
+            }
+        }
+
+        if let Some(reduced) = reduce_head_lambda_application(term) {
+            return self.denormalize_term(
+                &reduced,
+                local_context,
+                arbitrary_names,
+                var_remapping,
+                type_param_names,
+                type_var_id_to_name,
+                instantiate_type_vars,
+            );
+        }
+
         match term.as_ref().decompose() {
             crate::kernel::term::Decomposition::Lambda(input, body) => {
                 let input_term = input.to_owned();
@@ -2533,10 +2712,12 @@ impl Normalizer {
                 Some(self.denormalize_atom(
                     &head_type,
                     &term.get_head_atom(),
+                    local_context,
                     arbitrary_names,
                     var_remapping,
                     type_param_names,
                     type_var_id_to_name,
+                    instantiate_type_vars,
                 ))
             },
             |_| None,
@@ -2580,6 +2761,24 @@ impl Normalizer {
             go(term.as_ref(), local_context)
         }
 
+        fn is_syntactic_kind_term(term: &Term) -> bool {
+            fn go(term: crate::kernel::term::TermRef<'_>) -> bool {
+                use crate::kernel::term::Decomposition;
+                match term.decompose() {
+                    Decomposition::Atom(atom) => matches!(
+                        atom,
+                        Atom::Symbol(Symbol::Type0) | Atom::Symbol(Symbol::Typeclass(_))
+                    ),
+                    Decomposition::Pi(input, output) => go(input) && go(output),
+                    Decomposition::Application(_, _)
+                    | Decomposition::Lambda(_, _)
+                    | Decomposition::ForAll(_, _)
+                    | Decomposition::Exists(_, _) => false,
+                }
+            }
+            go(term.as_ref())
+        }
+
         for arg in term.args().iter() {
             // Classify arguments from the function type spine instead of arg.get_type_with_context().
             // This avoids panicking on lambda arguments (their type is not inferable this late).
@@ -2589,7 +2788,7 @@ impl Normalizer {
                 .map(|(input, _)| input.to_owned());
             let is_type_arg = expected_input_type
                 .as_ref()
-                .is_some_and(|input| input.as_ref().is_type_param_kind())
+                .is_some_and(is_syntactic_kind_term)
                 && is_syntactic_type_term(arg, local_context);
 
             if is_type_arg {
