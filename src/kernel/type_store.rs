@@ -681,53 +681,197 @@ impl TypeStore {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
-        // Check for FreeVariable first - we need to look up its typeclass constraint
+        self.type_term_to_acorn_type_with_context_impl(
+            type_term,
+            0,
+            0,
+            local_context,
+            instantiate_type_vars,
+        )
+    }
+
+    fn type_term_to_acorn_type_with_context_impl(
+        &self,
+        type_term: &Term,
+        outer_depth: u16,
+        local_depth: u16,
+        local_context: &LocalContext,
+        instantiate_type_vars: bool,
+    ) -> AcornType {
+        // Check for built-in types first
+        if type_term.as_ref().is_bool_type() {
+            return AcornType::Bool;
+        }
+        if type_term.as_ref().is_empty_type() {
+            return AcornType::Empty;
+        }
+        if type_term.as_ref().is_type0() {
+            return AcornType::Type0;
+        }
+
+        // Check for user-defined ground type
+        if let Some(ground_id) = type_term.as_ref().as_type_atom() {
+            let mod_idx = ground_id.module_id().get() as usize;
+            return self.ground_id_to_type[mod_idx][ground_id.local_id() as usize].clone();
+        }
+
+        // Check for Pi type
+        if let Some((input, output)) = type_term.as_ref().split_pi() {
+            let input_owned = input.to_owned();
+            let is_type_param = input_owned.as_ref().is_type_param_kind();
+
+            let mut arg_types = if is_type_param {
+                vec![]
+            } else {
+                vec![self.type_term_to_acorn_type_with_context_impl(
+                    &input_owned,
+                    outer_depth,
+                    local_depth,
+                    local_context,
+                    instantiate_type_vars,
+                )]
+            };
+
+            let (mut current_outer, mut current_local) = if is_type_param {
+                (outer_depth + 1, local_depth)
+            } else {
+                (outer_depth, local_depth + 1)
+            };
+            let mut current_output = output.to_owned();
+
+            while let Some((next_input, next_output)) = current_output.as_ref().split_pi() {
+                let next_input_owned = next_input.to_owned();
+                let is_next_type_param = next_input_owned.as_ref().is_type_param_kind();
+                if !is_next_type_param {
+                    arg_types.push(self.type_term_to_acorn_type_with_context_impl(
+                        &next_input_owned,
+                        current_outer,
+                        current_local,
+                        local_context,
+                        instantiate_type_vars,
+                    ));
+                }
+                if is_next_type_param {
+                    current_outer += 1;
+                } else {
+                    current_local += 1;
+                }
+                current_output = next_output.to_owned();
+            }
+
+            let return_type = self.type_term_to_acorn_type_with_context_impl(
+                &current_output,
+                current_outer,
+                current_local,
+                local_context,
+                instantiate_type_vars,
+            );
+            if arg_types.is_empty() {
+                return return_type;
+            }
+            return AcornType::Function(FunctionType {
+                arg_types,
+                return_type: Box::new(return_type),
+            });
+        }
+
+        // Check for type application
+        if let Some((head, args)) = type_term.as_ref().split_application_multi() {
+            let base_type = self.type_term_to_acorn_type_with_context_impl(
+                &head,
+                outer_depth,
+                local_depth,
+                local_context,
+                instantiate_type_vars,
+            );
+            let datatype = match &base_type {
+                AcornType::Data(dt, params) if params.is_empty() => dt.clone(),
+                _ => panic!(
+                    "Expected ground data type in type application, got {:?}",
+                    base_type
+                ),
+            };
+            let params: Vec<AcornType> = args
+                .iter()
+                .map(|arg| {
+                    self.type_term_to_acorn_type_with_context_impl(
+                        arg,
+                        outer_depth,
+                        local_depth,
+                        local_context,
+                        instantiate_type_vars,
+                    )
+                })
+                .collect();
+            return AcornType::Data(datatype, params);
+        }
+
+        // Handle BoundVariable
         if type_term.as_ref().is_atomic() {
-            if let Atom::FreeVariable(var_id) = type_term.as_ref().get_head_atom() {
-                // Look up the type of this variable in the context
-                let var_type = local_context.get_var_type(*var_id as usize);
-                let typeclass_id = if let Some(vt) = var_type {
-                    // Check if the type is a Typeclass constraint
-                    if let Atom::Symbol(Symbol::Typeclass(tc_id)) = vt.as_ref().get_head_atom() {
-                        Some(*tc_id)
+            if let Atom::BoundVariable(i) = type_term.as_ref().get_head_atom() {
+                let type_param_index = if *i >= local_depth && outer_depth > 0 {
+                    let outer_index = *i - local_depth;
+                    if outer_index < outer_depth {
+                        outer_depth - 1 - outer_index
                     } else {
-                        None
+                        outer_index
                     }
                 } else {
-                    None
+                    *i
                 };
+                return AcornType::Variable(TypeParam {
+                    name: format!("T{}", type_param_index),
+                    typeclass: None,
+                });
+            }
+        }
+
+        // Handle FreeVariable with typeclass-aware context lookup.
+        if type_term.as_ref().is_atomic() {
+            if let Atom::FreeVariable(var_id) = type_term.as_ref().get_head_atom() {
+                let typeclass_id = local_context
+                    .get_var_type(*var_id as usize)
+                    .and_then(|vt| vt.as_ref().as_typeclass());
 
                 if instantiate_type_vars {
-                    // Convert to a concrete type
                     if let Some(tc_id) = typeclass_id {
-                        // Find a type that implements this typeclass
                         if let Some(ground_id) = self.find_instance_of_typeclass(tc_id) {
                             let mod_idx = ground_id.module_id().get() as usize;
                             return self.ground_id_to_type[mod_idx][ground_id.local_id() as usize]
                                 .clone();
                         }
                     }
-                    // No typeclass constraint or no implementing type found - use Bool
                     return AcornType::Bool;
                 }
 
-                // Not instantiating - return a type variable
-                // Use "T" prefix since these are type variables
                 let typeclass = typeclass_id.and_then(|tc_id| {
                     let mod_idx = tc_id.module_id().get() as usize;
                     self.id_to_typeclass
                         .get(mod_idx)
                         .and_then(|v| v.get(tc_id.local_id() as usize).cloned())
                 });
-                let type_param = TypeParam {
+                return AcornType::Variable(TypeParam {
                     name: format!("T{}", var_id),
                     typeclass,
-                };
-                return AcornType::Variable(type_param);
+                });
             }
         }
-        // Fall back to regular conversion for non-FreeVariable types
-        self.type_term_to_acorn_type(type_term)
+
+        // Handle Typeclass
+        if type_term.as_ref().is_atomic() {
+            if let Atom::Symbol(Symbol::Typeclass(tc_id)) = type_term.as_ref().get_head_atom() {
+                let mod_idx = tc_id.module_id().get() as usize;
+                if let Some(typeclass) = self
+                    .id_to_typeclass
+                    .get(mod_idx)
+                    .and_then(|v| v.get(tc_id.local_id() as usize))
+                {
+                    return AcornType::TypeclassConstraint(typeclass.clone());
+                }
+            }
+        }
+
+        panic!("Unexpected type Term structure: {:?}", type_term);
     }
 
     /// Convert a type Term back to an AcornType, using provided names for FreeVariables.

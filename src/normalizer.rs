@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::builder::BuildError;
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::ConstantInstance;
-use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
+use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::names::ConstantName;
@@ -2351,17 +2351,31 @@ impl Normalizer {
         let _ = (local_context, instantiate_type_vars);
 
         #[cfg(feature = "term_normalization_bridge")]
-        let acorn_type = if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
-            let typeclass = local_context
-                .get_var_type(*var_id as usize)
-                .and_then(|t| t.as_ref().as_typeclass())
-                .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
-                .cloned();
-            let name = type_var_id_to_name
-                .and_then(|m| m.get(var_id))
-                .cloned()
-                .unwrap_or_else(|| format!("T{}", var_id));
-            AcornType::Variable(TypeParam { name, typeclass })
+        let acorn_type = if atom_type.as_ref().is_atomic() {
+            if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
+                let typeclass = local_context
+                    .get_var_type(*var_id as usize)
+                    .and_then(|t| t.as_ref().as_typeclass())
+                    .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                    .cloned();
+                let name = type_var_id_to_name
+                    .and_then(|m| m.get(var_id))
+                    .cloned()
+                    .unwrap_or_else(|| format!("T{}", var_id));
+                AcornType::Variable(TypeParam { name, typeclass })
+            } else if let Some(name_map) = type_var_id_to_name {
+                self.kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_var_names(atom_type, name_map)
+            } else {
+                self.kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_context(
+                        atom_type,
+                        local_context,
+                        instantiate_type_vars,
+                    )
+            }
         } else if let Some(name_map) = type_var_id_to_name {
             self.kernel_context
                 .type_store
@@ -2453,11 +2467,21 @@ impl Normalizer {
                         );
                     }
                 }
-                // Apply remapping if provided
-                let new_i = var_remapping
-                    .and_then(|mapping| mapping.get(*i as usize))
-                    .and_then(|opt| *opt)
-                    .unwrap_or(*i);
+                // Apply remapping if provided. A mapped `None` means this variable should have
+                // been eliminated (e.g., type-level variable), so seeing it in a value position
+                // indicates a denormalization bug.
+                let new_i = if let Some(mapping) = var_remapping {
+                    match mapping.get(*i as usize) {
+                        Some(Some(mapped)) => *mapped,
+                        Some(None) => panic!(
+                            "denormalize_atom saw excluded variable x{} in value position",
+                            i
+                        ),
+                        None => *i,
+                    }
+                } else {
+                    *i
+                };
                 AcornValue::Variable(new_i, acorn_type)
             }
             Atom::Symbol(Symbol::Synthetic(m, i)) => {
@@ -2517,6 +2541,155 @@ impl Normalizer {
                 panic!("BoundVariable atoms should not appear in denormalize_atom")
             }
         }
+    }
+
+    fn apply_type_args_to_constant(
+        constant: &ConstantInstance,
+        type_args: &[AcornType],
+    ) -> AcornValue {
+        if type_args.is_empty() {
+            return AcornValue::Constant(constant.clone());
+        }
+        let params_to_apply = constant.type_param_names.len().min(type_args.len());
+        let params: Vec<AcornType> = type_args.iter().take(params_to_apply).cloned().collect();
+        let named_params: Vec<_> = constant
+            .type_param_names
+            .iter()
+            .take(params_to_apply)
+            .zip(params.iter())
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect();
+        let instance_type = constant.generic_type.instantiate(&named_params);
+        AcornValue::Constant(ConstantInstance {
+            name: constant.name.clone(),
+            params,
+            instance_type,
+            generic_type: constant.generic_type.clone(),
+            type_param_names: constant.type_param_names.clone(),
+        })
+    }
+
+    fn instantiate_symbol_for_match(
+        &self,
+        symbol: Symbol,
+        type_args: &[AcornType],
+    ) -> Option<AcornValue> {
+        let name = match symbol {
+            Symbol::GlobalConstant(module_id, atom_id) => self
+                .kernel_context
+                .symbol_table
+                .name_for_global_id(module_id, atom_id)
+                .clone(),
+            Symbol::ScopedConstant(atom_id) => self
+                .kernel_context
+                .symbol_table
+                .name_for_local_id(atom_id)
+                .clone(),
+            _ => return None,
+        };
+
+        if let Some(poly) = self.kernel_context.symbol_table.get_polymorphic_info(&name) {
+            let params_to_apply = poly.type_param_names.len().min(type_args.len());
+            let params: Vec<AcornType> = type_args.iter().take(params_to_apply).cloned().collect();
+            let named_params: Vec<_> = poly
+                .type_param_names
+                .iter()
+                .take(params_to_apply)
+                .zip(params.iter())
+                .map(|(param_name, ty)| (param_name.clone(), ty.clone()))
+                .collect();
+            let instance_type = poly.generic_type.instantiate(&named_params);
+            return Some(AcornValue::constant(
+                name.clone(),
+                params,
+                instance_type,
+                poly.generic_type.clone(),
+                poly.type_param_names.clone(),
+            ));
+        }
+
+        let symbol_type = self
+            .kernel_context
+            .symbol_table
+            .get_symbol_type(symbol, &self.kernel_context.type_store);
+        let acorn_type = self
+            .kernel_context
+            .type_store
+            .type_term_to_acorn_type(&symbol_type);
+        Some(AcornValue::constant(
+            name.clone(),
+            vec![],
+            acorn_type.clone(),
+            acorn_type,
+            vec![],
+        ))
+    }
+
+    fn maybe_reconstruct_match(
+        &self,
+        head: &AcornValue,
+        type_args: &[AcornType],
+        value_args: &[AcornValue],
+        local_context: &LocalContext,
+        var_remapping: Option<&[Option<u16>]>,
+    ) -> Option<AcornValue> {
+        let AcornValue::Constant(constant) = head else {
+            return None;
+        };
+        let match_symbol = self
+            .kernel_context
+            .symbol_table
+            .get_symbol(&constant.name)?;
+        let info = self
+            .kernel_context
+            .symbol_table
+            .get_match_eliminator_info(match_symbol)?;
+        if value_args.len() != info.constructor_symbols.len() + 1 {
+            return None;
+        }
+
+        let scrutinee = value_args[0].clone();
+        let constructor_total = u16::try_from(info.constructor_symbols.len()).ok()?;
+        let first_new_var_id = local_context.len() as AtomId;
+        let mut cases = vec![];
+
+        for (constructor_index, (constructor_symbol, branch_value)) in info
+            .constructor_symbols
+            .iter()
+            .zip(value_args.iter().skip(1))
+            .enumerate()
+        {
+            let (new_vars, result) = match branch_value.clone() {
+                AcornValue::Lambda(args, body) => (args, *body),
+                other => (vec![], other),
+            };
+
+            let constructor = self.instantiate_symbol_for_match(*constructor_symbol, type_args)?;
+            let pattern = if new_vars.is_empty() {
+                constructor
+            } else {
+                let mut pattern_args = vec![];
+                for (i, var_type) in new_vars.iter().enumerate() {
+                    let original_var_id = first_new_var_id + i as AtomId;
+                    let remapped_id = var_remapping
+                        .and_then(|mapping| mapping.get(original_var_id as usize))
+                        .and_then(|mapped| *mapped)
+                        .unwrap_or(original_var_id);
+                    pattern_args.push(AcornValue::Variable(remapped_id, var_type.clone()));
+                }
+                AcornValue::apply(constructor, pattern_args)
+            };
+
+            cases.push(MatchCase {
+                new_vars,
+                pattern,
+                result,
+                constructor_index: constructor_index as u16,
+                constructor_total,
+            });
+        }
+
+        Some(AcornValue::Match(Box::new(scrutinee), cases))
     }
 
     /// If arbitrary names are provided, any free variables of the keyed types are converted
@@ -2746,7 +2919,7 @@ impl Normalizer {
                         Atom::FreeVariable(i) => local_context
                             .get_var_type(*i as usize)
                             .is_some_and(|t| t.as_ref().is_type_param_kind()),
-                        Atom::BoundVariable(_) => false,
+                        Atom::BoundVariable(_) => true,
                         _ => false,
                     },
                     Decomposition::Application(func, arg) => {
@@ -2891,31 +3064,19 @@ impl Normalizer {
 
         let head = head.expect("non-logical terms should have a denormalized head");
 
-        // Update the head with type parameters if needed.
-        let head = if !type_args.is_empty() {
-            match head {
-                AcornValue::Constant(c) => {
-                    // Compute the instance_type by applying type args to generic_type
-                    let named_params: Vec<_> = c
-                        .type_param_names
-                        .iter()
-                        .zip(type_args.iter())
-                        .map(|(name, t)| (name.clone(), t.clone()))
-                        .collect();
-                    let instance_type = c.generic_type.instantiate(&named_params);
+        if let Some(match_value) = self.maybe_reconstruct_match(
+            &head,
+            &type_args,
+            &value_args,
+            local_context,
+            var_remapping,
+        ) {
+            return match_value;
+        }
 
-                    AcornValue::Constant(ConstantInstance {
-                        name: c.name.clone(),
-                        params: type_args.clone(),
-                        instance_type,
-                        generic_type: c.generic_type.clone(),
-                        type_param_names: c.type_param_names.clone(),
-                    })
-                }
-                other => other, // Non-constant head, just keep as is
-            }
-        } else {
-            head
+        let head = match head {
+            AcornValue::Constant(c) => Self::apply_type_args_to_constant(&c, &type_args),
+            other => other,
         };
 
         AcornValue::apply(head, value_args)

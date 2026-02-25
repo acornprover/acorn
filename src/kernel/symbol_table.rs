@@ -80,6 +80,13 @@ pub struct PolymorphicInfo {
     pub type_param_names: Vec<String>,
 }
 
+/// Metadata for a datatype match eliminator (`Type.match`).
+/// Stores constructor constants in constructor-index order.
+#[derive(Clone, Debug)]
+pub struct MatchEliminatorInfo {
+    pub constructor_symbols: Vec<Symbol>,
+}
+
 /// In the Acorn language, constants and types have names, scoped by modules. They can be rich values
 /// with internal structure, like polymorphic parameters or complex types.
 /// The prover, on the other hand, operates in simply typed higher order logic.
@@ -120,6 +127,10 @@ pub struct SymbolTable {
     /// Used to properly denormalize constants.
     polymorphic_info: ImHashMap<ConstantName, PolymorphicInfo>,
 
+    /// Metadata for datatype match eliminators (`Type.match`) used to reconstruct
+    /// `AcornValue::Match` from term applications in bridge mode.
+    match_eliminator_info: ImHashMap<Symbol, MatchEliminatorInfo>,
+
     /// Maps a type to the first symbol registered with that type.
     /// Used to get an element of a particular type (e.g., for instantiating universal quantifiers).
     type_to_element: ImHashMap<Term, Symbol>,
@@ -144,6 +155,7 @@ impl SymbolTable {
             instance_to_symbol: ImHashMap::new(),
             synthetic_types: ImVector::new(),
             polymorphic_info: ImHashMap::new(),
+            match_eliminator_info: ImHashMap::new(),
             type_to_element: ImHashMap::new(),
             inhabited_type_constructors: ImHashSet::new(),
             inhabited_typeclasses: ImHashSet::new(),
@@ -237,6 +249,11 @@ impl SymbolTable {
     /// Get polymorphic info for a constant, if it's polymorphic.
     pub fn get_polymorphic_info(&self, name: &ConstantName) -> Option<&PolymorphicInfo> {
         self.polymorphic_info.get(name)
+    }
+
+    /// Get match-eliminator metadata for a datatype `match` constant, if known.
+    pub fn get_match_eliminator_info(&self, match_symbol: Symbol) -> Option<&MatchEliminatorInfo> {
+        self.match_eliminator_info.get(&match_symbol)
     }
 
     /// Get the type of a symbol.
@@ -588,6 +605,200 @@ impl SymbolTable {
                 }
             }
         });
+
+        // Match expressions lower to datatype eliminator symbols (`Type.match`) in term elaboration.
+        // Legacy normalization handled Match directly and didn't need these symbols registered.
+        // Register them here so bridge-mode elaboration can always resolve them.
+        fn replace_type_args_with_params(
+            ty: &AcornType,
+            concrete_type_args: &[AcornType],
+            type_params: &[TypeParam],
+        ) -> AcornType {
+            for (i, concrete) in concrete_type_args.iter().enumerate() {
+                if ty == concrete {
+                    return AcornType::Variable(type_params[i].clone());
+                }
+            }
+            match ty {
+                AcornType::Function(ftype) => AcornType::functional(
+                    ftype
+                        .arg_types
+                        .iter()
+                        .map(|arg| {
+                            replace_type_args_with_params(arg, concrete_type_args, type_params)
+                        })
+                        .collect(),
+                    replace_type_args_with_params(
+                        &ftype.return_type,
+                        concrete_type_args,
+                        type_params,
+                    ),
+                ),
+                AcornType::Data(datatype, args) => AcornType::Data(
+                    datatype.clone(),
+                    args.iter()
+                        .map(|arg| {
+                            replace_type_args_with_params(arg, concrete_type_args, type_params)
+                        })
+                        .collect(),
+                ),
+                _ => ty.clone(),
+            }
+        }
+
+        fn register_match_symbols_for_value(
+            symbol_table: &mut SymbolTable,
+            type_store: &mut TypeStore,
+            value: &AcornValue,
+        ) {
+            match value {
+                AcornValue::Match(scrutinee, cases) => {
+                    if let AcornType::Data(datatype, concrete_type_args) = scrutinee.get_type() {
+                        let match_name = ConstantName::datatype_attr(
+                            datatype.module_id,
+                            datatype.clone(),
+                            "match",
+                        );
+                        let mut sorted_cases = cases.clone();
+                        sorted_cases.sort_by_key(|case| case.constructor_index);
+
+                        let match_symbol = if let Some(symbol) =
+                            symbol_table.get_symbol(&match_name)
+                        {
+                            symbol
+                        } else {
+                            let type_params: Vec<TypeParam> = concrete_type_args
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| TypeParam {
+                                    name: format!("T{}", i),
+                                    typeclass: None,
+                                })
+                                .collect();
+                            let result_param = TypeParam {
+                                name: "R".to_string(),
+                                typeclass: None,
+                            };
+
+                            let generic_datatype_args: Vec<AcornType> = type_params
+                                .iter()
+                                .map(|param| AcornType::Variable(param.clone()))
+                                .collect();
+                            let generic_scrutinee_type =
+                                AcornType::Data(datatype.clone(), generic_datatype_args);
+                            let generic_result_type = AcornType::Variable(result_param.clone());
+
+                            let mut generic_match_arg_types = vec![generic_scrutinee_type];
+                            for case in &sorted_cases {
+                                let generic_case_args: Vec<AcornType> = case
+                                    .new_vars
+                                    .iter()
+                                    .map(|arg_type| {
+                                        replace_type_args_with_params(
+                                            arg_type,
+                                            &concrete_type_args,
+                                            &type_params,
+                                        )
+                                    })
+                                    .collect();
+                                generic_match_arg_types.push(AcornType::functional(
+                                    generic_case_args,
+                                    generic_result_type.clone(),
+                                ));
+                            }
+
+                            let generic_match_type = AcornType::functional(
+                                generic_match_arg_types,
+                                generic_result_type.clone(),
+                            );
+                            type_store.add_type(&generic_match_type);
+
+                            let mut all_params = type_params.clone();
+                            all_params.push(result_param);
+                            let variable_params: Vec<AcornType> = all_params
+                                .iter()
+                                .map(|param| AcornType::Variable(param.clone()))
+                                .collect();
+                            let body_type = type_store
+                                .to_polymorphic_type_term(&generic_match_type, &variable_params);
+                            let mut symbol_type = body_type;
+                            for _ in all_params.iter().rev() {
+                                symbol_type = Term::pi(Term::type_sort(), symbol_type);
+                            }
+
+                            let symbol = symbol_table.add_constant(
+                                match_name.clone(),
+                                NewConstantType::Global,
+                                symbol_type,
+                            );
+                            symbol_table.polymorphic_info.insert(
+                                match_name,
+                                PolymorphicInfo {
+                                    generic_type: generic_match_type,
+                                    type_param_names: all_params
+                                        .iter()
+                                        .map(|param| param.name.clone())
+                                        .collect(),
+                                },
+                            );
+                            symbol
+                        };
+
+                        // Record constructor-order metadata for denormalizing Type.match back
+                        // into AcornValue::Match. Store kernel symbols (not names).
+                        if let Some(constructor_symbols) = sorted_cases
+                            .iter()
+                            .map(|case| match case.pattern.unapply() {
+                                AcornValue::Constant(c) => symbol_table.get_symbol(&c.name),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                        {
+                            symbol_table
+                                .match_eliminator_info
+                                .entry(match_symbol)
+                                .or_insert(MatchEliminatorInfo {
+                                    constructor_symbols,
+                                });
+                        }
+                    }
+
+                    register_match_symbols_for_value(symbol_table, type_store, scrutinee);
+                    for case in cases {
+                        register_match_symbols_for_value(symbol_table, type_store, &case.pattern);
+                        register_match_symbols_for_value(symbol_table, type_store, &case.result);
+                    }
+                }
+                AcornValue::Application(app) => {
+                    register_match_symbols_for_value(symbol_table, type_store, &app.function);
+                    for arg in &app.args {
+                        register_match_symbols_for_value(symbol_table, type_store, arg);
+                    }
+                }
+                AcornValue::TypeApplication(app) => {
+                    register_match_symbols_for_value(symbol_table, type_store, &app.function);
+                }
+                AcornValue::Lambda(_, subvalue)
+                | AcornValue::ForAll(_, subvalue)
+                | AcornValue::Exists(_, subvalue)
+                | AcornValue::Not(subvalue)
+                | AcornValue::Try(subvalue, _) => {
+                    register_match_symbols_for_value(symbol_table, type_store, subvalue);
+                }
+                AcornValue::Binary(_, left, right) => {
+                    register_match_symbols_for_value(symbol_table, type_store, left);
+                    register_match_symbols_for_value(symbol_table, type_store, right);
+                }
+                AcornValue::IfThenElse(cond, then_value, else_value) => {
+                    register_match_symbols_for_value(symbol_table, type_store, cond);
+                    register_match_symbols_for_value(symbol_table, type_store, then_value);
+                    register_match_symbols_for_value(symbol_table, type_store, else_value);
+                }
+                AcornValue::Variable(..) | AcornValue::Constant(..) | AcornValue::Bool(..) => {}
+            }
+        }
+
+        register_match_symbols_for_value(self, type_store, value);
     }
 
     /// Get the name corresponding to a particular global (ModuleId, AtomId).
@@ -702,6 +913,9 @@ impl SymbolTable {
         for (k, v) in other.polymorphic_info.iter() {
             self.polymorphic_info.insert(k.clone(), v.clone());
         }
+        for (k, v) in other.match_eliminator_info.iter() {
+            self.match_eliminator_info.insert(k.clone(), v.clone());
+        }
         for (k, v) in other.type_to_element.iter() {
             // Only insert if not already present (first registered wins)
             if !self.type_to_element.contains_key(k) {
@@ -742,6 +956,9 @@ impl SymbolTable {
         }
         for (k, v) in other.polymorphic_info.iter() {
             self.polymorphic_info.insert(k.clone(), v.clone());
+        }
+        for (k, v) in other.match_eliminator_info.iter() {
+            self.match_eliminator_info.insert(k.clone(), v.clone());
         }
         for (k, v) in other.type_to_element.iter() {
             if !self.type_to_element.contains_key(k) {
