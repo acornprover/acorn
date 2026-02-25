@@ -2262,7 +2262,8 @@ impl Normalizer {
             Atom::Symbol(Symbol::Not)
             | Atom::Symbol(Symbol::And)
             | Atom::Symbol(Symbol::Or)
-            | Atom::Symbol(Symbol::Eq) => {
+            | Atom::Symbol(Symbol::Eq)
+            | Atom::Symbol(Symbol::Ite) => {
                 panic!("logical symbols should be handled in denormalize_term")
             }
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
@@ -2406,6 +2407,7 @@ impl Normalizer {
             Atom::Symbol(Symbol::And) => Some(Symbol::And),
             Atom::Symbol(Symbol::Or) => Some(Symbol::Or),
             Atom::Symbol(Symbol::Eq) => Some(Symbol::Eq),
+            Atom::Symbol(Symbol::Ite) => Some(Symbol::Ite),
             _ => None,
         };
 
@@ -2538,6 +2540,18 @@ impl Normalizer {
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::equals(args.next().unwrap(), args.next().unwrap());
+                }
+                Symbol::Ite => {
+                    // Ite may carry one explicit type argument in term form.
+                    if type_args.len() > 1 || value_args.len() != 3 {
+                        panic!("malformed ite term during denormalization: {}", term);
+                    }
+                    let mut args = value_args.into_iter();
+                    return AcornValue::IfThenElse(
+                        Box::new(args.next().unwrap()),
+                        Box::new(args.next().unwrap()),
+                        Box::new(args.next().unwrap()),
+                    );
                 }
                 _ => unreachable!("unexpected logical symbol: {}", symbol),
             }

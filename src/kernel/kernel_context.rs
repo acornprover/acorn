@@ -32,6 +32,7 @@ impl KernelContext {
             Atom::Symbol(Symbol::And) => "and".to_string(),
             Atom::Symbol(Symbol::Or) => "or".to_string(),
             Atom::Symbol(Symbol::Eq) => "eq".to_string(),
+            Atom::Symbol(Symbol::Ite) => "ite".to_string(),
             Atom::Symbol(Symbol::Empty) => "Empty".to_string(),
             Atom::Symbol(Symbol::Bool) => "Bool".to_string(),
             Atom::Symbol(Symbol::Type0) => "Type".to_string(),
@@ -919,6 +920,7 @@ impl KernelContext {
             "and" => Term::atom(Atom::Symbol(Symbol::And)),
             "or" => Term::atom(Atom::Symbol(Symbol::Or)),
             "eq" => Term::atom(Atom::Symbol(Symbol::Eq)),
+            "ite" => Term::atom(Atom::Symbol(Symbol::Ite)),
             _ => {
                 // Fall back to Term::parse for anything else
                 Term::parse(s)

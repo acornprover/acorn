@@ -698,7 +698,8 @@ impl<'a> TermRef<'a> {
                 | TermComponent::Atom(Atom::Symbol(Symbol::Not))
                 | TermComponent::Atom(Atom::Symbol(Symbol::And))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Or))
-                | TermComponent::Atom(Atom::Symbol(Symbol::Eq)) => {
+                | TermComponent::Atom(Atom::Symbol(Symbol::Eq))
+                | TermComponent::Atom(Atom::Symbol(Symbol::Ite)) => {
                     // Built-in type/logical symbols contribute to weight
                     weight1 += 1;
                 }

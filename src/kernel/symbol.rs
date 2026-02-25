@@ -27,6 +27,9 @@ pub enum Symbol {
     // Polymorphic equality: Pi(T: Type0). T -> T -> Bool.
     Eq,
 
+    // Polymorphic if-then-else: Pi(T: Type0). Bool -> T -> T -> T.
+    Ite,
+
     // The Empty type (bottom type).
     Empty,
 
@@ -72,6 +75,7 @@ impl fmt::Display for Symbol {
             Symbol::And => write!(f, "and"),
             Symbol::Or => write!(f, "or"),
             Symbol::Eq => write!(f, "eq"),
+            Symbol::Ite => write!(f, "ite"),
             Symbol::Empty => write!(f, "Empty"),
             Symbol::Bool => write!(f, "Bool"),
             Symbol::Type0 => write!(f, "Type0"),
