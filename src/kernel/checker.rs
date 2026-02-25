@@ -105,7 +105,7 @@ pub struct CheckedStep {
 ///
 /// The types of single-step we support are:
 ///
-///   Substitutions into a known theorem (or exact variable-clause matches in `bigcert` mode).
+///   Substitutions into a known theorem (or exact variable-clause matches for variable clauses).
 ///   "Congruence closure" of equalities and subterm relationships. Handled by the EqualityGraph.
 ///   Propositional calculus on concrete literals. Handled by the EqualityGraph.
 ///   Introducing variables for existential quantifiers. Handled weirdly through a Normalizer.
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checker_bigcert_requires_exact_variable_clause_match() {
+    fn test_checker_requires_exact_variable_clause_match() {
         let mut context = KernelContext::new();
         context.parse_constants(&["c0", "c1"], "Bool");
         context.parse_constant("g0", "Bool -> Bool");
@@ -536,16 +536,16 @@ mod tests {
         let generic = context.parse_clause("g0(x0)", &["Bool"]);
         checker.insert_clause(&generic, StepReason::Testing, &context);
 
-        // Exact variable clause lookup is still allowed in bigcert mode.
+        // Exact variable clause lookup is allowed for variable clauses.
         assert!(checker.check_clause(&generic, &context).is_some());
 
-        // But specialization via generalization matching is disabled in bigcert mode.
+        // But specialization via generalization matching is disabled for variable clauses.
         let specialized = context.parse_clause("g0(c0)", &[]);
         assert!(checker.check_clause(&specialized, &context).is_none());
     }
 
     #[test]
-    fn test_checker_bigcert_simplifies_variable_clause_using_concrete_literal() {
+    fn test_checker_simplifies_variable_clause_using_concrete_literal() {
         let mut context = KernelContext::new();
         context.parse_constants(&["c0", "c1"], "Bool");
         context.parse_constant("g0", "(Bool, Bool) -> Bool");

@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_concrete_steps_uses_bigcert_claim_serialization() {
+    fn test_from_concrete_steps_uses_claim_with_args_serialization() {
         let code = r#"
             theorem goal {
                 false = false
@@ -1513,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_concrete_steps_bigcert_serializes_plain_claim_when_no_local_context() {
+    fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
         let code = r#"
             theorem goal {
                 false
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_concrete_steps_bigcert_infers_type_arg_from_value_mapping() {
+    fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
         let code = r#"
             theorem goal {
                 true

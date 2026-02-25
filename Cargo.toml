@@ -40,12 +40,10 @@ walkdir = "2.4.0"
 assert_fs = "1.1.2"
 
 [features]
-default = ["bigcert"]
+default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Enable claim serialization as `function(...) { generic }(args)` in generated certificates.
-bigcert = []
 # Enable experimental normalization bridge:
 # AcornValue -> Term -> (denormalize) -> legacy clause backend.
 term_normalization_bridge = []
