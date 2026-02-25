@@ -12,6 +12,7 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::elaborator::synthetic::{SyntheticDefinition, SyntheticRegistry};
+use crate::elaborator::to_term::build_type_var_map;
 use crate::kernel::atom::{Atom, AtomId, INVALID_SYNTHETIC_MODULE};
 use crate::kernel::clause::Clause;
 use crate::kernel::cnf::Cnf;
@@ -2131,8 +2132,6 @@ impl Normalizer {
         let range = fact.source().range;
 
         {
-            use crate::elaborator::acorn_type::TypeParam;
-
             // We keep track of type params to build the type_var_map
             let propositions: Vec<(AcornValue, Vec<TypeParam>, Source)> = match fact {
                 Fact::Proposition(prop) => {
@@ -2156,23 +2155,7 @@ impl Normalizer {
             };
 
             for (value, type_params, source) in propositions {
-                // Build type_var_map from type parameters.
-                // Each type parameter gets a variable ID and a type (TypeSort or Typeclass).
-                let type_var_map: HashMap<String, (AtomId, Term)> = type_params
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        let var_type = if let Some(tc) = &p.typeclass {
-                            // Type parameter has a typeclass constraint
-                            let tc_id = self.kernel_context.type_store.add_typeclass(tc);
-                            Term::typeclass(tc_id)
-                        } else {
-                            // Unconstrained type parameter
-                            Term::type_sort()
-                        };
-                        (p.name.clone(), (i as AtomId, var_type))
-                    })
-                    .collect();
+                let type_var_map = build_type_var_map(&mut self.kernel_context, &type_params);
 
                 let type_var_map_opt = if type_var_map.is_empty() {
                     None

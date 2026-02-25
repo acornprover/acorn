@@ -17,5 +17,6 @@ pub mod source;
 pub mod stack;
 pub mod synthetic;
 pub mod termination_checker;
+pub mod to_term;
 pub mod type_unifier;
 pub mod unresolved_constant;
