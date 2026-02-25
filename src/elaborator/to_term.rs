@@ -529,6 +529,10 @@ mod tests {
 
     fn assert_term_roundtrip_stable(value: AcornValue) {
         let mut normalizer = Normalizer::new();
+        assert_term_roundtrip_stable_in_normalizer(&mut normalizer, value);
+    }
+
+    fn assert_term_roundtrip_stable_in_normalizer(normalizer: &mut Normalizer, value: AcornValue) {
         let term = elaborate_value_to_term(
             normalizer.kernel_context_mut(),
             &value,
@@ -1157,5 +1161,216 @@ mod tests {
                 AcornValue::lambda(vec![bool_ty.clone()], AcornValue::Variable(1, bool_ty)),
             ),
         ));
+    }
+
+    #[test]
+    fn test_parity_roundtrip_matrix_for_supported_acorn_values() {
+        let bool_ty = AcornType::Bool;
+        let f_name = ConstantName::unqualified(ModuleId(0), "f");
+        let f_type = AcornType::functional(vec![bool_ty.clone()], bool_ty.clone());
+        let f = AcornValue::constant(f_name, vec![], f_type.clone(), f_type.clone(), vec![]);
+
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let id_name = ConstantName::unqualified(ModuleId(0), "id");
+        let id_generic_type = AcornType::functional(
+            vec![AcornType::Variable(t_param.clone())],
+            AcornType::Variable(t_param),
+        );
+        let id = AcornValue::constant(
+            id_name,
+            vec![],
+            id_generic_type.clone(),
+            id_generic_type,
+            vec!["T".to_string()],
+        );
+
+        let cases: Vec<(&str, AcornValue)> = vec![
+            ("bool_true", AcornValue::Bool(true)),
+            ("bool_false", AcornValue::Bool(false)),
+            ("not", AcornValue::Not(Box::new(AcornValue::Bool(false)))),
+            (
+                "and",
+                AcornValue::and(AcornValue::Bool(true), AcornValue::Bool(false)),
+            ),
+            (
+                "or",
+                AcornValue::or(AcornValue::Bool(false), AcornValue::Bool(true)),
+            ),
+            (
+                "implies",
+                AcornValue::implies(AcornValue::Bool(true), AcornValue::Bool(false)),
+            ),
+            (
+                "equals",
+                AcornValue::equals(AcornValue::Bool(true), AcornValue::Bool(false)),
+            ),
+            (
+                "not_equals",
+                AcornValue::not_equals(AcornValue::Bool(true), AcornValue::Bool(true)),
+            ),
+            (
+                "if_then_else",
+                AcornValue::IfThenElse(
+                    Box::new(AcornValue::Bool(true)),
+                    Box::new(AcornValue::Bool(false)),
+                    Box::new(AcornValue::Bool(true)),
+                ),
+            ),
+            (
+                "lambda",
+                AcornValue::lambda(
+                    vec![bool_ty.clone()],
+                    AcornValue::Variable(0, bool_ty.clone()),
+                ),
+            ),
+            (
+                "forall_exists",
+                AcornValue::forall(
+                    vec![bool_ty.clone()],
+                    AcornValue::exists(
+                        vec![bool_ty.clone()],
+                        AcornValue::or(
+                            AcornValue::Variable(0, bool_ty.clone()),
+                            AcornValue::Variable(1, bool_ty.clone()),
+                        ),
+                    ),
+                ),
+            ),
+            (
+                "value_application",
+                AcornValue::apply(f.clone(), vec![AcornValue::Bool(true)]),
+            ),
+            (
+                "type_application",
+                AcornValue::apply(
+                    AcornValue::type_apply(
+                        id,
+                        vec!["T".to_string()],
+                        vec![None],
+                        vec![AcornType::Bool],
+                    ),
+                    vec![AcornValue::Bool(true)],
+                ),
+            ),
+        ];
+
+        for (name, value) in cases {
+            let mut normalizer = Normalizer::new();
+            let term = elaborate_value_to_term(
+                normalizer.kernel_context_mut(),
+                &value,
+                NewConstantType::Local,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{}: initial elaboration failed: {}", name, e));
+            let denormalized =
+                normalizer.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
+            let roundtripped = elaborate_value_to_term(
+                normalizer.kernel_context_mut(),
+                &denormalized,
+                NewConstantType::Local,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{}: re-elaboration failed: {}", name, e));
+            assert_eq!(
+                term, roundtripped,
+                "{}: AcornValue -> Term -> AcornValue -> Term mismatch",
+                name
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "known denormalization gap: eliminator applications with lambda args"]
+    fn test_parity_roundtrip_match_value_in_context() {
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let succ_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "succ");
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "match");
+
+        let zero = AcornValue::constant(
+            zero_name.clone(),
+            vec![],
+            nat_type.clone(),
+            nat_type.clone(),
+            vec![],
+        );
+        let succ = AcornValue::constant(
+            succ_name.clone(),
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
+        );
+        let match_value = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero.clone(),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
+                        function: Box::new(succ),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    result: AcornValue::Variable(0, nat_type.clone()),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
+            ],
+        );
+
+        let mut normalizer = Normalizer::new();
+        normalizer
+            .kernel_context_mut()
+            .type_store
+            .add_type(&nat_type);
+        let nat_id = normalizer
+            .kernel_context_mut()
+            .type_store
+            .get_datatype_id(&nat)
+            .expect("nat type id should exist");
+        let nat_term = Term::ground_type(nat_id);
+        normalizer.kernel_context_mut().symbol_table.add_constant(
+            zero_name,
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        normalizer.kernel_context_mut().symbol_table.add_constant(
+            succ_name,
+            NewConstantType::Global,
+            Term::pi(nat_term.clone(), nat_term.clone()),
+        );
+        normalizer.kernel_context_mut().symbol_table.add_constant(
+            match_name,
+            NewConstantType::Global,
+            Term::pi(
+                Term::type_sort(),
+                Term::pi(
+                    nat_term.clone(),
+                    Term::pi(
+                        nat_term.clone(),
+                        Term::pi(
+                            Term::pi(nat_term.clone(), nat_term.clone()),
+                            nat_term.clone(),
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        assert_term_roundtrip_stable_in_normalizer(&mut normalizer, match_value);
     }
 }
