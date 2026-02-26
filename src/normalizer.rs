@@ -32,7 +32,7 @@ use tracing::trace;
 #[derive(Clone)]
 pub struct NormalizedFact {
     pub steps: Vec<ProofStep>,
-    pub normalizer: Normalizer,
+    pub kernel_context: KernelContext,
 }
 
 /// A goal that has been normalized into proof steps.
@@ -41,8 +41,8 @@ pub struct NormalizedFact {
 pub struct NormalizedGoal {
     pub goal: Goal,
     pub steps: Vec<ProofStep>,
-    /// The normalizer state after normalizing this goal (with negated goal added).
-    pub normalizer: Normalizer,
+    /// The kernel context state after normalizing this goal (with negated goal added).
+    pub kernel_context: KernelContext,
 }
 
 #[derive(Clone)]
@@ -435,7 +435,7 @@ impl Normalizer {
 
         Ok(NormalizedFact {
             steps,
-            normalizer: self.clone(),
+            kernel_context: self.kernel_context.clone(),
         })
     }
 
@@ -464,7 +464,7 @@ impl Normalizer {
         Ok(NormalizedGoal {
             goal: goal.clone(),
             steps,
-            normalizer: self.clone(),
+            kernel_context: self.kernel_context.clone(),
         })
     }
 

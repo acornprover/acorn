@@ -323,7 +323,7 @@ impl Checker {
     }
 
     /// Insert pre-normalized goal clauses into the checker.
-    /// Uses the provided normalized goal (including its normalizer state).
+    /// Uses the provided normalized goal (including its kernel context state).
     pub fn insert_normalized_goal(
         &mut self,
         normalized: &crate::normalizer::NormalizedGoal,
@@ -335,7 +335,8 @@ impl Checker {
             normalized.goal.first_line
         );
 
-        *normalizer = normalized.normalizer.clone();
+        *normalizer =
+            crate::normalizer::Normalizer::from_kernel_context(normalized.kernel_context.clone());
         let source = &normalized.goal.proposition.source;
         let kernel_context = normalizer.kernel_context();
         for step in &normalized.steps {
@@ -694,7 +695,9 @@ mod tests {
 
         let project = Project::new_mock();
         let mut bindings_cow = Cow::Borrowed(&bindings);
-        let mut normalizer_cow = Cow::Owned(normalized_goal.normalizer.clone());
+        let mut normalizer_cow = Cow::Owned(crate::normalizer::Normalizer::from_kernel_context(
+            normalized_goal.kernel_context.clone(),
+        ));
 
         let err = match Certificate::parse_code_line(
             "let (x: Bool, y: Bool) satisfy { true }",

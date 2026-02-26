@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::{project::Project, prover::Outcome};
+use crate::{normalizer::Normalizer, project::Project, prover::Outcome};
 
 // This file tests that the various language features work correctly in the prover.
 
@@ -1160,22 +1160,17 @@ fn test_proving_with_mixin_instance() {
         processor.add_module_facts(&cursor).unwrap();
         let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
         processor.set_normalized_goal(normalized_goal);
+        let goal_normalizer =
+            Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
 
-        let outcome =
-            processor.search(crate::prover::ProverMode::Test, &normalized_goal.normalizer);
+        let outcome = processor.search(crate::prover::ProverMode::Test, &goal_normalizer);
         assert_eq!(outcome, Outcome::Success);
         let cert = processor
             .prover()
-            .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
+            .make_cert(&goal_env.bindings, &goal_normalizer, true)
             .expect("make_cert failed");
         processor
-            .check_cert(
-                &cert,
-                None,
-                &normalized_goal.normalizer,
-                &p,
-                &goal_env.bindings,
-            )
+            .check_cert(&cert, None, &goal_normalizer, &p, &goal_env.bindings)
             .expect("check_cert failed");
     }
 }
@@ -1792,14 +1787,15 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
     processor.add_module_facts(&cursor).unwrap();
     let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
     processor.set_normalized_goal(normalized_goal);
+    let goal_normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
 
-    let outcome = processor.search(crate::prover::ProverMode::Test, &normalized_goal.normalizer);
+    let outcome = processor.search(crate::prover::ProverMode::Test, &goal_normalizer);
     assert_eq!(outcome, Outcome::Success);
 
     // Generate the certificate
     let cert = processor
         .prover()
-        .make_cert(&goal_env.bindings, &normalized_goal.normalizer, true)
+        .make_cert(&goal_env.bindings, &goal_normalizer, true)
         .expect("make_cert failed");
 
     // Debug: print the certificate
@@ -1813,13 +1809,7 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
     // The certificate should verify successfully
     // (If the code generator correctly uses lib(monoid).Monoid format)
     processor
-        .check_cert(
-            &cert,
-            None,
-            &normalized_goal.normalizer,
-            &p,
-            &goal_env.bindings,
-        )
+        .check_cert(&cert, None, &goal_normalizer, &p, &goal_env.bindings)
         .expect("check_cert should succeed");
 }
 
@@ -2090,7 +2080,8 @@ fn test_dependently_typed_synthetic() {
     // s0 has type T0 where T0 is a type parameter constrained to Grp.
     let cert_line = "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }";
 
-    processor.test_parse_code(cert_line, &bindings, &normalized_goal.normalizer);
+    let goal_normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+    processor.test_parse_code(cert_line, &bindings, &goal_normalizer);
 }
 
 // Reproduces a bug where a polymorphic synthetic causes
@@ -2119,7 +2110,7 @@ fn test_polymorphic_synthetic_claim() {
     );
 
     let project = Project::new_mock();
-    let normalizer = normalized_goal.normalizer.clone();
+    let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
@@ -2168,7 +2159,7 @@ fn test_certificate_type_params_are_step_local() {
     );
 
     let project = Project::new_mock();
-    let normalizer = normalized_goal.normalizer.clone();
+    let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 

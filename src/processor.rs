@@ -99,7 +99,7 @@ impl Processor {
 
     /// Adds a normalized fact to the prover.
     pub fn add_normalized_fact(&mut self, normalized: &NormalizedFact) -> Result<(), BuildError> {
-        let kernel_context = normalized.normalizer.kernel_context();
+        let kernel_context = &normalized.kernel_context;
         for step in &normalized.steps {
             // Extract the source from the step's rule.
             let step_source = match &step.rule {
@@ -128,7 +128,7 @@ impl Processor {
     /// Sets a normalized goal as the prover's goal.
     pub fn set_normalized_goal(&mut self, normalized: &NormalizedGoal) {
         let source = &normalized.goal.proposition.source;
-        let kernel_context = normalized.normalizer.kernel_context();
+        let kernel_context = &normalized.kernel_context;
         for step in &normalized.steps {
             // Use the step's own source if it's an assumption (which includes negated goals),
             // otherwise use the goal's source

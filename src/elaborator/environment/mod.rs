@@ -778,7 +778,7 @@ impl Environment {
 
                     // Normalize the goal on a CLONE of current_normalizer (without the claim's fact).
                     // This captures the state that would exist after set_goal is called.
-                    // The NormalizedGoal.normalizer will include the negated goal.
+                    // The NormalizedGoal.kernel_context will include the negated goal.
                     let mut goal_normalizer = current_normalizer.clone();
                     match goal_normalizer.normalize_goal(goal) {
                         Ok(normalized) => {

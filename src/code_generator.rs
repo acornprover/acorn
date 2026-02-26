@@ -2262,6 +2262,7 @@ impl From<String> for Error {
 #[cfg(test)]
 mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
+    use crate::normalizer::Normalizer;
     use crate::project::Project;
 
     #[test]
@@ -2275,18 +2276,18 @@ mod tests {
             "#,
         );
 
-        let normalizer = &normalized_goal.normalizer;
+        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
         let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
+        names.collect_synthetic_steps(&bindings, synthetic_ids, &normalizer, &mut synthetic_steps);
         let mut codes = vec![];
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .certificate_step_to_code(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, &normalizer)
                     .unwrap(),
             );
         }
@@ -2296,7 +2297,7 @@ mod tests {
         let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer);
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2314,18 +2315,18 @@ mod tests {
             "#,
         );
 
-        let normalizer = &normalized_goal.normalizer;
+        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
         let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
+        names.collect_synthetic_steps(&bindings, synthetic_ids, &normalizer, &mut synthetic_steps);
         let mut codes = vec![];
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .certificate_step_to_code(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, &normalizer)
                     .unwrap(),
             );
         }
@@ -2335,7 +2336,7 @@ mod tests {
         let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer);
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2355,18 +2356,18 @@ mod tests {
             "#,
         );
 
-        let normalizer = &normalized_goal.normalizer;
+        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut names = SyntheticNameSet::new();
         let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(&bindings, synthetic_ids, normalizer, &mut synthetic_steps);
+        names.collect_synthetic_steps(&bindings, synthetic_ids, &normalizer, &mut synthetic_steps);
         let mut codes = vec![];
         for step in synthetic_steps {
             codes.push(
                 generator
-                    .certificate_step_to_code(&names, &step, normalizer)
+                    .certificate_step_to_code(&names, &step, &normalizer)
                     .unwrap(),
             );
         }
@@ -2375,7 +2376,7 @@ mod tests {
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer);
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2393,7 +2394,7 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = normalized_goal.normalizer;
+        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
 
         let foreign_name = ConstantName::Unqualified(ModuleId(999), "s0".to_string());
         let foreign_atom = normalizer.add_scoped_constant(foreign_name, &AcornType::Bool, None);
@@ -2435,7 +2436,7 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = normalized_goal.normalizer;
+        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
         let generic = normalizer
             .kernel_context()
             .parse_clause("x0 = x0", &["Bool"]);
@@ -2476,7 +2477,7 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = normalized_goal.normalizer;
+        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
         let generic = normalizer
             .kernel_context()
             .parse_clause("x0 = x0", &["Bool"]);
@@ -2521,7 +2522,7 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = normalized_goal.normalizer;
+        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
 
         {
             let kctx = normalizer.kernel_context_mut();
