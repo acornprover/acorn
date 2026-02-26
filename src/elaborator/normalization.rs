@@ -44,21 +44,12 @@ pub struct NormalizedGoal {
     pub kernel_context: KernelContext,
 }
 
-#[derive(Clone)]
-pub struct Normalizer {
-    /// The kernel context containing kernel stores.
-    pub(crate) kernel_context: KernelContext,
-}
-
 /// Normalize one fact using kernel context state.
 pub fn normalize_fact(
     kernel_context: &mut KernelContext,
     fact: &Fact,
 ) -> Result<NormalizedFact, BuildError> {
-    let mut normalizer = Normalizer::from_kernel_context(std::mem::take(kernel_context));
-    let result = normalizer.normalize_fact(fact);
-    *kernel_context = normalizer.into_kernel_context();
-    result
+    kernel_context.normalize_fact(fact)
 }
 
 /// Normalize one goal using kernel context state.
@@ -66,45 +57,19 @@ pub fn normalize_goal(
     kernel_context: &mut KernelContext,
     goal: &Goal,
 ) -> Result<NormalizedGoal, BuildError> {
-    let mut normalizer = Normalizer::from_kernel_context(std::mem::take(kernel_context));
-    let result = normalizer.normalize_goal(goal);
-    *kernel_context = normalizer.into_kernel_context();
-    result
+    kernel_context.normalize_goal(goal)
 }
-
-impl Normalizer {
-    pub fn new() -> Normalizer {
-        Self::from_kernel_context(KernelContext::new())
-    }
-
-    pub fn from_kernel_context(kernel_context: KernelContext) -> Normalizer {
-        Normalizer { kernel_context }
-    }
-
-    pub fn into_kernel_context(self) -> KernelContext {
-        self.kernel_context
-    }
-
+impl KernelContext {
     pub fn get_synthetic_type(&self, module_id: ModuleId, local_id: AtomId) -> AcornType {
         let symbol = Symbol::Synthetic(module_id, local_id);
-        let type_term = self.kernel_context.symbol_table.get_type(symbol);
-        self.kernel_context
-            .type_store
-            .type_term_to_acorn_type(type_term)
+        let type_term = self.symbol_table.get_type(symbol);
+        self.type_store.type_term_to_acorn_type(type_term)
     }
 
     /// Returns all synthetic atom IDs that have been defined.
     #[cfg(test)]
     pub fn get_synthetic_ids(&self) -> Vec<(ModuleId, AtomId)> {
-        self.kernel_context.synthetic_registry.get_ids()
-    }
-
-    pub fn kernel_context(&self) -> &KernelContext {
-        &self.kernel_context
-    }
-
-    pub fn kernel_context_mut(&mut self) -> &mut KernelContext {
-        &mut self.kernel_context
+        self.synthetic_registry.get_ids()
     }
 
     /// Registers an arbitrary type with the type store.
@@ -112,11 +77,11 @@ impl Normalizer {
     /// in a let...satisfy statement need to be available for subsequent steps.
     pub fn register_arbitrary_type(&mut self, param: &TypeParam) {
         let arb_type = AcornType::Arbitrary(param.clone());
-        self.kernel_context.type_store.add_type(&arb_type);
+        self.type_store.add_type(&arb_type);
 
         // If the type param has a typeclass constraint, ensure the typeclass is registered.
         if let Some(typeclass) = &param.typeclass {
-            self.kernel_context.type_store.add_typeclass(typeclass);
+            self.type_store.add_typeclass(typeclass);
         }
     }
 
@@ -137,11 +102,8 @@ impl Normalizer {
             _ => (0, value.clone(), vec![]),
         };
 
-        let term =
-            elaborate_value_to_term_existing(&mut self.kernel_context, &alt_value, type_var_map)
-                .ok()?;
-        let mut view =
-            Clausifier::new_mut(&mut self.kernel_context, type_var_map.cloned(), ModuleId(0));
+        let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
+        let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
         let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
             return None;
         };
@@ -164,10 +126,7 @@ impl Normalizer {
             .iter()
             .map(|t| {
                 // First convert the base type
-                let mut type_term = self
-                    .kernel_context
-                    .type_store
-                    .to_type_term_with_vars(t, type_var_map);
+                let mut type_term = self.type_store.to_type_term_with_vars(t, type_var_map);
                 // Convert FreeVariables to BoundVariables (same as make_skolem_terms)
                 type_term = type_term.convert_free_to_bound(num_type_params);
                 // Wrap with Pi types for each type variable
@@ -183,11 +142,8 @@ impl Normalizer {
             .map(|c| c.instantiate_invalid_synthetics_with_skip(num_definitions, num_type_vars))
             .collect();
 
-        self.kernel_context.synthetic_registry.lookup_by_key(
-            &type_var_kinds,
-            &synthetic_types,
-            &clauses,
-        )
+        self.synthetic_registry
+            .lookup_by_key(&type_var_kinds, &synthetic_types, &clauses)
     }
 
     pub fn add_scoped_constant(
@@ -197,30 +153,16 @@ impl Normalizer {
         type_var_map: Option<&HashMap<String, (AtomId, Term)>>,
     ) -> Atom {
         let type_term = self
-            .kernel_context
             .type_store
             .to_type_term_with_vars(acorn_type, type_var_map);
-        Atom::Symbol(self.kernel_context.symbol_table.add_constant(
-            cname,
-            NewConstantType::Local,
-            type_term,
-        ))
-    }
-
-    /// Merges another Normalizer into this one.
-    /// Used to combine normalized state from dependencies.
-    pub fn merge(&mut self, other: &Normalizer) {
-        self.kernel_context.merge(&other.kernel_context);
-    }
-
-    /// Merges another Normalizer into this one, excluding scoped constants.
-    /// This is intended for merging import state only.
-    pub fn merge_imports(&mut self, other: &Normalizer) {
-        self.kernel_context.merge_imports(&other.kernel_context);
+        Atom::Symbol(
+            self.symbol_table
+                .add_constant(cname, NewConstantType::Local, type_term),
+        )
     }
 }
 
-impl Normalizer {
+impl KernelContext {
     /// Normalize a term-level proposition into clauses.
     ///
     /// This is the term-native backend for proposition normalization.
@@ -234,11 +176,7 @@ impl Normalizer {
         term.validate();
 
         let mut skolem_ids = vec![];
-        let mut mut_view = Clausifier::new_mut(
-            &mut self.kernel_context,
-            type_var_map.clone(),
-            source.module_id,
-        );
+        let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
         let clauses = mut_view.clausify_term(term, &mut skolem_ids)?;
 
         // For any of the created ids that have not been defined yet, the output
@@ -246,7 +184,7 @@ impl Normalizer {
         let mut output = vec![];
         let mut undefined_ids = vec![];
         for id in skolem_ids {
-            if let Some(def) = self.kernel_context.synthetic_registry.get(&id) {
+            if let Some(def) = self.synthetic_registry.get(&id) {
                 for clause in &def.clauses {
                     output.push(clause.clone());
                 }
@@ -267,15 +205,10 @@ impl Normalizer {
 
             let synthetic_types: Vec<Term> = undefined_ids
                 .iter()
-                .map(|&(m, i)| {
-                    self.kernel_context
-                        .symbol_table
-                        .get_type(Symbol::Synthetic(m, i))
-                        .clone()
-                })
+                .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
                 .collect();
 
-            self.kernel_context.define_synthetic_atoms(
+            self.define_synthetic_atoms(
                 undefined_ids,
                 type_vars,
                 synthetic_types,
@@ -305,12 +238,7 @@ impl Normalizer {
         }
         assert!(value.is_bool_type());
 
-        let term = elaborate_value_to_term(
-            &mut self.kernel_context,
-            value,
-            ctype,
-            type_var_map.as_ref(),
-        )?;
+        let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         self.normalize_term(&term, ctype, source, type_var_map)
     }
 
@@ -322,25 +250,19 @@ impl Normalizer {
         match fact {
             Fact::Instance(datatype, typeclass, _) => {
                 let acorn_type = AcornType::Data(datatype.clone(), vec![]);
-                let typeclass_id = self.kernel_context.type_store.add_typeclass(typeclass);
-                self.kernel_context
-                    .type_store
-                    .add_type_instance(&acorn_type, typeclass_id);
+                let typeclass_id = self.type_store.add_typeclass(typeclass);
+                self.type_store.add_type_instance(&acorn_type, typeclass_id);
             }
             Fact::Extends(typeclass, base_set, provides_inhabitants, _) => {
-                let tc_id = self.kernel_context.type_store.add_typeclass(typeclass);
+                let tc_id = self.type_store.add_typeclass(typeclass);
                 for base in base_set {
-                    let base_id = self.kernel_context.type_store.add_typeclass(base);
-                    self.kernel_context
-                        .type_store
-                        .add_typeclass_extends(tc_id, base_id);
+                    let base_id = self.type_store.add_typeclass(base);
+                    self.type_store.add_typeclass_extends(tc_id, base_id);
                 }
                 // If the typeclass has a constant of the instance type (e.g., point: P),
                 // mark it as providing inhabitants.
                 if *provides_inhabitants {
-                    self.kernel_context
-                        .symbol_table
-                        .mark_typeclass_inhabited(tc_id);
+                    self.symbol_table.mark_typeclass_inhabited(tc_id);
                 }
             }
             _ => {}
@@ -372,7 +294,7 @@ impl Normalizer {
             };
 
             for (value, type_params, source) in propositions {
-                let type_var_map = build_type_var_map(&mut self.kernel_context, &type_params);
+                let type_var_map = build_type_var_map(self, &type_params);
 
                 let type_var_map_opt = if type_var_map.is_empty() {
                     None
@@ -391,7 +313,7 @@ impl Normalizer {
                     trace!(clause = %clause, "normalized to clause");
                 }
                 for clause in clauses {
-                    clause.validate(&self.kernel_context);
+                    clause.validate(self);
                     let step = ProofStep::assumption(&source, clause);
                     steps.push(step);
                 }
@@ -400,7 +322,7 @@ impl Normalizer {
 
         Ok(NormalizedFact {
             steps,
-            kernel_context: self.kernel_context.clone(),
+            kernel_context: self.clone(),
         })
     }
 
@@ -429,7 +351,7 @@ impl Normalizer {
         Ok(NormalizedGoal {
             goal: goal.clone(),
             steps,
-            kernel_context: self.kernel_context.clone(),
+            kernel_context: self.clone(),
         })
     }
 
@@ -449,7 +371,7 @@ impl Normalizer {
         type_param_names: Option<&[String]>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(&self.kernel_context).denormalize(
+        TermBridge::new(self).denormalize(
             clause,
             arbitrary_names,
             type_param_names,
@@ -465,7 +387,7 @@ impl Normalizer {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
-        TermBridge::new(&self.kernel_context).denormalize_type_with_context(
+        TermBridge::new(self).denormalize_type_with_context(
             type_term,
             local_context,
             instantiate_type_vars,
@@ -481,7 +403,7 @@ impl Normalizer {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(&self.kernel_context).denormalize_term_with_context(
+        TermBridge::new(self).denormalize_term_with_context(
             term,
             local_context,
             instantiate_type_vars,
@@ -497,7 +419,7 @@ impl Normalizer {
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(&self.kernel_context).denormalize_term_with_context_and_arbitrary(
+        TermBridge::new(self).denormalize_term_with_context_and_arbitrary(
             term,
             local_context,
             arbitrary_names,
@@ -513,13 +435,7 @@ impl Normalizer {
         &self,
         ids: &[(ModuleId, AtomId)],
     ) -> Vec<Arc<SyntheticDefinition>> {
-        self.kernel_context
-            .synthetic_registry
-            .find_covering_info(ids)
-    }
-
-    pub fn atom_str(&self, atom: &Atom) -> String {
-        TermBridge::new(&self.kernel_context).atom_str(atom)
+        self.synthetic_registry.find_covering_info(ids)
     }
 
     /// When you denormalize and renormalize a clause, you should get the same thing.
@@ -582,7 +498,7 @@ impl Normalizer {
                     .iter()
                     .map(|c| DisplayClause {
                         clause: c,
-                        context: &self.kernel_context,
+                        context: self,
                     }
                     .to_string())
                     .collect::<Vec<String>>()
@@ -593,7 +509,7 @@ impl Normalizer {
             self.check_denormalize_renormalize(clause);
             let c = DisplayClause {
                 clause,
-                context: &self.kernel_context,
+                context: self,
             };
             let a = c.to_string();
             if a != expected[i] {

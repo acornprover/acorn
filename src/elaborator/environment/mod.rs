@@ -14,9 +14,7 @@ use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::node::{Node, NodeCursor};
-use crate::elaborator::normalization::{
-    normalize_fact, normalize_goal, NormalizedFact, Normalizer,
-};
+use crate::elaborator::normalization::{normalize_fact, normalize_goal, NormalizedFact};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::kernel_context::KernelContext;
@@ -706,11 +704,10 @@ impl Environment {
         // Now normalize goals. For each goal, we compute the normalizer state that matches
         // what verification sees. This iterates through nodes in order, adding facts to
         // the normalizer as we go (mirroring verify_node behavior).
-        let import_normalizer = Normalizer::from_kernel_context(
-            self.import_kernel_context
-                .clone()
-                .expect("import kernel context should be present"),
-        );
+        let import_normalizer = self
+            .import_kernel_context
+            .clone()
+            .expect("import kernel context should be present");
         let final_normalizer =
             Self::normalize_nodes_pass(&mut self.nodes, &import_normalizer, &mut first_error);
 
@@ -729,7 +726,7 @@ impl Environment {
             }
         }
 
-        self.kernel_context = Some(final_normalizer.into_kernel_context());
+        self.kernel_context = Some(final_normalizer);
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
@@ -752,9 +749,9 @@ impl Environment {
     /// normalizer and process the block's nodes independently.
     fn normalize_nodes_pass(
         nodes: &mut [Node],
-        base_normalizer: &Normalizer,
+        base_normalizer: &KernelContext,
         first_error: &mut Option<String>,
-    ) -> Normalizer {
+    ) -> KernelContext {
         // Clone the normalizer to track state as we process nodes.
         // We need to track state for this level only.
         let mut current_normalizer = base_normalizer.clone();
@@ -763,7 +760,7 @@ impl Environment {
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {
                     // Normalize the fact and store it
-                    match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
+                    match normalize_fact(&mut current_normalizer, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -782,7 +779,7 @@ impl Environment {
                     // This captures the state that would exist after set_goal is called.
                     // The NormalizedGoal.kernel_context will include the negated goal.
                     let mut goal_normalizer = current_normalizer.clone();
-                    match normalize_goal(goal_normalizer.kernel_context_mut(), goal) {
+                    match normalize_goal(&mut goal_normalizer, goal) {
                         Ok(normalized) => {
                             *normalized_goal_slot = Some(normalized);
                         }
@@ -795,7 +792,7 @@ impl Environment {
 
                     // AFTER goal verification, add the claim's fact to current_normalizer.
                     // This matches runtime: add_fact is called after verify_node returns.
-                    match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
+                    match normalize_fact(&mut current_normalizer, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -816,7 +813,7 @@ impl Environment {
                     );
                     // After the block, add the external fact (if any) for subsequent nodes
                     if let Some(fact) = external_fact {
-                        match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
+                        match normalize_fact(&mut current_normalizer, fact) {
                             Ok(normalized) => {
                                 *normalized_fact_slot = Some(normalized);
                             }

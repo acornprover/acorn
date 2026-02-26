@@ -15,7 +15,6 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::ConstantName;
-use crate::elaborator::normalization::Normalizer;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::to_term::elaborate_value_to_term_existing;
@@ -25,6 +24,7 @@ use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
+use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
@@ -49,7 +49,7 @@ pub struct CertificateLine {
 
 fn clause_to_code(
     clause: &crate::kernel::clause::Clause,
-    normalizer: &Normalizer,
+    normalizer: &KernelContext,
     bindings: &Cow<BindingMap>,
     synthetic_names: &HashMap<(ModuleId, AtomId), String>,
     code_line: Option<&str>,
@@ -158,7 +158,7 @@ impl Certificate {
     pub fn from_concrete_steps(
         goal: String,
         concrete_steps: &[ConcreteStep],
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
         let mut generator = CodeGenerator::new(bindings);
@@ -210,7 +210,7 @@ impl Certificate {
     /// and the bindings (to generate readable names).
     pub fn from_concrete_proof(
         concrete_proof: &ConcreteProof,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
         let mut concrete_steps = Vec::new();
@@ -238,7 +238,7 @@ impl Certificate {
         proof: &[String],
         project: &Project,
         bindings: &mut Cow<BindingMap>,
-        normalizer: &mut Cow<Normalizer>,
+        normalizer: &mut Cow<KernelContext>,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
         let mut steps = Vec::with_capacity(proof.len());
         for code in proof {
@@ -252,7 +252,7 @@ impl Certificate {
         code: &str,
         project: &Project,
         bindings: &mut Cow<BindingMap>,
-        normalizer: &mut Cow<Normalizer>,
+        normalizer: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new(project, bindings, None);
@@ -267,13 +267,8 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let module_id = bindings.module_id();
-                let term = elaborate_value_to_term_existing(
-                    normalizer.to_mut().kernel_context_mut(),
-                    &value,
-                    None,
-                )?;
-                let mut view =
-                    Clausifier::new_mut(normalizer.to_mut().kernel_context_mut(), None, module_id);
+                let term = elaborate_value_to_term_existing(normalizer.to_mut(), &value, None)?;
+                let mut view = Clausifier::new_mut(normalizer.to_mut(), None, module_id);
                 let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
@@ -345,11 +340,8 @@ impl Certificate {
                                     .enumerate()
                                     .map(|(i, p)| {
                                         let var_type = if let Some(tc) = &p.typeclass {
-                                            let tc_id = normalizer
-                                                .to_mut()
-                                                .kernel_context_mut()
-                                                .type_store
-                                                .add_typeclass(tc);
+                                            let tc_id =
+                                                normalizer.to_mut().type_store.add_typeclass(tc);
                                             Term::typeclass(tc_id)
                                         } else {
                                             Term::type_sort()
@@ -373,7 +365,7 @@ impl Certificate {
                                 )));
                             }
                             // Trivial condition requires the type to be inhabited
-                            let kernel_context = normalizer.kernel_context();
+                            let kernel_context = normalizer.as_ref();
                             for (name, acorn_type) in &decls {
                                 let type_term = kernel_context
                                     .type_store
@@ -514,7 +506,7 @@ impl Certificate {
     /// serialization.
     pub fn serialize_claim_with_args(
         claim: &Claim,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         Self::serialize_claim_with_names(claim, normalizer, bindings, None)
@@ -543,7 +535,7 @@ impl Certificate {
 
     fn serialize_claim_with_names(
         claim: &Claim,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         bindings: &BindingMap,
         synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
     ) -> Result<String, CodeGenError> {
@@ -597,7 +589,7 @@ impl Certificate {
             .map(|max| (max + 1) as usize)
             .unwrap_or(0);
 
-        let kernel_context = normalizer.kernel_context();
+        let kernel_context = normalizer;
 
         let mut type_param_decl_codes: Vec<String> = vec![];
         let mut type_arg_codes: Vec<String> = vec![];
@@ -660,7 +652,6 @@ impl Certificate {
                 };
                 if let Some(selected_type) = selected_type {
                     let selected_term = normalizer
-                        .kernel_context()
                         .type_store
                         .to_type_term_with_vars(&selected_type, None);
                     resolved_type_var_map.set(var_id as AtomId, selected_term);
@@ -750,7 +741,7 @@ impl Certificate {
         code: &str,
         project: &Project,
         bindings: &BindingMap,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
     ) -> Result<Claim, CodeGenError> {
         let statement = Statement::parse_str_with_options(code, true)?;
         let StatementInfo::Claim(claim_statement) = statement.statement else {
@@ -773,7 +764,7 @@ impl Certificate {
     fn try_deserialize_claim_with_args_value(
         value: AcornValue,
         bindings: &BindingMap,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
     ) -> Result<Option<Claim>, CodeGenError> {
         let mut type_param_names: Vec<String> = vec![];
         let mut type_param_constraints = vec![];
@@ -832,10 +823,7 @@ impl Certificate {
                 .enumerate()
             {
                 let var_type = if let Some(typeclass) = constraint {
-                    let typeclass_id = normalizer_clone
-                        .kernel_context_mut()
-                        .type_store
-                        .add_typeclass(typeclass);
+                    let typeclass_id = normalizer_clone.type_store.add_typeclass(typeclass);
                     Term::typeclass(typeclass_id)
                 } else {
                     Term::type_sort()
@@ -846,15 +834,12 @@ impl Certificate {
         };
         let generic_value = AcornValue::forall(arg_types, body);
         let generic_term = elaborate_value_to_term_existing(
-            normalizer_clone.kernel_context_mut(),
+            &mut normalizer_clone,
             &generic_value,
             type_var_map.as_ref(),
         )?;
-        let mut view = Clausifier::new_mut(
-            normalizer_clone.kernel_context_mut(),
-            type_var_map,
-            bindings.module_id(),
-        );
+        let mut view =
+            Clausifier::new_mut(&mut normalizer_clone, type_var_map, bindings.module_id());
         let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
             return Err(CodeGenError::GeneratedBadCode(format!(
@@ -871,20 +856,15 @@ impl Certificate {
         let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
             let type_term = normalizer
-                .kernel_context()
                 .type_store
                 .to_type_term_with_vars(acorn_type, None);
             var_map.set(var_id as AtomId, type_term);
         }
         let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
-            let term =
-                elaborate_value_to_term_existing(term_normalizer.kernel_context_mut(), arg, None)?;
-            let mut term_view = Clausifier::new_mut(
-                term_normalizer.kernel_context_mut(),
-                None,
-                bindings.module_id(),
-            );
+            let term = elaborate_value_to_term_existing(&mut term_normalizer, arg, None)?;
+            let mut term_view =
+                Clausifier::new_mut(&mut term_normalizer, None, bindings.module_id());
             let term = term_view.clausify_term_to_simple_term(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
@@ -900,7 +880,7 @@ impl Certificate {
         mut checker: Checker,
         project: &Project,
         mut bindings: Cow<BindingMap>,
-        mut normalizer: Cow<Normalizer>,
+        mut normalizer: Cow<KernelContext>,
     ) -> Result<Vec<CertificateLine>, CodeGenError> {
         if checker.has_contradiction() {
             return Ok(Vec::new());
@@ -909,15 +889,14 @@ impl Certificate {
             return Err(CodeGenError::NoProof);
         };
         let cert_steps = Self::parse_cert_steps(proof, project, &mut bindings, &mut normalizer)?;
-        let checked_steps =
-            checker.check_cert_steps(&cert_steps, Some(proof), normalizer.kernel_context())?;
+        let checked_steps = checker.check_cert_steps(&cert_steps, Some(proof), &normalizer)?;
         let synthetic_names = bindings.synthetic_name_map();
         Ok(checked_steps
             .into_iter()
             .map(|checked_step| {
                 let statement = clause_to_code(
                     &checked_step.clause,
-                    &normalizer,
+                    normalizer.as_ref(),
                     &bindings,
                     &synthetic_names,
                     checked_step.code_line.as_deref(),
@@ -936,7 +915,7 @@ impl Certificate {
         checker: Checker,
         project: &Project,
         bindings: Cow<BindingMap>,
-        normalizer: Cow<Normalizer>,
+        normalizer: Cow<KernelContext>,
     ) -> Result<(Certificate, Vec<CertificateLine>), CodeGenError> {
         let mut good_cert = self;
         let mut keep_count = 0;
@@ -1171,7 +1150,7 @@ mod tests {
         // Clean up is automatic when temp_dir goes out of scope
     }
 
-    fn setup_claim_codec_env(code: &str) -> (Project, BindingMap, Normalizer) {
+    fn setup_claim_codec_env(code: &str) -> (Project, BindingMap, KernelContext) {
         let mut project = Project::new_mock();
         project.mock("/mock/main.ac", code);
 
@@ -1184,11 +1163,10 @@ mod tests {
                 LoadState::Error(e) => panic!("module loading error: {}", e),
                 _ => panic!("unexpected module load state"),
             };
-            let normalizer = Normalizer::from_kernel_context(
-                env.kernel_context
-                    .clone()
-                    .expect("environment should have a kernel context"),
-            );
+            let normalizer = env
+                .kernel_context
+                .clone()
+                .expect("environment should have a kernel context");
             (env.bindings.clone(), normalizer)
         };
 
@@ -1203,7 +1181,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x0 = true", &["Bool"]);
         let mut var_map = VariableMap::new();
@@ -1228,7 +1206,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x0 = x1 or x0 = true", &["Bool", "Bool"]);
         let mut var_map = VariableMap::new();
@@ -1252,7 +1230,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x0", &["Bool"]);
         let mut var_map = VariableMap::new();
@@ -1275,7 +1253,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x1 = x1", &["Type", "x0"]);
         let mut var_map = VariableMap::new();
@@ -1304,7 +1282,7 @@ mod tests {
             }
         "#;
         let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
         let mut var_map = VariableMap::new();
@@ -1343,7 +1321,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let mut expected_var_map = VariableMap::new();
         expected_var_map.set(0, Term::new_false());
@@ -1376,7 +1354,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let mut expected_var_map = VariableMap::new();
         expected_var_map.set(0, Term::bool_type());
@@ -1448,7 +1426,7 @@ mod tests {
             }
         "#;
         let (project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
 
         let clause = kernel.parse_clause("x0 or x1 or x2", &["Bool", "Bool", "Bool"]);
         let mut var_map = VariableMap::new();
@@ -1512,7 +1490,7 @@ mod tests {
             }
         "#;
         let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
         let generic = kernel.parse_clause("x0", &["Bool"]);
 
         let mut var_map = VariableMap::new();
@@ -1542,7 +1520,7 @@ mod tests {
             }
         "#;
         let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
         let generic = kernel.parse_clause("false", &[]);
 
         let concrete_steps = vec![ConcreteStep {
@@ -1573,7 +1551,7 @@ mod tests {
             }
         "#;
         let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
         let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
 
         let mut bad_map = VariableMap::new();
@@ -1607,7 +1585,7 @@ mod tests {
             }
         "#;
         let (_project, bindings, normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
         let generic = kernel.parse_clause("x1 = x1", &["Type", "x0"]);
 
         let mut var_map = VariableMap::new();
@@ -1643,11 +1621,10 @@ mod tests {
             }
         "#;
         let (_project, bindings, mut normalizer) = setup_claim_codec_env(code);
-        let kernel = normalizer.kernel_context();
+        let kernel = &normalizer;
         let clause = kernel.parse_clause("x0", &["Bool"]);
 
         let synthetic_symbol = normalizer
-            .kernel_context_mut()
             .symbol_table
             .declare_synthetic(ModuleId(7), Term::bool_type());
         let synthetic_term = Term::atom(Atom::Symbol(synthetic_symbol));

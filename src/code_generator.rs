@@ -11,11 +11,11 @@ use crate::elaborator::acorn_value::{
 };
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
-use crate::elaborator::normalization::Normalizer;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::clause::Clause;
+use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
@@ -478,16 +478,13 @@ impl SyntheticNameSet {
     fn ensure_arbitrary_for_type(
         &mut self,
         bindings: &BindingMap,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
         concrete_type: &Term,
     ) -> Result<Option<Symbol>> {
         if self.arbitrary_symbols.contains_key(concrete_type) {
             return Ok(None);
         }
-        let acorn_type = normalizer
-            .kernel_context()
-            .type_store
-            .type_term_to_acorn_type(concrete_type);
+        let acorn_type = normalizer.type_store.type_term_to_acorn_type(concrete_type);
         let name = bindings.next_indexed_var('s', &mut self.next_s);
         let cname = ConstantName::Unqualified(bindings.module_id(), name);
         let atom = normalizer.add_scoped_constant(cname, &acorn_type, None);
@@ -501,14 +498,13 @@ impl SyntheticNameSet {
     }
 
     fn concrete_type_for_term(
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         var_type: &Term,
         local_context: &LocalContext,
     ) -> Result<Term> {
         let acorn_type =
             normalizer.denormalize_type_with_context(var_type.clone(), local_context, true);
         normalizer
-            .kernel_context()
             .type_store
             .get_type_term(&acorn_type)
             .map_err(Error::internal)
@@ -517,7 +513,7 @@ impl SyntheticNameSet {
     fn ensure_arbitrary_for_variable_type(
         &mut self,
         bindings: &BindingMap,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
         var_type: &Term,
         local_context: &LocalContext,
     ) -> Result<Option<Symbol>> {
@@ -530,7 +526,7 @@ impl SyntheticNameSet {
 
     fn symbol_for_variable_type(
         &self,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         var_type: &Term,
         local_context: &LocalContext,
     ) -> Result<Option<Symbol>> {
@@ -544,7 +540,7 @@ impl SyntheticNameSet {
     fn add_arbitrary_for_term(
         &mut self,
         bindings: &BindingMap,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
         term: &Term,
         local_context: &LocalContext,
         new_entries: &mut Vec<Symbol>,
@@ -638,7 +634,7 @@ impl SyntheticNameSet {
     fn add_arbitrary_for_clause(
         &mut self,
         bindings: &BindingMap,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
         clause: &Clause,
     ) -> Result<Vec<Symbol>> {
         let local_context = clause.get_local_context();
@@ -659,7 +655,7 @@ impl SyntheticNameSet {
 
     fn build_arbitrary_var_map(
         &self,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         clause: &Clause,
     ) -> Result<VariableMap> {
         let mut var_map = VariableMap::new();
@@ -703,7 +699,7 @@ impl SyntheticNameSet {
         &mut self,
         bindings: &BindingMap,
         skolem_ids: Vec<(ModuleId, AtomId)>,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         steps: &mut Vec<CertificateStep>,
     ) {
         let infos = normalizer.find_covering_synthetic_info(&skolem_ids);
@@ -917,7 +913,7 @@ impl CodeGenerator<'_> {
         atoms: &[(ModuleId, AtomId)],
         type_vars: &[Term],
         clauses: &[Clause],
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
     ) -> Result<String> {
         let mut decl = vec![];
         for &(module_id, local_id) in atoms {
@@ -966,13 +962,10 @@ impl CodeGenerator<'_> {
             var_id_to_new_name.insert(id, name.clone());
             type_param_names.push(name);
 
-            let constraint = type_var_kind.as_ref().as_typeclass().map(|tc_id| {
-                normalizer
-                    .kernel_context()
-                    .type_store
-                    .get_typeclass(tc_id)
-                    .clone()
-            });
+            let constraint = type_var_kind
+                .as_ref()
+                .as_typeclass()
+                .map(|tc_id| normalizer.type_store.get_typeclass(tc_id).clone());
             type_param_constraints.push(constraint);
         }
 
@@ -1113,17 +1106,14 @@ impl CodeGenerator<'_> {
 
     fn ensure_no_foreign_scoped_constants_in_term(
         term: &Term,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         current_module: ModuleId,
     ) -> Result<()> {
         for atom in term.iter_atoms() {
             let Atom::Symbol(Symbol::ScopedConstant(local_id)) = atom else {
                 continue;
             };
-            let name = normalizer
-                .kernel_context()
-                .symbol_table
-                .name_for_local_id(*local_id);
+            let name = normalizer.symbol_table.name_for_local_id(*local_id);
             if name.module_id() != current_module {
                 return Err(Error::internal(format!(
                     "foreign scoped constant '{}' (local id {}) from module {:?} leaked into certificate generation for module {:?}",
@@ -1139,7 +1129,7 @@ impl CodeGenerator<'_> {
 
     fn ensure_no_foreign_scoped_constants_in_clause(
         clause: &Clause,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
         current_module: ModuleId,
     ) -> Result<()> {
         for literal in &clause.literals {
@@ -1166,13 +1156,13 @@ impl CodeGenerator<'_> {
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
         steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
         let mut clause = var_map.specialize_clause_with_replacement_context(
             &generic,
             replacement_context,
-            normalizer.kernel_context(),
+            normalizer,
         );
 
         // Normalize variable IDs to ensure they are in order (0, 1, 2, ...) with no gaps.
@@ -1194,7 +1184,7 @@ impl CodeGenerator<'_> {
         clause = arbitrary_var_map.specialize_clause_with_replacement_context(
             &clause,
             &clause_context,
-            normalizer.kernel_context(),
+            normalizer,
         );
         clause.normalize_var_ids_no_flip();
 
@@ -1240,8 +1230,7 @@ impl CodeGenerator<'_> {
             let expected_type = replacement_context
                 .get_var_type(var_id)
                 .expect("replacement context should provide all var types");
-            let mapped_type =
-                mapped_term.get_type_with_context(replacement_context, normalizer.kernel_context());
+            let mapped_type = mapped_term.get_type_with_context(replacement_context, normalizer);
             Self::infer_type_param_bindings_from_type_pattern(
                 expected_type.as_ref(),
                 mapped_type.as_ref(),
@@ -1269,7 +1258,7 @@ impl CodeGenerator<'_> {
             )?;
             if var_type.as_ref().is_type_param_kind() {
                 let specialized_type =
-                    specialized.get_type_with_context(generic_context, normalizer.kernel_context());
+                    specialized.get_type_with_context(generic_context, normalizer);
                 if !specialized_type.as_ref().is_type_param_kind()
                     || matches!(
                         specialized.as_ref().decompose(),
@@ -1297,8 +1286,7 @@ impl CodeGenerator<'_> {
             let generic_type = generic_context
                 .get_var_type(var_id)
                 .expect("generic context should provide all var types");
-            let mapped_type =
-                mapped_term.get_type_with_context(generic_context, normalizer.kernel_context());
+            let mapped_type = mapped_term.get_type_with_context(generic_context, normalizer);
             Self::infer_type_param_bindings_from_type_pattern(
                 generic_type.as_ref(),
                 mapped_type.as_ref(),
@@ -1375,8 +1363,7 @@ impl CodeGenerator<'_> {
             }
 
             let expected_concrete = apply_to_term(expected_type.as_ref(), &claim_var_map);
-            let mapped_type =
-                term.get_type_with_context(generic_context, normalizer.kernel_context());
+            let mapped_type = term.get_type_with_context(generic_context, normalizer);
             let mapped_concrete = apply_to_term(mapped_type.as_ref(), &claim_var_map);
             if expected_concrete != mapped_concrete {
                 Some((
@@ -1413,12 +1400,11 @@ impl CodeGenerator<'_> {
                 clause
             )));
         }
-        let mut replayed = claim_var_map.specialize_clause(generic, normalizer.kernel_context());
+        let mut replayed = claim_var_map.specialize_clause(generic, normalizer);
         replayed.normalize_var_ids_no_flip();
         // Compare against the concrete clause after only applying inferred replacement-type
         // substitutions; applying claim_var_map here can incorrectly capture overlapping IDs.
-        let mut concretized_clause =
-            replacement_type_map.specialize_clause(&clause, normalizer.kernel_context());
+        let mut concretized_clause = replacement_type_map.specialize_clause(&clause, normalizer);
         concretized_clause.normalize_var_ids_no_flip();
         if replayed != concretized_clause {
             return Err(Error::GeneratedBadCode(format!(
@@ -1440,7 +1426,7 @@ impl CodeGenerator<'_> {
         &mut self,
         names: &SyntheticNameSet,
         step: &CertificateStep,
-        normalizer: &Normalizer,
+        normalizer: &KernelContext,
     ) -> Result<String> {
         match step {
             CertificateStep::DefineArbitrary { symbol } => {
@@ -1449,15 +1435,9 @@ impl CodeGenerator<'_> {
                         "DefineArbitrary expected a local scoped constant symbol",
                     ));
                 };
-                let name = normalizer
-                    .kernel_context()
-                    .symbol_table
-                    .name_for_local_id(*local_id);
-                let type_term = normalizer.kernel_context().symbol_table.get_type(*symbol);
-                let acorn_type = normalizer
-                    .kernel_context()
-                    .type_store
-                    .type_term_to_acorn_type(type_term);
+                let name = normalizer.symbol_table.name_for_local_id(*local_id);
+                let type_term = normalizer.symbol_table.get_type(*symbol);
+                let acorn_type = normalizer.type_store.type_term_to_acorn_type(type_term);
                 let ty_code = self.type_to_code(&acorn_type)?;
                 Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
             }
@@ -1469,9 +1449,7 @@ impl CodeGenerator<'_> {
                 self.generate_code_for_synthetic_step(names, atoms, type_vars, clauses, normalizer)
             }
             CertificateStep::Claim(claim) => {
-                let clause = claim
-                    .var_map
-                    .specialize_clause(&claim.clause, normalizer.kernel_context());
+                let clause = claim.var_map.specialize_clause(&claim.clause, normalizer);
                 let mut value = normalizer.denormalize(&clause, None, None, true);
                 value = value.replace_synthetics(&names.synthetic_names);
                 self.value_to_code_with_names(&value, names)
@@ -1484,7 +1462,7 @@ impl CodeGenerator<'_> {
         &mut self,
         names: &mut SyntheticNameSet,
         step: &ConcreteStep,
-        normalizer: &mut Normalizer,
+        normalizer: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
@@ -2262,7 +2240,6 @@ impl From<String> for Error {
 #[cfg(test)]
 mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
-    use crate::elaborator::normalization::Normalizer;
     use crate::project::Project;
 
     #[test]
@@ -2276,7 +2253,7 @@ mod tests {
             "#,
         );
 
-        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+        let normalizer = normalized_goal.kernel_context.clone();
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -2297,7 +2274,7 @@ mod tests {
         let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2315,7 +2292,7 @@ mod tests {
             "#,
         );
 
-        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+        let normalizer = normalized_goal.kernel_context.clone();
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -2336,7 +2313,7 @@ mod tests {
         let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2356,7 +2333,7 @@ mod tests {
             "#,
         );
 
-        let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+        let normalizer = normalized_goal.kernel_context.clone();
         let synthetic_ids = normalizer.get_synthetic_ids();
 
         let mut generator = CodeGenerator::new(&bindings);
@@ -2376,7 +2353,7 @@ mod tests {
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
+        processor.test_parse_code(&codes[0], &bindings, &normalizer);
     }
 
     #[test]
@@ -2394,7 +2371,7 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
+        let mut normalizer = normalized_goal.kernel_context;
 
         let foreign_name = ConstantName::Unqualified(ModuleId(999), "s0".to_string());
         let foreign_atom = normalizer.add_scoped_constant(foreign_name, &AcornType::Bool, None);
@@ -2436,10 +2413,8 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
-        let generic = normalizer
-            .kernel_context()
-            .parse_clause("x0 = x0", &["Bool"]);
+        let mut normalizer = normalized_goal.kernel_context;
+        let generic = normalizer.parse_clause("x0 = x0", &["Bool"]);
 
         let mut bad_map = VariableMap::new();
         bad_map.set(0, Term::type_sort());
@@ -2477,10 +2452,8 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
-        let generic = normalizer
-            .kernel_context()
-            .parse_clause("x0 = x0", &["Bool"]);
+        let mut normalizer = normalized_goal.kernel_context;
+        let generic = normalizer.parse_clause("x0 = x0", &["Bool"]);
 
         // Invalid var map: x1 survives specialization and is out of scope for the generic clause.
         let mut bad_map = VariableMap::new();
@@ -2522,26 +2495,18 @@ mod tests {
         use crate::processor::Processor;
 
         let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
-        let mut normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context);
+        let mut normalizer = normalized_goal.kernel_context;
 
-        {
-            let kctx = normalizer.kernel_context_mut();
-            kctx.parse_polymorphic_constant("g0", "T: Type", "T -> Bool");
-            kctx.parse_polymorphic_constant("g1", "A: Type, B: Type", "A -> B");
-        }
+        normalizer.parse_polymorphic_constant("g0", "T: Type", "T -> Bool");
+        normalizer.parse_polymorphic_constant("g1", "A: Type, B: Type", "A -> B");
 
-        let generic = normalizer
-            .kernel_context()
-            .parse_clause("g0(x0, x1)", &["Type", "x0"]);
-        let replacement_context = normalizer.kernel_context().parse_local(&["Type", "x0"]);
+        let generic = normalizer.parse_clause("g0(x0, x1)", &["Type", "x0"]);
+        let replacement_context = normalizer.parse_local(&["Type", "x0"]);
 
         let mut var_map = VariableMap::new();
-        var_map.set(0, normalizer.kernel_context().parse_term("Empty"));
+        var_map.set(0, normalizer.parse_term("Empty"));
         // x0 and x1 here are in replacement_context; x0 should be inferred as Bool from x1's symbol.
-        var_map.set(
-            1,
-            normalizer.kernel_context().parse_term("g1(x0, Empty, x1)"),
-        );
+        var_map.set(1, normalizer.parse_term("g1(x0, Empty, x1)"));
 
         let mut names = SyntheticNameSet::new();
         let type_key = SyntheticNameSet::concrete_type_for_term(

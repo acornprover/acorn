@@ -10,7 +10,6 @@ use crate::code_generator::{CodeGenerator, Error};
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::normalization::Normalizer;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -201,7 +200,6 @@ impl Prover {
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) {
-        let normalizer = Normalizer::from_kernel_context(kernel_context.clone());
         println!(
             "in total, we activated {} proof steps.",
             self.active_set.len()
@@ -219,7 +217,7 @@ impl Prover {
             if step.clause.is_impossible() {
                 println!("Contradiction, depth {}, {}.", step.depth, rule);
             } else {
-                let denormalized = normalizer.denormalize(&step.clause, None, None, false);
+                let denormalized = kernel_context.denormalize(&step.clause, None, None, false);
                 let clause_text = CodeGenerator::new(bindings)
                     .value_to_code(&denormalized)
                     .unwrap_or_else(|_| format!("{:?}", step.clause));
@@ -253,7 +251,7 @@ impl Prover {
                 let dep_text = if dep_clause.is_impossible() {
                     "contradiction".to_string()
                 } else {
-                    let denormalized = normalizer.denormalize(&dep_clause, None, None, false);
+                    let denormalized = kernel_context.denormalize(&dep_clause, None, None, false);
                     CodeGenerator::new(bindings)
                         .value_to_code(&denormalized)
                         .unwrap_or_else(|_| format!("{:?}", dep_clause))

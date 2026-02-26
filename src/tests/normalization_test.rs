@@ -1,10 +1,10 @@
 use crate::elaborator::environment::Environment;
-use crate::elaborator::normalization::Normalizer;
+use crate::kernel::kernel_context::KernelContext;
 
 #[test]
 fn test_nat_normalization() {
     let mut env = Environment::test();
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     env.add("type Nat: axiom");
     env.add("let zero: Nat = axiom");
     env.expect_type("zero", "Nat");
@@ -59,7 +59,7 @@ fn test_nat_normalization() {
 #[test]
 fn test_bool_formulas() {
     let mut env = Environment::test();
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     env.add("theorem one(a: Bool) { a implies a or (a or a) }");
     norm.check(&env, "one", &["not x0 or x0"]);
 
@@ -74,7 +74,7 @@ fn test_bool_formulas() {
 #[test]
 fn test_tautology_elimination() {
     let mut env = Environment::test();
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     env.add("type Nat: axiom");
     env.add("theorem one(n: Nat) { n = n }");
     norm.check(&env, "one", &[]);
@@ -86,7 +86,7 @@ fn test_tautology_elimination() {
 #[test]
 fn test_nested_skolemization() {
     let mut env = Environment::test();
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     env.add("type Nat: axiom");
     env.add("theorem exists_eq(x: Nat) { exists(y: Nat) { x = y } }");
     norm.check(&env, "exists_eq", &["s0_0(x0) = x0"]);
@@ -107,7 +107,7 @@ fn test_second_order_binding() {
         theorem goal { not always_true(specific_borf) }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["not always_true(specific_borf)"]);
 }
 
@@ -124,7 +124,7 @@ fn test_boolean_equality() {
         theorem goal { (n0 = n1) = (n2 = n3) }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -145,7 +145,7 @@ fn test_boolean_inequality() {
         theorem goal { (n0 = n1) != (n2 = n3) }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -164,7 +164,7 @@ fn test_functions_returning_lambdas() {
         theorem goal(a: Nat, b: Nat) { adder(a)(b) = adder(b)(a) }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["adder(x0, x1) = adder(x1, x0)"]);
 }
 
@@ -179,7 +179,7 @@ fn test_functional_equality() {
         theorem goal(a: Nat, b: Nat) { zerof(a) = zerof(b) }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // Functional equality gets expanded with free variables
     norm.check(&env, "goal", &["zerof(x0, x1) = zerof(x2, x1)"]);
 }
@@ -196,7 +196,7 @@ fn test_normalizing_exists() {
         theorem goal { exists(x: Nat) { addx(x, zero) = one } }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["addx(s0_0, zero) = one"]);
 }
 
@@ -213,7 +213,7 @@ fn test_denormalizing_disjunction() {
         theorem foo(x0: Nat, x1: Nat) { addx(addx(x0, zero), x1) != zero or ltx(x1, zero) }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "foo",
@@ -247,7 +247,7 @@ fn test_functional_skolemization() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "test_finite",
@@ -274,7 +274,7 @@ fn test_if_then_else_under_equality() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -305,7 +305,7 @@ fn test_if_then_else_with_true_branch_under_equality() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -330,7 +330,7 @@ fn test_if_then_else_normalization_with_variables() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -361,7 +361,7 @@ fn test_lambda_normalization() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["f2(x0, x1) = f1(x0, x1)"]);
 }
 
@@ -382,7 +382,7 @@ fn test_normalizing_functional_or() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -412,7 +412,7 @@ fn test_normalizing_equals_exists() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["not b or f(s0_0)", "not f(x0) or b"]);
 }
 
@@ -435,7 +435,7 @@ fn test_normalizing_not_or_exists() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["not f(x0)", "not g(x0)"]);
 }
 
@@ -459,7 +459,7 @@ fn test_normalizing_exists_inside_if() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["not b or f(s0_0)", "g(s0_1) or b"]);
 }
 
@@ -482,7 +482,7 @@ fn test_normalizing_lambda_inside_equality() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -509,7 +509,7 @@ fn test_normalizing_function_equality() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // Functional equality gets expanded with free variables
     norm.check(&env, "goal", &["g(a, x0) = f(x0)"]);
 }
@@ -530,7 +530,7 @@ fn test_normalizing_function_inequality() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["g(a, s0_0) != f(s0_0)"]);
 }
 
@@ -552,7 +552,7 @@ fn test_normalizing_func_eq_inside_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // Functional equality inside lambda gets expanded with free variables
     norm.check(
         &env,
@@ -583,7 +583,7 @@ fn test_normalizing_exists_inside_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -610,7 +610,7 @@ fn test_normalizing_forall_inside_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -637,7 +637,7 @@ fn test_normalizing_exists_inside_neq_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -664,7 +664,7 @@ fn test_normalizing_forall_inside_neq_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -691,7 +691,7 @@ fn test_normalizing_pre_expanded_exists_inside_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -713,7 +713,7 @@ fn test_normalizing_boolean_function_equality() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // Boolean functional equality gets expanded with free variables
     norm.check(&env, "goal", &["g(x0) = f(x0)"]);
 }
@@ -732,7 +732,7 @@ fn test_normalizing_boolean_function_inequality() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["g(s0_0) != f(s0_0)"]);
 }
 
@@ -757,7 +757,7 @@ fn test_normalizing_lambda_applied_to_lambda() {
         }
     "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["g(a, b)"]);
 }
 
@@ -780,7 +780,7 @@ fn test_normalizing_and_inside_arg() {
     "#,
     );
 
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -818,7 +818,7 @@ fn test_normalizing_nested_lambdas() {
     "#,
     );
 
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     norm.check(
         &env,
         "goal",
@@ -853,7 +853,7 @@ fn test_if_then_else_with_forall_condition() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // The key thing is that normalization doesn't panic - the forall variable's type must be
     // properly tracked in the context when creating clauses.
     norm.check(
@@ -886,7 +886,7 @@ fn test_polymorphic_type_params_in_goal() {
         }
         "#,
     );
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     // We don't check the exact clauses - we just verify normalization doesn't crash
     let clauses = norm.get_all_clauses(&env);
     assert!(!clauses.is_empty(), "Should have normalized clauses");
@@ -951,7 +951,7 @@ fn test_code_generator_omits_type_params_when_arity_changes() {
         "#,
     );
 
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     let clauses = norm.get_all_clauses(&env);
 
     // Find the clause with compose and 4 args (the one derived from the goal)
@@ -1111,7 +1111,7 @@ fn test_type_variable_display_format() {
         "#,
     );
 
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     let clauses = norm.get_all_clauses(&env);
 
     // Find the clause for ax1 which has a type variable T and a value variable x
@@ -1164,7 +1164,7 @@ fn test_typeclass_constrained_type_variable_display() {
         "#,
     );
 
-    let mut norm = Normalizer::new();
+    let mut norm = KernelContext::new();
     let clauses = norm.get_all_clauses(&env);
 
     // Find clauses involving the Monoid typeclass

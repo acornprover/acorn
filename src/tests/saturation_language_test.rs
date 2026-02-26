@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::{elaborator::normalization::Normalizer, project::Project, prover::Outcome};
+use crate::{project::Project, prover::Outcome};
 
 // This file tests that the various language features work correctly in the prover.
 
@@ -2108,7 +2108,7 @@ fn test_polymorphic_synthetic_claim() {
     );
 
     let project = Project::new_mock();
-    let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+    let normalizer = normalized_goal.kernel_context.clone();
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
@@ -2157,7 +2157,7 @@ fn test_certificate_type_params_are_step_local() {
     );
 
     let project = Project::new_mock();
-    let normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+    let normalizer = normalized_goal.kernel_context.clone();
     let mut normalizer_cow = Cow::Owned(normalizer);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 

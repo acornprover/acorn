@@ -6,7 +6,7 @@ use crate::code_generator::Error;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::node::NodeCursor;
-use crate::elaborator::normalization::{NormalizedFact, NormalizedGoal, Normalizer};
+use crate::elaborator::normalization::{NormalizedFact, NormalizedGoal};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
@@ -194,9 +194,7 @@ impl Processor {
             effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(Normalizer::from_kernel_context(
-            effective_kernel_context.clone(),
-        ));
+        let normalizer = Cow::Owned(effective_kernel_context.clone());
         cert.check(checker, project, cert_bindings, normalizer)
     }
 
@@ -226,9 +224,7 @@ impl Processor {
             effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(Normalizer::from_kernel_context(
-            effective_kernel_context.clone(),
-        ));
+        let normalizer = Cow::Owned(effective_kernel_context.clone());
         cert.clean(checker, project, cert_bindings, normalizer)
     }
 
@@ -275,8 +271,7 @@ impl Processor {
     ) {
         use std::borrow::Cow;
 
-        let mut normalizer_cow =
-            Cow::Owned(Normalizer::from_kernel_context(kernel_context.clone()));
+        let mut normalizer_cow = Cow::Owned(kernel_context.clone());
         let mut bindings_cow = Cow::Borrowed(bindings);
         let project = Project::new_mock();
 

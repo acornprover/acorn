@@ -429,9 +429,9 @@ mod tests {
     use crate::elaborator::binding_map::{BindingMap, ConstructorInfo};
     use crate::elaborator::evaluator::Evaluator;
     use crate::elaborator::names::ConstantName;
-    use crate::elaborator::normalization::Normalizer;
     use crate::elaborator::stack::Stack;
     use crate::kernel::atom::Atom;
+    use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol::Symbol;
     use crate::kernel::symbol_table::NewConstantType;
@@ -539,27 +539,21 @@ mod tests {
     }
 
     fn assert_term_roundtrip_stable(value: AcornValue) {
-        let mut normalizer = Normalizer::new();
+        let mut normalizer = KernelContext::new();
         assert_term_roundtrip_stable_in_normalizer(&mut normalizer, value);
     }
 
-    fn assert_term_roundtrip_stable_in_normalizer(normalizer: &mut Normalizer, value: AcornValue) {
-        let term = elaborate_value_to_term(
-            normalizer.kernel_context_mut(),
-            &value,
-            NewConstantType::Local,
-            None,
-        )
-        .expect("elaboration should succeed");
+    fn assert_term_roundtrip_stable_in_normalizer(
+        normalizer: &mut KernelContext,
+        value: AcornValue,
+    ) {
+        let term = elaborate_value_to_term(normalizer, &value, NewConstantType::Local, None)
+            .expect("elaboration should succeed");
         let denormalized =
             normalizer.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
-        let roundtripped = elaborate_value_to_term(
-            normalizer.kernel_context_mut(),
-            &denormalized,
-            NewConstantType::Local,
-            None,
-        )
-        .expect("re-elaboration should succeed");
+        let roundtripped =
+            elaborate_value_to_term(normalizer, &denormalized, NewConstantType::Local, None)
+                .expect("re-elaboration should succeed");
         assert_eq!(term, roundtripped);
     }
 
@@ -1269,18 +1263,14 @@ mod tests {
         ];
 
         for (name, value) in cases {
-            let mut normalizer = Normalizer::new();
-            let term = elaborate_value_to_term(
-                normalizer.kernel_context_mut(),
-                &value,
-                NewConstantType::Local,
-                None,
-            )
-            .unwrap_or_else(|e| panic!("{}: initial elaboration failed: {}", name, e));
+            let mut normalizer = KernelContext::new();
+            let term =
+                elaborate_value_to_term(&mut normalizer, &value, NewConstantType::Local, None)
+                    .unwrap_or_else(|e| panic!("{}: initial elaboration failed: {}", name, e));
             let denormalized =
                 normalizer.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
             let roundtripped = elaborate_value_to_term(
-                normalizer.kernel_context_mut(),
+                &mut normalizer,
                 &denormalized,
                 NewConstantType::Local,
                 None,
@@ -1342,28 +1332,22 @@ mod tests {
             ],
         );
 
-        let mut normalizer = Normalizer::new();
-        normalizer
-            .kernel_context_mut()
-            .type_store
-            .add_type(&nat_type);
+        let mut normalizer = KernelContext::new();
+        normalizer.type_store.add_type(&nat_type);
         let nat_id = normalizer
-            .kernel_context_mut()
             .type_store
             .get_datatype_id(&nat)
             .expect("nat type id should exist");
         let nat_term = Term::ground_type(nat_id);
-        normalizer.kernel_context_mut().symbol_table.add_constant(
-            zero_name,
-            NewConstantType::Global,
-            nat_term.clone(),
-        );
-        normalizer.kernel_context_mut().symbol_table.add_constant(
+        normalizer
+            .symbol_table
+            .add_constant(zero_name, NewConstantType::Global, nat_term.clone());
+        normalizer.symbol_table.add_constant(
             succ_name,
             NewConstantType::Global,
             Term::pi(nat_term.clone(), nat_term.clone()),
         );
-        normalizer.kernel_context_mut().symbol_table.add_constant(
+        normalizer.symbol_table.add_constant(
             match_name,
             NewConstantType::Global,
             Term::pi(

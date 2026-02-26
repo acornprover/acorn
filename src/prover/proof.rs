@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use crate::certificate::Certificate;
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::normalization::Normalizer;
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
@@ -164,8 +163,7 @@ impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        let normalizer = Normalizer::from_kernel_context(self.kernel_context.clone());
-        Certificate::from_concrete_steps(goal, &concrete_steps, &normalizer, bindings)
+        Certificate::from_concrete_steps(goal, &concrete_steps, self.kernel_context, bindings)
     }
 
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
@@ -415,7 +413,6 @@ pub fn reconstruct_step<R: ProofResolver>(
 
 #[cfg(test)]
 mod tests {
-    use crate::elaborator::normalization::Normalizer;
     use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
@@ -538,9 +535,9 @@ mod tests {
 
     #[test]
     fn test_collect_concrete_steps_preserves_proof_step_specialization_maps() {
-        let mut normalizer = Normalizer::new();
+        let mut kernel_context = KernelContext::new();
         let (base_step, mid_step, final_step, mid_clause, c1_term) = {
-            let kernel = normalizer.kernel_context_mut();
+            let kernel = &mut kernel_context;
             kernel
                 .parse_constant("g0", "(Bool, Bool) -> Bool")
                 .parse_constant("c0", "Bool")
@@ -586,7 +583,7 @@ mod tests {
         };
 
         // Add Active(1) before Active(0) so the first emitted concrete step is from Active(1).
-        let mut proof = Proof::new(normalizer.kernel_context());
+        let mut proof = Proof::new(&kernel_context);
         proof.add_step(ProofStepId::Active(1), &mid_step);
         proof.add_step(ProofStepId::Active(0), &base_step);
         proof.add_step(ProofStepId::Final, &final_step);

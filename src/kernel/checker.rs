@@ -296,16 +296,15 @@ impl Checker {
     pub fn insert_goal(
         &mut self,
         goal: &crate::elaborator::goal::Goal,
-        normalizer: &mut crate::elaborator::normalization::Normalizer,
+        normalizer: &mut crate::kernel::kernel_context::KernelContext,
     ) -> Result<(), Error> {
         trace!("inserting goal {} (line {})", goal.name, goal.first_line);
 
         let source = &goal.proposition.source;
-        let normalized =
-            crate::elaborator::normalization::normalize_goal(normalizer.kernel_context_mut(), goal)
-                .map_err(|e| e.message)?;
+        let normalized = crate::elaborator::normalization::normalize_goal(normalizer, goal)
+            .map_err(|e| e.message)?;
         // Get kernel_context after normalizing, since normalize_goal may create new synthetics
-        let kernel_context = normalizer.kernel_context();
+        let kernel_context = normalizer;
         for step in &normalized.steps {
             // Use the step's own source if it's an assumption (which includes negated goals),
             // otherwise use the goal's source
@@ -692,11 +691,7 @@ mod tests {
 
         let project = Project::new_mock();
         let mut bindings_cow = Cow::Borrowed(&bindings);
-        let mut normalizer_cow = Cow::Owned(
-            crate::elaborator::normalization::Normalizer::from_kernel_context(
-                normalized_goal.kernel_context.clone(),
-            ),
-        );
+        let mut normalizer_cow = Cow::Owned(normalized_goal.kernel_context.clone());
 
         let err = match Certificate::parse_code_line(
             "let (x: Bool, y: Bool) satisfy { true }",
