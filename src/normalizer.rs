@@ -13,7 +13,6 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::elaborator::synthetic::{SyntheticDefinition, SyntheticRegistry};
 use crate::elaborator::to_term::build_type_var_map;
-#[cfg(feature = "term_normalization_bridge")]
 use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::kernel::atom::{Atom, AtomId, INVALID_SYNTHETIC_MODULE};
 use crate::kernel::clause::Clause;
@@ -2101,7 +2100,6 @@ impl Normalizer {
     /// `AcornValue -> Term -> Vec<Clause>`.
     /// The clause conversion backend is currently still value-based, so we
     /// denormalize the term back into an AcornValue first.
-    #[cfg(feature = "term_normalization_bridge")]
     fn normalize_term(
         &mut self,
         term: &Term,
@@ -2174,12 +2172,8 @@ impl Normalizer {
         self.normalize_value_legacy(&value, ctype, source, legacy_type_var_map)
     }
 
-    /// Converts a value proposition to CNF clauses.
-    ///
-    /// With `term_normalization_bridge` enabled:
+    /// Converts a value proposition to CNF clauses via:
     /// `AcornValue --elaborate--> Term --normalize_term--> Vec<Clause>`.
-    ///
-    /// Without that feature, this uses the legacy value-only normalization path.
     fn normalize_value(
         &mut self,
         value: &AcornValue,
@@ -2195,21 +2189,13 @@ impl Normalizer {
         }
         assert!(value.is_bool_type());
 
-        #[cfg(feature = "term_normalization_bridge")]
-        {
-            let term = elaborate_value_to_term(
-                &mut self.kernel_context,
-                value,
-                ctype,
-                type_var_map.as_ref(),
-            )?;
-            return self.normalize_term(&term, ctype, source, type_var_map);
-        }
-
-        #[cfg(not(feature = "term_normalization_bridge"))]
-        {
-            self.normalize_value_legacy(value, ctype, source, type_var_map)
-        }
+        let term = elaborate_value_to_term(
+            &mut self.kernel_context,
+            value,
+            ctype,
+            type_var_map.as_ref(),
+        )?;
+        self.normalize_term(&term, ctype, source, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.
@@ -2347,10 +2333,6 @@ impl Normalizer {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        #[cfg(not(feature = "term_normalization_bridge"))]
-        let _ = (local_context, instantiate_type_vars);
-
-        #[cfg(feature = "term_normalization_bridge")]
         let acorn_type = if atom_type.as_ref().is_atomic() {
             if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
                 let typeclass = local_context
@@ -2388,17 +2370,6 @@ impl Normalizer {
                     local_context,
                     instantiate_type_vars,
                 )
-        };
-
-        #[cfg(not(feature = "term_normalization_bridge"))]
-        let acorn_type = if let Some(name_map) = type_var_id_to_name {
-            self.kernel_context
-                .type_store
-                .type_term_to_acorn_type_with_var_names(atom_type, name_map)
-        } else {
-            self.kernel_context
-                .type_store
-                .type_term_to_acorn_type(atom_type)
         };
         match atom {
             Atom::Symbol(Symbol::True) => AcornValue::Bool(true),

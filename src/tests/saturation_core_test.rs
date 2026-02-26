@@ -1814,15 +1814,6 @@ fn test_proving_with_theorem_arg() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    #[cfg(not(feature = "term_normalization_bridge"))]
-    assert_proof_lines(
-        proof,
-        &[
-            "function[T0: Thing](x0: T0, x1: T0, x2: T0) { T0.add(x0, x1) + x2 = T0.add(x0, T0.add(x1, x2)) }[T](a, b, c)",
-            "function[T0: Thing](x0: T0, x1: T0) { T0.add(x0, x1) = T0.add(x1, x0) }[T](b + c, a)",
-        ],
-    );
-    #[cfg(feature = "term_normalization_bridge")]
     assert_proof_lines(
         proof,
         &[
