@@ -103,6 +103,17 @@ pub fn elaborate_value_to_term(
         .symbol_table
         .add_from(value, ctype, &mut kernel_context.type_store);
 
+    elaborate_value_to_term_existing(kernel_context, value, type_var_map)
+}
+
+/// Elaborates an `AcornValue` into a kernel `Term` assuming symbols are already registered.
+///
+/// This does not call `symbol_table.add_from(...)`; unknown constants will fail elaboration.
+pub fn elaborate_value_to_term_existing(
+    kernel_context: &mut KernelContext,
+    value: &AcornValue,
+    type_var_map: Option<&TypeVarMap>,
+) -> Result<Term, String> {
     let mut stack = vec![];
     elaborate_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
 }

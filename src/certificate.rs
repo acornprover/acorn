@@ -854,7 +854,9 @@ impl Certificate {
             .next()
             .expect("clauses has exactly one element");
 
-        let term_view = NormalizationContext::new_ref(normalizer, None);
+        let mut term_normalizer = normalizer.clone();
+        let mut term_view =
+            NormalizationContext::new_mut(&mut term_normalizer, None, bindings.module_id());
         let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
             let type_term = normalizer
