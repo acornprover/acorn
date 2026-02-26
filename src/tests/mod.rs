@@ -26,7 +26,7 @@ mod saturation_attributes_test;
 mod saturation_norm_test;
 
 #[cfg(test)]
-mod normalizer_test;
+mod normalization_test;
 
 #[cfg(test)]
 mod project_test;

@@ -10,6 +10,7 @@ use crate::code_generator::{CodeGenerator, Error};
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::goal::Goal;
+use crate::elaborator::normalization::Normalizer;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -18,7 +19,6 @@ use crate::kernel::proof_step::{PremiseMap, ProofStep, ProofStepId, Rule, Truthi
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::VariableMap;
 use crate::kernel::EqualityGraphContradiction;
-use crate::normalizer::Normalizer;
 use crate::prover::{Outcome, ProverMode};
 
 /// A traditional saturation prover. Uses just a bit of AI for scoring.

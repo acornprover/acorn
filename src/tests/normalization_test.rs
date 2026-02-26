@@ -1,5 +1,5 @@
 use crate::elaborator::environment::Environment;
-use crate::normalizer::Normalizer;
+use crate::elaborator::normalization::Normalizer;
 
 #[test]
 fn test_nat_normalization() {

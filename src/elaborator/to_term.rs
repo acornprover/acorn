@@ -429,13 +429,13 @@ mod tests {
     use crate::elaborator::binding_map::{BindingMap, ConstructorInfo};
     use crate::elaborator::evaluator::Evaluator;
     use crate::elaborator::names::ConstantName;
+    use crate::elaborator::normalization::Normalizer;
     use crate::elaborator::stack::Stack;
     use crate::kernel::atom::Atom;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol::Symbol;
     use crate::kernel::symbol_table::NewConstantType;
     use crate::module::ModuleId;
-    use crate::normalizer::Normalizer;
     use crate::project::Project;
     use crate::syntax::expression::Expression;
 

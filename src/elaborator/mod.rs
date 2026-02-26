@@ -11,6 +11,7 @@ pub mod inference;
 pub mod named_entity;
 pub mod names;
 pub mod node;
+pub mod normalization;
 pub mod potential_value;
 pub mod proposition;
 pub mod source;

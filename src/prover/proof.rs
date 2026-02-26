@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::certificate::Certificate;
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::normalization::Normalizer;
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
@@ -11,7 +12,6 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
-use crate::normalizer::Normalizer;
 
 /// Trait for types that can resolve proof step IDs to clauses.
 /// Used by reconstruct_step to look up premises.
@@ -415,6 +415,7 @@ pub fn reconstruct_step<R: ProofResolver>(
 
 #[cfg(test)]
 mod tests {
+    use crate::elaborator::normalization::Normalizer;
     use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
@@ -422,7 +423,6 @@ mod tests {
     use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
-    use crate::normalizer::Normalizer;
     use crate::prover::active_set::ActiveSet;
     use crate::prover::proof::{add_var_map, Proof, ProofResolver};
     use std::collections::HashMap;

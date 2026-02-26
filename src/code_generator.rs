@@ -11,6 +11,7 @@ use crate::elaborator::acorn_value::{
 };
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
+use crate::elaborator::normalization::Normalizer;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
@@ -20,7 +21,6 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
-use crate::normalizer::Normalizer;
 use crate::prover::proof::ConcreteStep;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::TokenType;
@@ -2262,7 +2262,7 @@ impl From<String> for Error {
 #[cfg(test)]
 mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
-    use crate::normalizer::Normalizer;
+    use crate::elaborator::normalization::Normalizer;
     use crate::project::Project;
 
     #[test]

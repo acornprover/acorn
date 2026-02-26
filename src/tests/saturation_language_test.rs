@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::{normalizer::Normalizer, project::Project, prover::Outcome};
+use crate::{elaborator::normalization::Normalizer, project::Project, prover::Outcome};
 
 // This file tests that the various language features work correctly in the prover.
 

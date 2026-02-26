@@ -14,11 +14,13 @@ use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::node::{Node, NodeCursor};
+use crate::elaborator::normalization::{
+    normalize_fact, normalize_goal, NormalizedFact, Normalizer,
+};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::kernel_context::KernelContext;
 use crate::module::ModuleId;
-use crate::normalizer::{normalize_fact, normalize_goal, NormalizedFact, Normalizer};
 use crate::project::Project;
 use crate::syntax::statement::{Body, Statement};
 use crate::syntax::token::{Token, TokenIter};
