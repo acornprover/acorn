@@ -18,6 +18,7 @@ pub mod pdt;
 pub mod proof_step;
 pub mod symbol;
 pub mod symbol_table;
+pub mod synthetic;
 pub mod term;
 pub mod type_store;
 pub mod types;

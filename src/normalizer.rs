@@ -11,7 +11,6 @@ use crate::elaborator::names::ConstantName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
-use crate::elaborator::synthetic::{SyntheticDefinition, SyntheticRegistry};
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::elaborator::to_term::elaborate_value_to_term_existing;
@@ -25,6 +24,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
+use crate::kernel::synthetic::SyntheticDefinition;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
 use tracing::trace;
@@ -48,17 +48,13 @@ pub struct NormalizedGoal {
 
 #[derive(Clone)]
 pub struct Normalizer {
-    /// Registry for synthetic atom definitions.
-    synthetic_registry: SyntheticRegistry,
-
-    /// The kernel context containing TypeStore and SymbolTable.
+    /// The kernel context containing kernel stores.
     kernel_context: KernelContext,
 }
 
 impl Normalizer {
     pub fn new() -> Normalizer {
         Normalizer {
-            synthetic_registry: SyntheticRegistry::new(),
             kernel_context: KernelContext::new(),
         }
     }
@@ -74,7 +70,7 @@ impl Normalizer {
     /// Returns all synthetic atom IDs that have been defined.
     #[cfg(test)]
     pub fn get_synthetic_ids(&self) -> Vec<(ModuleId, AtomId)> {
-        self.synthetic_registry.get_ids()
+        self.kernel_context.synthetic_registry.get_ids()
     }
 
     pub fn kernel_context(&self) -> &KernelContext {
@@ -160,8 +156,11 @@ impl Normalizer {
             .map(|c| c.instantiate_invalid_synthetics_with_skip(num_definitions, num_type_vars))
             .collect();
 
-        self.synthetic_registry
-            .lookup_by_key(&type_var_kinds, &synthetic_types, &clauses)
+        self.kernel_context.synthetic_registry.lookup_by_key(
+            &type_var_kinds,
+            &synthetic_types,
+            &clauses,
+        )
     }
 
     /// Declare a synthetic atom with a type already in Term form.
@@ -215,7 +214,7 @@ impl Normalizer {
             .map(|c| c.invalidate_synthetics_with_pinned(&atoms, num_type_vars))
             .collect();
 
-        self.synthetic_registry.define(
+        self.kernel_context.synthetic_registry.define(
             atoms,
             type_vars,
             synthetic_types,
@@ -246,14 +245,12 @@ impl Normalizer {
     /// Used to combine normalized state from dependencies.
     pub fn merge(&mut self, other: &Normalizer) {
         self.kernel_context.merge(&other.kernel_context);
-        self.synthetic_registry.merge(&other.synthetic_registry);
     }
 
     /// Merges another Normalizer into this one, excluding scoped constants.
     /// This is intended for merging import state only.
     pub fn merge_imports(&mut self, other: &Normalizer) {
         self.kernel_context.merge_imports(&other.kernel_context);
-        self.synthetic_registry.merge(&other.synthetic_registry);
     }
 }
 
@@ -1404,11 +1401,12 @@ impl<'a> NormalizationContext<'a> {
             .collect();
         let synthetic_types = vec![synthetic_type.clone()];
 
-        if let Some(existing_def) = self.as_ref().synthetic_registry.lookup_by_key(
-            &type_vars,
-            &synthetic_types,
-            &key_clauses,
-        ) {
+        if let Some(existing_def) = self
+            .as_ref()
+            .kernel_context
+            .synthetic_registry
+            .lookup_by_key(&type_vars, &synthetic_types, &key_clauses)
+        {
             let (existing_m, existing_id) = existing_def.atoms[0];
             let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
             Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
@@ -2158,7 +2156,7 @@ impl Normalizer {
         let mut output = vec![];
         let mut undefined_ids = vec![];
         for id in skolem_ids {
-            if let Some(def) = self.synthetic_registry.get(&id) {
+            if let Some(def) = self.kernel_context.synthetic_registry.get(&id) {
                 for clause in &def.clauses {
                     output.push(clause.clone());
                 }
@@ -3290,7 +3288,9 @@ impl Normalizer {
         &self,
         ids: &[(ModuleId, AtomId)],
     ) -> Vec<Arc<SyntheticDefinition>> {
-        self.synthetic_registry.find_covering_info(ids)
+        self.kernel_context
+            .synthetic_registry
+            .find_covering_info(ids)
     }
 
     pub fn atom_str(&self, atom: &Atom) -> String {
