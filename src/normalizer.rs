@@ -451,6 +451,1302 @@ impl<'a> NormalizationContext<'a> {
         }
     }
 
+    /// Term-native normalization path.
+    ///
+    /// This mirrors `nice_value_to_clauses` but starts from kernel `Term`
+    /// instead of denormalizing through `AcornValue`.
+    pub fn nice_term_to_clauses(
+        &mut self,
+        term: &Term,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+    ) -> Result<Vec<Clause>, String> {
+        let mut stack = vec![];
+        let mut local_context = LocalContext::empty();
+
+        let (mut next_var_id, num_type_params) = if let Some(type_var_map) = self.type_var_map() {
+            let mut entries: Vec<_> = type_var_map.values().collect();
+            entries.sort_by_key(|(id, _)| *id);
+            for (_, var_type) in entries {
+                local_context.push_type(var_type.clone());
+            }
+            (type_var_map.len() as AtomId, type_var_map.len())
+        } else {
+            (0, 0)
+        };
+
+        let cnf = self.term_to_cnf(
+            term,
+            false,
+            &mut stack,
+            &mut next_var_id,
+            synthesized,
+            &mut local_context,
+        )?;
+        let clauses = cnf.into_clauses_with_pinned(&local_context, num_type_params);
+
+        if self.has_uninhabited_existential_witness(synthesized, &clauses) {
+            return Err("exists over a potentially uninhabited type".to_string());
+        }
+
+        if self.has_uninhabited_dropped_variable(&local_context, &clauses, num_type_params) {
+            return Ok(vec![]);
+        }
+
+        Ok(clauses)
+    }
+
+    /// If `term` is exactly `symbol(arg1, ..., argN)`, return those arguments.
+    ///
+    /// We require full application so callers can rely on fixed arity for builtins.
+    fn split_symbol_application(
+        &self,
+        term: &Term,
+        symbol: Symbol,
+        arity: usize,
+    ) -> Option<Vec<Term>> {
+        let (head, args) = term.as_ref().split_application_multi()?;
+        if args.len() != arity {
+            return None;
+        }
+        match head.get_head_atom() {
+            Atom::Symbol(s) if *s == symbol => Some(args),
+            _ => None,
+        }
+    }
+
+    /// If `term` is a lowered datatype eliminator application (`Type.match`),
+    /// return `(type_args, scrutinee, cases)` in constructor order.
+    fn split_match_eliminator_application(
+        &self,
+        term: &Term,
+    ) -> Option<(Vec<Term>, Term, Vec<(Symbol, Term)>)> {
+        let (head, args) = term.as_ref().split_application_multi()?;
+        let Atom::Symbol(match_symbol) = head.get_head_atom() else {
+            return None;
+        };
+        let info = self
+            .symbol_table()
+            .get_match_eliminator_info(*match_symbol)?;
+        let match_type = self.symbol_table().get_type(*match_symbol);
+        let num_type_args = match_type.as_ref().count_type_params();
+        let num_cases = info.constructor_symbols.len();
+        if args.len() != num_type_args + 1 + num_cases {
+            return None;
+        }
+
+        let type_args = args[..num_type_args].to_vec();
+        let scrutinee = args[num_type_args].clone();
+        let mut cases = Vec::with_capacity(num_cases);
+        for (ctor, case_term) in info
+            .constructor_symbols
+            .iter()
+            .zip(args[(num_type_args + 1)..].iter())
+        {
+            cases.push((*ctor, case_term.clone()));
+        }
+        Some((type_args, scrutinee, cases))
+    }
+
+    /// Open a binder body by replacing bound variable 0 with `replacement`.
+    ///
+    /// This is the de Bruijn "open" operation: substitute first, then shift down.
+    fn open_binder_body(&self, body: &Term, replacement: &Term) -> Term {
+        body.substitute_bound(0, replacement).shift_bound(0, -1)
+    }
+
+    /// Apply arguments by instantiating leading binders (lambda/forall/exists)
+    /// before falling back to ordinary term application.
+    ///
+    /// Returns `(applied_term, consumed_count)` where `consumed_count` is the
+    /// number of arguments consumed by binder instantiation.
+    fn instantiate_binder_prefix(&self, function: &Term, args: &[Term]) -> (Term, usize) {
+        let mut current = function.clone();
+        let mut consumed = 0usize;
+        while consumed < args.len() {
+            match current.as_ref().decompose() {
+                crate::kernel::term::Decomposition::Lambda(_, body)
+                | crate::kernel::term::Decomposition::ForAll(_, body)
+                | crate::kernel::term::Decomposition::Exists(_, body) => {
+                    current = self.open_binder_body(&body.to_owned(), &args[consumed]);
+                    consumed += 1;
+                }
+                _ => break,
+            }
+        }
+        if consumed < args.len() {
+            current = current.apply(&args[consumed..]);
+        }
+        (current, consumed)
+    }
+
+    /// Abstract a specific free variable into a new outer binder.
+    ///
+    /// This both:
+    /// 1. Replaces `FreeVariable(var_id)` with `BoundVariable(depth)`, and
+    /// 2. Shifts existing bound variables to make room for that new binder.
+    fn abstract_free_var_as_bound_at_depth(&self, term: &Term, var_id: AtomId, depth: u16) -> Term {
+        match term.as_ref().decompose() {
+            crate::kernel::term::Decomposition::Atom(atom) => match atom {
+                Atom::FreeVariable(i) if *i == var_id => Term::atom(Atom::BoundVariable(depth)),
+                Atom::BoundVariable(i) if *i >= depth => Term::atom(Atom::BoundVariable(*i + 1)),
+                _ => term.clone(),
+            },
+            crate::kernel::term::Decomposition::Application(func, arg) => {
+                let new_func =
+                    self.abstract_free_var_as_bound_at_depth(&func.to_owned(), var_id, depth);
+                let new_arg =
+                    self.abstract_free_var_as_bound_at_depth(&arg.to_owned(), var_id, depth);
+                new_func.apply(&[new_arg])
+            }
+            crate::kernel::term::Decomposition::Pi(input, output) => {
+                let new_input =
+                    self.abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
+                let new_output =
+                    self.abstract_free_var_as_bound_at_depth(&output.to_owned(), var_id, depth + 1);
+                Term::pi(new_input, new_output)
+            }
+            crate::kernel::term::Decomposition::Lambda(input, body) => {
+                let new_input =
+                    self.abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
+                let new_body =
+                    self.abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::lambda(new_input, new_body)
+            }
+            crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
+                let new_binder_type = self.abstract_free_var_as_bound_at_depth(
+                    &binder_type.to_owned(),
+                    var_id,
+                    depth,
+                );
+                let new_body =
+                    self.abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::forall(new_binder_type, new_body)
+            }
+            crate::kernel::term::Decomposition::Exists(binder_type, body) => {
+                let new_binder_type = self.abstract_free_var_as_bound_at_depth(
+                    &binder_type.to_owned(),
+                    var_id,
+                    depth,
+                );
+                let new_body =
+                    self.abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::exists(new_binder_type, new_body)
+            }
+        }
+    }
+
+    /// Like `Term::get_type_with_context`, but supports lambda terms.
+    ///
+    /// Lambda type computation opens one binder at a time with a fresh free variable,
+    /// computes the body type recursively, then abstracts that variable back into a Pi.
+    fn term_type_for_normalization(&self, term: &Term, context: &LocalContext) -> Term {
+        if let Some((input, body)) = term.as_ref().split_lambda() {
+            let input_type = input.to_owned();
+            let fresh_var = context.len() as AtomId;
+            let mut nested_context = context.clone();
+            nested_context.push_type(input_type.clone());
+            let opened_body =
+                self.open_binder_body(&body.to_owned(), &Term::new_variable(fresh_var));
+            let body_type = self.term_type_for_normalization(&opened_body, &nested_context);
+            let output_type = self.abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
+            Term::pi(input_type, output_type)
+        } else {
+            term.get_type_with_context(context, self.kernel_context())
+        }
+    }
+
+    /// Term-native CNF conversion.
+    ///
+    /// This mirrors `value_to_cnf` but starts from elaborated `Term`.
+    /// `true` is `[]`, `false` is `[[]]`, and we intentionally leave tautologies
+    /// and redundancy for later clause normalization.
+    ///
+    /// The `stack` plays the same role as in value normalization:
+    /// `TermBinding::Free` tracks forall-introduced variables and
+    /// `TermBinding::Bound` tracks existential/skolem substitutions.
+    fn term_to_cnf(
+        &mut self,
+        term: &Term,
+        negate: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        match term.as_ref().decompose() {
+            crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
+                if !negate {
+                    self.forall_term_to_cnf(
+                        &binder_type.to_owned(),
+                        &body.to_owned(),
+                        false,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )
+                } else {
+                    self.exists_term_to_cnf(
+                        &binder_type.to_owned(),
+                        &body.to_owned(),
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )
+                }
+            }
+            crate::kernel::term::Decomposition::Exists(binder_type, body) => {
+                if !negate {
+                    self.exists_term_to_cnf(
+                        &binder_type.to_owned(),
+                        &body.to_owned(),
+                        false,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )
+                } else {
+                    self.forall_term_to_cnf(
+                        &binder_type.to_owned(),
+                        &body.to_owned(),
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )
+                }
+            }
+            _ => {
+                // Builtin logical atoms are recognized by head symbol + arity.
+                if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
+                    return self.term_to_cnf(&args[0], !negate, stack, next_var_id, synth, context);
+                }
+                if let Some(args) = self.split_symbol_application(term, Symbol::And, 2) {
+                    if !negate {
+                        return self.term_and_to_cnf(
+                            &args[0],
+                            &args[1],
+                            false,
+                            false,
+                            stack,
+                            next_var_id,
+                            synth,
+                            context,
+                        );
+                    }
+                    return self.term_or_to_cnf(
+                        &args[0],
+                        &args[1],
+                        true,
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    );
+                }
+                if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
+                    if !negate {
+                        return self.term_or_to_cnf(
+                            &args[0],
+                            &args[1],
+                            false,
+                            false,
+                            stack,
+                            next_var_id,
+                            synth,
+                            context,
+                        );
+                    }
+                    return self.term_and_to_cnf(
+                        &args[0],
+                        &args[1],
+                        true,
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    );
+                }
+                if let Some(args) = self.split_symbol_application(term, Symbol::Eq, 3) {
+                    return self.term_eq_to_cnf(
+                        &args[1],
+                        &args[2],
+                        negate,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    );
+                }
+                if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
+                    let cond_cnf =
+                        self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
+                    let Some(cond_lit) = cond_cnf.to_literal() else {
+                        return Err("term 'ite' condition is too complicated".to_string());
+                    };
+                    let then_cnf =
+                        self.term_to_cnf(&args[2], negate, stack, next_var_id, synth, context)?;
+                    let else_cnf =
+                        self.term_to_cnf(&args[3], negate, stack, next_var_id, synth, context)?;
+                    return Ok(Cnf::cnf_if(cond_lit, then_cnf, else_cnf));
+                }
+
+                if let Some((function, args)) = term.as_ref().split_application_multi() {
+                    match function.as_ref().decompose() {
+                        crate::kernel::term::Decomposition::Lambda(_, _)
+                        | crate::kernel::term::Decomposition::ForAll(_, _)
+                        | crate::kernel::term::Decomposition::Exists(_, _) => {
+                            let (applied, consumed) =
+                                self.instantiate_binder_prefix(&function.to_owned(), &args);
+                            for arg in args.iter().take(consumed) {
+                                stack.push(TermBinding::Bound(arg.clone()));
+                            }
+                            let answer = self.term_to_cnf(
+                                &applied,
+                                negate,
+                                stack,
+                                next_var_id,
+                                synth,
+                                context,
+                            );
+                            stack.truncate(stack.len().saturating_sub(consumed));
+                            return answer;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if term == &Term::new_true() {
+                    return if negate {
+                        Ok(Cnf::false_value())
+                    } else {
+                        Ok(Cnf::true_value())
+                    };
+                }
+                if term == &Term::new_false() {
+                    return if negate {
+                        Ok(Cnf::true_value())
+                    } else {
+                        Ok(Cnf::false_value())
+                    };
+                }
+
+                // Everything else must normalize to a single signed literal.
+                let simple_term =
+                    self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
+                let literal = Literal::from_signed_term(simple_term, !negate);
+                Ok(Cnf::from_literal(literal))
+            }
+        }
+    }
+
+    fn forall_term_to_cnf(
+        &mut self,
+        binder_type: &Term,
+        body: &Term,
+        negate: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        let var_id = *next_var_id;
+        *next_var_id += 1;
+        context.push_type(binder_type.clone());
+        let var = Term::new_variable(var_id);
+        stack.push(TermBinding::Free(var.clone()));
+        let opened_body = self.open_binder_body(body, &var);
+        let result = self.term_to_cnf(
+            &opened_body,
+            negate,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?;
+        stack.pop();
+        Ok(result)
+    }
+
+    fn exists_term_to_cnf(
+        &mut self,
+        binder_type: &Term,
+        body: &Term,
+        negate: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        let skolem_terms = self.make_skolem_terms_from_type_terms(
+            std::slice::from_ref(binder_type),
+            stack,
+            synthesized,
+            context,
+        )?;
+        let skolem_term = skolem_terms.into_iter().next().unwrap();
+        stack.push(TermBinding::Bound(skolem_term.clone()));
+        let opened_body = self.open_binder_body(body, &skolem_term);
+        let result = self.term_to_cnf(
+            &opened_body,
+            negate,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?;
+        stack.pop();
+        Ok(result)
+    }
+
+    fn make_skolem_terms_from_type_terms(
+        &mut self,
+        skolem_type_terms: &[Term],
+        stack: &Vec<TermBinding>,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &LocalContext,
+    ) -> Result<Vec<Term>, String> {
+        let mut args = vec![];
+        let mut arg_type_terms: Vec<Term> = vec![];
+        let mut seen_vars = std::collections::HashSet::new();
+
+        if let Some(type_var_map) = self.type_var_map() {
+            let mut entries: Vec<_> = type_var_map.values().collect();
+            entries.sort_by_key(|(id, _)| *id);
+            for (var_id, var_type) in entries {
+                let var_term = Term::new_variable(*var_id);
+                args.push(var_term);
+                arg_type_terms.push(var_type.clone());
+                seen_vars.insert(*var_id);
+            }
+        }
+
+        for binding in stack.iter() {
+            for (var_id, closed_type) in binding.term().collect_vars(context) {
+                if seen_vars.insert(var_id) {
+                    let var_term = Term::new_variable(var_id);
+                    args.push(var_term);
+                    arg_type_terms.push(closed_type);
+                }
+            }
+        }
+
+        let num_type_params = self.type_var_map().map_or(0, |m| m.len()) as u16;
+        let mut non_type_param_index = 0u16;
+        let arg_type_terms: Vec<Term> = arg_type_terms
+            .into_iter()
+            .map(|t| {
+                if t.as_ref().is_type_param_kind() {
+                    t
+                } else {
+                    let depth = non_type_param_index;
+                    non_type_param_index += 1;
+                    t.convert_free_to_bound_with_depth(num_type_params, depth)
+                }
+            })
+            .collect();
+
+        let mut output = vec![];
+        for t in skolem_type_terms {
+            let non_type_param_args = arg_type_terms.len() - num_type_params as usize;
+            let result_type_term =
+                t.convert_free_to_bound_with_depth(num_type_params, non_type_param_args as u16);
+
+            let mut skolem_type_term = result_type_term;
+            for arg_type in arg_type_terms.iter().rev() {
+                skolem_type_term = Term::pi(arg_type.clone(), skolem_type_term);
+            }
+
+            let module_id = self.module_id();
+            let skolem_id = self
+                .as_mut()?
+                .declare_synthetic_atom_with_type_term(module_id, skolem_type_term)?;
+            synthesized.push(skolem_id);
+            let (m, i) = skolem_id;
+            let skolem_atom = Atom::Symbol(Symbol::Synthetic(m, i));
+            let skolem_term = Term::new(skolem_atom, args.clone());
+            output.push(skolem_term);
+        }
+        Ok(output)
+    }
+
+    fn make_skolem_term_from_type_term(
+        &mut self,
+        skolem_type_term: &Term,
+        stack: &Vec<TermBinding>,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &LocalContext,
+    ) -> Result<Term, String> {
+        let mut terms = self.make_skolem_terms_from_type_terms(
+            std::slice::from_ref(skolem_type_term),
+            stack,
+            synthesized,
+            context,
+        )?;
+        Ok(terms.pop().unwrap())
+    }
+
+    fn term_and_to_cnf(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        negate_left: bool,
+        negate_right: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, synthesized, context)?;
+        let right = self.term_to_cnf(
+            right,
+            negate_right,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?;
+        Ok(left.and(right))
+    }
+
+    fn term_or_to_cnf(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        negate_left: bool,
+        negate_right: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, synthesized, context)?;
+        let right = self.term_to_cnf(
+            right,
+            negate_right,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?;
+        Ok(left.or(right))
+    }
+
+    fn try_simple_term_to_term(&self, term: &Term) -> Result<Option<Term>, String> {
+        match self.try_simple_term_to_signed_term(term)? {
+            Some((t, true)) => Ok(Some(t)),
+            Some((_t, false)) => Ok(None),
+            None => Ok(None),
+        }
+    }
+
+    fn try_simple_term_to_signed_term(&self, term: &Term) -> Result<Option<(Term, bool)>, String> {
+        if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
+            return match self.try_simple_term_to_signed_term(&args[0])? {
+                None => Ok(None),
+                Some((t, sign)) => Ok(Some((t, !sign))),
+            };
+        }
+
+        match term.as_ref().decompose() {
+            crate::kernel::term::Decomposition::ForAll(_, _)
+            | crate::kernel::term::Decomposition::Exists(_, _)
+            | crate::kernel::term::Decomposition::Lambda(_, _) => Ok(None),
+            _ => {
+                if term == &Term::new_true() {
+                    return Ok(Some((Term::new_true(), true)));
+                }
+                if term == &Term::new_false() {
+                    return Ok(Some((Term::new_true(), false)));
+                }
+
+                if self
+                    .split_symbol_application(term, Symbol::And, 2)
+                    .is_some()
+                    || self.split_symbol_application(term, Symbol::Or, 2).is_some()
+                    || self.split_symbol_application(term, Symbol::Eq, 3).is_some()
+                    || self
+                        .split_symbol_application(term, Symbol::Ite, 4)
+                        .is_some()
+                {
+                    return Ok(None);
+                }
+
+                if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
+                    let function = function.to_owned();
+                    let func_term = match self.try_simple_term_to_term(&function)? {
+                        Some(t) => t,
+                        None => return Ok(None),
+                    };
+                    let head = *func_term.get_head_atom();
+                    let mut args = func_term.args().to_vec();
+                    for arg in arg_terms {
+                        let arg_term = match self.try_simple_term_to_term(&arg)? {
+                            Some(t) => t,
+                            None => return Ok(None),
+                        };
+                        args.push(arg_term);
+                    }
+                    return Ok(Some((Term::new(head, args), true)));
+                }
+
+                Ok(Some((term.clone(), true)))
+            }
+        }
+    }
+
+    fn apply_term_to_cnf(
+        &mut self,
+        function: &Term,
+        args: Vec<ExtendedTerm>,
+        negate: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        match function.as_ref().decompose() {
+            crate::kernel::term::Decomposition::Lambda(_, _)
+            | crate::kernel::term::Decomposition::ForAll(_, _)
+            | crate::kernel::term::Decomposition::Exists(_, _) => {
+                let mut arg_terms = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_terms.push(arg.to_term()?);
+                }
+                let (applied, consumed) = self.instantiate_binder_prefix(function, &arg_terms);
+                for arg in arg_terms.iter().take(consumed) {
+                    stack.push(TermBinding::Bound(arg.clone()));
+                }
+                let answer =
+                    self.term_to_cnf(&applied, negate, stack, next_var_id, synthesized, context);
+                stack.truncate(stack.len().saturating_sub(consumed));
+                return answer;
+            }
+            _ => {}
+        }
+
+        let extended = self.apply_term_to_extended_term(
+            function,
+            args,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?;
+        match extended {
+            ExtendedTerm::Term(term) => {
+                let literal = Literal::from_signed_term(term, !negate);
+                Ok(Cnf::from_literal(literal))
+            }
+            _ => Err("unhandled case: non-term application".to_string()),
+        }
+    }
+
+    /// Convert `left = right` (or `!=` when `negate`) to CNF.
+    ///
+    /// For function-typed terms, this performs extensional reasoning by applying
+    /// either fresh variables (`forall`-style) or skolems (`exists`-style) to both
+    /// sides, then reducing to equality on results.
+    fn term_eq_to_cnf(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        negate: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        if let Some((type_args, scrutinee, cases)) = self.split_match_eliminator_application(right)
+        {
+            let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
+            let mut answer = Cnf::true_value();
+            for (constructor_symbol, case_term) in &cases {
+                let mut constructor_args = datatype_type_args.clone();
+                let mut case_value = case_term.clone();
+                let stack_len = stack.len();
+
+                while let Some((input, body)) = case_value.as_ref().split_lambda() {
+                    let input_type = input.to_owned();
+                    let var_id = *next_var_id;
+                    *next_var_id += 1;
+                    context.push_type(input_type.clone());
+                    let var = Term::new_variable(var_id);
+                    constructor_args.push(var.clone());
+                    stack.push(TermBinding::Free(var.clone()));
+                    case_value = self.open_binder_body(&body.to_owned(), &var);
+                }
+
+                let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
+                let condition = self.term_eq_to_cnf(
+                    &scrutinee,
+                    &pattern,
+                    false,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let conclusion = self.term_eq_to_cnf(
+                    left,
+                    &case_value,
+                    negate,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                answer = answer.and(condition.negate().or(conclusion));
+
+                stack.truncate(stack_len);
+            }
+            return Ok(answer);
+        }
+
+        if let Some((type_args, scrutinee, cases)) = self.split_match_eliminator_application(left) {
+            let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
+            let mut answer = Cnf::true_value();
+            for (constructor_symbol, case_term) in &cases {
+                let mut constructor_args = datatype_type_args.clone();
+                let mut case_value = case_term.clone();
+                let stack_len = stack.len();
+
+                while let Some((input, body)) = case_value.as_ref().split_lambda() {
+                    let input_type = input.to_owned();
+                    let var_id = *next_var_id;
+                    *next_var_id += 1;
+                    context.push_type(input_type.clone());
+                    let var = Term::new_variable(var_id);
+                    constructor_args.push(var.clone());
+                    stack.push(TermBinding::Free(var.clone()));
+                    case_value = self.open_binder_body(&body.to_owned(), &var);
+                }
+
+                let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
+                let condition = self.term_eq_to_cnf(
+                    &scrutinee,
+                    &pattern,
+                    false,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let conclusion = self.term_eq_to_cnf(
+                    right,
+                    &case_value,
+                    negate,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                answer = answer.and(condition.negate().or(conclusion));
+
+                stack.truncate(stack_len);
+            }
+            return Ok(answer);
+        }
+
+        let left_type = self.term_type_for_normalization(left, context);
+        let mut fn_arg_types = vec![];
+        let mut result_type = left_type.clone();
+        while let Some((input, output)) = result_type.as_ref().split_pi() {
+            fn_arg_types.push(input.to_owned());
+            result_type = output.to_owned();
+        }
+
+        if !fn_arg_types.is_empty() {
+            if result_type == Term::bool_type() {
+                if negate {
+                    // f != g for Bool-valued functions:
+                    // skolemize an argument tuple and assert result disagreement.
+                    let arg_terms = self.make_skolem_terms_from_type_terms(
+                        &fn_arg_types,
+                        stack,
+                        synth,
+                        context,
+                    )?;
+                    let args: Vec<_> = arg_terms.iter().cloned().map(ExtendedTerm::Term).collect();
+                    let left_pos = self.apply_term_to_cnf(
+                        left,
+                        args.clone(),
+                        false,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )?;
+                    let left_neg = self.apply_term_to_cnf(
+                        left,
+                        args.clone(),
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )?;
+                    let right_pos = self.apply_term_to_cnf(
+                        right,
+                        args.clone(),
+                        false,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )?;
+                    let right_neg = self.apply_term_to_cnf(
+                        right,
+                        args,
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )?;
+
+                    if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg) {
+                        if let Some((right_term, right_sign)) = right_pos.match_negated(&right_neg)
+                        {
+                            let positive = left_sign != right_sign;
+                            let literal =
+                                Literal::new(positive, left_term.clone(), right_term.clone());
+                            return Ok(Cnf::from_literal(literal));
+                        }
+                    }
+
+                    let some = left_pos.or(right_pos);
+                    let not_both = left_neg.or(right_neg);
+                    return Ok(not_both.and(some));
+                }
+
+                // f = g for Bool-valued functions:
+                // introduce fresh universally-quantified arguments.
+                let mut args = vec![];
+                for arg_type_term in &fn_arg_types {
+                    let var_id = *next_var_id;
+                    *next_var_id += 1;
+                    context.push_type(arg_type_term.clone());
+                    args.push(ExtendedTerm::Term(Term::new_variable(var_id)));
+                }
+                let left_pos = self.apply_term_to_cnf(
+                    left,
+                    args.clone(),
+                    false,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let left_neg = self.apply_term_to_cnf(
+                    left,
+                    args.clone(),
+                    true,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let right_pos = self.apply_term_to_cnf(
+                    right,
+                    args.clone(),
+                    false,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let right_neg =
+                    self.apply_term_to_cnf(right, args, true, stack, next_var_id, synth, context)?;
+
+                if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg) {
+                    if let Some((right_term, right_sign)) = right_pos.match_negated(&right_neg) {
+                        let positive = left_sign == right_sign;
+                        let literal = Literal::new(positive, left_term.clone(), right_term.clone());
+                        return Ok(Cnf::from_literal(literal));
+                    }
+                }
+
+                let l_imp_r = left_neg.or(right_pos);
+                let r_imp_l = left_pos.or(right_neg);
+                return Ok(l_imp_r.and(r_imp_l));
+            }
+
+            let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
+            let right = self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
+            if negate {
+                let args =
+                    self.make_skolem_terms_from_type_terms(&fn_arg_types, stack, synth, context)?;
+                return left.apply(&args).eq_to_cnf(right.apply(&args), true);
+            }
+
+            let mut args = vec![];
+            for arg_type_term in &fn_arg_types {
+                let var_id = *next_var_id;
+                *next_var_id += 1;
+                context.push_type(arg_type_term.clone());
+                args.push(Term::new_variable(var_id));
+            }
+            return left.apply(&args).eq_to_cnf(right.apply(&args), false);
+        }
+
+        if left_type == Term::bool_type() {
+            if let Some((left_term, left_sign)) = self.try_simple_term_to_signed_term(left)? {
+                if let Some((right_term, right_sign)) =
+                    self.try_simple_term_to_signed_term(right)?
+                {
+                    let positive = (left_sign == right_sign) ^ negate;
+                    let literal = Literal::new(positive, left_term, right_term);
+                    return Ok(Cnf::from_literal(literal));
+                }
+            }
+
+            if negate {
+                let some = self.term_or_to_cnf(
+                    left,
+                    right,
+                    true,
+                    true,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                let not_both = self.term_or_to_cnf(
+                    left,
+                    right,
+                    false,
+                    false,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                return Ok(some.and(not_both));
+            }
+
+            let l_imp_r =
+                self.term_or_to_cnf(left, right, true, false, stack, next_var_id, synth, context)?;
+            let r_imp_l =
+                self.term_or_to_cnf(left, right, false, true, stack, next_var_id, synth, context)?;
+            return Ok(l_imp_r.and(r_imp_l));
+        }
+
+        let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
+        let right = self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
+        left.eq_to_cnf(right, negate)
+    }
+
+    fn synthesize_term_from_term(
+        &mut self,
+        value: &Term,
+        value_type: &Term,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Term, String> {
+        let skolem_term =
+            self.make_skolem_term_from_type_term(value_type, stack, synth, context)?;
+        let skolem_id = if let Atom::Symbol(Symbol::Synthetic(m, id)) = *skolem_term.get_head_atom()
+        {
+            (m, id)
+        } else {
+            return Err("internal error: skolem term is not synthetic".to_string());
+        };
+
+        let synthetic_type = self
+            .kernel_context()
+            .symbol_table
+            .get_type(Symbol::Synthetic(skolem_id.0, skolem_id.1))
+            .clone();
+
+        let definition_cnf = self.term_eq_to_cnf(
+            &skolem_term,
+            value,
+            false,
+            stack,
+            next_var_id,
+            synth,
+            context,
+        )?;
+
+        let type_vars = self.get_type_var_kinds();
+        let num_type_vars = type_vars.len();
+        let clauses = definition_cnf
+            .clone()
+            .into_clauses_with_pinned(context, num_type_vars);
+        let key_clauses: Vec<Clause> = clauses
+            .iter()
+            .map(|c| c.invalidate_synthetics(&[skolem_id]))
+            .collect();
+        let synthetic_types = vec![synthetic_type.clone()];
+
+        if let Some(existing_def) = self.as_ref().synthetic_registry.lookup_by_key(
+            &type_vars,
+            &synthetic_types,
+            &key_clauses,
+        ) {
+            let (existing_m, existing_id) = existing_def.atoms[0];
+            let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
+            Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
+        } else {
+            let clauses = definition_cnf.into_clauses_with_pinned(context, num_type_vars);
+            self.as_mut()?.define_synthetic_atoms(
+                vec![skolem_id],
+                type_vars,
+                vec![synthetic_type],
+                clauses,
+                None,
+            )?;
+            Ok(skolem_term)
+        }
+    }
+
+    fn arg_term_to_extended(
+        &mut self,
+        term: &Term,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<ExtendedTerm, String> {
+        if term.as_ref().is_lambda() {
+            let lambda_type = self.term_type_for_normalization(term, context);
+            let skolem_term = self.synthesize_term_from_term(
+                term,
+                &lambda_type,
+                stack,
+                next_var_id,
+                synth,
+                context,
+            )?;
+            return Ok(ExtendedTerm::Term(skolem_term));
+        }
+
+        // For boolean arguments, synthesize non-simple formulas
+        // (and/or/eq/not/forall/exists/match/etc) into atoms.
+        let term_type = self.term_type_for_normalization(term, context);
+        if term_type == Term::bool_type() && self.try_simple_term_to_term(term)?.is_none() {
+            let skolem_term = self.synthesize_term_from_term(
+                term,
+                &Term::bool_type(),
+                stack,
+                next_var_id,
+                synth,
+                context,
+            )?;
+            return Ok(ExtendedTerm::Term(skolem_term));
+        }
+
+        self.term_to_extended_term(term, stack, next_var_id, synth, context)
+    }
+
+    /// Apply `function` to `args`, pushing a single conditional outward when possible.
+    ///
+    /// This preserves the old normalization behavior where
+    /// `f(if c then a else b, d)` becomes `if c then f(a, d) else f(b, d)`.
+    fn apply_term_to_extended_term(
+        &mut self,
+        function: &Term,
+        args: Vec<ExtendedTerm>,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<ExtendedTerm, String> {
+        if function.as_ref().is_lambda() {
+            let func_ext =
+                self.term_to_extended_term(function, stack, next_var_id, synth, context)?;
+            let mut arg_terms = vec![];
+            for arg in args {
+                arg_terms.push(self.extended_term_to_term(arg, context, synth)?);
+            }
+            return Ok(func_ext.apply(&arg_terms));
+        }
+
+        let mut cond: Option<Literal> = None;
+        let mut spine1 = vec![];
+        let mut spine2 = vec![];
+
+        match self.term_to_extended_term(function, stack, next_var_id, synth, context)? {
+            ExtendedTerm::Term(t) => {
+                spine1.push(t);
+            }
+            ExtendedTerm::If(sub_cond, sub_then, sub_else) => {
+                cond = Some(sub_cond);
+                spine1.push(sub_then);
+                spine2.push(sub_else);
+            }
+            ExtendedTerm::Lambda(_, _) => {
+                return Err("unhandled case: secret lambda".to_string());
+            }
+        }
+
+        for arg in args {
+            match arg {
+                ExtendedTerm::Term(t) => {
+                    if !spine2.is_empty() {
+                        spine2.push(t.clone());
+                    }
+                    spine1.push(t);
+                }
+                ExtendedTerm::If(sub_cond, sub_then, sub_else) => {
+                    if !spine2.is_empty() {
+                        return Err("unhandled case: multiple ite args".to_string());
+                    }
+                    cond = Some(sub_cond);
+                    spine2.extend(spine1.iter().cloned());
+                    spine1.push(sub_then);
+                    spine2.push(sub_else);
+                }
+                ExtendedTerm::Lambda(_, _) => {
+                    return Err("unhandled case: lambda arg".to_string());
+                }
+            }
+        }
+
+        match cond {
+            Some(cond) => {
+                assert_eq!(spine1.len(), spine2.len());
+                let then_term = Term::from_spine(spine1);
+                let else_term = Term::from_spine(spine2);
+                Ok(ExtendedTerm::If(cond, then_term, else_term))
+            }
+            None => {
+                assert!(spine2.is_empty());
+                Ok(ExtendedTerm::Term(Term::from_spine(spine1)))
+            }
+        }
+    }
+
+    /// Convert a term into `ExtendedTerm`, introducing synthetic atoms as needed.
+    ///
+    /// `ExtendedTerm::If` is used as an intermediate form to avoid losing branching
+    /// structure before we synthesize a simple term.
+    fn term_to_extended_term(
+        &mut self,
+        term: &Term,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<ExtendedTerm, String> {
+        if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
+            let cond_cnf = self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
+            let cond_lit = if cond_cnf.is_literal() {
+                cond_cnf.to_literal().unwrap()
+            } else {
+                self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
+            };
+            let then_ext =
+                self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
+            let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
+            let else_ext =
+                self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
+            let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
+            return Ok(ExtendedTerm::If(cond_lit, then_branch, else_branch));
+        }
+
+        if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
+            let mut arg_exts = vec![];
+            for arg in arg_terms {
+                arg_exts.push(self.arg_term_to_extended(
+                    &arg,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?);
+            }
+            return self.apply_term_to_extended_term(
+                &function,
+                arg_exts,
+                stack,
+                next_var_id,
+                synth,
+                context,
+            );
+        }
+
+        match term.as_ref().decompose() {
+            crate::kernel::term::Decomposition::Lambda(_, _) => {
+                let mut args = vec![];
+                let mut current = term.clone();
+                while let Some((input, body)) = current.as_ref().split_lambda() {
+                    let input_type = input.to_owned();
+                    let var_id = *next_var_id;
+                    *next_var_id += 1;
+                    context.push_type(input_type.clone());
+                    let var = Term::new_variable(var_id);
+                    args.push((var_id, input_type));
+                    stack.push(TermBinding::Free(var.clone()));
+                    current = self.open_binder_body(&body.to_owned(), &var);
+                }
+
+                let body_ext =
+                    self.term_to_extended_term(&current, stack, next_var_id, synth, context)?;
+                let body_term = self.extended_term_to_term(body_ext, context, synth)?;
+
+                for _ in 0..args.len() {
+                    stack.pop();
+                }
+                Ok(ExtendedTerm::Lambda(args, body_term))
+            }
+            crate::kernel::term::Decomposition::ForAll(_, _)
+            | crate::kernel::term::Decomposition::Exists(_, _) => {
+                Err(format!("quantifier in unexpected term position: {}", term))
+            }
+            _ => {
+                if term == &Term::new_false() {
+                    return Err("false literal in unexpected position".to_string());
+                }
+                if term == &Term::new_true() {
+                    return Ok(ExtendedTerm::Term(Term::new_true()));
+                }
+
+                let term_type = self.term_type_for_normalization(term, context);
+                if term_type == Term::bool_type() {
+                    if let Some(simple) = self.try_simple_term_to_term(term)? {
+                        return Ok(ExtendedTerm::Term(simple));
+                    }
+                    let skolem_term = self.synthesize_term_from_term(
+                        term,
+                        &Term::bool_type(),
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    )?;
+                    Ok(ExtendedTerm::Term(skolem_term))
+                } else {
+                    Ok(ExtendedTerm::Term(term.clone()))
+                }
+            }
+        }
+    }
+
+    fn term_to_simple_term(
+        &mut self,
+        term: &Term,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synth: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Term, String> {
+        if let Some(simple) = self.try_simple_term_to_term(term)? {
+            return Ok(simple);
+        }
+        let ext = self.term_to_extended_term(term, stack, next_var_id, synth, context)?;
+        self.extended_term_to_term(ext, context, synth)
+    }
+
     /// Checks if any forall variables dropped during normalization have uninhabited types.
     /// This is specifically for detecting vacuous quantification over unconstrained type parameters.
     ///
@@ -1584,7 +2880,7 @@ impl<'a> NormalizationContext<'a> {
 
     /// Converts a value to an ExtendedTerm when it's being used as an argument.
     /// This handles lambdas specially by synthesizing terms for them,
-    /// since lambdas can't be directly converted to plain terms.
+    /// since lambdas can't be directly converted to simple terms.
     fn arg_to_extended_term(
         &mut self,
         value: &AcornValue,
@@ -1690,7 +2986,7 @@ impl<'a> NormalizationContext<'a> {
         Ok(synth_lit)
     }
 
-    /// Converts an ExtendedTerm to a plain Term.
+    /// Converts an ExtendedTerm to a simple Term.
     /// If the ExtendedTerm is an If expression, synthesizes a new atom for it.
     /// The local_context provides variable type information.
     fn extended_term_to_term(
@@ -1715,8 +3011,7 @@ impl<'a> NormalizationContext<'a> {
                 // Determine the type of the result (should be same as then_term and else_term)
                 // Keep types as Terms to avoid round-trip conversion through AcornType,
                 // which would lose the original type parameter names.
-                let result_type_term =
-                    then_term.get_type_with_context(local_context, self.kernel_context());
+                let result_type_term = self.term_type_for_normalization(&then_term, local_context);
 
                 // Create a new synthetic atom with the appropriate function type
                 // based on free variables in the if-expression
@@ -1859,7 +3154,9 @@ impl<'a> NormalizationContext<'a> {
 
                 Ok(synth_term)
             }
-            ExtendedTerm::Lambda(_, t) => Err(format!("cannot convert lambda {} to plain term", t)),
+            ExtendedTerm::Lambda(_, t) => {
+                Err(format!("cannot convert lambda {} to simple term", t))
+            }
         }
     }
 
@@ -1997,30 +3294,22 @@ impl<'a> NormalizationContext<'a> {
 }
 
 impl Normalizer {
-    /// This should handle any sort of boolean value.
-    /// TODO: port edge cases into the "nice" value to clauses so that we only have one of these.
-    fn ugly_value_to_clauses(
+    /// Normalize a term-level proposition into clauses.
+    ///
+    /// This is the term-native backend for proposition normalization.
+    fn normalize_term(
         &mut self,
-        value: &AcornValue,
-        ctype: NewConstantType,
+        term: &Term,
+        _ctype: NewConstantType,
         source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
-        self.kernel_context.symbol_table.add_from(
-            &value,
-            ctype,
-            &mut self.kernel_context.type_store,
-        );
+        term.validate();
 
-        // TODO: can we remove this? Expanding them doesn't really seem right.
-        // Maybe we can inline lambdas instead of expanding them.
-        let value = value.expand_lambdas(0);
-
-        // Check for dropped forall variables only when normalizing negated goals.
         let mut skolem_ids = vec![];
         let mut mut_view =
             NormalizationContext::new_mut(self, type_var_map.clone(), source.module_id);
-        let clauses = mut_view.nice_value_to_clauses(&value, &mut skolem_ids)?;
+        let clauses = mut_view.nice_term_to_clauses(term, &mut skolem_ids)?;
 
         // For any of the created ids that have not been defined yet, the output
         // clauses will be their definition.
@@ -2038,7 +3327,6 @@ impl Normalizer {
 
         if !undefined_ids.is_empty() {
             // We have to define the skolem atoms that were declared during skolemization.
-            // Get type_vars from the type_var_map parameter
             let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
                 let mut entries: Vec<_> = tvm.values().collect();
                 entries.sort_by_key(|(id, _)| *id);
@@ -2047,7 +3335,6 @@ impl Normalizer {
                 vec![]
             };
 
-            // Get the types for these synthetic atoms from the symbol table.
             let synthetic_types: Vec<Term> = undefined_ids
                 .iter()
                 .map(|&(m, i)| {
@@ -2069,107 +3356,6 @@ impl Normalizer {
 
         output.extend(clauses.into_iter());
         Ok(output)
-    }
-
-    /// Legacy value-based normalization backend.
-    ///
-    /// This path predates term-level elaboration and is still used as the clause
-    /// conversion backend while `normalize_term(...)` is being introduced.
-    fn normalize_value_legacy(
-        &mut self,
-        value: &AcornValue,
-        ctype: NewConstantType,
-        source: &Source,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Result<Vec<Clause>, String> {
-        if let Err(e) = value.validate() {
-            return Err(format!(
-                "validation error: {} while normalizing: {}",
-                e, value
-            ));
-        }
-        assert!(value.is_bool_type());
-
-        let clauses = self.ugly_value_to_clauses(value, ctype, source, type_var_map)?;
-        Ok(clauses)
-    }
-
-    /// Normalize a term-level proposition into clauses.
-    ///
-    /// This is the bridge entrypoint for the migration to:
-    /// `AcornValue -> Term -> Vec<Clause>`.
-    /// The clause conversion backend is currently still value-based, so we
-    /// denormalize the term back into an AcornValue first.
-    fn normalize_term(
-        &mut self,
-        term: &Term,
-        ctype: NewConstantType,
-        source: &Source,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Result<Vec<Clause>, String> {
-        term.validate();
-
-        // Build LocalContext entries for type variables in declaration order.
-        let mut local_context = LocalContext::empty();
-        if let Some(ref tvm) = type_var_map {
-            let mut entries: Vec<_> = tvm.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            for (_, kind) in entries {
-                local_context.push_type(kind.clone());
-            }
-        }
-
-        let num_type_vars = type_var_map.as_ref().map_or(0usize, |tvm| tvm.len());
-        let legacy_type_var_map: Option<HashMap<String, (AtomId, Term)>> =
-            type_var_map.as_ref().map(|tvm| {
-                tvm.values()
-                    .map(|(id, kind)| (format!("T{}", id), (*id, kind.clone())))
-                    .collect()
-            });
-        fn binder_count(term: crate::kernel::term::TermRef<'_>) -> AtomId {
-            use crate::kernel::term::Decomposition;
-            match term.decompose() {
-                Decomposition::Atom(_) => 0,
-                Decomposition::Application(func, arg) | Decomposition::Pi(func, arg) => {
-                    binder_count(func) + binder_count(arg)
-                }
-                Decomposition::Lambda(input, body)
-                | Decomposition::ForAll(input, body)
-                | Decomposition::Exists(input, body) => {
-                    1 + binder_count(input) + binder_count(body)
-                }
-            }
-        }
-
-        let max_original_var = term.max_variable().unwrap_or(0);
-        let max_remap_var =
-            max_original_var + binder_count(term.as_ref()) + num_type_vars as AtomId + 1;
-        let var_remapping: Vec<Option<u16>> = (0..=max_remap_var)
-            .map(|i| {
-                if (i as usize) < num_type_vars {
-                    None
-                } else {
-                    Some((i - num_type_vars as AtomId) as u16)
-                }
-            })
-            .collect();
-
-        let value = self.denormalize_term(
-            term,
-            &local_context,
-            None,
-            Some(&var_remapping),
-            None,
-            None,
-            false,
-        );
-        if let Err(e) = value.validate() {
-            return Err(format!(
-                "term denormalization produced invalid value: {}. term={} value={}",
-                e, term, value
-            ));
-        }
-        self.normalize_value_legacy(&value, ctype, source, legacy_type_var_map)
     }
 
     /// Converts a value proposition to CNF clauses via:

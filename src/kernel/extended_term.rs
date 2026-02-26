@@ -44,11 +44,11 @@ impl std::fmt::Display for ExtendedTerm {
 }
 
 impl ExtendedTerm {
-    /// Convert ExtendedTerm to a plain Term, erroring if it's not ::Term variant
+    /// Convert ExtendedTerm to a simple Term, erroring if it's not ::Term variant.
     pub fn to_term(self) -> Result<Term, String> {
         match self {
             ExtendedTerm::Term(t) => Ok(t),
-            other => Err(format!("expected plain term but got {}", other)),
+            other => Err(format!("expected simple term but got {}", other)),
         }
     }
 
