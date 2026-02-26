@@ -25,7 +25,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
-use crate::normalizer::{NormalizationContext, Normalizer};
+use crate::normalizer::{Clausifier, Normalizer};
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
 use crate::syntax::expression::{Declaration, Expression};
@@ -265,8 +265,8 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let module_id = bindings.module_id();
-                let mut view = NormalizationContext::new_mut(normalizer.to_mut(), None, module_id);
-                let clauses = view.value_to_denormalized_clauses(&value)?;
+                let mut view = Clausifier::new_mut(normalizer.to_mut(), None, module_id);
+                let clauses = view.clausify_value_to_denormalized_clauses(&value)?;
                 if clauses.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "claim must normalize to exactly one clause, got {}",
@@ -836,13 +836,10 @@ impl Certificate {
             }
             Some(map)
         };
-        let mut view = NormalizationContext::new_mut(
-            &mut normalizer_clone,
-            type_var_map,
-            bindings.module_id(),
-        );
+        let mut view =
+            Clausifier::new_mut(&mut normalizer_clone, type_var_map, bindings.module_id());
         let generic_value = AcornValue::forall(arg_types, body);
-        let clauses = view.value_to_denormalized_clauses(&generic_value)?;
+        let clauses = view.clausify_value_to_denormalized_clauses(&generic_value)?;
         if clauses.len() != 1 {
             return Err(CodeGenError::GeneratedBadCode(format!(
                 "claim-with-args body normalized to {} clauses (expected 1)",
@@ -855,8 +852,7 @@ impl Certificate {
             .expect("clauses has exactly one element");
 
         let mut term_normalizer = normalizer.clone();
-        let mut term_view =
-            NormalizationContext::new_mut(&mut term_normalizer, None, bindings.module_id());
+        let mut term_view = Clausifier::new_mut(&mut term_normalizer, None, bindings.module_id());
         let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
             let type_term = normalizer
@@ -867,7 +863,7 @@ impl Certificate {
         }
         let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
-            let term = term_view.value_to_simple_term(arg)?;
+            let term = term_view.clausify_value_to_simple_term(arg)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
 
@@ -1165,10 +1161,11 @@ mod tests {
                 LoadState::Error(e) => panic!("module loading error: {}", e),
                 _ => panic!("unexpected module load state"),
             };
-            let normalizer = env
-                .normalizer
-                .clone()
-                .expect("environment should have a normalizer");
+            let normalizer = Normalizer::from_kernel_context(
+                env.kernel_context
+                    .clone()
+                    .expect("environment should have a kernel context"),
+            );
             (env.bindings.clone(), normalizer)
         };
 

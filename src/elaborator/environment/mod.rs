@@ -16,6 +16,7 @@ use crate::elaborator::names::DefinedName;
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
+use crate::kernel::kernel_context::KernelContext;
 use crate::module::ModuleId;
 use crate::normalizer::{NormalizedFact, Normalizer};
 use crate::project::Project;
@@ -80,15 +81,15 @@ pub struct Environment {
     /// The line number of the last statement we processed (for detecting blank lines).
     pub last_statement_line: Option<u32>,
 
-    /// Stores the normalizer state after processing imports.
+    /// Stores the kernel context state after processing imports.
     /// This can be cloned to create a Processor without re-normalizing imports.
-    pub import_normalizer: Option<Normalizer>,
+    pub import_kernel_context: Option<KernelContext>,
 
     /// Stores normalized facts from imports.
     pub normalized_imports: Vec<NormalizedFact>,
 
-    /// Stores the normalizer state after processing all facts.
-    pub normalizer: Option<Normalizer>,
+    /// Stores the kernel context state after processing all facts.
+    pub kernel_context: Option<KernelContext>,
 
     /// Stores normalized facts from this module's nodes.
     pub normalized_module_facts: Vec<NormalizedFact>,
@@ -111,9 +112,9 @@ impl Environment {
             module_doc_comments: Vec::new(),
             at_module_beginning: true,
             last_statement_line: None,
-            import_normalizer: None,
+            import_kernel_context: None,
             normalized_imports: Vec::new(),
-            normalizer: None,
+            kernel_context: None,
             normalized_module_facts: Vec::new(),
         }
     }
@@ -135,9 +136,9 @@ impl Environment {
             module_doc_comments: Vec::new(), // Child environments don't inherit module doc comments
             at_module_beginning: false,      // Child environments are never at module beginning
             last_statement_line: None,
-            import_normalizer: None,
+            import_kernel_context: None,
             normalized_imports: Vec::new(),
-            normalizer: None,
+            kernel_context: None,
             normalized_module_facts: Vec::new(),
         }
     }
@@ -649,11 +650,11 @@ impl Environment {
     /// This should be called after elaboration is complete.
     ///
     /// For dependencies that have already been normalized, we merge their
-    /// normalizer state and reuse their pre-normalized facts, avoiding redundant
+    /// kernel context state and reuse their pre-normalized facts, avoiding redundant
     /// normalization work.
     ///
     /// Returns Ok(()) if all facts normalized successfully, or Err if any failed.
-    /// Even on error, the normalizer states are set to what was achieved before the error.
+    /// Even on error, the kernel context states are set to what was achieved before the error.
     pub fn run_normalization_pass(&mut self, project: &Project) -> Result<(), String> {
         if !self.normalized_module_facts.is_empty() {
             return Err(
@@ -663,7 +664,7 @@ impl Environment {
         }
         use std::collections::HashSet;
 
-        let mut normalizer = Normalizer::new();
+        let mut kernel_context = KernelContext::new();
         let mut first_error: Option<String> = None;
 
         // Collect all dependencies (including transitive) using the environment's bindings.
@@ -682,9 +683,9 @@ impl Environment {
         // when we process that dependency directly.
         for dep_id in deps {
             if let Some(dep_env) = project.get_env_by_id(dep_id) {
-                if let Some(ref dep_normalizer) = dep_env.normalizer {
+                if let Some(ref dep_kernel_context) = dep_env.kernel_context {
                     // Dependency has normalized state - merge and reuse
-                    normalizer.merge_imports(dep_normalizer);
+                    kernel_context.merge_imports(dep_kernel_context);
                     // Add only the dependency's own facts (not its imports)
                     for normalized in &dep_env.normalized_module_facts {
                         self.normalized_imports.push(normalized.clone());
@@ -696,14 +697,18 @@ impl Environment {
             }
         }
 
-        // Store the normalizer state after processing imports.
+        // Store the kernel context state after processing imports.
         // This can be cloned by Processor::with_imports to avoid re-normalizing.
-        self.import_normalizer = Some(normalizer.clone());
+        self.import_kernel_context = Some(kernel_context.clone());
 
         // Now normalize goals. For each goal, we compute the normalizer state that matches
         // what verification sees. This iterates through nodes in order, adding facts to
         // the normalizer as we go (mirroring verify_node behavior).
-        let import_normalizer = self.import_normalizer.clone().unwrap();
+        let import_normalizer = Normalizer::from_kernel_context(
+            self.import_kernel_context
+                .clone()
+                .expect("import kernel context should be present"),
+        );
         let final_normalizer =
             Self::normalize_nodes_pass(&mut self.nodes, &import_normalizer, &mut first_error);
 
@@ -722,7 +727,7 @@ impl Environment {
             }
         }
 
-        self.normalizer = Some(final_normalizer);
+        self.kernel_context = Some(final_normalizer.into_kernel_context());
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),

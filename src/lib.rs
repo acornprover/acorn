@@ -1,6 +1,7 @@
 pub mod build_cache;
 pub mod builder;
 pub mod certificate;
+pub mod clausifier;
 pub mod cleaner;
 pub mod code_generator;
 pub mod common;
