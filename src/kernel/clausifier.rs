@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use crate::elaborator::acorn_value::AcornValue;
-use crate::elaborator::to_term::elaborate_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::cnf::Cnf;
@@ -12,7 +10,6 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
-use crate::normalizer::Normalizer;
 
 // Represents a binding for a variable on the stack during normalization.
 // Each binding corresponds to a variable in the output clause.
@@ -30,18 +27,18 @@ impl TermBinding {
     }
 }
 
-/// Inner enum for Clausifier to support both ref and mut access to the Normalizer.
-enum ClausifierRef<'a> {
-    Ref(&'a Normalizer),
-    Mut(&'a mut Normalizer),
+/// Inner enum for Clausifier to support both ref and mut access to kernel state.
+enum ClausifierContext<'a> {
+    Ref(&'a KernelContext),
+    Mut(&'a mut KernelContext),
 }
 
 /// A Clausifier holds state for a single clausification operation.
-/// It combines a reference to the Normalizer with operation-scoped state like type_var_map.
-/// This lets us share methods between mutable and non-mutable normalizer access while
-/// keeping per-operation state separate from the persistent Normalizer state.
+/// It combines a reference to the KernelContext with operation-scoped state like
+/// type_var_map. This lets us share methods between mutable and non-mutable kernel
+/// access while keeping per-operation state separate from persistent kernel state.
 pub struct Clausifier<'a> {
-    inner: ClausifierRef<'a>,
+    inner: ClausifierContext<'a>,
     /// Type variable mapping for polymorphic normalization.
     /// Maps type parameter names to (variable id, kind).
     /// This is set for the duration of normalizing a single polymorphic fact/goal.
@@ -55,11 +52,11 @@ impl<'a> Clausifier<'a> {
     /// Create a new Clausifier with immutable access.
     /// Uses ModuleId(0) as a placeholder since immutable contexts don't create synthetics.
     pub fn new_ref(
-        n: &'a Normalizer,
+        kernel_context: &'a KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Self {
         Clausifier {
-            inner: ClausifierRef::Ref(n),
+            inner: ClausifierContext::Ref(kernel_context),
             type_var_map,
             module_id: ModuleId(0),
         }
@@ -68,28 +65,28 @@ impl<'a> Clausifier<'a> {
     /// Create a new Clausifier with mutable access.
     /// The module_id determines which module synthetics will be scoped to.
     pub fn new_mut(
-        n: &'a mut Normalizer,
+        kernel_context: &'a mut KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
         module_id: ModuleId,
     ) -> Self {
         Clausifier {
-            inner: ClausifierRef::Mut(n),
+            inner: ClausifierContext::Mut(kernel_context),
             type_var_map,
             module_id,
         }
     }
 
-    fn as_ref(&self) -> &Normalizer {
+    fn as_ref(&self) -> &KernelContext {
         match &self.inner {
-            ClausifierRef::Ref(n) => n,
-            ClausifierRef::Mut(n) => n,
+            ClausifierContext::Ref(kernel_context) => kernel_context,
+            ClausifierContext::Mut(kernel_context) => kernel_context,
         }
     }
 
-    fn as_mut(&mut self) -> Result<&mut Normalizer, String> {
+    fn as_mut(&mut self) -> Result<&mut KernelContext, String> {
         match &mut self.inner {
-            ClausifierRef::Ref(_) => Err("Cannot mutate a Clausifier::Ref".to_string()),
-            ClausifierRef::Mut(n) => Ok(n),
+            ClausifierContext::Ref(_) => Err("Cannot mutate a Clausifier::Ref".to_string()),
+            ClausifierContext::Mut(kernel_context) => Ok(kernel_context),
         }
     }
 
@@ -98,11 +95,11 @@ impl<'a> Clausifier<'a> {
     }
 
     fn symbol_table(&self) -> &crate::kernel::symbol_table::SymbolTable {
-        &self.as_ref().kernel_context.symbol_table
+        &self.kernel_context().symbol_table
     }
 
     fn kernel_context(&self) -> &KernelContext {
-        &self.as_ref().kernel_context
+        self.as_ref()
     }
 
     /// Get the type variable map for polymorphic normalization.
@@ -1161,12 +1158,11 @@ impl<'a> Clausifier<'a> {
             .collect();
         let synthetic_types = vec![synthetic_type.clone()];
 
-        if let Some(existing_def) = self
-            .as_ref()
-            .kernel_context
-            .synthetic_registry
-            .lookup_by_key(&type_vars, &synthetic_types, &key_clauses)
-        {
+        if let Some(existing_def) = self.kernel_context().synthetic_registry.lookup_by_key(
+            &type_vars,
+            &synthetic_types,
+            &key_clauses,
+        ) {
             let (existing_m, existing_id) = existing_def.atoms[0];
             let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
             Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
@@ -1601,40 +1597,17 @@ impl<'a> Clausifier<'a> {
         Ok(output)
     }
 
-    /// This returns clauses that are denormalized in the sense that they sort literals,
-    /// but don't filter out redundant or tautological literals.
-    /// This is the format that the Checker uses.
-    /// If you call normalize() on the clause afterwards, you should get the normalized one.
-    pub fn clausify_value_to_denormalized_clauses(
-        &mut self,
-        value: &AcornValue,
-    ) -> Result<Vec<Clause>, String> {
-        let type_var_map = self.type_var_map().cloned();
-        let term = elaborate_value_to_term_existing(
-            self.as_mut()?.kernel_context_mut(),
-            value,
-            type_var_map.as_ref(),
-        )?;
-        self.clausify_term_to_denormalized_clauses(&term)
-    }
-
-    /// Converts a simple value expression into a kernel term.
+    /// Convert a term expression into a simple kernel term.
     ///
-    /// This only succeeds for values that elaborate into a simple term form.
-    pub fn clausify_value_to_simple_term(&mut self, value: &AcornValue) -> Result<Term, String> {
-        let type_var_map = self.type_var_map().cloned();
-        let term = elaborate_value_to_term_existing(
-            self.as_mut()?.kernel_context_mut(),
-            value,
-            type_var_map.as_ref(),
-        )?;
-        match self.try_simple_term_to_signed_term(&term)? {
+    /// This only succeeds for terms that are representable in simple-term form.
+    pub fn clausify_term_to_simple_term(&mut self, term: &Term) -> Result<Term, String> {
+        match self.try_simple_term_to_signed_term(term)? {
             Some((term, true)) => Ok(term),
             // `false` is represented as `not true` in signed-term form.
             Some((term, false)) if term == Term::new_true() => Ok(Term::new_false()),
             Some(_) | None => Err(format!(
-                "value '{}' cannot be represented as a simple term",
-                value
+                "term '{}' cannot be represented as a simple term",
+                term
             )),
         }
     }

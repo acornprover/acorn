@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::builder::BuildError;
-pub use crate::clausifier::Clausifier;
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::ConstantInstance;
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
@@ -15,8 +14,9 @@ use crate::elaborator::source::Source;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::elaborator::to_term::elaborate_value_to_term_existing;
-use crate::kernel::atom::{Atom, AtomId, INVALID_SYNTHETIC_MODULE};
+use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
+use crate::kernel::clausifier::Clausifier;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
@@ -119,7 +119,8 @@ impl Normalizer {
         let term =
             elaborate_value_to_term_existing(&mut self.kernel_context, &alt_value, type_var_map)
                 .ok()?;
-        let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
+        let mut view =
+            Clausifier::new_mut(&mut self.kernel_context, type_var_map.cloned(), ModuleId(0));
         let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
             return None;
         };
@@ -168,67 +169,6 @@ impl Normalizer {
         )
     }
 
-    /// Declare a synthetic atom with a type already in Term form.
-    /// This avoids round-trip conversion through AcornType.
-    pub(crate) fn declare_synthetic_atom_with_type_term(
-        &mut self,
-        module_id: ModuleId,
-        type_term: Term,
-    ) -> Result<(ModuleId, AtomId), String> {
-        let symbol = self
-            .kernel_context
-            .symbol_table
-            .declare_synthetic(module_id, type_term);
-        let (m, id) = match symbol {
-            Symbol::Synthetic(m, id) => (m, id),
-            _ => panic!("declare_synthetic should return a Synthetic symbol"),
-        };
-        // Check for invalid synthetic module (shouldn't happen in normal use)
-        if m == INVALID_SYNTHETIC_MODULE {
-            return Err("synthetic atom created with invalid module".to_string());
-        }
-        Ok((m, id))
-    }
-
-    /// Adds the definition for these synthetic atoms.
-    pub(crate) fn define_synthetic_atoms(
-        &mut self,
-        atoms: Vec<(ModuleId, AtomId)>,
-        type_vars: Vec<Term>,
-        synthetic_types: Vec<Term>,
-        clauses: Vec<Clause>,
-        source: Option<Source>,
-    ) -> Result<(), String> {
-        for (i, atom) in atoms.iter().enumerate() {
-            trace!(
-                atom_id = ?atom,
-                source = ?source,
-                clause_index = i,
-                "defining synthetic atom"
-            );
-        }
-        for clause in &clauses {
-            trace!(clause = %clause, "synthetic definition clause");
-        }
-
-        // In the synthetic key, we normalize synthetic ids by renumbering them.
-        // Use pinned normalization to preserve type variable ordering.
-        let num_type_vars = type_vars.len();
-        let key_clauses: Vec<Clause> = clauses
-            .iter()
-            .map(|c| c.invalidate_synthetics_with_pinned(&atoms, num_type_vars))
-            .collect();
-
-        self.kernel_context.synthetic_registry.define(
-            atoms,
-            type_vars,
-            synthetic_types,
-            clauses,
-            key_clauses,
-            source,
-        )
-    }
-
     pub fn add_scoped_constant(
         &mut self,
         cname: ConstantName,
@@ -273,7 +213,11 @@ impl Normalizer {
         term.validate();
 
         let mut skolem_ids = vec![];
-        let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+        let mut mut_view = Clausifier::new_mut(
+            &mut self.kernel_context,
+            type_var_map.clone(),
+            source.module_id,
+        );
         let clauses = mut_view.clausify_term(term, &mut skolem_ids)?;
 
         // For any of the created ids that have not been defined yet, the output
@@ -310,7 +254,7 @@ impl Normalizer {
                 })
                 .collect();
 
-            self.define_synthetic_atoms(
+            self.kernel_context.define_synthetic_atoms(
                 undefined_ids,
                 type_vars,
                 synthetic_types,

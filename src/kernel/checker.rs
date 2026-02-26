@@ -107,7 +107,7 @@ pub struct CheckedStep {
 ///   Substitutions into a known theorem (or exact variable-clause matches for variable clauses).
 ///   "Congruence closure" of equalities and subterm relationships. Handled by the EqualityGraph.
 ///   Propositional calculus on concrete literals. Handled by the EqualityGraph.
-///   Introducing variables for existential quantifiers. Handled weirdly through a Normalizer.
+///   Introducing variables for existential quantifiers during clausification.
 #[derive(Clone)]
 pub struct Checker {
     /// For deductions among concrete clauses.

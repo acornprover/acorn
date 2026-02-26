@@ -17,15 +17,17 @@ use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
+use crate::elaborator::to_term::elaborate_value_to_term_existing;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
+use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
-use crate::normalizer::{Clausifier, Normalizer};
+use crate::normalizer::Normalizer;
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
 use crate::syntax::expression::{Declaration, Expression};
@@ -265,8 +267,14 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let module_id = bindings.module_id();
-                let mut view = Clausifier::new_mut(normalizer.to_mut(), None, module_id);
-                let clauses = view.clausify_value_to_denormalized_clauses(&value)?;
+                let term = elaborate_value_to_term_existing(
+                    normalizer.to_mut().kernel_context_mut(),
+                    &value,
+                    None,
+                )?;
+                let mut view =
+                    Clausifier::new_mut(normalizer.to_mut().kernel_context_mut(), None, module_id);
+                let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "claim must normalize to exactly one clause, got {}",
@@ -836,10 +844,18 @@ impl Certificate {
             }
             Some(map)
         };
-        let mut view =
-            Clausifier::new_mut(&mut normalizer_clone, type_var_map, bindings.module_id());
         let generic_value = AcornValue::forall(arg_types, body);
-        let clauses = view.clausify_value_to_denormalized_clauses(&generic_value)?;
+        let generic_term = elaborate_value_to_term_existing(
+            normalizer_clone.kernel_context_mut(),
+            &generic_value,
+            type_var_map.as_ref(),
+        )?;
+        let mut view = Clausifier::new_mut(
+            normalizer_clone.kernel_context_mut(),
+            type_var_map,
+            bindings.module_id(),
+        );
+        let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
             return Err(CodeGenError::GeneratedBadCode(format!(
                 "claim-with-args body normalized to {} clauses (expected 1)",
@@ -852,7 +868,6 @@ impl Certificate {
             .expect("clauses has exactly one element");
 
         let mut term_normalizer = normalizer.clone();
-        let mut term_view = Clausifier::new_mut(&mut term_normalizer, None, bindings.module_id());
         let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
             let type_term = normalizer
@@ -863,7 +878,14 @@ impl Certificate {
         }
         let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
-            let term = term_view.clausify_value_to_simple_term(arg)?;
+            let term =
+                elaborate_value_to_term_existing(term_normalizer.kernel_context_mut(), arg, None)?;
+            let mut term_view = Clausifier::new_mut(
+                term_normalizer.kernel_context_mut(),
+                None,
+                bindings.module_id(),
+            );
+            let term = term_view.clausify_term_to_simple_term(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
 
