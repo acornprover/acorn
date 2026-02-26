@@ -1,6 +1,5 @@
 use crate::certificate::Certificate;
 use crate::module::LoadState;
-use crate::normalizer::Normalizer;
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
@@ -36,20 +35,20 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
     let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_normalized_goal(normalized_goal);
-    let goal_normalizer = Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
-    let outcome = processor.search(ProverMode::Test, &goal_normalizer);
+    let goal_kernel_context = &normalized_goal.kernel_context;
+    let outcome = processor.search(ProverMode::Test, goal_kernel_context);
 
     assert_eq!(outcome, Outcome::Success);
 
     let cert = match processor
         .prover()
-        .make_cert(&env.bindings, &goal_normalizer, true)
+        .make_cert(&env.bindings, goal_kernel_context, true)
     {
         Ok(cert) => cert,
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, &goal_normalizer, project, &env.bindings) {
+    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, &env.bindings) {
         panic!("check_cert failed: {}", e);
     }
     cert
@@ -83,9 +82,8 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
                 None => return Outcome::Inconsistent,
             };
             processor.set_normalized_goal(normalized_goal);
-            let goal_normalizer =
-                Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
-            return processor.search(ProverMode::Test, &goal_normalizer);
+            let goal_kernel_context = &normalized_goal.kernel_context;
+            return processor.search(ProverMode::Test, goal_kernel_context);
         }
     }
     panic!("goal '{}' not found in text", goal_name);
@@ -123,23 +121,26 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
             .normalized_goal()
             .ok_or_else(|| "missing normalized goal".to_string())?;
         processor.set_normalized_goal(normalized_goal);
-        let goal_normalizer =
-            Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+        let goal_kernel_context = &normalized_goal.kernel_context;
 
         // This is a key difference between our verification tests, and our real verification.
         // This helps us test that verification fails in cases where we do have an
         // infinite rabbit hole we could go down.
-        let outcome = processor.search(ProverMode::Test, &goal_normalizer);
+        let outcome = processor.search(ProverMode::Test, goal_kernel_context);
         if outcome != Outcome::Success {
             return Ok(outcome);
         }
         let cert = processor
             .prover()
-            .make_cert(&goal_env.bindings, &goal_normalizer, true)
+            .make_cert(&goal_env.bindings, goal_kernel_context, true)
             .map_err(|e| e.to_string())?;
-        if let Err(e) =
-            processor.check_cert(&cert, None, &goal_normalizer, &project, &goal_env.bindings)
-        {
+        if let Err(e) = processor.check_cert(
+            &cert,
+            None,
+            goal_kernel_context,
+            &project,
+            &goal_env.bindings,
+        ) {
             panic!("check_cert failed: {}", e);
         }
     }
@@ -206,19 +207,22 @@ pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
                 .normalized_goal()
                 .ok_or_else(|| "missing normalized goal".to_string())?;
             processor.set_normalized_goal(normalized_goal);
-            let goal_normalizer =
-                Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
-            let outcome = processor.search(ProverMode::Test, &goal_normalizer);
+            let goal_kernel_context = &normalized_goal.kernel_context;
+            let outcome = processor.search(ProverMode::Test, goal_kernel_context);
             if outcome != Outcome::Success {
                 return Ok(outcome);
             }
             let cert = processor
                 .prover()
-                .make_cert(&goal_env.bindings, &goal_normalizer, true)
+                .make_cert(&goal_env.bindings, goal_kernel_context, true)
                 .map_err(|e| e.to_string())?;
-            if let Err(e) =
-                processor.check_cert(&cert, None, &goal_normalizer, &project, &goal_env.bindings)
-            {
+            if let Err(e) = processor.check_cert(
+                &cert,
+                None,
+                goal_kernel_context,
+                &project,
+                &goal_env.bindings,
+            ) {
                 panic!("check_cert failed: {}", e);
             }
             return Ok(Outcome::Success);

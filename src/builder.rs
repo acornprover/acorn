@@ -15,7 +15,7 @@ use crate::elaborator::goal::Goal;
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::source::SourceType;
 use crate::module::{LoadState, ModuleDescriptor, ModuleId};
-use crate::normalizer::{NormalizedGoal, Normalizer};
+use crate::normalizer::NormalizedGoal;
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
@@ -653,12 +653,11 @@ impl<'a> Builder<'a> {
         if let Some(ref cert) = self.cert_override {
             let normalized_goal =
                 normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
-            let goal_normalizer =
-                Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+            let goal_kernel_context = &normalized_goal.kernel_context;
             let result = processor.check_cert(
                 cert,
                 Some(normalized_goal),
-                &goal_normalizer,
+                goal_kernel_context,
                 self.project,
                 &env.bindings,
             );
@@ -686,13 +685,12 @@ impl<'a> Builder<'a> {
             // If clean_certs is enabled, clean the certificate
             let normalized_goal =
                 normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
-            let goal_normalizer =
-                Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+            let goal_kernel_context = &normalized_goal.kernel_context;
             let (cert_to_use, check_result) = if self.clean_certs {
                 match processor.clean_cert(
                     cert,
                     Some(normalized_goal),
-                    &goal_normalizer,
+                    goal_kernel_context,
                     self.project,
                     &env.bindings,
                 ) {
@@ -709,7 +707,7 @@ impl<'a> Builder<'a> {
                 let result = processor.check_cert(
                     &cert,
                     Some(normalized_goal),
-                    &goal_normalizer,
+                    goal_kernel_context,
                     self.project,
                     &env.bindings,
                 );
@@ -766,8 +764,7 @@ impl<'a> Builder<'a> {
         // Use normalized goal data only; do not normalize during phase three.
         let normalized_goal =
             normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
-        let goal_normalizer =
-            Normalizer::from_kernel_context(normalized_goal.kernel_context.clone());
+        let goal_kernel_context = &normalized_goal.kernel_context;
         processor.set_normalized_goal(normalized_goal);
 
         let start = std::time::Instant::now();
@@ -775,10 +772,10 @@ impl<'a> Builder<'a> {
             ProverMode::Interactive {
                 timeout_secs: self.timeout_secs,
             },
-            &goal_normalizer,
+            goal_kernel_context,
         );
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, &goal_normalizer, self.verbose) {
+            match processor.make_cert(&env.bindings, goal_kernel_context, self.verbose) {
                 Ok(cert) => {
                     #[cfg(feature = "validate")]
                     {
@@ -786,7 +783,7 @@ impl<'a> Builder<'a> {
                         if let Err(e) = processor.check_cert(
                             &cert,
                             Some(normalized_goal),
-                            &goal_normalizer,
+                            goal_kernel_context,
                             self.project,
                             &env.bindings,
                         ) {
@@ -819,7 +816,7 @@ impl<'a> Builder<'a> {
                         if let Err(e) = processor.check_cert(
                             &cert,
                             Some(normalized_goal),
-                            &goal_normalizer,
+                            goal_kernel_context,
                             self.project,
                             &env.bindings,
                         ) {

@@ -2297,7 +2297,7 @@ mod tests {
         let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, &normalizer);
+        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
     }
 
     #[test]
@@ -2336,7 +2336,7 @@ mod tests {
         let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, &normalizer);
+        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
     }
 
     #[test]
@@ -2376,7 +2376,7 @@ mod tests {
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
         assert_eq!(codes[0], expected);
 
-        processor.test_parse_code(&codes[0], &bindings, &normalizer);
+        processor.test_parse_code(&codes[0], &bindings, normalizer.kernel_context());
     }
 
     #[test]

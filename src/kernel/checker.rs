@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
 
 use im::HashMap as ImHashMap;
@@ -327,7 +326,6 @@ impl Checker {
     pub fn insert_normalized_goal(
         &mut self,
         normalized: &crate::normalizer::NormalizedGoal,
-        normalizer: &mut crate::normalizer::Normalizer,
     ) -> Result<(), Error> {
         trace!(
             "inserting normalized goal {} (line {})",
@@ -335,10 +333,8 @@ impl Checker {
             normalized.goal.first_line
         );
 
-        *normalizer =
-            crate::normalizer::Normalizer::from_kernel_context(normalized.kernel_context.clone());
         let source = &normalized.goal.proposition.source;
-        let kernel_context = normalizer.kernel_context();
+        let kernel_context = &normalized.kernel_context;
         for step in &normalized.steps {
             let step_source = if let Rule::Assumption(info) = &step.rule {
                 &info.source
@@ -359,7 +355,7 @@ impl Checker {
         &mut self,
         cert_steps: &[CertificateStep],
         code_lines: Option<&[String]>,
-        normalizer: &Cow<crate::normalizer::Normalizer>,
+        kernel_context: &KernelContext,
     ) -> Result<Vec<CheckedStep>, Error> {
         let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
@@ -370,7 +366,6 @@ impl Checker {
                 return Ok(checked_steps);
             }
 
-            let kernel_context = normalizer.kernel_context();
             match step {
                 CertificateStep::Claim(claim) => {
                     let mut clause = Self::instantiate_claim_clause(claim, kernel_context)?;

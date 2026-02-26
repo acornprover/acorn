@@ -7,6 +7,7 @@ use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::node::NodeCursor;
 use crate::kernel::checker::{Checker, StepReason};
+use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::normalizer::{NormalizedFact, NormalizedGoal, Normalizer};
 use crate::project::Project;
@@ -151,18 +152,18 @@ impl Processor {
     }
 
     /// Forwards a search request to the underlying prover.
-    pub fn search(&mut self, mode: ProverMode, normalizer: &Normalizer) -> Outcome {
-        self.prover.search(mode, normalizer)
+    pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
+        self.prover.search(mode, kernel_context)
     }
 
     /// Creates a certificate from the current proof state.
     pub fn make_cert(
         &self,
         bindings: &BindingMap,
-        normalizer: &Normalizer,
+        kernel_context: &KernelContext,
         print: bool,
     ) -> Result<Certificate, Error> {
-        self.prover.make_cert(bindings, normalizer, print)
+        self.prover.make_cert(bindings, kernel_context, print)
     }
 
     /// Checks a certificate.
@@ -173,23 +174,29 @@ impl Processor {
         &self,
         cert: &Certificate,
         normalized_goal: Option<&NormalizedGoal>,
-        normalizer: &Normalizer,
+        kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
     ) -> Result<Vec<CertificateLine>, Error> {
         let mut checker = self.checker.clone();
-        let mut normalizer = normalizer.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
+        let effective_kernel_context: &KernelContext;
 
         if let Some(normalized_goal) = normalized_goal {
-            checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
+            checker.insert_normalized_goal(normalized_goal)?;
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
+            effective_kernel_context = &normalized_goal.kernel_context;
         } else if let Some(type_params) = self.prover.goal_type_params() {
             cert_bindings = Self::bindings_with_type_params(bindings, type_params);
+            effective_kernel_context = kernel_context;
+        } else {
+            effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(normalizer);
+        let normalizer = Cow::Owned(Normalizer::from_kernel_context(
+            effective_kernel_context.clone(),
+        ));
         cert.check(checker, project, cert_bindings, normalizer)
     }
 
@@ -199,23 +206,29 @@ impl Processor {
         &self,
         cert: Certificate,
         normalized_goal: Option<&NormalizedGoal>,
-        normalizer: &Normalizer,
+        kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
     ) -> Result<(Certificate, Vec<CertificateLine>), Error> {
         let mut checker = self.checker.clone();
-        let mut normalizer = normalizer.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
+        let effective_kernel_context: &KernelContext;
 
         if let Some(normalized_goal) = normalized_goal {
-            checker.insert_normalized_goal(normalized_goal, &mut normalizer)?;
+            checker.insert_normalized_goal(normalized_goal)?;
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
+            effective_kernel_context = &normalized_goal.kernel_context;
         } else if let Some(type_params) = self.prover.goal_type_params() {
             cert_bindings = Self::bindings_with_type_params(bindings, type_params);
+            effective_kernel_context = kernel_context;
+        } else {
+            effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(normalizer);
+        let normalizer = Cow::Owned(Normalizer::from_kernel_context(
+            effective_kernel_context.clone(),
+        ));
         cert.clean(checker, project, cert_bindings, normalizer)
     }
 
@@ -254,10 +267,16 @@ impl Processor {
     /// Test helper: verify a line of certificate code can be parsed.
     /// Panics if parsing fails.
     #[cfg(test)]
-    pub fn test_parse_code(&self, code: &str, bindings: &BindingMap, normalizer: &Normalizer) {
+    pub fn test_parse_code(
+        &self,
+        code: &str,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) {
         use std::borrow::Cow;
 
-        let mut normalizer_cow = Cow::Owned(normalizer.clone());
+        let mut normalizer_cow =
+            Cow::Owned(Normalizer::from_kernel_context(kernel_context.clone()));
         let mut bindings_cow = Cow::Borrowed(bindings);
         let project = Project::new_mock();
 

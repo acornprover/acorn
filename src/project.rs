@@ -23,7 +23,6 @@ use crate::elaborator::names::ConstantName;
 use crate::interfaces::{GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
-use crate::normalizer::Normalizer;
 use crate::processor::Processor;
 use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
@@ -1399,7 +1398,7 @@ impl Project {
                 if let Ok(steps) = processor.check_cert(
                     cert,
                     Some(normalized_goal),
-                    &Normalizer::from_kernel_context(normalized_goal.kernel_context.clone()),
+                    &normalized_goal.kernel_context,
                     self,
                     &goal_env.bindings,
                 ) {

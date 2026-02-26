@@ -33,7 +33,7 @@ pub trait ProofResolver {
 /// This represents a proof by contradiction, with each step depending only on
 /// previous steps.
 pub struct Proof<'a> {
-    normalizer: &'a Normalizer,
+    kernel_context: &'a KernelContext,
 
     // Steps of the proof that can be directly verified.
     // Represents a proof by contradiction, with each step depending only on
@@ -46,9 +46,9 @@ pub struct Proof<'a> {
 
 impl<'a> Proof<'a> {
     /// Creates a new proof.
-    pub fn new(normalizer: &'a Normalizer) -> Proof<'a> {
+    pub fn new(kernel_context: &'a KernelContext) -> Proof<'a> {
         Proof {
-            normalizer,
+            kernel_context,
             steps: vec![],
             step_map: HashMap::new(),
         }
@@ -73,7 +73,7 @@ impl ProofResolver for Proof<'_> {
     }
 
     fn kernel_context(&self) -> &KernelContext {
-        self.normalizer.kernel_context()
+        self.kernel_context
     }
 }
 
@@ -164,13 +164,14 @@ impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        Certificate::from_concrete_steps(goal, &concrete_steps, self.normalizer, bindings)
+        let normalizer = Normalizer::from_kernel_context(self.kernel_context.clone());
+        Certificate::from_concrete_steps(goal, &concrete_steps, &normalizer, bindings)
     }
 
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
     /// that we intentionally omit from certificates.
     fn collect_concrete_steps(&self) -> Result<Vec<ConcreteStep>, Error> {
-        let kernel_context = self.normalizer.kernel_context();
+        let kernel_context = self.kernel_context;
 
         // First, reconstruct all the steps, working backwards.
         let mut concrete_steps: HashMap<ConcreteStepId, ConcreteStep> = HashMap::new();
@@ -259,7 +260,7 @@ impl<'a> Proof<'a> {
     /// Create a concrete proof from this proof.
     /// This is an intermediate representation between Proof and Certificate.
     pub fn make_concrete_proof(&self, goal: String) -> Result<ConcreteProof, Error> {
-        let kernel_context = self.normalizer.kernel_context();
+        let kernel_context = self.kernel_context;
         let steps_in_order = self.collect_concrete_steps()?;
         let mut claims = Vec::new();
         for step in &steps_in_order {
@@ -585,7 +586,7 @@ mod tests {
         };
 
         // Add Active(1) before Active(0) so the first emitted concrete step is from Active(1).
-        let mut proof = Proof::new(&normalizer);
+        let mut proof = Proof::new(normalizer.kernel_context());
         proof.add_step(ProofStepId::Active(1), &mid_step);
         proof.add_step(ProofStepId::Active(0), &base_step);
         proof.add_step(ProofStepId::Final, &final_step);

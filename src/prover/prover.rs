@@ -195,7 +195,13 @@ impl Prover {
     }
 
     /// Prints the proof in a human-readable form.
-    pub fn print_proof(&self, proof: &Proof, bindings: &BindingMap, normalizer: &Normalizer) {
+    pub fn print_proof(
+        &self,
+        proof: &Proof,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) {
+        let normalizer = Normalizer::from_kernel_context(kernel_context.clone());
         println!(
             "in total, we activated {} proof steps.",
             self.active_set.len()
@@ -265,7 +271,7 @@ impl Prover {
     /// which the prover used to find the proof, but are not needed for the proof to be valid.
     fn get_proof<'a>(
         &'a self,
-        normalizer: &'a Normalizer,
+        kernel_context: &'a KernelContext,
         include_inspiration: bool,
     ) -> Option<Proof<'a>> {
         let final_step = match &self.final_step {
@@ -279,7 +285,7 @@ impl Prover {
             self.active_set
                 .find_upstream(step, include_inspiration, &mut useful_active);
         }
-        let mut proof = Proof::new(&normalizer);
+        let mut proof = Proof::new(kernel_context);
         let mut active_ids: Vec<_> = useful_active.iter().collect();
         active_ids.sort();
         for i in active_ids {
@@ -300,7 +306,7 @@ impl Prover {
     pub fn make_cert(
         &self,
         bindings: &BindingMap,
-        normalizer: &Normalizer,
+        kernel_context: &KernelContext,
         print: bool,
     ) -> Result<Certificate, Error> {
         let goal = self
@@ -311,11 +317,11 @@ impl Prover {
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
 
         let proof = self
-            .get_proof(&normalizer, false)
+            .get_proof(kernel_context, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
         if print {
-            self.print_proof(&proof, cert_bindings.as_ref(), normalizer);
+            self.print_proof(&proof, cert_bindings.as_ref(), kernel_context);
         }
 
         let cert = proof.make_cert(goal_name, cert_bindings.as_ref())?;
@@ -585,9 +591,7 @@ impl Prover {
     ///   Activating activation_limit nonfactual clauses
     ///   Going over the time limit, in seconds
     ///   Activating all shallow steps, if shallow_only is set
-    pub fn search(&mut self, mode: ProverMode, normalizer: &Normalizer) -> Outcome {
-        let kernel_context = normalizer.kernel_context();
-
+    pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
         // Convert mode to actual parameters
         let (activation_limit, seconds, shallow_only) = match mode {
             ProverMode::Interactive { timeout_secs } => (2000, timeout_secs, false),
