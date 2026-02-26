@@ -15,6 +15,7 @@ pub mod potential_value;
 pub mod proposition;
 pub mod source;
 pub mod stack;
+pub mod term_bridge;
 pub mod termination_checker;
 pub mod to_term;
 pub mod type_unifier;

@@ -18,7 +18,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::kernel_context::KernelContext;
 use crate::module::ModuleId;
-use crate::normalizer::{NormalizedFact, Normalizer};
+use crate::normalizer::{normalize_fact, normalize_goal, NormalizedFact, Normalizer};
 use crate::project::Project;
 use crate::syntax::statement::{Body, Statement};
 use crate::syntax::token::{Token, TokenIter};
@@ -761,7 +761,7 @@ impl Environment {
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {
                     // Normalize the fact and store it
-                    match current_normalizer.normalize_fact(fact) {
+                    match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -780,7 +780,7 @@ impl Environment {
                     // This captures the state that would exist after set_goal is called.
                     // The NormalizedGoal.kernel_context will include the negated goal.
                     let mut goal_normalizer = current_normalizer.clone();
-                    match goal_normalizer.normalize_goal(goal) {
+                    match normalize_goal(goal_normalizer.kernel_context_mut(), goal) {
                         Ok(normalized) => {
                             *normalized_goal_slot = Some(normalized);
                         }
@@ -793,7 +793,7 @@ impl Environment {
 
                     // AFTER goal verification, add the claim's fact to current_normalizer.
                     // This matches runtime: add_fact is called after verify_node returns.
-                    match current_normalizer.normalize_fact(fact) {
+                    match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -814,7 +814,7 @@ impl Environment {
                     );
                     // After the block, add the external fact (if any) for subsequent nodes
                     if let Some(fact) = external_fact {
-                        match current_normalizer.normalize_fact(fact) {
+                        match normalize_fact(current_normalizer.kernel_context_mut(), fact) {
                             Ok(normalized) => {
                                 *normalized_fact_slot = Some(normalized);
                             }

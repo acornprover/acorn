@@ -301,7 +301,8 @@ impl Checker {
         trace!("inserting goal {} (line {})", goal.name, goal.first_line);
 
         let source = &goal.proposition.source;
-        let normalized = normalizer.normalize_goal(goal).map_err(|e| e.message)?;
+        let normalized = crate::normalizer::normalize_goal(normalizer.kernel_context_mut(), goal)
+            .map_err(|e| e.message)?;
         // Get kernel_context after normalizing, since normalize_goal may create new synthetics
         let kernel_context = normalizer.kernel_context();
         for step in &normalized.steps {
