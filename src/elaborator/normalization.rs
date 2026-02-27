@@ -35,7 +35,7 @@ pub struct NormalizedFact {
 }
 
 /// A goal that has been normalized into proof steps.
-/// Includes the normalizer state after normalizing this goal.
+/// Includes the kernel_context state after normalizing this goal.
 #[derive(Clone)]
 pub struct NormalizedGoal {
     pub goal: Goal,

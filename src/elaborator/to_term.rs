@@ -539,20 +539,20 @@ mod tests {
     }
 
     fn assert_term_roundtrip_stable(value: AcornValue) {
-        let mut normalizer = KernelContext::new();
-        assert_term_roundtrip_stable_in_normalizer(&mut normalizer, value);
+        let mut kernel_context = KernelContext::new();
+        assert_term_roundtrip_stable_in_kernel_context(&mut kernel_context, value);
     }
 
-    fn assert_term_roundtrip_stable_in_normalizer(
-        normalizer: &mut KernelContext,
+    fn assert_term_roundtrip_stable_in_kernel_context(
+        kernel_context: &mut KernelContext,
         value: AcornValue,
     ) {
-        let term = elaborate_value_to_term(normalizer, &value, NewConstantType::Local, None)
+        let term = elaborate_value_to_term(kernel_context, &value, NewConstantType::Local, None)
             .expect("elaboration should succeed");
         let denormalized =
-            normalizer.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
+            kernel_context.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
         let roundtripped =
-            elaborate_value_to_term(normalizer, &denormalized, NewConstantType::Local, None)
+            elaborate_value_to_term(kernel_context, &denormalized, NewConstantType::Local, None)
                 .expect("re-elaboration should succeed");
         assert_eq!(term, roundtripped);
     }
@@ -1263,14 +1263,17 @@ mod tests {
         ];
 
         for (name, value) in cases {
-            let mut normalizer = KernelContext::new();
+            let mut kernel_context = KernelContext::new();
             let term =
-                elaborate_value_to_term(&mut normalizer, &value, NewConstantType::Local, None)
+                elaborate_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
                     .unwrap_or_else(|e| panic!("{}: initial elaboration failed: {}", name, e));
-            let denormalized =
-                normalizer.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
+            let denormalized = kernel_context.denormalize_term_with_context(
+                &term,
+                LocalContext::empty_ref(),
+                false,
+            );
             let roundtripped = elaborate_value_to_term(
-                &mut normalizer,
+                &mut kernel_context,
                 &denormalized,
                 NewConstantType::Local,
                 None,
@@ -1332,22 +1335,24 @@ mod tests {
             ],
         );
 
-        let mut normalizer = KernelContext::new();
-        normalizer.type_store.add_type(&nat_type);
-        let nat_id = normalizer
+        let mut kernel_context = KernelContext::new();
+        kernel_context.type_store.add_type(&nat_type);
+        let nat_id = kernel_context
             .type_store
             .get_datatype_id(&nat)
             .expect("nat type id should exist");
         let nat_term = Term::ground_type(nat_id);
-        normalizer
-            .symbol_table
-            .add_constant(zero_name, NewConstantType::Global, nat_term.clone());
-        normalizer.symbol_table.add_constant(
+        kernel_context.symbol_table.add_constant(
+            zero_name,
+            NewConstantType::Global,
+            nat_term.clone(),
+        );
+        kernel_context.symbol_table.add_constant(
             succ_name,
             NewConstantType::Global,
             Term::pi(nat_term.clone(), nat_term.clone()),
         );
-        normalizer.symbol_table.add_constant(
+        kernel_context.symbol_table.add_constant(
             match_name,
             NewConstantType::Global,
             Term::pi(
@@ -1365,6 +1370,6 @@ mod tests {
             ),
         );
 
-        assert_term_roundtrip_stable_in_normalizer(&mut normalizer, match_value);
+        assert_term_roundtrip_stable_in_kernel_context(&mut kernel_context, match_value);
     }
 }

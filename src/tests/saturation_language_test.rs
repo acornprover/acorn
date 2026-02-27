@@ -2108,8 +2108,8 @@ fn test_polymorphic_synthetic_claim() {
     );
 
     let project = Project::new_mock();
-    let normalizer = normalized_goal.kernel_context.clone();
-    let mut normalizer_cow = Cow::Owned(normalizer);
+    let kernel_context = normalized_goal.kernel_context.clone();
+    let mut kernel_context_cow = Cow::Owned(kernel_context);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
     // Parse the polymorphic synthetic
@@ -2117,7 +2117,7 @@ fn test_polymorphic_synthetic_claim() {
         "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
-        &mut normalizer_cow,
+        &mut kernel_context_cow,
     )
     .expect("let-satisfy should parse");
 
@@ -2128,7 +2128,7 @@ fn test_polymorphic_synthetic_claim() {
         "has_finite_order[G](s0[G]) or is_torsion_free[G]",
         &project,
         &mut bindings_cow,
-        &mut normalizer_cow,
+        &mut kernel_context_cow,
     )
     .expect("claim should parse");
 }
@@ -2157,15 +2157,15 @@ fn test_certificate_type_params_are_step_local() {
     );
 
     let project = Project::new_mock();
-    let normalizer = normalized_goal.kernel_context.clone();
-    let mut normalizer_cow = Cow::Owned(normalizer);
+    let kernel_context = normalized_goal.kernel_context.clone();
+    let mut kernel_context_cow = Cow::Owned(kernel_context);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
     Certificate::parse_code_line(
         "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
-        &mut normalizer_cow,
+        &mut kernel_context_cow,
     )
     .expect("first line should parse");
 
@@ -2174,7 +2174,7 @@ fn test_certificate_type_params_are_step_local() {
         "let s1[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s1) or is_torsion_free[T0]) and (s1 != Grp.1[T0] or is_torsion_free[T0]) }",
         &project,
         &mut bindings_cow,
-        &mut normalizer_cow,
+        &mut kernel_context_cow,
     )
     .expect("second line should parse");
 }

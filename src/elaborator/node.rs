@@ -30,7 +30,7 @@ pub enum Node {
 
     /// A claim is something that we need to prove, and then we can subsequently use it.
     /// The Goal represents what needs to be proven; the Fact represents what can be used once proven.
-    /// The optional NormalizedGoal is the pre-normalized goal with captured normalizer state.
+    /// The optional NormalizedGoal is the pre-normalized goal with captured kernel_context state.
     /// The optional NormalizedFact is the pre-normalized fact.
     /// Both are populated during the normalization pass.
     Claim(Goal, Fact, Option<NormalizedGoal>, Option<NormalizedFact>),

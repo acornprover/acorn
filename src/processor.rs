@@ -167,7 +167,7 @@ impl Processor {
     }
 
     /// Checks a certificate.
-    /// Clones the checker and normalizer, because the checking process despoils them.
+    /// Clones the checker and kernel_context, because the checking process despoils them.
     /// If the goal is provided, it is added to the checker before checking the certificate.
     /// Returns a list of CertificateLines showing how each line was verified.
     pub fn check_cert(
@@ -194,8 +194,8 @@ impl Processor {
             effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(effective_kernel_context.clone());
-        cert.check(checker, project, cert_bindings, normalizer)
+        let kernel_context = Cow::Owned(effective_kernel_context.clone());
+        cert.check(checker, project, cert_bindings, kernel_context)
     }
 
     /// Cleans a certificate by removing unnecessary steps.
@@ -224,8 +224,8 @@ impl Processor {
             effective_kernel_context = kernel_context;
         }
 
-        let normalizer = Cow::Owned(effective_kernel_context.clone());
-        cert.clean(checker, project, cert_bindings, normalizer)
+        let kernel_context = Cow::Owned(effective_kernel_context.clone());
+        cert.clean(checker, project, cert_bindings, kernel_context)
     }
 
     /// Creates a test Processor from code containing a theorem named "goal".
@@ -271,11 +271,11 @@ impl Processor {
     ) {
         use std::borrow::Cow;
 
-        let mut normalizer_cow = Cow::Owned(kernel_context.clone());
+        let mut kernel_context_cow = Cow::Owned(kernel_context.clone());
         let mut bindings_cow = Cow::Borrowed(bindings);
         let project = Project::new_mock();
 
-        Certificate::parse_code_line(code, &project, &mut bindings_cow, &mut normalizer_cow)
+        Certificate::parse_code_line(code, &project, &mut bindings_cow, &mut kernel_context_cow)
             .unwrap();
     }
 }

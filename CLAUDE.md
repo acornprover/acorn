@@ -5,7 +5,7 @@
   `cargo check`
   `cargo fmt`
 
-- If we make changes to the normalizer or the kernel, we should run a full reverify to ensure we didn't
+- If we make changes to the elaborator or the kernel, we should run a full reverify to ensure we didn't
   break anything.
   `cargo run --profile release --features validate -- reverify`
 

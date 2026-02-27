@@ -50,7 +50,7 @@ pub enum Symbol {
     // types that implement Monoid.
     Typeclass(TypeclassId),
 
-    // Synthetic atoms are created by the normalizer to handle expressions that cannot be converted
+    // Synthetic atoms are created by the kernel_context to handle expressions that cannot be converted
     // to CNF directly.
     // These don't have a name in the environment, so you need to create a definition before
     // generating code with them.

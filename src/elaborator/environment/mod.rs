@@ -701,15 +701,15 @@ impl Environment {
         // This can be cloned by Processor::with_imports to avoid re-normalizing.
         self.import_kernel_context = Some(kernel_context.clone());
 
-        // Now normalize goals. For each goal, we compute the normalizer state that matches
+        // Now normalize goals. For each goal, we compute the kernel_context state that matches
         // what verification sees. This iterates through nodes in order, adding facts to
-        // the normalizer as we go (mirroring verify_node behavior).
-        let import_normalizer = self
+        // the kernel_context as we go (mirroring verify_node behavior).
+        let import_kernel_context = self
             .import_kernel_context
             .clone()
             .expect("import kernel context should be present");
-        let final_normalizer =
-            Self::normalize_nodes_pass(&mut self.nodes, &import_normalizer, &mut first_error);
+        let final_kernel_context =
+            Self::normalize_nodes_pass(&mut self.nodes, &import_kernel_context, &mut first_error);
 
         // Collect normalized top-level facts for use as module facts in dependents.
         // Facts should be normalized exactly once during normalize_nodes_pass.
@@ -726,17 +726,17 @@ impl Environment {
             }
         }
 
-        self.kernel_context = Some(final_normalizer);
+        self.kernel_context = Some(final_kernel_context);
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
         }
     }
 
-    /// Recursively normalizes goals in nodes, computing the correct normalizer state for each.
+    /// Recursively normalizes goals in nodes, computing the correct kernel_context state for each.
     ///
-    /// The normalizer state for a goal depends on:
-    /// 1. Import facts (from base_normalizer)
+    /// The kernel_context state for a goal depends on:
+    /// 1. Import facts (from base_kernel_context)
     /// 2. Facts from nodes processed BEFORE the goal in the current traversal
     ///
     /// At the top level, verify_module's loop adds facts after each node is verified.
@@ -745,22 +745,22 @@ impl Environment {
     /// cloned processor, visible to later siblings but not to the parent.
     ///
     /// This function mirrors that behavior: we iterate through nodes in order, adding facts
-    /// to the normalizer as we go. When recursing into a block, we clone the current
-    /// normalizer and process the block's nodes independently.
+    /// to the kernel_context as we go. When recursing into a block, we clone the current
+    /// kernel_context and process the block's nodes independently.
     fn normalize_nodes_pass(
         nodes: &mut [Node],
-        base_normalizer: &KernelContext,
+        base_kernel_context: &KernelContext,
         first_error: &mut Option<String>,
     ) -> KernelContext {
-        // Clone the normalizer to track state as we process nodes.
+        // Clone the kernel_context to track state as we process nodes.
         // We need to track state for this level only.
-        let mut current_normalizer = base_normalizer.clone();
+        let mut current_kernel_context = base_kernel_context.clone();
 
         for node in nodes.iter_mut() {
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {
                     // Normalize the fact and store it
-                    match normalize_fact(&mut current_normalizer, fact) {
+                    match normalize_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -775,11 +775,11 @@ impl Environment {
                     // Runtime order: verify_goal (which calls set_goal) runs BEFORE add_fact.
                     // So we normalize the goal FIRST, then add the fact for subsequent nodes.
 
-                    // Normalize the goal on a CLONE of current_normalizer (without the claim's fact).
+                    // Normalize the goal on a CLONE of current_kernel_context (without the claim's fact).
                     // This captures the state that would exist after set_goal is called.
                     // The NormalizedGoal.kernel_context will include the negated goal.
-                    let mut goal_normalizer = current_normalizer.clone();
-                    match normalize_goal(&mut goal_normalizer, goal) {
+                    let mut goal_kernel_context = current_kernel_context.clone();
+                    match normalize_goal(&mut goal_kernel_context, goal) {
                         Ok(normalized) => {
                             *normalized_goal_slot = Some(normalized);
                         }
@@ -790,9 +790,9 @@ impl Environment {
                         }
                     }
 
-                    // AFTER goal verification, add the claim's fact to current_normalizer.
+                    // AFTER goal verification, add the claim's fact to current_kernel_context.
                     // This matches runtime: add_fact is called after verify_node returns.
-                    match normalize_fact(&mut current_normalizer, fact) {
+                    match normalize_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -804,16 +804,16 @@ impl Environment {
                     }
                 }
                 Node::Block(block, external_fact, normalized_fact_slot) => {
-                    // Recurse into the block's nodes with current normalizer state.
+                    // Recurse into the block's nodes with current kernel_context state.
                     // This mirrors how verify_node clones the processor when entering a block.
                     Self::normalize_nodes_pass(
                         &mut block.env.nodes,
-                        &current_normalizer,
+                        &current_kernel_context,
                         first_error,
                     );
                     // After the block, add the external fact (if any) for subsequent nodes
                     if let Some(fact) = external_fact {
-                        match normalize_fact(&mut current_normalizer, fact) {
+                        match normalize_fact(&mut current_kernel_context, fact) {
                             Ok(normalized) => {
                                 *normalized_fact_slot = Some(normalized);
                             }
@@ -828,7 +828,7 @@ impl Environment {
             }
         }
 
-        current_normalizer
+        current_kernel_context
     }
 }
 

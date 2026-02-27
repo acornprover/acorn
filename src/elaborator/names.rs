@@ -78,7 +78,7 @@ pub enum ConstantName {
     /// A name for a constant that is not an attribute.
     Unqualified(ModuleId, String),
 
-    /// A synthetic constant, created by the normalizer to simplify expressions.
+    /// A synthetic constant, created by the kernel_context to simplify expressions.
     /// The ModuleId identifies which module's normalization created this synthetic.
     Synthetic(ModuleId, AtomId),
 }
