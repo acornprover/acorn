@@ -1,4 +1,5 @@
 pub mod atom;
+pub mod canonicalize;
 pub mod certificate_step;
 pub mod checker;
 pub mod clause;

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -103,8 +104,20 @@ impl KernelContext {
         };
 
         let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
+        let term_for_clausify: Cow<'_, Term> = {
+            #[cfg(feature = "canonicalization")]
+            {
+                Cow::Owned(crate::kernel::canonicalize::canonicalize_term(&term))
+            }
+            #[cfg(not(feature = "canonicalization"))]
+            {
+                Cow::Borrowed(&term)
+            }
+        };
         let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
-        let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
+        let Ok(uninstantiated) =
+            view.clausify_term_to_denormalized_clauses(term_for_clausify.as_ref())
+        else {
             return None;
         };
 
@@ -173,11 +186,21 @@ impl KernelContext {
         source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
-        term.validate();
+        let term_for_clausify: Cow<'_, Term> = {
+            #[cfg(feature = "canonicalization")]
+            {
+                Cow::Owned(crate::kernel::canonicalize::canonicalize_term(term))
+            }
+            #[cfg(not(feature = "canonicalization"))]
+            {
+                Cow::Borrowed(term)
+            }
+        };
+        term_for_clausify.validate();
 
         let mut skolem_ids = vec![];
         let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-        let clauses = mut_view.clausify_term(term, &mut skolem_ids)?;
+        let clauses = mut_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?;
 
         // For any of the created ids that have not been defined yet, the output
         // clauses will be their definition.

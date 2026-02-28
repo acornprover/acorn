@@ -1154,7 +1154,16 @@ impl<'a> Clausifier<'a> {
             .into_clauses_with_pinned(context, num_type_vars);
         let key_clauses: Vec<Clause> = clauses
             .iter()
-            .map(|c| c.invalidate_synthetics(&[skolem_id]))
+            .map(|c| {
+                #[cfg(feature = "canonicalization")]
+                {
+                    c.invalidate_synthetics_with_pinned(&[skolem_id], num_type_vars)
+                }
+                #[cfg(not(feature = "canonicalization"))]
+                {
+                    c.invalidate_synthetics(&[skolem_id])
+                }
+            })
             .collect();
         let synthetic_types = vec![synthetic_type.clone()];
 
