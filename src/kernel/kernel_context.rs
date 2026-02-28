@@ -67,22 +67,8 @@ impl KernelContext {
             trace!(clause = %clause, "synthetic definition clause");
         }
 
-        // In the synthetic key, normalize synthetic ids by renumbering.
-        // Use pinned normalization to preserve type variable ordering.
-        let num_type_vars = type_vars.len();
-        let key_clauses: Vec<Clause> = clauses
-            .iter()
-            .map(|c| c.invalidate_synthetics_with_pinned(&atoms, num_type_vars))
-            .collect();
-
-        self.synthetic_registry.define(
-            atoms,
-            type_vars,
-            synthetic_types,
-            clauses,
-            key_clauses,
-            source,
-        )
+        self.synthetic_registry
+            .define(atoms, type_vars, synthetic_types, clauses, source)
     }
 
     /// Returns a human-readable string representation of an atom.

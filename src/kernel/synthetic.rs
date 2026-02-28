@@ -120,6 +120,31 @@ impl SyntheticRegistry {
         self.definitions.get(id)
     }
 
+    /// Build a canonical synthetic key from raw key components.
+    ///
+    /// This canonicalizes each clause with pinned type variables, then sorts and deduplicates
+    /// the clause list to make key matching deterministic and order-insensitive.
+    fn build_key(type_vars: &[Term], synthetic_types: &[Term], clauses: &[Clause]) -> SyntheticKey {
+        let pinned = type_vars.len();
+        let mut canonical_clauses: Vec<Clause> = clauses
+            .iter()
+            .map(|c| c.key_canonicalized_with_pinned(pinned))
+            .collect();
+
+        canonical_clauses.sort_by(|a, b| {
+            a.literals
+                .cmp(&b.literals)
+                .then_with(|| a.context.get_var_types().cmp(b.context.get_var_types()))
+        });
+        canonical_clauses.dedup();
+
+        SyntheticKey {
+            type_vars: type_vars.to_vec(),
+            synthetic_types: synthetic_types.to_vec(),
+            clauses: canonical_clauses,
+        }
+    }
+
     /// Looks up a definition by its normalized key components.
     /// Returns the existing definition if one with equivalent structure exists.
     pub fn lookup_by_key(
@@ -128,18 +153,16 @@ impl SyntheticRegistry {
         synthetic_types: &[Term],
         clauses: &[Clause],
     ) -> Option<&Arc<SyntheticDefinition>> {
-        let key = SyntheticKey {
-            type_vars: type_vars.to_vec(),
-            synthetic_types: synthetic_types.to_vec(),
-            clauses: clauses.to_vec(),
-        };
-        self.by_key.get(&key)
+        self.by_key
+            .get(&Self::build_key(type_vars, synthetic_types, clauses))
     }
 
     /// Defines synthetic atoms with the given information.
     ///
-    /// The `key_clauses` should have synthetic ids normalized (remapped to invalid range)
-    /// for deduplication purposes.
+    /// Keying canonicalization is applied internally:
+    /// - defined synthetic ids are invalidated in key clauses
+    /// - clauses are canonicalized with pinned type vars
+    /// - clause order is sorted/deduplicated
     ///
     /// Returns an error if any of the atoms are already defined.
     pub fn define(
@@ -148,7 +171,6 @@ impl SyntheticRegistry {
         type_vars: Vec<Term>,
         synthetic_types: Vec<Term>,
         clauses: Vec<Clause>,
-        key_clauses: Vec<Clause>,
         source: Option<Source>,
     ) -> Result<(), String> {
         // Check if any atoms are already defined
@@ -158,11 +180,13 @@ impl SyntheticRegistry {
             }
         }
 
-        let key = SyntheticKey {
-            type_vars: type_vars.clone(),
-            synthetic_types: synthetic_types.clone(),
-            clauses: key_clauses,
-        };
+        // In the key, normalize out the concrete ids of the defined synthetic atoms.
+        let num_type_vars = type_vars.len();
+        let key_clauses: Vec<Clause> = clauses
+            .iter()
+            .map(|c| c.invalidate_synthetics_with_pinned(&atoms, num_type_vars))
+            .collect();
+        let key = Self::build_key(&type_vars, &synthetic_types, &key_clauses);
 
         let info = Arc::new(SyntheticDefinition {
             atoms: atoms.clone(),

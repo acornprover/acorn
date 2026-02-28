@@ -528,15 +528,43 @@ impl KernelContext {
                     .join("\n")
             );
         }
-        for (i, clause) in actual.iter().enumerate() {
+        for clause in &actual {
             self.check_denormalize_renormalize(clause);
-            let c = DisplayClause {
+        }
+
+        let actual_strings: Vec<String> = actual
+            .iter()
+            .map(|clause| DisplayClause {
                 clause,
                 context: self,
-            };
-            let a = c.to_string();
-            if a != expected[i] {
-                panic!("expected clause {} to be:\n{}\ngot:\n{}", i, expected[i], a);
+            })
+            .map(|c| c.to_string())
+            .collect();
+        let expected_strings: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+
+        #[cfg(feature = "canonicalization")]
+        let (actual_strings, expected_strings) = {
+            let mut actual_strings = actual_strings;
+            let mut expected_strings = expected_strings;
+            // Canonicalization can reorder logically equivalent clauses.
+            // Compare multisets rather than fixed clause positions.
+            actual_strings.sort();
+            expected_strings.sort();
+            (actual_strings, expected_strings)
+        };
+        #[cfg(not(feature = "canonicalization"))]
+        let (actual_strings, expected_strings) = (actual_strings, expected_strings);
+
+        for (i, (actual_clause, expected_clause)) in actual_strings
+            .iter()
+            .zip(expected_strings.iter())
+            .enumerate()
+        {
+            if actual_clause != expected_clause {
+                panic!(
+                    "expected clause {} to be:\n{}\ngot:\n{}",
+                    i, expected_clause, actual_clause
+                );
             }
         }
     }

@@ -450,6 +450,13 @@ impl Clause {
         }
     }
 
+    /// Returns a canonicalized clone suitable for deterministic keying.
+    ///
+    /// The first `pinned` variables are kept fixed (x0..x{pinned-1}).
+    pub fn key_canonicalized_with_pinned(&self, pinned: usize) -> Clause {
+        self.canonicalize_with_pinned(pinned)
+    }
+
     /// Extracts the polarity from all literals.
     /// Returns a clause with all positive literals and a vector of the original polarities.
     pub fn extract_polarity(&self) -> (Clause, Vec<bool>) {
