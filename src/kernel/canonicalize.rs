@@ -17,7 +17,7 @@ fn canonicalize_with_polarity(term: &Term, negated: bool) -> Term {
     match term.as_ref().decompose() {
         Decomposition::Atom(_) => {
             if negated {
-                mk_not(term.clone())
+                Term::not(term.clone())
             } else {
                 term.clone()
             }
@@ -29,7 +29,7 @@ fn canonicalize_with_polarity(term: &Term, negated: bool) -> Term {
                 canonicalize_with_polarity(&output.to_owned(), false),
             );
             if negated {
-                mk_not(result)
+                Term::not(result)
             } else {
                 result
             }
@@ -40,7 +40,7 @@ fn canonicalize_with_polarity(term: &Term, negated: bool) -> Term {
                 canonicalize_with_polarity(&body.to_owned(), false),
             );
             if negated {
-                mk_not(result)
+                Term::not(result)
             } else {
                 result
             }
@@ -101,9 +101,9 @@ fn canonicalize_application(term: &Term, negated: bool) -> Term {
             if right < left {
                 std::mem::swap(&mut left, &mut right);
             }
-            let result = mk_symbol_application(Symbol::Eq, vec![eq_type, left, right]);
+            let result = Term::eq(eq_type, left, right);
             if negated {
-                mk_not(result)
+                Term::not(result)
             } else {
                 result
             }
@@ -116,7 +116,7 @@ fn canonicalize_application(term: &Term, negated: bool) -> Term {
                 .collect();
             let result = canonical_head.apply(&canonical_args);
             if negated {
-                mk_not(result)
+                Term::not(result)
             } else {
                 result
             }
@@ -179,17 +179,15 @@ fn build_associative(symbol: Symbol, terms: Vec<Term>) -> Term {
     let first = iter
         .next()
         .expect("associative connective should have at least one term");
-    iter.fold(first, |acc, next| {
-        mk_symbol_application(symbol, vec![acc, next])
-    })
+    iter.fold(first, |acc, next| apply_binary_symbol(symbol, acc, next))
 }
 
-fn mk_symbol_application(symbol: Symbol, args: Vec<Term>) -> Term {
-    Term::atom(Atom::Symbol(symbol)).apply(&args)
-}
-
-fn mk_not(term: Term) -> Term {
-    mk_symbol_application(Symbol::Not, vec![term])
+fn apply_binary_symbol(symbol: Symbol, left: Term, right: Term) -> Term {
+    match symbol {
+        Symbol::And => Term::and(left, right),
+        Symbol::Or => Term::or(left, right),
+        _ => Term::atom(Atom::Symbol(symbol)).apply(&[left, right]),
+    }
 }
 
 #[cfg(test)]

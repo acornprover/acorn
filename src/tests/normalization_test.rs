@@ -856,16 +856,21 @@ fn test_if_then_else_with_forall_condition() {
     let mut norm = KernelContext::new();
     // The key thing is that normalization doesn't panic - the forall variable's type must be
     // properly tracked in the context when creating clauses.
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not s0_0 or p(x0)",
-            "not s0_0 or q(x0)",
-            "not q(x0) or not p(x0) or s0_0",
-            "one = zero or s0_0",
-        ],
-    );
+    #[cfg(feature = "canonicalization")]
+    let expected = vec![
+        "not s0_0 or p(x0)",
+        "not s0_0 or q(x0)",
+        "not q(s0_1) or not p(s0_1) or s0_0",
+        "one = zero or s0_0",
+    ];
+    #[cfg(not(feature = "canonicalization"))]
+    let expected = vec![
+        "not s0_0 or p(x0)",
+        "not s0_0 or q(x0)",
+        "not q(x0) or not p(x0) or s0_0",
+        "one = zero or s0_0",
+    ];
+    norm.check(&env, "goal", &expected);
 }
 
 /// Test that normalizing a polymorphic theorem with type parameters in the goal doesn't crash.

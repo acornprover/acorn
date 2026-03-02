@@ -1709,6 +1709,26 @@ impl Term {
         Term::atom(Atom::Symbol(Symbol::False))
     }
 
+    /// Create a logical negation term: `not term`.
+    pub fn not(term: Term) -> Term {
+        Term::atom(Atom::Symbol(Symbol::Not)).apply(&[term])
+    }
+
+    /// Create a logical conjunction term: `left and right`.
+    pub fn and(left: Term, right: Term) -> Term {
+        Term::atom(Atom::Symbol(Symbol::And)).apply(&[left, right])
+    }
+
+    /// Create a logical disjunction term: `left or right`.
+    pub fn or(left: Term, right: Term) -> Term {
+        Term::atom(Atom::Symbol(Symbol::Or)).apply(&[left, right])
+    }
+
+    /// Create an equality term: `left = right` at type `eq_type`.
+    pub fn eq(eq_type: Term, left: Term, right: Term) -> Term {
+        Term::atom(Atom::Symbol(Symbol::Eq)).apply(&[eq_type, left, right])
+    }
+
     /// Create a new Term representing a variable with the given index.
     pub fn new_variable(index: AtomId) -> Term {
         Term {

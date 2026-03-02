@@ -5,7 +5,13 @@ use im::HashMap as ImHashMap;
 
 use crate::elaborator::source::Source;
 use crate::kernel::atom::AtomId;
+#[cfg(feature = "canonicalization")]
+use crate::kernel::atom::{Atom, INVALID_SYNTHETIC_MODULE};
 use crate::kernel::clause::Clause;
+#[cfg(feature = "canonicalization")]
+use crate::kernel::symbol::Symbol;
+#[cfg(feature = "canonicalization")]
+use crate::kernel::term::Decomposition;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
 
@@ -28,6 +34,11 @@ pub struct SyntheticDefinition {
     /// The clauses are true by construction and describe the synthetic atoms.
     /// Type variables are pinned at x0, x1, ... across all clauses.
     pub clauses: Vec<Clause>,
+
+    /// Canonical term-level key shape (with concrete synthetic ids) used for
+    /// canonicalization-mode codegen and round-tripping.
+    #[cfg(feature = "canonicalization")]
+    pub key_term: Term,
 
     /// The source location where this synthetic definition originated.
     pub source: Option<Source>,
@@ -64,9 +75,17 @@ struct SyntheticKey {
     /// The types of the synthetic atoms.
     synthetic_types: Vec<Term>,
 
+    /// Canonical term key for this synthetic definition.
+    ///
+    /// In canonicalization mode, this is the only identity key and never passes
+    /// through `Vec<Clause>` form.
+    #[cfg(feature = "canonicalization")]
+    key_term: Term,
+
     /// Clauses that define the synthetic atoms.
     /// Here, the synthetic atoms have been remapped to the invalid range,
     /// and type variables are pinned at x0, x1, ...
+    #[cfg(not(feature = "canonicalization"))]
     clauses: Vec<Clause>,
 }
 
@@ -74,14 +93,27 @@ impl std::fmt::Display for SyntheticKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let type_vars_str: Vec<String> = self.type_vars.iter().map(|t| t.to_string()).collect();
         let types_str: Vec<String> = self.synthetic_types.iter().map(|t| t.to_string()).collect();
-        let clauses_str: Vec<String> = self.clauses.iter().map(|c| c.to_string()).collect();
-        write!(
-            f,
-            "SyntheticKey(type_vars: [{}], types: [{}], clauses: {})",
-            type_vars_str.join(", "),
-            types_str.join(", "),
-            clauses_str.join(" and ")
-        )
+        #[cfg(feature = "canonicalization")]
+        {
+            write!(
+                f,
+                "SyntheticKey(type_vars: [{}], types: [{}], key_term: {})",
+                type_vars_str.join(", "),
+                types_str.join(", "),
+                self.key_term
+            )
+        }
+        #[cfg(not(feature = "canonicalization"))]
+        {
+            let clauses_str: Vec<String> = self.clauses.iter().map(|c| c.to_string()).collect();
+            write!(
+                f,
+                "SyntheticKey(type_vars: [{}], types: [{}], clauses: {})",
+                type_vars_str.join(", "),
+                types_str.join(", "),
+                clauses_str.join(" and ")
+            )
+        }
     }
 }
 
@@ -120,6 +152,16 @@ impl SyntheticRegistry {
         self.definitions.get(id)
     }
 
+    #[cfg(feature = "canonicalization")]
+    fn build_key(type_vars: &[Term], synthetic_types: &[Term], key_term: &Term) -> SyntheticKey {
+        SyntheticKey {
+            type_vars: type_vars.to_vec(),
+            synthetic_types: synthetic_types.to_vec(),
+            key_term: canonicalize_synthetic_key_term(key_term),
+        }
+    }
+
+    #[cfg(not(feature = "canonicalization"))]
     /// Build a canonical synthetic key from raw key components.
     ///
     /// This canonicalizes each clause with pinned type variables, then sorts and deduplicates
@@ -147,6 +189,18 @@ impl SyntheticRegistry {
 
     /// Looks up a definition by its normalized key components.
     /// Returns the existing definition if one with equivalent structure exists.
+    #[cfg(feature = "canonicalization")]
+    pub fn lookup_by_key(
+        &self,
+        type_vars: &[Term],
+        synthetic_types: &[Term],
+        key_term: &Term,
+    ) -> Option<&Arc<SyntheticDefinition>> {
+        self.by_key
+            .get(&Self::build_key(type_vars, synthetic_types, key_term))
+    }
+
+    #[cfg(not(feature = "canonicalization"))]
     pub fn lookup_by_key(
         &self,
         type_vars: &[Term],
@@ -165,6 +219,43 @@ impl SyntheticRegistry {
     /// - clause order is sorted/deduplicated
     ///
     /// Returns an error if any of the atoms are already defined.
+    #[cfg(feature = "canonicalization")]
+    pub fn define(
+        &mut self,
+        atoms: Vec<(ModuleId, AtomId)>,
+        type_vars: Vec<Term>,
+        synthetic_types: Vec<Term>,
+        clauses: Vec<Clause>,
+        key_term: Term,
+        source: Option<Source>,
+    ) -> Result<(), String> {
+        for atom in &atoms {
+            if self.definitions.contains_key(atom) {
+                return Err(format!("synthetic atom {:?} is already defined", atom));
+            }
+        }
+
+        let canonical_key_term = canonicalize_synthetic_key_term(&key_term);
+        let key_term_for_lookup = canonical_key_term.invalidate_synthetics(&atoms);
+        let key = Self::build_key(&type_vars, &synthetic_types, &key_term_for_lookup);
+
+        let info = Arc::new(SyntheticDefinition {
+            atoms: atoms.clone(),
+            type_vars,
+            synthetic_types,
+            clauses,
+            key_term: canonical_key_term,
+            source,
+        });
+
+        for atom in &atoms {
+            self.definitions.insert(*atom, info.clone());
+        }
+        self.by_key.insert(key, info);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "canonicalization"))]
     pub fn define(
         &mut self,
         atoms: Vec<(ModuleId, AtomId)>,
@@ -238,6 +329,149 @@ impl SyntheticRegistry {
             self.by_key.insert(k.clone(), v.clone());
         }
     }
+}
+
+#[cfg(feature = "canonicalization")]
+fn open_exists_with_replacements(term: &Term, replacements: &[Term]) -> Result<Term, String> {
+    let mut current = term.clone();
+    for replacement in replacements {
+        let Decomposition::Exists(_, body) = current.as_ref().decompose() else {
+            return Err("expected leading exists binders for synthetic key term".to_string());
+        };
+        current = body
+            .to_owned()
+            .substitute_bound(0, replacement)
+            .shift_bound(0, -1);
+    }
+    Ok(current)
+}
+
+#[cfg(feature = "canonicalization")]
+fn open_exists_with_replacements_lossy(term: &Term, replacements: &[Term]) -> Term {
+    let mut current = term.clone();
+    for replacement in replacements {
+        let Decomposition::Exists(_, body) = current.as_ref().decompose() else {
+            break;
+        };
+        current = body
+            .to_owned()
+            .substitute_bound(0, replacement)
+            .shift_bound(0, -1);
+    }
+    current
+}
+
+#[cfg(feature = "canonicalization")]
+fn reduce_head_lambda_application(term: &Term) -> Option<Term> {
+    match term.as_ref().decompose() {
+        Decomposition::Application(func, arg) => match func.decompose() {
+            Decomposition::Lambda(_, body) => {
+                let arg_term = arg.to_owned();
+                // De Bruijn beta reduction:
+                // (lambda. body) arg  ==>  shift(-1, substitute(body, 0, shift(+1, arg)))
+                let shifted_arg = arg_term.shift_bound(0, 1);
+                Some(
+                    body.to_owned()
+                        .substitute_bound(0, &shifted_arg)
+                        .shift_bound(0, -1),
+                )
+            }
+            _ => reduce_head_lambda_application(&func.to_owned())
+                .map(|reduced_func| reduced_func.apply(&[arg.to_owned()])),
+        },
+        _ => None,
+    }
+}
+
+#[cfg(feature = "canonicalization")]
+fn reduce_head_lambda_applications(term: &Term) -> Term {
+    let mut current = term.clone();
+    while let Some(reduced) = reduce_head_lambda_application(&current) {
+        current = reduced;
+    }
+    current
+}
+
+#[cfg(feature = "canonicalization")]
+fn reduce_key_term_lambda_heads(term: &Term) -> Term {
+    let reduced_top = reduce_head_lambda_applications(term);
+    match reduced_top.as_ref().decompose() {
+        Decomposition::Atom(_) => reduced_top,
+        Decomposition::Application(func, arg) => {
+            let reduced_func = reduce_key_term_lambda_heads(&func.to_owned());
+            let reduced_arg = reduce_key_term_lambda_heads(&arg.to_owned());
+            reduce_head_lambda_applications(&reduced_func.apply(&[reduced_arg]))
+        }
+        Decomposition::Pi(input, output) => Term::pi(
+            reduce_key_term_lambda_heads(&input.to_owned()),
+            reduce_key_term_lambda_heads(&output.to_owned()),
+        ),
+        Decomposition::Lambda(input, body) => Term::lambda(
+            reduce_key_term_lambda_heads(&input.to_owned()),
+            reduce_key_term_lambda_heads(&body.to_owned()),
+        ),
+        Decomposition::ForAll(binder_type, body) => Term::forall(
+            reduce_key_term_lambda_heads(&binder_type.to_owned()),
+            reduce_key_term_lambda_heads(&body.to_owned()),
+        ),
+        Decomposition::Exists(binder_type, body) => Term::exists(
+            reduce_key_term_lambda_heads(&binder_type.to_owned()),
+            reduce_key_term_lambda_heads(&body.to_owned()),
+        ),
+    }
+}
+
+#[cfg(feature = "canonicalization")]
+pub fn canonicalize_synthetic_key_term(term: &Term) -> Term {
+    let reduced = reduce_key_term_lambda_heads(term);
+    crate::kernel::canonicalize::canonicalize_term(&reduced)
+}
+
+#[cfg(feature = "canonicalization")]
+fn replacement_terms_for_ids(ids: &[(ModuleId, AtomId)], num_type_vars: usize) -> Vec<Term> {
+    let type_args: Vec<Term> = (0..(num_type_vars as AtomId))
+        .map(Term::new_variable)
+        .collect();
+    ids.iter()
+        .map(|&(m, i)| Term::new(Atom::Symbol(Symbol::Synthetic(m, i)), type_args.clone()))
+        .collect()
+}
+
+#[cfg(feature = "canonicalization")]
+fn replacement_terms_for_invalid_ids(count: usize, num_type_vars: usize) -> Vec<Term> {
+    let type_args: Vec<Term> = (0..(num_type_vars as AtomId))
+        .map(Term::new_variable)
+        .collect();
+    (0..count)
+        .map(|i| {
+            Term::new(
+                Atom::Symbol(Symbol::Synthetic(INVALID_SYNTHETIC_MODULE, i as AtomId)),
+                type_args.clone(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "canonicalization")]
+pub fn build_definition_key_term_from_exists(
+    term: &Term,
+    atoms: &[(ModuleId, AtomId)],
+    num_type_vars: usize,
+) -> Result<Term, String> {
+    let replacements = replacement_terms_for_ids(atoms, num_type_vars);
+    let opened = open_exists_with_replacements_lossy(term, &replacements);
+    Ok(canonicalize_synthetic_key_term(&opened))
+}
+
+#[cfg(feature = "canonicalization")]
+pub fn build_lookup_key_term_from_exists(
+    term: &Term,
+    num_witnesses: usize,
+    num_type_vars: usize,
+) -> Result<Term, String> {
+    let replacements = replacement_terms_for_invalid_ids(num_witnesses, num_type_vars);
+    let opened = open_exists_with_replacements(term, &replacements)?;
+    Ok(canonicalize_synthetic_key_term(&opened))
 }
 
 impl Default for SyntheticRegistry {

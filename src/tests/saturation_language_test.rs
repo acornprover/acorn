@@ -2059,6 +2059,10 @@ fn test_polymorphic_axiom_chain_needs_arbitrary_type() {
 // The original bug: cargo run --profile release --features polymorphic,validate -- reprove ordered_group
 #[test]
 fn test_dependently_typed_synthetic() {
+    #[cfg(feature = "canonicalization")]
+    use crate::code_generator::{CodeGenerator, SyntheticNameSet};
+    #[cfg(feature = "canonicalization")]
+    use crate::kernel::certificate_step::CertificateStep;
     use crate::processor::Processor;
 
     let (processor, bindings, normalized_goal) = Processor::test_goal(
@@ -2075,11 +2079,35 @@ fn test_dependently_typed_synthetic() {
         "#,
     );
 
-    // This certificate line is valid Acorn code, but the certificate checker fails on it.
-    // s0 has type T0 where T0 is a type parameter constrained to Grp.
+    #[cfg(feature = "canonicalization")]
+    let cert_line = {
+        let kernel_context = normalized_goal.kernel_context.clone();
+        let synthetic_ids = kernel_context.get_synthetic_ids();
+        let info = kernel_context
+            .find_covering_synthetic_info(&synthetic_ids)
+            .into_iter()
+            .next()
+            .expect("expected at least one synthetic definition");
+
+        let mut names = SyntheticNameSet::new();
+        for (index, id) in synthetic_ids.iter().enumerate() {
+            names.synthetic_names.insert(*id, format!("s{}", index));
+        }
+        let step = CertificateStep::DefineSynthetic {
+            atoms: info.atoms.clone(),
+            type_vars: info.type_vars.clone(),
+            clauses: info.clauses.clone(),
+            key_term: info.key_term.clone(),
+        };
+        let mut generator = CodeGenerator::new(&bindings);
+        generator
+            .certificate_step_to_code(&names, &step, &kernel_context)
+            .expect("synthetic step code generation should succeed")
+    };
+    #[cfg(not(feature = "canonicalization"))]
     let cert_line = "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }";
 
-    processor.test_parse_code(cert_line, &bindings, &normalized_goal.kernel_context);
+    processor.test_parse_code(&cert_line, &bindings, &normalized_goal.kernel_context);
 }
 
 // Reproduces a bug where a polymorphic synthetic causes
@@ -2089,6 +2117,10 @@ fn test_dependently_typed_synthetic() {
 #[test]
 fn test_polymorphic_synthetic_claim() {
     use crate::certificate::Certificate;
+    #[cfg(feature = "canonicalization")]
+    use crate::code_generator::{CodeGenerator, SyntheticNameSet};
+    #[cfg(feature = "canonicalization")]
+    use crate::kernel::certificate_step::CertificateStep;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;
@@ -2109,12 +2141,40 @@ fn test_polymorphic_synthetic_claim() {
 
     let project = Project::new_mock();
     let kernel_context = normalized_goal.kernel_context.clone();
-    let mut kernel_context_cow = Cow::Owned(kernel_context);
+    let mut kernel_context_cow: Cow<crate::kernel::kernel_context::KernelContext> =
+        Cow::Owned(kernel_context);
     let mut bindings_cow = Cow::Borrowed(&bindings);
+
+    #[cfg(feature = "canonicalization")]
+    let cert_line = {
+        let synthetic_ids = kernel_context_cow.get_synthetic_ids();
+        let info = kernel_context_cow
+            .find_covering_synthetic_info(&synthetic_ids)
+            .into_iter()
+            .next()
+            .expect("expected at least one synthetic definition");
+
+        let mut names = SyntheticNameSet::new();
+        for (index, id) in synthetic_ids.iter().enumerate() {
+            names.synthetic_names.insert(*id, format!("s{}", index));
+        }
+        let step = CertificateStep::DefineSynthetic {
+            atoms: info.atoms.clone(),
+            type_vars: info.type_vars.clone(),
+            clauses: info.clauses.clone(),
+            key_term: info.key_term.clone(),
+        };
+        let mut generator = CodeGenerator::new(&bindings);
+        generator
+            .certificate_step_to_code(&names, &step, &kernel_context_cow)
+            .expect("synthetic step code generation should succeed")
+    };
+    #[cfg(not(feature = "canonicalization"))]
+    let cert_line = "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }";
 
     // Parse the polymorphic synthetic
     Certificate::parse_code_line(
-        "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
+        &cert_line,
         &project,
         &mut bindings_cow,
         &mut kernel_context_cow,
@@ -2138,6 +2198,10 @@ fn test_polymorphic_synthetic_claim() {
 #[test]
 fn test_certificate_type_params_are_step_local() {
     use crate::certificate::Certificate;
+    #[cfg(feature = "canonicalization")]
+    use crate::code_generator::{CodeGenerator, SyntheticNameSet};
+    #[cfg(feature = "canonicalization")]
+    use crate::kernel::certificate_step::CertificateStep;
     use crate::processor::Processor;
     use crate::project::Project;
     use std::borrow::Cow;
@@ -2158,11 +2222,39 @@ fn test_certificate_type_params_are_step_local() {
 
     let project = Project::new_mock();
     let kernel_context = normalized_goal.kernel_context.clone();
-    let mut kernel_context_cow = Cow::Owned(kernel_context);
+    let mut kernel_context_cow: Cow<crate::kernel::kernel_context::KernelContext> =
+        Cow::Owned(kernel_context);
     let mut bindings_cow = Cow::Borrowed(&bindings);
 
+    #[cfg(feature = "canonicalization")]
+    let first_line = {
+        let synthetic_ids = kernel_context_cow.get_synthetic_ids();
+        let info = kernel_context_cow
+            .find_covering_synthetic_info(&synthetic_ids)
+            .into_iter()
+            .next()
+            .expect("expected at least one synthetic definition");
+
+        let mut names = SyntheticNameSet::new();
+        for (index, id) in synthetic_ids.iter().enumerate() {
+            names.synthetic_names.insert(*id, format!("s{}", index));
+        }
+        let step = CertificateStep::DefineSynthetic {
+            atoms: info.atoms.clone(),
+            type_vars: info.type_vars.clone(),
+            clauses: info.clauses.clone(),
+            key_term: info.key_term.clone(),
+        };
+        let mut generator = CodeGenerator::new(&bindings);
+        generator
+            .certificate_step_to_code(&names, &step, &kernel_context_cow)
+            .expect("synthetic step code generation should succeed")
+    };
+    #[cfg(not(feature = "canonicalization"))]
+    let first_line = "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }".to_string();
+
     Certificate::parse_code_line(
-        "let s0[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s0) or is_torsion_free[T0]) and (s0 != Grp.1[T0] or is_torsion_free[T0]) }",
+        &first_line,
         &project,
         &mut bindings_cow,
         &mut kernel_context_cow,
@@ -2170,8 +2262,9 @@ fn test_certificate_type_params_are_step_local() {
     .expect("first line should parse");
 
     // This currently fails because T0 remains bound globally after the first line.
+    let second_line = first_line.replace("s0", "s1");
     Certificate::parse_code_line(
-        "let s1[T0: Grp]: T0 satisfy { forall(x0: T0) { not is_torsion_free[T0] or not has_finite_order(x0) or Grp.1[T0] = x0 } and (has_finite_order(s1) or is_torsion_free[T0]) and (s1 != Grp.1[T0] or is_torsion_free[T0]) }",
+        &second_line,
         &project,
         &mut bindings_cow,
         &mut kernel_context_cow,

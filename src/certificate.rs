@@ -474,6 +474,8 @@ impl Certificate {
                             atoms: def.atoms.clone(),
                             type_vars: def.type_vars.clone(),
                             clauses: def.clauses.clone(),
+                            #[cfg(feature = "canonicalization")]
+                            key_term: def.key_term.clone(),
                         })
                     } else {
                         let (name, acorn_type) = decls

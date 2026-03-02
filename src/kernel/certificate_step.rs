@@ -41,6 +41,11 @@ pub enum CertificateStep {
         /// Kernel clauses that define the synthetic condition.
         /// These clauses are converted into the `satisfy { ... }` body.
         clauses: Vec<Clause>,
+
+        /// Canonical term-level synthetic definition key, used for canonicalization-mode
+        /// serialization/parsing round-trips.
+        #[cfg(feature = "canonicalization")]
+        key_term: Term,
     },
 
     /// A claim statement with a generic clause plus specialization map.
