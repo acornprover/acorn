@@ -166,7 +166,6 @@ impl<'a> Clausifier<'a> {
 
         Ok(clauses)
     }
-
     /// If `term` is exactly `symbol(arg1, ..., argN)`, return those arguments.
     ///
     /// We require full application so callers can rely on fixed arity for builtins.
@@ -326,40 +325,6 @@ impl<'a> Clausifier<'a> {
             term.get_type_with_context(context, self.kernel_context())
         }
     }
-
-    #[cfg(feature = "canonicalization")]
-    fn close_key_term_with_context(&self, term: &Term, context: &LocalContext) -> Term {
-        let mut closed = term.clone();
-        let num_type_vars = self.type_var_map().map_or(0, |m| m.len());
-        for (var_id, var_type) in context.get_var_types().iter().enumerate().rev() {
-            if var_id < num_type_vars || var_type.as_ref().is_type_param_kind() {
-                continue;
-            }
-            closed = self.abstract_free_var_as_bound_at_depth(&closed, var_id as AtomId, 0);
-            closed = Term::forall(var_type.clone(), closed);
-        }
-        crate::kernel::synthetic::canonicalize_synthetic_key_term(&closed)
-    }
-
-    #[cfg(feature = "canonicalization")]
-    fn literal_to_boolean_key_term(&self, literal: &Literal, context: &LocalContext) -> Term {
-        if literal.right.is_true() {
-            if literal.positive {
-                literal.left.clone()
-            } else {
-                Term::not(literal.left.clone())
-            }
-        } else {
-            let left_type = self.term_type_for_normalization(&literal.left, context);
-            let eq = Term::eq(left_type, literal.left.clone(), literal.right.clone());
-            if literal.positive {
-                eq
-            } else {
-                Term::not(eq)
-            }
-        }
-    }
-
     /// Term-native CNF conversion.
     ///
     /// This converts an elaborated kernel `Term` into CNF.
@@ -1153,9 +1118,7 @@ impl<'a> Clausifier<'a> {
     /// This is the bridge from rich term structure to a simple atom that later CNF steps can
     /// refer to. We create a fresh synthetic application `s(...)`, define it with `s = value`,
     /// and register the definition in the synthetic registry so equivalent definitions can be
-    /// deduplicated. The exact dedup key differs by feature:
-    /// - `canonicalization`: canonical closed term key.
-    /// - default mode: clause key with defined synthetic ids invalidated.
+    /// deduplicated.
     fn synthesize_term_from_term(
         &mut self,
         value: &Term,
@@ -1183,82 +1146,42 @@ impl<'a> Clausifier<'a> {
         let type_vars = self.get_type_var_kinds();
         let synthetic_types = vec![synthetic_type.clone()];
 
-        #[cfg(feature = "canonicalization")]
-        {
-            let definition_term = Term::eq(value_type.clone(), skolem_term.clone(), value.clone());
-            let key_term = self.close_key_term_with_context(&definition_term, context);
-            let lookup_key = key_term.invalidate_synthetics(&[skolem_id]);
+        let definition_cnf = self.term_eq_to_cnf(
+            &skolem_term,
+            value,
+            false,
+            stack,
+            next_var_id,
+            synth,
+            context,
+        )?;
+        let num_type_vars = type_vars.len();
+        let clauses = definition_cnf
+            .clone()
+            .into_clauses_with_pinned(context, num_type_vars);
+        let key_clauses: Vec<Clause> = clauses
+            .iter()
+            .map(|c| c.invalidate_synthetics(&[skolem_id]))
+            .collect();
 
-            if let Some(existing_def) = self.kernel_context().synthetic_registry.lookup_by_key(
-                &type_vars,
-                &synthetic_types,
-                &lookup_key,
-            ) {
-                let (existing_m, existing_id) = existing_def.atoms[0];
-                let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
-                return Ok(Term::new(existing_atom, skolem_term.args().to_vec()));
-            }
-
-            let definition_cnf = self.term_eq_to_cnf(
-                &skolem_term,
-                value,
-                false,
-                stack,
-                next_var_id,
-                synth,
-                context,
-            )?;
-            let num_type_vars = type_vars.len();
+        if let Some(existing_def) = self.kernel_context().synthetic_registry.lookup_by_key(
+            &type_vars,
+            &synthetic_types,
+            &key_clauses,
+        ) {
+            let (existing_m, existing_id) = existing_def.atoms[0];
+            let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
+            Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
+        } else {
             let clauses = definition_cnf.into_clauses_with_pinned(context, num_type_vars);
             self.as_mut()?.define_synthetic_atoms(
                 vec![skolem_id],
                 type_vars,
                 vec![synthetic_type],
                 clauses,
-                key_term,
                 None,
             )?;
             Ok(skolem_term)
-        }
-        #[cfg(not(feature = "canonicalization"))]
-        {
-            let definition_cnf = self.term_eq_to_cnf(
-                &skolem_term,
-                value,
-                false,
-                stack,
-                next_var_id,
-                synth,
-                context,
-            )?;
-            let num_type_vars = type_vars.len();
-            let clauses = definition_cnf
-                .clone()
-                .into_clauses_with_pinned(context, num_type_vars);
-            let key_clauses: Vec<Clause> = clauses
-                .iter()
-                .map(|c| c.invalidate_synthetics(&[skolem_id]))
-                .collect();
-
-            if let Some(existing_def) = self.kernel_context().synthetic_registry.lookup_by_key(
-                &type_vars,
-                &synthetic_types,
-                &key_clauses,
-            ) {
-                let (existing_m, existing_id) = existing_def.atoms[0];
-                let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
-                Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
-            } else {
-                let clauses = definition_cnf.into_clauses_with_pinned(context, num_type_vars);
-                self.as_mut()?.define_synthetic_atoms(
-                    vec![skolem_id],
-                    type_vars,
-                    vec![synthetic_type],
-                    clauses,
-                    None,
-                )?;
-                Ok(skolem_term)
-            }
         }
     }
 
@@ -1396,22 +1319,7 @@ impl<'a> Clausifier<'a> {
             let cond_lit = if cond_cnf.is_literal() {
                 cond_cnf.to_literal().unwrap()
             } else {
-                #[cfg(feature = "canonicalization")]
-                {
-                    let cond_term = self.synthesize_term_from_term(
-                        &args[1],
-                        &Term::bool_type(),
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-                    Literal::from_signed_term(cond_term, true)
-                }
-                #[cfg(not(feature = "canonicalization"))]
-                {
-                    self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
-                }
+                self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
             };
             let then_ext =
                 self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
@@ -1714,7 +1622,6 @@ impl<'a> Clausifier<'a> {
     /// and adding clauses that define it to be equivalent to the CNF.
     /// This uses a Tseitin-style transformation: for CNF C and new atom s,
     /// we add clauses for s <-> C, which is (s -> C) and (C -> s).
-    #[cfg(not(feature = "canonicalization"))]
     fn synthesize_literal_from_cnf(
         &mut self,
         cnf: Cnf,
@@ -1950,27 +1857,12 @@ impl<'a> Clausifier<'a> {
                 // Add the definition
                 let type_vars = self.get_type_var_kinds();
                 let num_type_vars = type_vars.len();
-                #[cfg(feature = "canonicalization")]
-                let key_term = {
-                    let cond_term = self.literal_to_boolean_key_term(&cond_lit, local_context);
-                    let eq_type_term = self.term_type_for_normalization(&then_term, local_context);
-                    let then_eq_term =
-                        Term::eq(eq_type_term.clone(), synth_term.clone(), then_term.clone());
-                    let else_eq_term =
-                        Term::eq(eq_type_term, synth_term.clone(), else_term.clone());
-                    let first = Term::or(Term::not(cond_term.clone()), then_eq_term);
-                    let second = Term::or(cond_term, else_eq_term);
-                    let definition_term = Term::and(first, second);
-                    self.close_key_term_with_context(&definition_term, local_context)
-                };
                 let clauses = defining_cnf.into_clauses_with_pinned(local_context, num_type_vars);
                 self.as_mut()?.define_synthetic_atoms(
                     vec![atom_id],
                     type_vars,
                     vec![synthetic_type],
                     clauses,
-                    #[cfg(feature = "canonicalization")]
-                    key_term,
                     None,
                 )?;
 

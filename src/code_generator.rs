@@ -6,15 +6,11 @@ use tower_lsp::lsp_types::{LanguageString, MarkedString};
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
 };
-#[cfg(feature = "canonicalization")]
-use crate::elaborator::acorn_value::FunctionApplication;
 use crate::elaborator::acorn_value::{
     AcornValue, ConstantInstance, MatchCase, TypeApplication as ValueTypeApplication,
 };
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
-#[cfg(feature = "canonicalization")]
-use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
@@ -393,79 +389,6 @@ fn rename_type_vars_in_value(
     }
 }
 
-/// TermBridge denormalization for key terms may include type parameters in the de Bruijn
-/// level space for value variables. Codegen variable binding only tracks value binders, so
-/// shift those value variable indices down by the number of leading type parameters.
-#[cfg(feature = "canonicalization")]
-fn strip_type_var_value_offsets(value: &AcornValue, num_type_vars: AtomId) -> AcornValue {
-    match value {
-        AcornValue::Variable(i, t) => {
-            if *i >= num_type_vars {
-                AcornValue::Variable(i - num_type_vars, t.clone())
-            } else {
-                AcornValue::Variable(*i, t.clone())
-            }
-        }
-        AcornValue::Constant(_) | AcornValue::Bool(_) => value.clone(),
-        AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
-            function: Box::new(strip_type_var_value_offsets(&app.function, num_type_vars)),
-            args: app
-                .args
-                .iter()
-                .map(|a| strip_type_var_value_offsets(a, num_type_vars))
-                .collect(),
-        }),
-        AcornValue::TypeApplication(app) => AcornValue::TypeApplication(ValueTypeApplication {
-            function: Box::new(strip_type_var_value_offsets(&app.function, num_type_vars)),
-            type_param_names: app.type_param_names.clone(),
-            type_param_constraints: app.type_param_constraints.clone(),
-            type_args: app.type_args.clone(),
-        }),
-        AcornValue::Lambda(args, body) => AcornValue::Lambda(
-            args.clone(),
-            Box::new(strip_type_var_value_offsets(body, num_type_vars)),
-        ),
-        AcornValue::Binary(op, left, right) => AcornValue::Binary(
-            *op,
-            Box::new(strip_type_var_value_offsets(left, num_type_vars)),
-            Box::new(strip_type_var_value_offsets(right, num_type_vars)),
-        ),
-        AcornValue::Not(inner) => {
-            AcornValue::Not(Box::new(strip_type_var_value_offsets(inner, num_type_vars)))
-        }
-        AcornValue::ForAll(quants, body) => AcornValue::ForAll(
-            quants.clone(),
-            Box::new(strip_type_var_value_offsets(body, num_type_vars)),
-        ),
-        AcornValue::Exists(quants, body) => AcornValue::Exists(
-            quants.clone(),
-            Box::new(strip_type_var_value_offsets(body, num_type_vars)),
-        ),
-        AcornValue::IfThenElse(cond, t, f) => AcornValue::IfThenElse(
-            Box::new(strip_type_var_value_offsets(cond, num_type_vars)),
-            Box::new(strip_type_var_value_offsets(t, num_type_vars)),
-            Box::new(strip_type_var_value_offsets(f, num_type_vars)),
-        ),
-        AcornValue::Match(scrutinee, cases) => AcornValue::Match(
-            Box::new(strip_type_var_value_offsets(scrutinee, num_type_vars)),
-            cases
-                .iter()
-                .map(|case| MatchCase {
-                    new_vars: case.new_vars.clone(),
-                    pattern: strip_type_var_value_offsets(&case.pattern, num_type_vars),
-                    result: strip_type_var_value_offsets(&case.result, num_type_vars),
-                    constructor_index: case.constructor_index,
-                    constructor_total: case.constructor_total,
-                })
-                .collect(),
-        ),
-        AcornValue::Try(inner, ty) => AcornValue::Try(
-            Box::new(strip_type_var_value_offsets(inner, num_type_vars)),
-            ty.clone(),
-        ),
-    }
-}
-
 pub struct CodeGenerator<'a> {
     /// Bindings for the module we are generating code in.
     bindings: &'a BindingMap,
@@ -794,7 +717,9 @@ impl SyntheticNameSet {
 
             // This definition may refer to other synthetics in its clauses.
             // Collect and define those first so generated code has dependencies in order.
-            let additional_synthetic_ids = Self::collect_synthetic_ids_from_clauses(&info.clauses);
+            let mut additional_synthetic_ids =
+                Self::collect_synthetic_ids_from_clauses(&info.clauses);
+            additional_synthetic_ids.retain(|id| !info.atoms.contains(id));
             if !additional_synthetic_ids.is_empty() {
                 self.collect_synthetic_steps(
                     bindings,
@@ -808,8 +733,6 @@ impl SyntheticNameSet {
                 atoms: info.atoms.clone(),
                 type_vars: info.type_vars.clone(),
                 clauses: info.clauses.clone(),
-                #[cfg(feature = "canonicalization")]
-                key_term: info.key_term.clone(),
             });
         }
     }
@@ -998,8 +921,7 @@ impl CodeGenerator<'_> {
         names: &SyntheticNameSet,
         atoms: &[(ModuleId, AtomId)],
         type_vars: &[Term],
-        _clauses: &[Clause],
-        #[cfg(feature = "canonicalization")] _key_term: &Term,
+        clauses: &[Clause],
         kernel_context: &KernelContext,
     ) -> Result<String> {
         let mut decl = vec![];
@@ -1015,22 +937,11 @@ impl CodeGenerator<'_> {
             return Err(Error::internal("synthetic definition has no atoms"));
         }
 
-        #[cfg(feature = "canonicalization")]
-        let cond_val = {
-            let mut local_context = LocalContext::empty();
-            for type_var_kind in type_vars {
-                local_context.push_type(type_var_kind.clone());
-            }
-            let bridge = TermBridge::new(kernel_context);
-            let raw = bridge.denormalize_term_with_context(_key_term, &local_context, false);
-            strip_type_var_value_offsets(&raw, type_vars.len() as AtomId)
-        };
-        #[cfg(not(feature = "canonicalization"))]
         let cond_val = {
             // Denormalize clauses first so we can collect all type variable names.
             // Keep type vars symbolic (no instantiation) because we emit a polymorphic definition.
             let mut cond_parts = vec![];
-            for clause in _clauses {
+            for clause in clauses {
                 let part = kernel_context.denormalize(clause, None, None, false);
                 cond_parts.push(part);
             }
@@ -1548,15 +1459,11 @@ impl CodeGenerator<'_> {
                 atoms,
                 type_vars,
                 clauses,
-                #[cfg(feature = "canonicalization")]
-                key_term,
             } => self.generate_code_for_synthetic_step(
                 names,
                 atoms,
                 type_vars,
                 clauses,
-                #[cfg(feature = "canonicalization")]
-                key_term,
                 kernel_context,
             ),
             CertificateStep::Claim(claim) => {
@@ -2387,9 +2294,6 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "canonicalization")]
-        let expected = "let s0[T0]: T0 satisfy { goal[T0] = foo[T0](s0) }";
-        #[cfg(not(feature = "canonicalization"))]
         let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
@@ -2434,9 +2338,6 @@ mod tests {
 
         // The synthetic uses T0 with typeclass constraint
         // foo[T0](s0) needs explicit type params since s0's type is Variable(T0)
-        #[cfg(feature = "canonicalization")]
-        let expected = "let s0[T0: Magma]: T0 satisfy { goal[T0] = foo[T0](s0) }";
-        #[cfg(not(feature = "canonicalization"))]
         let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
         assert_eq!(codes[0], expected);
 
@@ -2482,9 +2383,6 @@ mod tests {
         }
 
         // The synthetic uses T0 with type ((T0, T0) -> Bool) -> T0
-        #[cfg(feature = "canonicalization")]
-        let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool) { is_reflexive[T0](x0) = forall(x1: T0) { x0(x1, x1) } } }";
-        #[cfg(not(feature = "canonicalization"))]
         let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
         assert_eq!(codes[0], expected);
 

@@ -44,8 +44,7 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Enable canonicalization-first behavior in the term->clause pipeline.
-# This can change synthetic identities and therefore cached certificate output.
+# Experimental: canonicalize terms before clausification.
 canonicalization = []
 
 [lib]

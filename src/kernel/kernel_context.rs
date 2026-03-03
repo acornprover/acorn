@@ -53,7 +53,6 @@ impl KernelContext {
         type_vars: Vec<Term>,
         synthetic_types: Vec<Term>,
         clauses: Vec<Clause>,
-        #[cfg(feature = "canonicalization")] key_term: Term,
         source: Option<Source>,
     ) -> Result<(), String> {
         for (i, atom) in atoms.iter().enumerate() {
@@ -68,22 +67,8 @@ impl KernelContext {
             trace!(clause = %clause, "synthetic definition clause");
         }
 
-        #[cfg(feature = "canonicalization")]
-        {
-            self.synthetic_registry.define(
-                atoms,
-                type_vars,
-                synthetic_types,
-                clauses,
-                key_term,
-                source,
-            )
-        }
-        #[cfg(not(feature = "canonicalization"))]
-        {
-            self.synthetic_registry
-                .define(atoms, type_vars, synthetic_types, clauses, source)
-        }
+        self.synthetic_registry
+            .define(atoms, type_vars, synthetic_types, clauses, source)
     }
 
     /// Returns a human-readable string representation of an atom.

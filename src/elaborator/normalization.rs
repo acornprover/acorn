@@ -23,10 +23,6 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
-#[cfg(feature = "canonicalization")]
-use crate::kernel::synthetic::build_lookup_key_term_from_exists;
-#[cfg(feature = "canonicalization")]
-use crate::kernel::synthetic::canonicalize_synthetic_key_term;
 use crate::kernel::synthetic::SyntheticDefinition;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
@@ -63,234 +59,6 @@ pub fn normalize_goal(
     goal: &Goal,
 ) -> Result<NormalizedGoal, BuildError> {
     kernel_context.normalize_goal(goal)
-}
-
-#[cfg(feature = "canonicalization")]
-fn abstract_free_var_as_bound_at_depth(term: &Term, var_id: AtomId, depth: u16) -> Term {
-    match term.as_ref().decompose() {
-        crate::kernel::term::Decomposition::Atom(atom) => match atom {
-            Atom::FreeVariable(i) if *i == var_id => {
-                Term::atom(crate::kernel::atom::Atom::BoundVariable(depth))
-            }
-            Atom::BoundVariable(i) if *i >= depth => {
-                Term::atom(crate::kernel::atom::Atom::BoundVariable(*i + 1))
-            }
-            _ => term.clone(),
-        },
-        crate::kernel::term::Decomposition::Application(func, arg) => {
-            let new_func = abstract_free_var_as_bound_at_depth(&func.to_owned(), var_id, depth);
-            let new_arg = abstract_free_var_as_bound_at_depth(&arg.to_owned(), var_id, depth);
-            new_func.apply(&[new_arg])
-        }
-        crate::kernel::term::Decomposition::Pi(input, output) => {
-            let new_input = abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
-            let new_output =
-                abstract_free_var_as_bound_at_depth(&output.to_owned(), var_id, depth + 1);
-            Term::pi(new_input, new_output)
-        }
-        crate::kernel::term::Decomposition::Lambda(input, body) => {
-            let new_input = abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
-            let new_body = abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
-            Term::lambda(new_input, new_body)
-        }
-        crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
-            let new_binder_type =
-                abstract_free_var_as_bound_at_depth(&binder_type.to_owned(), var_id, depth);
-            let new_body = abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
-            Term::forall(new_binder_type, new_body)
-        }
-        crate::kernel::term::Decomposition::Exists(binder_type, body) => {
-            let new_binder_type =
-                abstract_free_var_as_bound_at_depth(&binder_type.to_owned(), var_id, depth);
-            let new_body = abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
-            Term::exists(new_binder_type, new_body)
-        }
-    }
-}
-
-#[cfg(feature = "canonicalization")]
-fn split_eq_application(term: &Term) -> Option<(Term, Term, Term)> {
-    let (head, args) = term.as_ref().split_application_multi()?;
-    if args.len() != 3 {
-        return None;
-    }
-    match head.get_head_atom() {
-        Atom::Symbol(Symbol::Eq) => Some((args[0].clone(), args[1].clone(), args[2].clone())),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "canonicalization")]
-fn rewrite_function_inequality_to_exists(term: &Term) -> Term {
-    if let Some((head, args)) = term.as_ref().split_application_multi() {
-        if args.len() == 1 && matches!(head.get_head_atom(), Atom::Symbol(Symbol::Not)) {
-            let inner = rewrite_function_inequality_to_exists(&args[0]);
-            if let Some((mut eq_type, left, right)) = split_eq_application(&inner) {
-                let mut arg_types = vec![];
-                while let Some((input, output)) = eq_type.as_ref().split_pi() {
-                    arg_types.push(input.to_owned());
-                    eq_type = output.to_owned();
-                }
-                if !arg_types.is_empty() {
-                    let base_var_id = term.least_unused_variable();
-                    let var_ids: Vec<AtomId> = (0..arg_types.len())
-                        .map(|i| base_var_id + i as AtomId)
-                        .collect();
-                    let args: Vec<Term> = var_ids
-                        .iter()
-                        .map(|var_id| Term::new_variable(*var_id))
-                        .collect();
-                    let applied_left = left.apply(&args);
-                    let applied_right = right.apply(&args);
-                    let mut body = Term::not(Term::eq(eq_type, applied_left, applied_right));
-
-                    // Introduce exists binders in function argument order.
-                    for (var_id, arg_type) in var_ids.into_iter().zip(arg_types.into_iter()).rev() {
-                        body = abstract_free_var_as_bound_at_depth(&body, var_id, 0);
-                        body = Term::exists(arg_type, body);
-                    }
-                    return body;
-                }
-            }
-            return Term::not(inner);
-        }
-    }
-
-    match term.as_ref().decompose() {
-        crate::kernel::term::Decomposition::Atom(_) => term.clone(),
-        crate::kernel::term::Decomposition::Application(func, arg) => {
-            let new_func = rewrite_function_inequality_to_exists(&func.to_owned());
-            let new_arg = rewrite_function_inequality_to_exists(&arg.to_owned());
-            new_func.apply(&[new_arg])
-        }
-        crate::kernel::term::Decomposition::Pi(input, output) => Term::pi(
-            rewrite_function_inequality_to_exists(&input.to_owned()),
-            rewrite_function_inequality_to_exists(&output.to_owned()),
-        ),
-        crate::kernel::term::Decomposition::Lambda(input, body) => Term::lambda(
-            rewrite_function_inequality_to_exists(&input.to_owned()),
-            rewrite_function_inequality_to_exists(&body.to_owned()),
-        ),
-        crate::kernel::term::Decomposition::ForAll(binder_type, body) => Term::forall(
-            rewrite_function_inequality_to_exists(&binder_type.to_owned()),
-            rewrite_function_inequality_to_exists(&body.to_owned()),
-        ),
-        crate::kernel::term::Decomposition::Exists(binder_type, body) => Term::exists(
-            rewrite_function_inequality_to_exists(&binder_type.to_owned()),
-            rewrite_function_inequality_to_exists(&body.to_owned()),
-        ),
-    }
-}
-
-#[cfg(feature = "canonicalization")]
-fn build_definition_key_term_from_term(
-    term: &Term,
-    atoms: &[(ModuleId, AtomId)],
-    num_type_vars: usize,
-) -> Term {
-    struct State<'a> {
-        atoms: &'a [(ModuleId, AtomId)],
-        next_atom: usize,
-        next_var_id: AtomId,
-        num_type_vars: usize,
-        universal_vars: Vec<AtomId>,
-    }
-
-    fn replacement_term(state: &State<'_>, atom: (ModuleId, AtomId)) -> Term {
-        let mut args = Vec::with_capacity(state.num_type_vars + state.universal_vars.len());
-        for i in 0..(state.num_type_vars as AtomId) {
-            args.push(Term::new_variable(i));
-        }
-        for var_id in &state.universal_vars {
-            args.push(Term::new_variable(*var_id));
-        }
-        Term::new(Atom::Symbol(Symbol::Synthetic(atom.0, atom.1)), args)
-    }
-
-    fn transform(term: &Term, state: &mut State<'_>) -> Term {
-        match term.as_ref().decompose() {
-            crate::kernel::term::Decomposition::Atom(_) => term.clone(),
-            crate::kernel::term::Decomposition::Application(func, arg) => {
-                let new_func = transform(&func.to_owned(), state);
-                let new_arg = transform(&arg.to_owned(), state);
-                new_func.apply(&[new_arg])
-            }
-            crate::kernel::term::Decomposition::Pi(input, output) => {
-                let new_input = transform(&input.to_owned(), state);
-                let var_id = state.next_var_id;
-                state.next_var_id += 1;
-                let opened_output = output
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(var_id))
-                    .shift_bound(0, -1);
-                let new_output = transform(&opened_output, state);
-                let rebound_output = abstract_free_var_as_bound_at_depth(&new_output, var_id, 0);
-                Term::pi(new_input, rebound_output)
-            }
-            crate::kernel::term::Decomposition::Lambda(input, body) => {
-                let new_input = transform(&input.to_owned(), state);
-                let var_id = state.next_var_id;
-                state.next_var_id += 1;
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(var_id))
-                    .shift_bound(0, -1);
-                let new_body = transform(&opened_body, state);
-                let rebound_body = abstract_free_var_as_bound_at_depth(&new_body, var_id, 0);
-                Term::lambda(new_input, rebound_body)
-            }
-            crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
-                let new_binder_type = transform(&binder_type.to_owned(), state);
-                let var_id = state.next_var_id;
-                state.next_var_id += 1;
-                state.universal_vars.push(var_id);
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(var_id))
-                    .shift_bound(0, -1);
-                let new_body = transform(&opened_body, state);
-                state.universal_vars.pop();
-                let rebound_body = abstract_free_var_as_bound_at_depth(&new_body, var_id, 0);
-                Term::forall(new_binder_type, rebound_body)
-            }
-            crate::kernel::term::Decomposition::Exists(binder_type, body) => {
-                if let Some(atom) = state.atoms.get(state.next_atom).copied() {
-                    state.next_atom += 1;
-                    let replacement = replacement_term(state, atom);
-                    let opened_body = body
-                        .to_owned()
-                        .substitute_bound(0, &replacement)
-                        .shift_bound(0, -1);
-                    transform(&opened_body, state)
-                } else {
-                    let new_binder_type = transform(&binder_type.to_owned(), state);
-                    let var_id = state.next_var_id;
-                    state.next_var_id += 1;
-                    let opened_body = body
-                        .to_owned()
-                        .substitute_bound(0, &Term::new_variable(var_id))
-                        .shift_bound(0, -1);
-                    let new_body = transform(&opened_body, state);
-                    let rebound_body = abstract_free_var_as_bound_at_depth(&new_body, var_id, 0);
-                    Term::exists(new_binder_type, rebound_body)
-                }
-            }
-        }
-    }
-
-    let rewritten = rewrite_function_inequality_to_exists(term);
-
-    let mut state = State {
-        atoms,
-        next_atom: 0,
-        next_var_id: rewritten
-            .least_unused_variable()
-            .max(num_type_vars as AtomId),
-        num_type_vars,
-        universal_vars: Vec::new(),
-    };
-    let transformed = transform(&rewritten, &mut state);
-    canonicalize_synthetic_key_term(&transformed)
 }
 
 impl KernelContext {
@@ -361,37 +129,23 @@ impl KernelContext {
             })
             .collect();
 
-        #[cfg(feature = "canonicalization")]
-        {
-            let term = elaborate_value_to_term_existing(self, value, type_var_map).ok()?;
-            let raw_key_term = if num_definitions > 0 {
-                build_lookup_key_term_from_exists(&term, num_definitions, num_type_vars).ok()?
-            } else {
-                canonicalize_synthetic_key_term(&term)
-            };
-            self.synthetic_registry
-                .lookup_by_key(&type_var_kinds, &synthetic_types, &raw_key_term)
-        }
-        #[cfg(not(feature = "canonicalization"))]
-        {
-            let alt_value = match value {
-                AcornValue::Exists(quants, subvalue) => {
-                    AcornValue::ForAll(quants.clone(), subvalue.clone())
-                }
-                _ => value.clone(),
-            };
-            let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
-            let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
-            let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
-                return None;
-            };
-            let clauses: Vec<Clause> = uninstantiated
-                .iter()
-                .map(|c| c.instantiate_invalid_synthetics_with_skip(num_definitions, num_type_vars))
-                .collect();
-            self.synthetic_registry
-                .lookup_by_key(&type_var_kinds, &synthetic_types, &clauses)
-        }
+        let alt_value = match value {
+            AcornValue::Exists(quants, subvalue) => {
+                AcornValue::ForAll(quants.clone(), subvalue.clone())
+            }
+            _ => value.clone(),
+        };
+        let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
+        let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
+        let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
+            return None;
+        };
+        let clauses: Vec<Clause> = uninstantiated
+            .iter()
+            .map(|c| c.instantiate_invalid_synthetics_with_skip(num_definitions, num_type_vars))
+            .collect();
+        self.synthetic_registry
+            .lookup_by_key(&type_var_kinds, &synthetic_types, &clauses)
     }
 
     pub fn add_scoped_constant(
@@ -433,21 +187,24 @@ impl KernelContext {
         };
         term_for_clausify.validate();
 
-        let mut skolem_ids = vec![];
-        let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-        let clauses = mut_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?;
+        let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
+            let mut skolem_ids = vec![];
+            let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+            let clauses = mut_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?;
+            (clauses, skolem_ids)
+        };
 
         // For any of the created ids that have not been defined yet, the output
         // clauses will be their definition.
         let mut output = vec![];
         let mut undefined_ids = vec![];
-        for id in skolem_ids {
-            if let Some(def) = self.synthetic_registry.get(&id) {
+        for id in &skolem_ids {
+            if let Some(def) = self.synthetic_registry.get(id) {
                 for clause in &def.clauses {
                     output.push(clause.clone());
                 }
             } else {
-                undefined_ids.push(id);
+                undefined_ids.push(*id);
             }
         }
 
@@ -466,20 +223,11 @@ impl KernelContext {
                 .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
                 .collect();
 
-            #[cfg(feature = "canonicalization")]
-            let key_term = build_definition_key_term_from_term(
-                term_for_clausify.as_ref(),
-                &undefined_ids,
-                type_vars.len(),
-            );
-
             self.define_synthetic_atoms(
                 undefined_ids,
                 type_vars,
                 synthetic_types,
                 clauses.clone(),
-                #[cfg(feature = "canonicalization")]
-                key_term,
                 Some(source.clone()),
             )?;
         }
@@ -786,17 +534,6 @@ impl KernelContext {
             .collect();
         let expected_strings: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
 
-        #[cfg(feature = "canonicalization")]
-        let (actual_strings, expected_strings) = {
-            let mut actual_strings = actual_strings;
-            let mut expected_strings = expected_strings;
-            // Canonicalization can reorder logically equivalent clauses.
-            // Compare multisets rather than fixed clause positions.
-            actual_strings.sort();
-            expected_strings.sort();
-            (actual_strings, expected_strings)
-        };
-        #[cfg(not(feature = "canonicalization"))]
         let (actual_strings, expected_strings) = (actual_strings, expected_strings);
 
         for (i, (actual_clause, expected_clause)) in actual_strings
