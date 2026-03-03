@@ -17,7 +17,9 @@ use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::elaborator::to_term::elaborate_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
-use crate::kernel::clausifier::Clausifier;
+use crate::kernel::clausifier::DeepClausifier;
+#[cfg(feature = "sc")]
+use crate::kernel::clausifier::ShallowClausifier;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
@@ -136,7 +138,7 @@ impl KernelContext {
             _ => value.clone(),
         };
         let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
-        let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
+        let mut view = DeepClausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
         let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
             return None;
         };
@@ -176,11 +178,11 @@ impl KernelContext {
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         let term_for_clausify: Cow<'_, Term> = {
-            #[cfg(feature = "canonicalization")]
+            #[cfg(feature = "sc")]
             {
                 Cow::Owned(crate::kernel::canonicalize::canonicalize_term(term))
             }
-            #[cfg(not(feature = "canonicalization"))]
+            #[cfg(not(feature = "sc"))]
             {
                 Cow::Borrowed(term)
             }
@@ -189,8 +191,26 @@ impl KernelContext {
 
         let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
             let mut skolem_ids = vec![];
-            let mut mut_view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-            let clauses = mut_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?;
+            #[cfg(feature = "sc")]
+            let clauses = {
+                let mut shallow_view =
+                    ShallowClausifier::new_mut(self, type_var_map.clone(), source.module_id);
+                if let Some(clauses) =
+                    shallow_view.try_clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+                {
+                    clauses
+                } else {
+                    let mut deep_view =
+                        DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
+                    deep_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+                }
+            };
+            #[cfg(not(feature = "sc"))]
+            let clauses = {
+                let mut deep_view =
+                    DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
+                deep_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+            };
             (clauses, skolem_ids)
         };
 

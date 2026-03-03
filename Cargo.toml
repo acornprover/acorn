@@ -44,8 +44,8 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Experimental: canonicalize terms before clausification.
-canonicalization = []
+# Experimental: enable shallow clausification path with fallback to deep clausification.
+sc = []
 
 [lib]
 doctest = false
