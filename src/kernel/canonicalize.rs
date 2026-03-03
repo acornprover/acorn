@@ -2,7 +2,7 @@ use crate::kernel::atom::Atom;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term};
 
-/// Canonicalize a term for the `sc` feature pipeline.
+/// Canonicalize a term for normalization before shallow clausification.
 ///
 /// This pass is intentionally logical (not clausification):
 /// - Pushes negation inward to negation normal form (NNF) over ForAll/Exists/And/Or/Not.

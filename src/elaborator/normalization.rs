@@ -17,7 +17,6 @@ use crate::elaborator::to_term::elaborate_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::clausifier::DeepClausifier;
-#[cfg(feature = "sc")]
 use crate::kernel::clausifier::ShallowClausifier;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
@@ -180,24 +179,15 @@ impl KernelContext {
 
         let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
             let mut skolem_ids = vec![];
-            #[cfg(feature = "sc")]
-            let clauses = {
-                let canonical_term = crate::kernel::canonicalize::canonicalize_term(term);
-                canonical_term.validate();
-                let mut shallow_view =
-                    ShallowClausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                if let Some(clauses) =
-                    shallow_view.try_clausify_term(&canonical_term, &mut skolem_ids)?
-                {
-                    clauses
-                } else {
-                    let mut deep_view =
-                        DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                    deep_view.clausify_term(term, &mut skolem_ids)?
-                }
-            };
-            #[cfg(not(feature = "sc"))]
-            let clauses = {
+            let canonical_term = crate::kernel::canonicalize::canonicalize_term(term);
+            canonical_term.validate();
+            let mut shallow_view =
+                ShallowClausifier::new_mut(self, type_var_map.clone(), source.module_id);
+            let clauses = if let Some(clauses) =
+                shallow_view.try_clausify_term(&canonical_term, &mut skolem_ids)?
+            {
+                clauses
+            } else {
                 let mut deep_view =
                     DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
                 deep_view.clausify_term(term, &mut skolem_ids)?
