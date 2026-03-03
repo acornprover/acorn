@@ -279,19 +279,8 @@ impl Certificate {
                 }
                 let module_id = bindings.module_id();
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
-                let term_for_clausify: Cow<'_, Term> = {
-                    #[cfg(feature = "canonicalization")]
-                    {
-                        Cow::Owned(crate::kernel::canonicalize::canonicalize_term(&term))
-                    }
-                    #[cfg(not(feature = "canonicalization"))]
-                    {
-                        Cow::Borrowed(&term)
-                    }
-                };
                 let mut view = Clausifier::new_mut(kernel_context.to_mut(), None, module_id);
-                let clauses =
-                    view.clausify_term_to_denormalized_clauses(term_for_clausify.as_ref())?;
+                let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "claim must normalize to exactly one clause, got {}",
@@ -866,20 +855,7 @@ impl Certificate {
             type_var_map,
             bindings.module_id(),
         );
-        let generic_term_for_clausify: Cow<'_, Term> = {
-            #[cfg(feature = "canonicalization")]
-            {
-                Cow::Owned(crate::kernel::canonicalize::canonicalize_term(
-                    &generic_term,
-                ))
-            }
-            #[cfg(not(feature = "canonicalization"))]
-            {
-                Cow::Borrowed(&generic_term)
-            }
-        };
-        let clauses =
-            view.clausify_term_to_denormalized_clauses(generic_term_for_clausify.as_ref())?;
+        let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
             return Err(CodeGenError::GeneratedBadCode(format!(
                 "claim-with-args body normalized to {} clauses (expected 1)",
@@ -902,19 +878,9 @@ impl Certificate {
         let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
             let term = elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
-            let term_for_clausify: Cow<'_, Term> = {
-                #[cfg(feature = "canonicalization")]
-                {
-                    Cow::Owned(crate::kernel::canonicalize::canonicalize_term(&term))
-                }
-                #[cfg(not(feature = "canonicalization"))]
-                {
-                    Cow::Borrowed(&term)
-                }
-            };
             let mut term_view =
                 Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
-            let term = term_view.clausify_term_to_simple_term(term_for_clausify.as_ref())?;
+            let term = term_view.clausify_term_to_simple_term(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
 
