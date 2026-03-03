@@ -498,6 +498,69 @@ impl KernelContext {
     }
 
     #[cfg(test)]
+    fn clause_multiset(clauses: &[String]) -> std::collections::BTreeMap<String, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for clause in clauses {
+            *counts.entry(clause.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    #[cfg(test)]
+    fn format_clause_multiset(counts: &std::collections::BTreeMap<String, usize>) -> String {
+        counts
+            .iter()
+            .map(|(clause, count)| {
+                if *count == 1 {
+                    clause.clone()
+                } else {
+                    format!("{}x {}", count, clause)
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
+    #[cfg(test)]
+    fn assert_clauses_match_unordered(actual: &[String], expected: &[String]) {
+        let actual_counts = Self::clause_multiset(actual);
+        let expected_counts = Self::clause_multiset(expected);
+        if actual_counts == expected_counts {
+            return;
+        }
+
+        let mut missing = vec![];
+        for (clause, expected_count) in &expected_counts {
+            let actual_count = actual_counts.get(clause).copied().unwrap_or(0);
+            for _ in 0..expected_count.saturating_sub(actual_count) {
+                missing.push(clause.clone());
+            }
+        }
+
+        let mut unexpected = vec![];
+        for (clause, actual_count) in &actual_counts {
+            let expected_count = expected_counts.get(clause).copied().unwrap_or(0);
+            for _ in 0..actual_count.saturating_sub(expected_count) {
+                unexpected.push(clause.clone());
+            }
+        }
+
+        panic!(
+            "normalized clauses differ (order-insensitive)\n\
+             expected multiset:\n{}\n\
+             actual multiset:\n{}\n\
+             missing:\n{}\n\
+             unexpected:\n{}\n\
+             actual clause order:\n{}",
+            Self::format_clause_multiset(&expected_counts),
+            Self::format_clause_multiset(&actual_counts),
+            missing.join("\n"),
+            unexpected.join("\n"),
+            actual.join("\n")
+        );
+    }
+
+    #[cfg(test)]
     fn check_value(&mut self, value: &AcornValue, expected: &[&str]) {
         use crate::kernel::display::DisplayClause;
 
@@ -533,21 +596,7 @@ impl KernelContext {
             .map(|c| c.to_string())
             .collect();
         let expected_strings: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-
-        let (actual_strings, expected_strings) = (actual_strings, expected_strings);
-
-        for (i, (actual_clause, expected_clause)) in actual_strings
-            .iter()
-            .zip(expected_strings.iter())
-            .enumerate()
-        {
-            if actual_clause != expected_clause {
-                panic!(
-                    "expected clause {} to be:\n{}\ngot:\n{}",
-                    i, expected_clause, actual_clause
-                );
-            }
-        }
+        Self::assert_clauses_match_unordered(&actual_strings, &expected_strings);
     }
 
     /// Checks a theorem. Just for testing purposes.
