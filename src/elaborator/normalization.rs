@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -177,39 +176,31 @@ impl KernelContext {
         source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
-        let term_for_clausify: Cow<'_, Term> = {
-            #[cfg(feature = "sc")]
-            {
-                Cow::Owned(crate::kernel::canonicalize::canonicalize_term(term))
-            }
-            #[cfg(not(feature = "sc"))]
-            {
-                Cow::Borrowed(term)
-            }
-        };
-        term_for_clausify.validate();
+        term.validate();
 
         let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
             let mut skolem_ids = vec![];
             #[cfg(feature = "sc")]
             let clauses = {
+                let canonical_term = crate::kernel::canonicalize::canonicalize_term(term);
+                canonical_term.validate();
                 let mut shallow_view =
                     ShallowClausifier::new_mut(self, type_var_map.clone(), source.module_id);
                 if let Some(clauses) =
-                    shallow_view.try_clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+                    shallow_view.try_clausify_term(&canonical_term, &mut skolem_ids)?
                 {
                     clauses
                 } else {
                     let mut deep_view =
                         DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                    deep_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+                    deep_view.clausify_term(term, &mut skolem_ids)?
                 }
             };
             #[cfg(not(feature = "sc"))]
             let clauses = {
                 let mut deep_view =
                     DeepClausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                deep_view.clausify_term(term_for_clausify.as_ref(), &mut skolem_ids)?
+                deep_view.clausify_term(term, &mut skolem_ids)?
             };
             (clauses, skolem_ids)
         };
