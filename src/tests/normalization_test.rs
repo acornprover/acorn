@@ -64,6 +64,10 @@ fn test_bool_formulas() {
     norm.check(&env, "one", &["not x0 or x0"]);
 
     env.add("theorem two(a: Bool) { a implies a and (a and a) }");
+    #[cfg(feature = "ndc")]
+    norm.check(&env, "two", &["or(not(x0), and(x0, and(x0, x0)))"]);
+
+    #[cfg(not(feature = "ndc"))]
     norm.check(
         &env,
         "two",
@@ -783,6 +787,26 @@ fn test_normalizing_and_inside_arg() {
     let mut norm = KernelContext::new();
     let expected = vec!["BoxedBool.new(and(BoxedBool.value(x0), BoxedBool.value(x1))) = f(x0, x1)"];
     norm.check(&env, "goal", &expected);
+}
+
+#[cfg(feature = "ndc")]
+#[test]
+fn test_ndc_preserves_or_over_and_shape() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        let a: Bool = axiom
+        let b: Bool = axiom
+        let c: Bool = axiom
+
+        theorem goal {
+            (a and b) or c
+        }
+    "#,
+    );
+
+    let mut norm = KernelContext::new();
+    norm.check(&env, "goal", &["or(and(a, b), c)"]);
 }
 
 #[test]
