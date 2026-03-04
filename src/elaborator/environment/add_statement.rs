@@ -2284,8 +2284,8 @@ impl Environment {
 
         // Define all the constants that are in the typeclass.
         // Only applicable for block syntax, not no-block syntax.
-        // Track whether any constant has the instance type (proving the typeclass provides inhabitants).
-        let mut provides_inhabitants = false;
+        // If present, this is a constant of shape `forall(P: Typeclass). P`.
+        let mut inhabitant_provider = None;
         if !type_params.is_empty() {
             let type_param = &type_params[0]; // For block syntax, there's exactly one type param
             for (attr_name, type_expr, doc_comments) in &ts.constants {
@@ -2302,19 +2302,11 @@ impl Environment {
                 let arb_type = self.evaluator(project).evaluate_type(type_expr)?;
                 let var_type = arb_type.genericize(&type_params);
 
-                // Check if this constant's type is exactly the instance type.
-                // For example, `point: P` in `typeclass P: Pointed`.
-                if let AcornType::Variable(tp) = &var_type {
-                    if tp.name == type_param.name {
-                        provides_inhabitants = true;
-                    }
-                }
-
                 let defined_name = DefinedName::typeclass_attr(&typeclass, attr_name.text());
                 self.bindings
                     .check_defined_name_available(&defined_name, attr_name)?;
                 let def_str = format!("{}: {}", attr_name.text(), type_expr);
-                self.bindings.add_typeclass_attribute(
+                let potential = self.bindings.add_typeclass_attribute(
                     &typeclass,
                     &attr_name.text(),
                     vec![type_param.clone()],
@@ -2327,6 +2319,16 @@ impl Environment {
                 // Mark as required since it's from the initial typeclass definition
                 self.bindings
                     .mark_typeclass_attr_required(&typeclass, &attr_name.text());
+
+                // Check if this constant's type is exactly the instance type.
+                // For example, `point: P` in `typeclass P: Pointed`.
+                if inhabitant_provider.is_none() {
+                    if let AcornType::Variable(tp) = potential.get_type() {
+                        if tp.name == type_param.name {
+                            inhabitant_provider = Some(potential);
+                        }
+                    }
+                }
             }
         }
 
@@ -2342,7 +2344,7 @@ impl Environment {
             let extends_fact = Fact::Extends(
                 typeclass.clone(),
                 extends_set.clone(),
-                provides_inhabitants,
+                inhabitant_provider,
                 source,
             );
             self.add_node(Node::Structural(extends_fact, None));

@@ -257,16 +257,20 @@ impl KernelContext {
                 let typeclass_id = self.type_store.add_typeclass(typeclass);
                 self.type_store.add_type_instance(&acorn_type, typeclass_id);
             }
-            Fact::Extends(typeclass, base_set, provides_inhabitants, _) => {
+            Fact::Extends(typeclass, base_set, inhabitant_provider, _) => {
                 let tc_id = self.type_store.add_typeclass(typeclass);
                 for base in base_set {
                     let base_id = self.type_store.add_typeclass(base);
                     self.type_store.add_typeclass_extends(tc_id, base_id);
                 }
-                // If the typeclass has a constant of the instance type (e.g., point: P),
-                // mark it as providing inhabitants.
-                if *provides_inhabitants {
-                    self.symbol_table.mark_typeclass_inhabited(tc_id);
+                // If we have an explicit provider constant `forall(P: Tc). P`, register it
+                // in the kernel symbol table so inhabitedness can be constructive.
+                if let Some(provider) = inhabitant_provider {
+                    self.symbol_table.add_from(
+                        &provider.clone().to_generic_value(),
+                        NewConstantType::Global,
+                        &mut self.type_store,
+                    );
                 }
             }
             _ => {}

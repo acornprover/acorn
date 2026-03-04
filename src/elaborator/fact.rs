@@ -16,8 +16,13 @@ pub enum Fact {
     Proposition(Arc<Proposition>),
 
     /// The first typeclass extends this set of typeclasses.
-    /// The bool indicates whether the typeclass provides inhabitants (has a constant of the instance type).
-    Extends(Typeclass, HashSet<Typeclass>, bool, Source),
+    /// The optional witness provider is a constant of shape `forall(P: Typeclass). P`.
+    Extends(
+        Typeclass,
+        HashSet<Typeclass>,
+        Option<PotentialValue>,
+        Source,
+    ),
 
     /// The fact that this class is an instance of this typeclass.
     Instance(Datatype, Typeclass, Source),

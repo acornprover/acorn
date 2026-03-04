@@ -115,6 +115,21 @@ impl KernelContext {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> Option<Term> {
+        let mut seen = vec![];
+        self.find_inhabitant_with_seen(var_type, local_context, &mut seen)
+    }
+
+    fn find_inhabitant_with_seen(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+        seen: &mut Vec<Term>,
+    ) -> Option<Term> {
+        if seen.iter().any(|t| t == var_type) {
+            return None;
+        }
+        seen.push(var_type.clone());
+
         if let Some((domain, codomain)) = var_type.as_ref().split_pi() {
             let codomain_term = codomain.to_owned();
             let shifted_codomain = codomain_term.shift_bound(0, -1);
@@ -122,20 +137,27 @@ impl KernelContext {
 
             if domain_term == shifted_codomain {
                 // Identity function inhabits T -> T.
-                return Some(Term::lambda(
+                let result = Some(Term::lambda(
                     domain_term,
                     Term::atom(Atom::BoundVariable(0)),
                 ));
+                seen.pop();
+                return result;
             }
 
             // If codomain is inhabited, a constant function inhabits the Pi type.
-            if let Some(codomain_witness) = self.find_inhabitant(&shifted_codomain, local_context) {
-                return Some(Term::lambda(
+            if let Some(codomain_witness) =
+                self.find_inhabitant_with_seen(&shifted_codomain, local_context, seen)
+            {
+                let result = Some(Term::lambda(
                     domain_term,
                     // Entering a lambda adds one binder depth.
                     codomain_witness.shift_bound(0, 1),
                 ));
+                seen.pop();
+                return result;
             }
+            seen.pop();
             return None;
         }
 
@@ -147,20 +169,19 @@ impl KernelContext {
                 if let Some(constraint_type) = ctx.get_var_type(var_id as usize) {
                     if constraint_type.as_ref().is_type0() {
                         // Unconstrained type variable may be empty.
+                        seen.pop();
                         return None;
                     }
                     if let Some(tc_id) = constraint_type.as_ref().as_typeclass() {
                         if let Some(provider) = self.find_typeclass_provider(tc_id) {
-                            return Some(
+                            let result = Some(
                                 Term::atom(Atom::Symbol(provider))
                                     .apply(std::slice::from_ref(var_type)),
                             );
+                            seen.pop();
+                            return result;
                         }
-                        if self.is_typeclass_marked_inhabited(tc_id) {
-                            // Preserves legacy inhabitedness behavior for typeclass-constrained
-                            // variables even when no explicit provider symbol is available.
-                            return Some(Term::new_true());
-                        }
+                        seen.pop();
                         return None;
                     }
                 }
@@ -168,39 +189,55 @@ impl KernelContext {
         }
 
         if let Some(symbol) = self.symbol_table.get_element_of_type(var_type) {
-            return Some(Term::atom(Atom::Symbol(symbol)));
+            let result = Some(Term::atom(Atom::Symbol(symbol)));
+            seen.pop();
+            return result;
         }
 
-        match var_type.as_ref().get_head_atom() {
+        let result = match var_type.as_ref().get_head_atom() {
             Atom::Symbol(Symbol::Bool) => Some(Term::new_true()),
             // Any concrete type can witness Type0; keep the canonical Bool choice.
             Atom::Symbol(Symbol::Type0) => Some(Term::bool_type()),
             Atom::Symbol(Symbol::Type(ground_id)) => {
                 if let Some(provider) = self.symbol_table.get_type_constructor_witness(*ground_id) {
-                    let mut witness = Term::atom(Atom::Symbol(provider));
-                    let args: Vec<Term> = var_type.iter_args().map(|arg| arg.to_owned()).collect();
-                    if !args.is_empty() {
-                        witness = witness.apply(&args);
+                    if let Some(witness) = self.instantiate_type_constructor_witness(
+                        provider,
+                        var_type,
+                        local_context,
+                        seen,
+                    ) {
+                        Some(witness)
+                    } else if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id)
+                    {
+                        if let Some(provider) = self.find_typeclass_provider(tc_id) {
+                            Some(
+                                Term::atom(Atom::Symbol(provider))
+                                    .apply(std::slice::from_ref(var_type)),
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
-                    return Some(witness);
-                }
-
-                if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id) {
+                } else if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id) {
                     if let Some(provider) = self.find_typeclass_provider(tc_id) {
-                        return Some(
+                        Some(
                             Term::atom(Atom::Symbol(provider))
                                 .apply(std::slice::from_ref(var_type)),
-                        );
+                        )
+                    } else {
+                        None
                     }
-                    if self.is_typeclass_marked_inhabited(tc_id) {
-                        return Some(Term::new_true());
-                    }
+                } else {
+                    None
                 }
-                None
             }
             Atom::Symbol(Symbol::Typeclass(tc_id)) => self.find_type_witness_for_typeclass(*tc_id),
             _ => None,
-        }
+        };
+        seen.pop();
+        result
     }
 
     /// Returns true if we've proven that the given type has at least one element.
@@ -215,6 +252,58 @@ impl KernelContext {
         self.find_inhabitant(var_type, local_context).is_some()
     }
 
+    fn instantiate_type_constructor_witness(
+        &self,
+        provider: Symbol,
+        target_type: &Term,
+        local_context: Option<&LocalContext>,
+        seen: &mut Vec<Term>,
+    ) -> Option<Term> {
+        let mut witness = Term::atom(Atom::Symbol(provider));
+        let mut witness_type = self
+            .symbol_table
+            .get_symbol_type(provider, &self.type_store);
+        let type_args: Vec<Term> = target_type.iter_args().map(|arg| arg.to_owned()).collect();
+        let mut type_arg_index = 0;
+
+        // First apply type-level arguments from the target type to the provider.
+        while let Some((input, _output)) = witness_type.as_ref().split_pi() {
+            let input_type = input.to_owned();
+            if !input_type.as_ref().is_type_param_kind() || type_arg_index >= type_args.len() {
+                break;
+            }
+            let arg = type_args[type_arg_index].clone();
+            witness = witness.apply(std::slice::from_ref(&arg));
+            witness_type = witness_type.type_apply_with_arg(&arg)?;
+            type_arg_index += 1;
+        }
+
+        if witness_type == *target_type {
+            return Some(witness);
+        }
+
+        // Then satisfy any remaining value-level arguments by recursively finding inhabitants.
+        while let Some((input, _output)) = witness_type.as_ref().split_pi() {
+            let input_type = input.to_owned();
+            if input_type.as_ref().is_type_param_kind() {
+                return None;
+            }
+            let arg = self.find_inhabitant_with_seen(&input_type, local_context, seen)?;
+            witness = witness.apply(std::slice::from_ref(&arg));
+            witness_type = witness_type.type_apply_with_arg(&arg)?;
+
+            if witness_type == *target_type {
+                return Some(witness);
+            }
+        }
+
+        if witness_type == *target_type {
+            Some(witness)
+        } else {
+            None
+        }
+    }
+
     fn find_typeclass_provider(&self, tc_id: TypeclassId) -> Option<Symbol> {
         if let Some(symbol) = self.symbol_table.get_typeclass_witness(tc_id) {
             return Some(symbol);
@@ -227,18 +316,6 @@ impl KernelContext {
         None
     }
 
-    fn is_typeclass_marked_inhabited(&self, tc_id: TypeclassId) -> bool {
-        if self.symbol_table.is_typeclass_inhabited(tc_id) {
-            return true;
-        }
-        for base_id in self.type_store.get_typeclass_extends(tc_id) {
-            if self.symbol_table.is_typeclass_inhabited(base_id) {
-                return true;
-            }
-        }
-        false
-    }
-
     fn find_type_witness_for_typeclass(&self, tc_id: TypeclassId) -> Option<Term> {
         if let Some(ground_id) = self.type_store.find_instance_of_typeclass(tc_id) {
             return Some(Term::ground_type(ground_id));
@@ -249,11 +326,13 @@ impl KernelContext {
             }
         }
 
-        if self.is_typeclass_marked_inhabited(tc_id) {
-            // Preserve prior inhabitedness behavior for typeclass-kinded variables when no
-            // concrete instance is known; Bool is a stable canonical type witness.
+        // If the typeclass has an explicit value-level provider `forall(P: Tc). P`,
+        // preserve legacy behavior for kind-level inhabitedness checks by using
+        // a canonical type witness.
+        if self.find_typeclass_provider(tc_id).is_some() {
             return Some(Term::bool_type());
         }
+
         None
     }
 
@@ -1372,5 +1451,38 @@ mod tests {
         let expected = ctx.parse_term("g0(x0)");
         assert_eq!(witness, expected);
         assert!(ctx.provably_inhabited(&p_type, Some(&local_ctx)));
+    }
+
+    #[test]
+    fn test_find_inhabitant_via_constructor_with_value_argument() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::local_context::LocalContext;
+
+        let mut ctx = KernelContext::new();
+        ctx.parse_typeclass("Group");
+        ctx.parse_type_constructor("Subgroup", 1);
+
+        let group_id = ctx.type_store.get_typeclass_id_by_name("Group").unwrap();
+        let subgroup_id = ctx.type_store.get_ground_id_by_name("Subgroup").unwrap();
+
+        // g0 : forall(G: Group). (G -> Bool) -> Subgroup[G]
+        let fun_input = Term::pi(Term::atom(Atom::BoundVariable(0)), Term::bool_type());
+        let subgroup_output =
+            Term::ground_type(subgroup_id).apply(&[Term::atom(Atom::BoundVariable(1))]);
+        let constructor_type = Term::pi(
+            Term::typeclass(group_id),
+            Term::pi(fun_input, subgroup_output),
+        );
+        ctx.symbol_table.add_global_constant(constructor_type);
+
+        let mut local_ctx = LocalContext::empty();
+        local_ctx.push_type(Term::typeclass(group_id));
+        let subgroup_g = Term::ground_type(subgroup_id).apply(&[Term::atom(Atom::FreeVariable(0))]);
+
+        let witness = ctx
+            .find_inhabitant(&subgroup_g, Some(&local_ctx))
+            .expect("expected constructor-based witness");
+        assert_eq!(witness.get_type_with_context(&local_ctx, &ctx), subgroup_g);
+        assert!(ctx.provably_inhabited(&subgroup_g, Some(&local_ctx)));
     }
 }

@@ -230,17 +230,18 @@ impl SymbolTable {
             break;
         }
 
-        // Now current is the "return type" after stripping type/typeclass Pis.
-        // If it's a ground type (possibly applied to arguments), mark it as inhabited.
-        // We skip Pi types because get_head_atom on a Pi type like `T -> Bool` returns
-        // the head of the input type (T), not the function type itself.
-        if !current.is_pi() {
-            if let Atom::Symbol(Symbol::Type(ground_id)) = current.get_head_atom() {
-                self.inhabited_type_constructors.insert(*ground_id);
-                self.inhabited_type_constructor_witnesses
-                    .entry(*ground_id)
-                    .or_insert(symbol);
-            }
+        // Track the eventual codomain after all remaining (value-level) Pi binders.
+        // This lets us use constructor-like symbols with value arguments as inhabitant providers,
+        // e.g. `Subgroup.new : (G -> Bool) -> Subgroup[G]`.
+        let mut result = current;
+        while let Some((_input, output)) = result.split_pi() {
+            result = output;
+        }
+        if let Atom::Symbol(Symbol::Type(ground_id)) = result.get_head_atom() {
+            self.inhabited_type_constructors.insert(*ground_id);
+            self.inhabited_type_constructor_witnesses
+                .entry(*ground_id)
+                .or_insert(symbol);
         }
     }
 
