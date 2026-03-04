@@ -233,7 +233,17 @@ impl KernelContext {
                     None
                 }
             }
-            Atom::Symbol(Symbol::Typeclass(tc_id)) => self.find_type_witness_for_typeclass(*tc_id),
+            Atom::Symbol(Symbol::Typeclass(tc_id)) => {
+                if let Some(ctx) = local_context {
+                    if let Some(witness) = self.find_local_typeclass_witness(*tc_id, ctx) {
+                        Some(witness)
+                    } else {
+                        self.find_type_witness_for_typeclass(*tc_id)
+                    }
+                } else {
+                    self.find_type_witness_for_typeclass(*tc_id)
+                }
+            }
             _ => None,
         };
         seen.pop();
@@ -325,14 +335,21 @@ impl KernelContext {
                 return Some(Term::ground_type(ground_id));
             }
         }
+        None
+    }
 
-        // If the typeclass has an explicit value-level provider `forall(P: Tc). P`,
-        // preserve legacy behavior for kind-level inhabitedness checks by using
-        // a canonical type witness.
-        if self.find_typeclass_provider(tc_id).is_some() {
-            return Some(Term::bool_type());
+    fn find_local_typeclass_witness(
+        &self,
+        required_tc: TypeclassId,
+        local_context: &LocalContext,
+    ) -> Option<Term> {
+        for (var_id, var_type) in local_context.get_var_types().iter().enumerate() {
+            if let Some(var_tc) = var_type.as_ref().as_typeclass() {
+                if var_tc == required_tc || self.type_store.typeclass_extends(var_tc, required_tc) {
+                    return Some(Term::new_variable(var_id as AtomId));
+                }
+            }
         }
-
         None
     }
 
@@ -1425,6 +1442,37 @@ mod tests {
             .apply(&[Term::bool_type()]);
         assert_eq!(witness, expected);
         assert!(ctx.provably_inhabited(&list_bool, None));
+    }
+
+    #[test]
+    fn test_find_inhabitant_for_parametric_type_with_free_type_var() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::local_context::LocalContext;
+
+        let mut ctx = KernelContext::new();
+        ctx.parse_type_constructor("List", 1);
+
+        // g0 : Π(T: Type). List(T)
+        let list_id = ctx.type_store.get_ground_id_by_name("List").unwrap();
+        let nil_type = Term::pi(
+            Term::type_sort(),
+            Term::ground_type(list_id).apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        ctx.symbol_table.add_global_constant(nil_type);
+
+        // Local context has a type parameter x0 : Type0.
+        let mut local_ctx = LocalContext::empty();
+        local_ctx.push_type(Term::type_sort());
+
+        // List(x0) should be inhabited by g0(x0).
+        let list_x0 = Term::ground_type(list_id).apply(&[Term::new_variable(0)]);
+        let witness = ctx
+            .find_inhabitant(&list_x0, Some(&local_ctx))
+            .expect("expected List(x0) witness");
+        let expected = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(&[Term::new_variable(0)]);
+        assert_eq!(witness, expected);
+        assert!(ctx.provably_inhabited(&list_x0, Some(&local_ctx)));
     }
 
     #[test]

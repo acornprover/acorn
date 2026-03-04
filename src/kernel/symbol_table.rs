@@ -230,6 +230,10 @@ impl SymbolTable {
             break;
         }
 
+        // Prefer providers that can produce a value without additional value-level arguments.
+        // If `current` is still a Pi here, the symbol requires value arguments.
+        let has_value_args = current.split_pi().is_some();
+
         // Track the eventual codomain after all remaining (value-level) Pi binders.
         // This lets us use constructor-like symbols with value arguments as inhabitant providers,
         // e.g. `Subgroup.new : (G -> Bool) -> Subgroup[G]`.
@@ -237,11 +241,33 @@ impl SymbolTable {
         while let Some((_input, output)) = result.split_pi() {
             result = output;
         }
-        if let Atom::Symbol(Symbol::Type(ground_id)) = result.get_head_atom() {
+        if depth > 0 && matches!(result.get_head_atom(), Atom::Symbol(Symbol::Type(_))) {
+            let Atom::Symbol(Symbol::Type(ground_id)) = result.get_head_atom() else {
+                unreachable!()
+            };
             self.inhabited_type_constructors.insert(*ground_id);
-            self.inhabited_type_constructor_witnesses
-                .entry(*ground_id)
-                .or_insert(symbol);
+            let existing = self
+                .inhabited_type_constructor_witnesses
+                .get(ground_id)
+                .copied();
+            let replace = match existing {
+                None => true,
+                Some(existing_symbol) => {
+                    if matches!(symbol, Symbol::Synthetic(_, _))
+                        && !matches!(existing_symbol, Symbol::Synthetic(_, _))
+                    {
+                        // Don't let provisional synthetics replace a concrete provider.
+                        false
+                    } else {
+                        // Prefer providers that don't require value-level arguments.
+                        !has_value_args
+                    }
+                }
+            };
+            if replace {
+                self.inhabited_type_constructor_witnesses
+                    .insert(*ground_id, symbol);
+            }
         }
     }
 

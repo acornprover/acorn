@@ -1551,8 +1551,13 @@ impl<'a> Clausifier<'a> {
                 type_param_context.push_type(t);
             }
 
-            // The result term keeps its original bound variable indices
-            let result_term = result_type.to_owned();
+            // Convert stripped type-parameter binders from de Bruijn bound variables
+            // into free variables aligned with `type_param_context`.
+            let mut result_term = result_type.to_owned();
+            for i in (0..type_param_context.len()).rev() {
+                result_term =
+                    result_term.substitute_bound(i as u16, &Term::new_variable(i as AtomId));
+            }
 
             let is_inhabited = self
                 .kernel_context()
