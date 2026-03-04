@@ -14,6 +14,8 @@ Perform a safe rollout for breaking acornlib/certificate format changes.
 - Use the edit tool for proof-file changes (do not use ad-hoc shell text mutation commands).
 - Do not run git commands as part of this workflow.
 - The human handles commit/push/upstream actions.
+- In sandboxed Codex runs, commands that write cache files under `~/acornlib/build` may require escalated permissions.
+- For cache-writing steps, confirm writes actually happened by checking `git -C ~/acornlib status --short`.
 
 ## Workflow (Strict State Machine)
 Treat migration as a state machine. Do not skip states. Do not run commands from later states early.
@@ -85,6 +87,9 @@ Per-iteration checks:
 - Feature mode module check (no cache writes):
   - `cargo run --profile release --features <feature> -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
 
+Permission note:
+- If the cache-writing module check is expected to update `~/acornlib/build` but no files change, rerun that command with escalated permissions.
+
 Exit condition:
 - Whole-project feature probe succeeds:
   - `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
@@ -139,6 +144,10 @@ Actions:
   - `cargo run --profile release -- verify --no-cache-skip`
 - Final validation:
   - `cargo run --profile release --features validate -- reverify`
+
+Permission note:
+- The regeneration step writes `~/acornlib/build/*`; in sandboxed Codex runs, request escalated permissions if needed.
+- After regeneration, verify expected cache updates with `git -C ~/acornlib status --short`.
 
 Next state:
 - `S6_deploy_ready`

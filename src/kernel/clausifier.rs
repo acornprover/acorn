@@ -1323,41 +1323,20 @@ impl<'a> Clausifier<'a> {
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
-            #[cfg(feature = "iite")]
-            {
-                let then_ext =
-                    self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
-                let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
-                let else_ext =
-                    self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
-                let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
-                let result_type = self.term_type_for_normalization(&then_branch, context);
-                let ite_term = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
-                    result_type,
-                    args[1].clone(),
-                    then_branch,
-                    else_branch,
-                ]);
-                return Ok(ExtendedTerm::Term(ite_term));
-            }
-
-            #[cfg(not(feature = "iite"))]
-            {
-                let cond_cnf =
-                    self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
-                let cond_lit = if cond_cnf.is_literal() {
-                    cond_cnf.to_literal().unwrap()
-                } else {
-                    self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
-                };
-                let then_ext =
-                    self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
-                let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
-                let else_ext =
-                    self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
-                let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
-                return Ok(ExtendedTerm::If(cond_lit, then_branch, else_branch));
-            }
+            let then_ext =
+                self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
+            let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
+            let else_ext =
+                self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
+            let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
+            let result_type = self.term_type_for_normalization(&then_branch, context);
+            let ite_term = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+                result_type,
+                args[1].clone(),
+                then_branch,
+                else_branch,
+            ]);
+            return Ok(ExtendedTerm::Term(ite_term));
         }
 
         if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
@@ -1652,91 +1631,7 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    /// Synthesizes a literal from a CNF by creating a new synthetic boolean atom
-    /// and adding clauses that define it to be equivalent to the CNF.
-    /// This uses a Tseitin-style transformation: for CNF C and new atom s,
-    /// we add clauses for s <-> C, which is (s -> C) and (C -> s).
-    #[cfg(not(feature = "iite"))]
-    fn synthesize_literal_from_cnf(
-        &mut self,
-        cnf: Cnf,
-        stack: &Vec<TermBinding>,
-        synth: &mut Vec<(ModuleId, AtomId)>,
-        context: &LocalContext,
-    ) -> Result<Literal, String> {
-        // Create a new synthetic boolean atom with the appropriate function type
-        // based on free variables in the stack.
-        // Keep types as Terms to avoid round-trip conversion through AcornType,
-        // which would lose the original type parameter names.
-        let mut arg_type_terms = vec![];
-        let mut args = vec![];
-        let mut seen_vars = std::collections::HashSet::new();
-
-        for binding in stack.iter() {
-            // Use collect_vars with the context to get variable types
-            for (var_id, closed_type) in binding.term().collect_vars(context) {
-                if seen_vars.insert(var_id) {
-                    let var_term = Term::new_variable(var_id);
-                    args.push(var_term);
-                    arg_type_terms.push(closed_type);
-                }
-            }
-        }
-
-        // Build the function type as a Term: arg1 -> arg2 -> ... -> Bool
-        let mut type_term = Term::bool_type();
-        for arg_type in arg_type_terms.iter().rev() {
-            type_term = Term::pi(arg_type.clone(), type_term);
-        }
-
-        // Add the atom type to the symbol table and declare the synthetic atom
-        let module_id = self.module_id();
-        let atom_id = self
-            .as_mut()?
-            .declare_synthetic_atom_with_type_term(module_id, type_term)?;
-        synth.push(atom_id);
-
-        // Get the synthetic type from the symbol table
-        let (m, i) = atom_id;
-        let synthetic_type = self
-            .kernel_context()
-            .symbol_table
-            .get_type(Symbol::Synthetic(m, i))
-            .clone();
-
-        let atom = Atom::Symbol(Symbol::Synthetic(m, i));
-        let synth_term = Term::new(atom, args);
-        let synth_lit = Literal::from_signed_term(synth_term.clone(), true);
-
-        // Create defining CNF for: s <-> C
-        // This is (s -> C) and (C -> s)
-        // Which is (not s or C) and (not C or s)
-
-        // For (not s or C): add not_s to each clause in C
-        let not_s_implies_c = Cnf::from_literal(synth_lit.negate()).or(cnf.clone());
-
-        // For (C -> s): which is (not C or s)
-        let c_implies_s = cnf.negate().or(Cnf::from_literal(synth_lit.clone()));
-
-        let defining_cnf = not_s_implies_c.and(c_implies_s);
-
-        // Add the definition
-        let type_vars = self.get_type_var_kinds();
-        let num_type_vars = type_vars.len();
-        let clauses = defining_cnf.into_clauses_with_pinned(context, num_type_vars);
-        self.as_mut()?.define_synthetic_atoms(
-            vec![atom_id],
-            type_vars,
-            vec![synthetic_type],
-            clauses,
-            None,
-        )?;
-
-        Ok(synth_lit)
-    }
-
     /// Converts an ExtendedTerm to a simple Term.
-    /// If the ExtendedTerm is an If expression, synthesizes a new atom for it.
     /// The local_context provides variable type information.
     fn extended_term_to_term(
         &mut self,
@@ -1744,7 +1639,6 @@ impl<'a> Clausifier<'a> {
         local_context: &LocalContext,
         synth: &mut Vec<(ModuleId, AtomId)>,
     ) -> Result<Term, String> {
-        #[cfg(feature = "iite")]
         let _ = synth;
         match ext_term {
             ExtendedTerm::Term(t) => Ok(t),
@@ -1754,177 +1648,14 @@ impl<'a> Clausifier<'a> {
                     return Ok(then_term);
                 }
 
-                #[cfg(feature = "iite")]
-                {
-                    let result_type_term =
-                        self.term_type_for_normalization(&then_term, local_context);
-                    let cond_term = self.literal_to_bool_term(&cond_lit, local_context);
-                    Ok(Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
-                        result_type_term,
-                        cond_term,
-                        then_term,
-                        else_term,
-                    ]))
-                }
-
-                #[cfg(not(feature = "iite"))]
-                {
-                    // We need to synthesize a new atom that represents this if-expression
-                    // The defining clauses will be:
-                    // For atom s representing "if cond then then_term else else_term":
-                    // (cond -> s = then_term) and (not cond -> s = else_term)
-                    // Which is (not cond or s = then_term) and (cond or s = else_term)
-
-                    // Determine the type of the result (should be same as then_term and else_term)
-                    // Keep types as Terms to avoid round-trip conversion through AcornType,
-                    // which would lose the original type parameter names.
-                    let result_type_term =
-                        self.term_type_for_normalization(&then_term, local_context);
-
-                    // Create a new synthetic atom with the appropriate function type
-                    // based on free variables in the if-expression
-                    let mut arg_type_terms = vec![];
-                    let mut args = vec![];
-                    let mut seen_vars = std::collections::HashSet::new();
-
-                    // In polymorphic mode, include type parameters as arguments.
-                    // This matches how make_skolem_terms handles polymorphic synthetics.
-                    if let Some(type_var_map) = self.type_var_map() {
-                        let mut entries: Vec<_> = type_var_map.values().collect();
-                        entries.sort_by_key(|(id, _)| *id);
-                        for (var_id, var_type) in entries {
-                            let var_term = Term::new_variable(*var_id);
-                            args.push(var_term);
-                            // Type variables have their kind (TypeSort or typeclass) as their type in the Pi
-                            arg_type_terms.push(var_type.clone());
-                            seen_vars.insert(*var_id);
-                        }
-                    }
-
-                    // Collect free variables from the condition literal
-                    // Skip type parameters (TypeSort or Typeclass) - they're not value arguments
-                    for (var_id, closed_type) in cond_lit.left.collect_vars(local_context) {
-                        if closed_type.as_ref().is_type_param_kind() {
-                            continue;
-                        }
-                        if seen_vars.insert(var_id) {
-                            let var_term = Term::new_variable(var_id);
-                            args.push(var_term);
-                            arg_type_terms.push(closed_type);
-                        }
-                    }
-                    for (var_id, closed_type) in cond_lit.right.collect_vars(local_context) {
-                        if closed_type.as_ref().is_type_param_kind() {
-                            continue;
-                        }
-                        if seen_vars.insert(var_id) {
-                            let var_term = Term::new_variable(var_id);
-                            args.push(var_term);
-                            arg_type_terms.push(closed_type);
-                        }
-                    }
-
-                    // Collect free variables from the then branch
-                    for (var_id, closed_type) in then_term.collect_vars(local_context) {
-                        if closed_type.as_ref().is_type_param_kind() {
-                            continue;
-                        }
-                        if seen_vars.insert(var_id) {
-                            let var_term = Term::new_variable(var_id);
-                            args.push(var_term);
-                            arg_type_terms.push(closed_type);
-                        }
-                    }
-
-                    // Collect free variables from the else branch
-                    for (var_id, closed_type) in else_term.collect_vars(local_context) {
-                        if closed_type.as_ref().is_type_param_kind() {
-                            continue;
-                        }
-                        if seen_vars.insert(var_id) {
-                            let var_term = Term::new_variable(var_id);
-                            args.push(var_term);
-                            arg_type_terms.push(closed_type);
-                        }
-                    }
-
-                    // Convert FreeVariables in types to BoundVariables for the Pi structure.
-                    // This is needed because symbol types use BoundVariable for parameters.
-                    // Type parameter kinds (TypeSort/Typeclass) don't need conversion.
-                    let num_type_params = self.type_var_map().map_or(0, |m| m.len()) as u16;
-                    let mut non_type_param_index = 0u16;
-                    let arg_type_terms: Vec<Term> = arg_type_terms
-                        .into_iter()
-                        .map(|t| {
-                            if t.as_ref().is_type_param_kind() {
-                                t // Type parameter kinds don't need conversion
-                            } else {
-                                let depth = non_type_param_index;
-                                non_type_param_index += 1;
-                                t.convert_free_to_bound_with_depth(num_type_params, depth)
-                            }
-                        })
-                        .collect();
-                    let non_type_param_args = arg_type_terms.len() - num_type_params as usize;
-                    let result_type_term = result_type_term.convert_free_to_bound_with_depth(
-                        num_type_params,
-                        non_type_param_args as u16,
-                    );
-
-                    // Build the function type as a Term: arg1 -> arg2 -> ... -> result_type
-                    let mut type_term = result_type_term.clone();
-                    for arg_type in arg_type_terms.iter().rev() {
-                        type_term = Term::pi(arg_type.clone(), type_term);
-                    }
-
-                    // Add the atom type to the symbol table and declare the synthetic atom
-                    let module_id = self.module_id();
-                    let atom_id = self
-                        .as_mut()?
-                        .declare_synthetic_atom_with_type_term(module_id, type_term)?;
-                    synth.push(atom_id);
-
-                    // Get the synthetic type from the symbol table
-                    let (m, i) = atom_id;
-                    let synthetic_type = self
-                        .kernel_context()
-                        .symbol_table
-                        .get_type(Symbol::Synthetic(m, i))
-                        .clone();
-
-                    let atom = Atom::Symbol(Symbol::Synthetic(m, i));
-                    let synth_term = Term::new(atom, args);
-
-                    // Create defining CNF for the if-expression
-                    // (not cond or synth_term = then_term) and (cond or synth_term = else_term)
-
-                    // First clause: not cond or synth_term = then_term
-                    let then_eq = Literal::new(true, synth_term.clone(), then_term.clone());
-                    let first_clause =
-                        Cnf::from_literal(cond_lit.negate()).or(Cnf::from_literal(then_eq));
-
-                    // Second clause: cond or synth_term = else_term
-                    let else_eq = Literal::new(true, synth_term.clone(), else_term.clone());
-                    let second_clause =
-                        Cnf::from_literal(cond_lit.clone()).or(Cnf::from_literal(else_eq));
-
-                    let defining_cnf = first_clause.and(second_clause);
-
-                    // Add the definition
-                    let type_vars = self.get_type_var_kinds();
-                    let num_type_vars = type_vars.len();
-                    let clauses =
-                        defining_cnf.into_clauses_with_pinned(local_context, num_type_vars);
-                    self.as_mut()?.define_synthetic_atoms(
-                        vec![atom_id],
-                        type_vars,
-                        vec![synthetic_type],
-                        clauses,
-                        None,
-                    )?;
-
-                    Ok(synth_term)
-                }
+                let result_type_term = self.term_type_for_normalization(&then_term, local_context);
+                let cond_term = self.literal_to_bool_term(&cond_lit, local_context);
+                Ok(Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+                    result_type_term,
+                    cond_term,
+                    then_term,
+                    else_term,
+                ]))
             }
             ExtendedTerm::Lambda(_, t) => {
                 Err(format!("cannot convert lambda {} to simple term", t))
@@ -1932,7 +1663,6 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    #[cfg(feature = "iite")]
     fn literal_to_bool_term(&self, literal: &Literal, local_context: &LocalContext) -> Term {
         if literal.is_signed_term() {
             if literal.positive {

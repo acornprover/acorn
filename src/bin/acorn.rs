@@ -191,6 +191,7 @@ enum Command {
     },
 
     /// Reverify all goals, erroring if any goal requires a search
+    #[clap(alias = "check")]
     Reverify {
         /// Target module or file to reverify (can be a filename, module name, or module:line)
         #[clap(
