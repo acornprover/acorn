@@ -310,6 +310,32 @@ fn test_if_then_else_with_true_branch_under_equality() {
 }
 
 #[test]
+fn test_if_then_else_in_boolean_disjunction() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        let a: Bool = axiom
+        let b: Bool = axiom
+        let c: Bool = axiom
+        let d: Bool = axiom
+
+        theorem goal {
+            if a {
+                b
+            } else {
+                c
+            } or d
+        }
+        "#,
+    );
+    let mut norm = KernelContext::new();
+    #[cfg(feature = "iite")]
+    norm.check(&env, "goal", &["ite(Bool, a, b, c) or d"]);
+    #[cfg(not(feature = "iite"))]
+    norm.check(&env, "goal", &["not a or d or b", "d or c or a"]);
+}
+
+#[test]
 fn test_if_then_else_normalization_with_variables() {
     let mut env = Environment::test();
     env.add(
@@ -863,6 +889,9 @@ fn test_if_then_else_with_forall_condition() {
     let mut norm = KernelContext::new();
     // The key thing is that normalization doesn't panic - the forall variable's type must be
     // properly tracked in the context when creating clauses.
+    #[cfg(feature = "iite")]
+    let expected = vec!["T0_0 or one = zero"];
+    #[cfg(not(feature = "iite"))]
     let expected = vec![
         "not s0_0 or p(x0)",
         "not s0_0 or q(x0)",
