@@ -149,9 +149,17 @@ enum Command {
         #[clap(value_name = "LINE")]
         line_positional: Option<u32>,
 
-        /// Don't skip goals based on hash checks
-        #[clap(long, help = "Don't skip goals based on hash checks.")]
-        nohash: bool,
+        /// Don't skip unchanged modules based on manifest hash checks
+        #[clap(
+            long = "no-cache-skip",
+            alias = "nohash",
+            help = "Don't skip unchanged modules based on manifest hash checks."
+        )]
+        no_cache_skip: bool,
+
+        /// Don't write verification results to the cache
+        #[clap(long, help = "Don't write verification results to the cache.")]
+        no_write_cache: bool,
 
         /// Search for a proof at a specific line number (requires target)
         #[clap(
@@ -160,6 +168,10 @@ enum Command {
             value_name = "LINE"
         )]
         line_flag: Option<u32>,
+
+        /// Exit immediately on the first verification failure
+        #[clap(long, help = "Exit immediately on the first verification failure.")]
+        fail_fast: bool,
 
         /// Reject any use of the axiom keyword
         #[clap(
@@ -330,8 +342,10 @@ async fn main() {
         Some(Command::Verify {
             target,
             line_positional,
-            nohash,
+            no_cache_skip,
+            no_write_cache,
             line_flag,
+            fail_fast,
             strict,
             timeout,
         }) => {
@@ -354,7 +368,13 @@ async fn main() {
                 None => None,
             };
 
-            let mut verifier = match Verifier::new(current_dir, ProjectConfig::default(), target) {
+            let config = ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: !no_write_cache,
+            };
+
+            let mut verifier = match Verifier::new(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("{}", e);
@@ -366,7 +386,8 @@ async fn main() {
             verifier.line_selection = line_selection;
             verifier.builder.reverify = false;
             verifier.builder.strict = strict;
-            verifier.builder.check_hashes = !nohash && !strict;
+            verifier.builder.check_hashes = !no_cache_skip && !strict;
+            verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
                 verifier.builder.timeout_secs = t;
             }
