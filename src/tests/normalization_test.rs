@@ -329,9 +329,6 @@ fn test_if_then_else_in_boolean_disjunction() {
         "#,
     );
     let mut norm = KernelContext::new();
-    #[cfg(feature = "iite")]
-    norm.check(&env, "goal", &["ite(Bool, a, b, c) or d"]);
-    #[cfg(not(feature = "iite"))]
     norm.check(&env, "goal", &["not a or d or b", "d or c or a"]);
 }
 
@@ -890,7 +887,7 @@ fn test_if_then_else_with_forall_condition() {
     // The key thing is that normalization doesn't panic - the forall variable's type must be
     // properly tracked in the context when creating clauses.
     #[cfg(feature = "iite")]
-    let expected = vec!["T0_0 or one = zero"];
+    let expected = vec!["ite(T0_0, T0_0, zero, one) = zero"];
     #[cfg(not(feature = "iite"))]
     let expected = vec![
         "not s0_0 or p(x0)",

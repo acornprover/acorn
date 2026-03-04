@@ -469,18 +469,6 @@ impl<'a> Clausifier<'a> {
                         context,
                     );
                 }
-                #[cfg(feature = "iite")]
-                if self
-                    .split_symbol_application(term, Symbol::Ite, 4)
-                    .is_some()
-                {
-                    let inline_ite =
-                        self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
-                    let literal = Literal::from_signed_term(inline_ite, !negate);
-                    return Ok(Cnf::from_literal(literal));
-                }
-
-                #[cfg(not(feature = "iite"))]
                 if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
                     let cond_cnf =
                         self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
@@ -1336,23 +1324,40 @@ impl<'a> Clausifier<'a> {
     ) -> Result<ExtendedTerm, String> {
         if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
             #[cfg(feature = "iite")]
-            let cond_lit = Literal::from_signed_term(args[1].clone(), true);
+            {
+                let then_ext =
+                    self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
+                let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
+                let else_ext =
+                    self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
+                let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
+                let result_type = self.term_type_for_normalization(&then_branch, context);
+                let ite_term = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+                    result_type,
+                    args[1].clone(),
+                    then_branch,
+                    else_branch,
+                ]);
+                return Ok(ExtendedTerm::Term(ite_term));
+            }
 
             #[cfg(not(feature = "iite"))]
-            let cond_cnf = self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
-            #[cfg(not(feature = "iite"))]
-            let cond_lit = if cond_cnf.is_literal() {
-                cond_cnf.to_literal().unwrap()
-            } else {
-                self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
-            };
-            let then_ext =
-                self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
-            let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
-            let else_ext =
-                self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
-            let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
-            return Ok(ExtendedTerm::If(cond_lit, then_branch, else_branch));
+            {
+                let cond_cnf =
+                    self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
+                let cond_lit = if cond_cnf.is_literal() {
+                    cond_cnf.to_literal().unwrap()
+                } else {
+                    self.synthesize_literal_from_cnf(cond_cnf, stack, synth, context)?
+                };
+                let then_ext =
+                    self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
+                let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
+                let else_ext =
+                    self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
+                let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
+                return Ok(ExtendedTerm::If(cond_lit, then_branch, else_branch));
+            }
         }
 
         if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
@@ -1639,8 +1644,9 @@ impl<'a> Clausifier<'a> {
                     return Ok(term.clone());
                 }
                 Err(format!(
-                    "term '{}' cannot be represented as a simple term",
-                    term
+                    "term cannot be represented as a simple term (has_free_var={}, has_bound_var={})",
+                    term.has_free_variable(),
+                    term.has_bound_variable()
                 ))
             }
         }

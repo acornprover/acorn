@@ -863,10 +863,10 @@ impl Certificate {
         );
         let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "claim-with-args body normalized to {} clauses (expected 1)",
-                clauses.len()
-            )));
+            // This lambda form only round-trips to `Claim { clause, var_map }` when
+            // the body clausifies to a single clause. If it doesn't, let callers
+            // fall back to plain claim parsing.
+            return Ok(None);
         }
         let clause = clauses
             .into_iter()

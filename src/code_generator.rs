@@ -1996,6 +1996,13 @@ impl CodeGenerator<'_> {
                 let mut left_expr = self.value_to_expr(left, false, names)?;
                 let mut right_expr = self.value_to_expr(right, false, names)?;
                 let token = op.token_type().generate();
+                let paren = |expr: Expression| {
+                    Expression::Grouping(
+                        TokenType::LeftParen.generate(),
+                        Box::new(expr),
+                        TokenType::RightParen.generate(),
+                    )
+                };
 
                 if let AcornValue::Binary(left_op, _, _) = left.as_ref() {
                     if left_op.token_type().binary_precedence()
@@ -2003,10 +2010,11 @@ impl CodeGenerator<'_> {
                     {
                         // We want the left op to happen first, but its precedence is lower.
                         // So we wrap the left expression in parentheses.
-                        let open = TokenType::LeftParen.generate();
-                        let close = TokenType::RightParen.generate();
-                        left_expr = Expression::Grouping(open, Box::new(left_expr), close);
+                        left_expr = paren(left_expr);
                     }
+                }
+                if let AcornValue::IfThenElse(_, _, _) = left.as_ref() {
+                    left_expr = paren(left_expr);
                 }
 
                 if let AcornValue::Binary(right_op, _, _) = right.as_ref() {
@@ -2015,10 +2023,11 @@ impl CodeGenerator<'_> {
                     {
                         // We want the right op to happen first, but its precedence is not higher.
                         // So we wrap the right expression in parentheses.
-                        let open = TokenType::LeftParen.generate();
-                        let close = TokenType::RightParen.generate();
-                        right_expr = Expression::Grouping(open, Box::new(right_expr), close);
+                        right_expr = paren(right_expr);
                     }
+                }
+                if let AcornValue::IfThenElse(_, _, _) = right.as_ref() {
+                    right_expr = paren(right_expr);
                 }
 
                 Ok(Expression::Binary(
@@ -3044,6 +3053,23 @@ mod tests {
             "#,
         );
         p.check_goal_code("main", "goal", "x + -x = B.zero + B.zero");
+    }
+
+    #[test]
+    fn test_codegen_parenthesizes_if_in_binary_expression() {
+        let mut p = Project::new_mock();
+        p.mock(
+            "/mock/main.ac",
+            r#"
+            type Nat: axiom
+            let b: Nat = axiom
+
+            theorem goal(a: Bool) {
+                if a { b } else { b } != b
+            }
+            "#,
+        );
+        p.check_goal_code("main", "goal", "(if a { b } else { b }) != b");
     }
 
     #[test]

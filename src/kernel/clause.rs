@@ -703,6 +703,54 @@ impl Clause {
         }
     }
 
+    fn simplify_ite_term(term: &Term) -> Term {
+        fn recurse(term: &Term) -> Term {
+            let rebuilt = match term.as_ref().decompose() {
+                Decomposition::Atom(_) => term.clone(),
+                Decomposition::Application(function, argument) => {
+                    let function = recurse(&function.to_owned());
+                    let argument = recurse(&argument.to_owned());
+                    function.apply(&[argument])
+                }
+                Decomposition::Pi(input, output) => {
+                    let input = recurse(&input.to_owned());
+                    let output = recurse(&output.to_owned());
+                    Term::pi(input, output)
+                }
+                Decomposition::Lambda(input, body) => {
+                    let input = recurse(&input.to_owned());
+                    let body = recurse(&body.to_owned());
+                    Term::lambda(input, body)
+                }
+                Decomposition::ForAll(binder_type, body) => {
+                    let binder_type = recurse(&binder_type.to_owned());
+                    let body = recurse(&body.to_owned());
+                    Term::forall(binder_type, body)
+                }
+                Decomposition::Exists(binder_type, body) => {
+                    let binder_type = recurse(&binder_type.to_owned());
+                    let body = recurse(&body.to_owned());
+                    Term::exists(binder_type, body)
+                }
+            };
+
+            if let Some(args) = Clause::split_symbol_application(&rebuilt, Symbol::Ite, 4) {
+                if args[1].is_true() {
+                    return args[2].clone();
+                }
+                if args[1] == Term::new_false() {
+                    return args[3].clone();
+                }
+                if args[2] == args[3] {
+                    return args[2].clone();
+                }
+            }
+            rebuilt
+        }
+
+        recurse(term)
+    }
+
     fn with_replaced_literal(
         &self,
         index: usize,
@@ -725,6 +773,52 @@ impl Clause {
 
         for i in 0..self.literals.len() {
             let literal = &self.literals[i];
+
+            // General reduction for if-then-else terms:
+            // ite(T, true, t, e)  -> t
+            // ite(T, false, t, e) -> e
+            // ite(T, c, t, t)     -> t
+            let reduced_left = Self::simplify_ite_term(&literal.left);
+            if reduced_left != literal.left {
+                let reduced_lit =
+                    Literal::new(literal.positive, reduced_left, literal.right.clone());
+                answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+            }
+            let reduced_right = Self::simplify_ite_term(&literal.right);
+            if reduced_right != literal.right {
+                let reduced_lit =
+                    Literal::new(literal.positive, literal.left.clone(), reduced_right);
+                answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+            }
+
+            // Branch reduction for equalities/inequalities with ITE:
+            // ite(T, c, t, e) = v   -> (not c or t = v) and (c or e = v)
+            // ite(T, c, t, e) != v  -> (not c or t != v) and (c or e != v)
+            if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Ite, 4) {
+                let condition = args[1].clone();
+                let then_lit =
+                    Literal::new(literal.positive, args[2].clone(), literal.right.clone());
+                let else_lit =
+                    Literal::new(literal.positive, args[3].clone(), literal.right.clone());
+                let replacements = vec![
+                    vec![Literal::negative(condition.clone()), then_lit],
+                    vec![Literal::positive(condition), else_lit],
+                ];
+                answer.extend(self.with_replaced_literal(i, replacements));
+            }
+            if let Some(args) = Self::split_symbol_application(&literal.right, Symbol::Ite, 4) {
+                let condition = args[1].clone();
+                let then_lit =
+                    Literal::new(literal.positive, literal.left.clone(), args[2].clone());
+                let else_lit =
+                    Literal::new(literal.positive, literal.left.clone(), args[3].clone());
+                let replacements = vec![
+                    vec![Literal::negative(condition.clone()), then_lit],
+                    vec![Literal::positive(condition), else_lit],
+                ];
+                answer.extend(self.with_replaced_literal(i, replacements));
+            }
+
             if literal
                 .left
                 .get_type_with_context(&self.context, kernel_context)
@@ -1230,6 +1324,110 @@ mod tests {
             negative_reductions.contains(&expected_negative),
             "expected reduction to include {}",
             expected_negative
+        );
+    }
+
+    #[test]
+    fn test_reduction_collapses_ite_with_equal_branches_in_literal() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1", "c2"], "Bool");
+
+        let cond = kctx.parse_term("c0");
+        let x = kctx.parse_term("c1");
+        let y = kctx.parse_term("c2");
+        let ite = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+            Term::bool_type(),
+            cond,
+            x.clone(),
+            x.clone(),
+        ]);
+
+        let clause = Clause::new(
+            vec![Literal::equals(ite, y.clone())],
+            &LocalContext::empty(),
+        );
+        let reductions = clause.boolean_reductions(&kctx);
+        let expected = Clause::new(vec![Literal::equals(x, y)], &LocalContext::empty());
+        assert!(
+            reductions.contains(&expected),
+            "expected reduction to include {}",
+            expected
+        );
+    }
+
+    #[test]
+    fn test_reduction_collapses_ite_with_true_condition_in_literal() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1", "c2"], "Bool");
+
+        let x = kctx.parse_term("c1");
+        let y = kctx.parse_term("c2");
+        let ite = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+            Term::bool_type(),
+            Term::new_true(),
+            x.clone(),
+            y.clone(),
+        ]);
+
+        let clause = Clause::new(
+            vec![Literal::equals(ite, y.clone())],
+            &LocalContext::empty(),
+        );
+        let reductions = clause.boolean_reductions(&kctx);
+        let expected = Clause::new(vec![Literal::equals(x, y)], &LocalContext::empty());
+        assert!(
+            reductions.contains(&expected),
+            "expected reduction to include {}",
+            expected
+        );
+    }
+
+    #[test]
+    fn test_reduction_splits_ite_equality_into_branch_clauses() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1", "c2", "c3"], "Bool");
+
+        let cond = kctx.parse_term("c0");
+        let then_branch = kctx.parse_term("c1");
+        let else_branch = kctx.parse_term("c2");
+        let target = kctx.parse_term("c3");
+        let ite = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+            Term::bool_type(),
+            cond.clone(),
+            then_branch.clone(),
+            else_branch.clone(),
+        ]);
+
+        let clause = Clause::new(
+            vec![Literal::equals(ite, target.clone())],
+            &LocalContext::empty(),
+        );
+        let reductions = clause.boolean_reductions(&kctx);
+
+        let then_clause = Clause::new(
+            vec![
+                Literal::negative(cond.clone()),
+                Literal::equals(then_branch, target.clone()),
+            ],
+            &LocalContext::empty(),
+        );
+        let else_clause = Clause::new(
+            vec![
+                Literal::positive(cond),
+                Literal::equals(else_branch, target),
+            ],
+            &LocalContext::empty(),
+        );
+
+        assert!(
+            reductions.contains(&then_clause),
+            "expected reduction to include {}",
+            then_clause
+        );
+        assert!(
+            reductions.contains(&else_clause),
+            "expected reduction to include {}",
+            else_clause
         );
     }
 }
