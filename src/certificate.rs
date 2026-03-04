@@ -27,7 +27,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::term::Term;
+use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::Project;
@@ -630,6 +630,24 @@ impl Certificate {
         // lambda body and argument declarations use the same identifiers, even when
         // lower indices (e.g. x0, x1) are already occupied in bindings.
         let mut next_value_decl_id: u32 = 0;
+        let mut value_decl_name_by_var: Vec<Option<String>> = vec![None; used_var_count];
+
+        for var_id in 0..used_var_count {
+            let var_type = local_context
+                .get_var_type(var_id)
+                .expect("local context should provide all variable types");
+            if var_type.as_ref().is_type_param_kind() {
+                continue;
+            }
+            if claim.var_map.get_mapping(var_id as AtomId).is_none() {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "missing claim var map entry for x{}",
+                    var_id
+                )));
+            }
+            let var_name = bindings.next_indexed_var('x', &mut next_value_decl_id);
+            value_decl_name_by_var[var_id] = Some(var_name);
+        }
 
         for var_id in 0..used_var_count {
             let var_type = local_context
@@ -698,13 +716,25 @@ impl Certificate {
                 ))
             })?;
 
-            let var_name = bindings.next_indexed_var('x', &mut next_value_decl_id);
+            let var_name = value_decl_name_by_var[var_id]
+                .as_ref()
+                .expect("value variable names should be precomputed")
+                .clone();
             let acorn_type =
                 kernel_context.denormalize_type_with_context(var_type, local_context, false);
             let type_code = generator.type_to_expr(&acorn_type)?.to_string();
             value_decl_codes.push(format!("{}: {}", var_name, type_code));
 
             let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
+            if let Decomposition::Atom(Atom::FreeVariable(mapped_var_id)) =
+                substituted_arg_term.as_ref().decompose()
+            {
+                if let Some(Some(mapped_name)) = value_decl_name_by_var.get(*mapped_var_id as usize)
+                {
+                    value_arg_codes.push(mapped_name.clone());
+                    continue;
+                }
+            }
             let arg_value = kernel_context.denormalize_term_with_context(
                 &substituted_arg_term,
                 local_context,

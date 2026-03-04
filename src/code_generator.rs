@@ -480,23 +480,55 @@ impl SyntheticNameSet {
         bindings: &BindingMap,
         kernel_context: &mut KernelContext,
         concrete_type: &Term,
+        local_context: &LocalContext,
     ) -> Result<Option<Symbol>> {
-        if self.arbitrary_symbols.contains_key(concrete_type) {
-            return Ok(None);
+        #[cfg(feature = "naw")]
+        let _ = bindings;
+        #[cfg(not(feature = "naw"))]
+        let _ = local_context;
+
+        #[cfg(feature = "naw")]
+        {
+            if kernel_context
+                .find_inhabitant(concrete_type, Some(local_context))
+                .is_some()
+            {
+                return Ok(None);
+            }
+            if Self::find_local_witness_for_concrete_type(
+                kernel_context,
+                concrete_type,
+                local_context,
+            )?
+            .is_some()
+            {
+                return Ok(None);
+            }
+            return Err(Error::GeneratedBadCode(format!(
+                "cannot generate certificate under --features naw: no explicit inhabitant found for type '{}'",
+                concrete_type
+            )));
         }
-        let acorn_type = kernel_context
-            .type_store
-            .type_term_to_acorn_type(concrete_type);
-        let name = bindings.next_indexed_var('s', &mut self.next_s);
-        let cname = ConstantName::Unqualified(bindings.module_id(), name);
-        let atom = kernel_context.add_scoped_constant(cname, &acorn_type, None);
-        let Atom::Symbol(symbol) = atom else {
-            return Err(Error::internal(
-                "add_scoped_constant did not produce a symbol",
-            ));
-        };
-        self.arbitrary_symbols.insert(concrete_type.clone(), symbol);
-        Ok(Some(symbol))
+
+        #[cfg(not(feature = "naw"))]
+        {
+            if self.arbitrary_symbols.contains_key(concrete_type) {
+                return Ok(None);
+            }
+            let acorn_type = kernel_context
+                .type_store
+                .type_term_to_acorn_type(concrete_type);
+            let name = bindings.next_indexed_var('s', &mut self.next_s);
+            let cname = ConstantName::Unqualified(bindings.module_id(), name);
+            let atom = kernel_context.add_scoped_constant(cname, &acorn_type, None);
+            let Atom::Symbol(symbol) = atom else {
+                return Err(Error::internal(
+                    "add_scoped_constant did not produce a symbol",
+                ));
+            };
+            self.arbitrary_symbols.insert(concrete_type.clone(), symbol);
+            Ok(Some(symbol))
+        }
     }
 
     fn concrete_type_for_term(
@@ -512,6 +544,25 @@ impl SyntheticNameSet {
             .map_err(Error::internal)
     }
 
+    #[cfg(feature = "naw")]
+    fn find_local_witness_for_concrete_type(
+        kernel_context: &KernelContext,
+        concrete_type: &Term,
+        local_context: &LocalContext,
+    ) -> Result<Option<Term>> {
+        for (var_id, candidate_type) in local_context.get_var_types().iter().enumerate() {
+            if candidate_type.as_ref().is_type_param_kind() {
+                continue;
+            }
+            let candidate_concrete =
+                Self::concrete_type_for_term(kernel_context, candidate_type, local_context)?;
+            if candidate_concrete == *concrete_type {
+                return Ok(Some(Term::new_variable(var_id as AtomId)));
+            }
+        }
+        Ok(None)
+    }
+
     fn ensure_arbitrary_for_variable_type(
         &mut self,
         bindings: &BindingMap,
@@ -523,20 +574,31 @@ impl SyntheticNameSet {
             return Ok(None);
         }
         let concrete_type = Self::concrete_type_for_term(kernel_context, var_type, local_context)?;
-        self.ensure_arbitrary_for_type(bindings, kernel_context, &concrete_type)
+        self.ensure_arbitrary_for_type(bindings, kernel_context, &concrete_type, local_context)
     }
 
-    fn symbol_for_variable_type(
+    fn term_for_variable_type(
         &self,
         kernel_context: &KernelContext,
         var_type: &Term,
         local_context: &LocalContext,
-    ) -> Result<Option<Symbol>> {
+    ) -> Result<Option<Term>> {
         if var_type.as_ref().is_type_param_kind() {
             return Ok(None);
         }
         let concrete_type = Self::concrete_type_for_term(kernel_context, var_type, local_context)?;
-        Ok(self.arbitrary_symbols.get(&concrete_type).copied())
+        #[cfg(feature = "naw")]
+        {
+            Ok(kernel_context.find_inhabitant(&concrete_type, Some(local_context)))
+        }
+        #[cfg(not(feature = "naw"))]
+        {
+            Ok(self
+                .arbitrary_symbols
+                .get(&concrete_type)
+                .copied()
+                .map(|symbol| Term::atom(Atom::Symbol(symbol))))
+        }
     }
 
     fn add_arbitrary_for_term(
@@ -666,10 +728,10 @@ impl SyntheticNameSet {
             let var_type = local_context
                 .get_var_type(i)
                 .expect("LocalContext should have all variable types");
-            if let Some(symbol) =
-                self.symbol_for_variable_type(kernel_context, var_type, local_context)?
+            if let Some(term) =
+                self.term_for_variable_type(kernel_context, var_type, local_context)?
             {
-                var_map.set(i as AtomId, Term::atom(Atom::Symbol(symbol)));
+                var_map.set(i as AtomId, term);
             }
         }
         Ok(var_map)
@@ -1234,10 +1296,10 @@ impl CodeGenerator<'_> {
             let var_type = replacement_context
                 .get_var_type(var_id)
                 .expect("replacement context should provide all var types");
-            if let Some(symbol) =
-                names.symbol_for_variable_type(kernel_context, var_type, replacement_context)?
+            if let Some(term) =
+                names.term_for_variable_type(kernel_context, var_type, replacement_context)?
             {
-                replacement_arbitrary_map.set(var_id as AtomId, Term::atom(Atom::Symbol(symbol)));
+                replacement_arbitrary_map.set(var_id as AtomId, term);
             }
         }
 
@@ -1327,10 +1389,10 @@ impl CodeGenerator<'_> {
             if var_type.as_ref().is_type_param_kind() {
                 continue;
             }
-            if let Some(symbol) =
-                names.symbol_for_variable_type(kernel_context, var_type, generic_context)?
+            if let Some(term) =
+                names.term_for_variable_type(kernel_context, var_type, generic_context)?
             {
-                claim_var_map.set(var_id, Term::atom(Atom::Symbol(symbol)));
+                claim_var_map.set(var_id, term);
             }
         }
 
