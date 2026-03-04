@@ -27,18 +27,18 @@ impl TermBinding {
     }
 }
 
-/// Inner enum for DeepClausifier to support both ref and mut access to kernel state.
-enum DeepClausifierContext<'a> {
+/// Inner enum for Clausifier to support both ref and mut access to kernel state.
+enum ClausifierContext<'a> {
     Ref(&'a KernelContext),
     Mut(&'a mut KernelContext),
 }
 
-/// A DeepClausifier holds state for a single clausification operation.
+/// A Clausifier holds state for a single clausification operation.
 /// It combines a reference to the KernelContext with operation-scoped state like
 /// type_var_map. This lets us share methods between mutable and non-mutable kernel
 /// access while keeping per-operation state separate from persistent kernel state.
-pub struct DeepClausifier<'a> {
-    inner: DeepClausifierContext<'a>,
+pub struct Clausifier<'a> {
+    inner: ClausifierContext<'a>,
 
     /// Type variable mapping for polymorphic normalization.
     /// Maps type parameter names to (variable id, kind).
@@ -50,119 +50,29 @@ pub struct DeepClausifier<'a> {
     module_id: ModuleId,
 }
 
-/// A shallow clausifier for terms already in conjunction-of-disjunctions shape.
-///
-/// This path is intentionally conservative: it returns `Ok(None)` when the input
-/// term is not already close to CNF, and callers can then fall back to
-/// `DeepClausifier`.
-pub struct ShallowClausifier<'a> {
-    inner: DeepClausifier<'a>,
-}
-
-impl<'a> ShallowClausifier<'a> {
-    pub fn new_mut(
-        kernel_context: &'a mut KernelContext,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-        module_id: ModuleId,
-    ) -> Self {
-        ShallowClausifier {
-            inner: DeepClausifier::new_mut(kernel_context, type_var_map, module_id),
-        }
-    }
-
-    pub fn try_clausify_term(
-        &mut self,
-        term: &Term,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
-    ) -> Result<Option<Vec<Clause>>, String> {
-        if !self.is_shallow_cnf_shape(term)? {
-            return Ok(None);
-        }
-        self.inner.clausify_term(term, synthesized).map(Some)
-    }
-
-    fn is_shallow_cnf_shape(&self, term: &Term) -> Result<bool, String> {
-        if let Some(args) = self.inner.split_symbol_application(term, Symbol::And, 2) {
-            return Ok(self.is_shallow_cnf_shape(&args[0])? && self.is_shallow_cnf_shape(&args[1])?);
-        }
-        self.is_shallow_clause_shape(term)
-    }
-
-    fn is_shallow_clause_shape(&self, term: &Term) -> Result<bool, String> {
-        if let Some(args) = self.inner.split_symbol_application(term, Symbol::Or, 2) {
-            return Ok(self.is_shallow_clause_shape(&args[0])?
-                && self.is_shallow_clause_shape(&args[1])?);
-        }
-        self.is_shallow_literal_shape(term)
-    }
-
-    fn is_shallow_literal_shape(&self, term: &Term) -> Result<bool, String> {
-        if let Some(args) = self.inner.split_symbol_application(term, Symbol::Not, 1) {
-            return self.is_shallow_atomic_bool_shape(&args[0]);
-        }
-        self.is_shallow_atomic_bool_shape(term)
-    }
-
-    fn is_shallow_atomic_bool_shape(&self, term: &Term) -> Result<bool, String> {
-        match term.as_ref().decompose() {
-            crate::kernel::term::Decomposition::ForAll(_, _)
-            | crate::kernel::term::Decomposition::Exists(_, _)
-            | crate::kernel::term::Decomposition::Lambda(_, _) => return Ok(false),
-            _ => {}
-        }
-
-        if self
-            .inner
-            .split_symbol_application(term, Symbol::Not, 1)
-            .is_some()
-            || self
-                .inner
-                .split_symbol_application(term, Symbol::And, 2)
-                .is_some()
-            || self
-                .inner
-                .split_symbol_application(term, Symbol::Or, 2)
-                .is_some()
-            || self
-                .inner
-                .split_symbol_application(term, Symbol::Ite, 4)
-                .is_some()
-        {
-            return Ok(false);
-        }
-
-        if let Some(args) = self.inner.split_symbol_application(term, Symbol::Eq, 3) {
-            return Ok(self.inner.try_simple_term_to_term(&args[1])?.is_some()
-                && self.inner.try_simple_term_to_term(&args[2])?.is_some());
-        }
-
-        Ok(self.inner.try_simple_term_to_signed_term(term)?.is_some())
-    }
-}
-
-impl<'a> DeepClausifier<'a> {
-    /// Create a new DeepClausifier with immutable access.
+impl<'a> Clausifier<'a> {
+    /// Create a new Clausifier with immutable access.
     /// Uses ModuleId(0) as a placeholder since immutable contexts don't create synthetics.
     pub fn new_ref(
         kernel_context: &'a KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Self {
-        DeepClausifier {
-            inner: DeepClausifierContext::Ref(kernel_context),
+        Clausifier {
+            inner: ClausifierContext::Ref(kernel_context),
             type_var_map,
             module_id: ModuleId(0),
         }
     }
 
-    /// Create a new DeepClausifier with mutable access.
+    /// Create a new Clausifier with mutable access.
     /// The module_id determines which module synthetics will be scoped to.
     pub fn new_mut(
         kernel_context: &'a mut KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
         module_id: ModuleId,
     ) -> Self {
-        DeepClausifier {
-            inner: DeepClausifierContext::Mut(kernel_context),
+        Clausifier {
+            inner: ClausifierContext::Mut(kernel_context),
             type_var_map,
             module_id,
         }
@@ -170,15 +80,15 @@ impl<'a> DeepClausifier<'a> {
 
     fn as_ref(&self) -> &KernelContext {
         match &self.inner {
-            DeepClausifierContext::Ref(kernel_context) => kernel_context,
-            DeepClausifierContext::Mut(kernel_context) => kernel_context,
+            ClausifierContext::Ref(kernel_context) => kernel_context,
+            ClausifierContext::Mut(kernel_context) => kernel_context,
         }
     }
 
     fn as_mut(&mut self) -> Result<&mut KernelContext, String> {
         match &mut self.inner {
-            DeepClausifierContext::Ref(_) => Err("Cannot mutate a DeepClausifier::Ref".to_string()),
-            DeepClausifierContext::Mut(kernel_context) => Ok(kernel_context),
+            ClausifierContext::Ref(_) => Err("Cannot mutate a Clausifier::Ref".to_string()),
+            ClausifierContext::Mut(kernel_context) => Ok(kernel_context),
         }
     }
 

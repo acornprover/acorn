@@ -22,7 +22,7 @@ use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
-use crate::kernel::clausifier::DeepClausifier;
+use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::term::Term;
@@ -279,7 +279,7 @@ impl Certificate {
                 }
                 let module_id = bindings.module_id();
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
-                let mut view = DeepClausifier::new_mut(kernel_context.to_mut(), None, module_id);
+                let mut view = Clausifier::new_mut(kernel_context.to_mut(), None, module_id);
                 let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
@@ -850,7 +850,7 @@ impl Certificate {
             &generic_value,
             type_var_map.as_ref(),
         )?;
-        let mut view = DeepClausifier::new_mut(
+        let mut view = Clausifier::new_mut(
             &mut kernel_context_clone,
             type_var_map,
             bindings.module_id(),
@@ -879,7 +879,7 @@ impl Certificate {
         for (var_id, arg) in args.iter().enumerate() {
             let term = elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
             let mut term_view =
-                DeepClausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
+                Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
             let term = term_view.clausify_term_to_simple_term(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
