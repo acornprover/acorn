@@ -1627,10 +1627,23 @@ impl<'a> Clausifier<'a> {
             Some((term, true)) => Ok(term),
             // `false` is represented as `not true` in signed-term form.
             Some((term, false)) if term == Term::new_true() => Ok(Term::new_false()),
-            Some(_) | None => Err(format!(
-                "term '{}' cannot be represented as a simple term",
-                term
-            )),
+            Some(_) | None => {
+                #[cfg(feature = "ibf")]
+                {
+                    // In IBF mode we may keep boolean formulas inline (e.g. `and(a, b)`).
+                    // Allow those to pass through claim reconstruction as raw terms.
+                    if !term.has_any_variable()
+                        && self.term_type_for_normalization(term, &LocalContext::empty())
+                            == Term::bool_type()
+                    {
+                        return Ok(term.clone());
+                    }
+                }
+                Err(format!(
+                    "term '{}' cannot be represented as a simple term",
+                    term
+                ))
+            }
         }
     }
 

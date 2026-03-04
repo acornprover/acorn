@@ -6,6 +6,10 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+#[cfg(feature = "ibf")]
+use crate::kernel::symbol::Symbol;
+#[cfg(feature = "ibf")]
+use crate::kernel::term::Decomposition;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
 
@@ -690,6 +694,34 @@ impl Clause {
     /// Generates all clauses that can be derived from this clause using boolean reduction.
     /// Boolean reduction is replacing a boolean equality with a disjunction that it implies.
     /// Returns the resulting literals for each application.
+    #[cfg(feature = "ibf")]
+    fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
+        let (head, args) = term.as_ref().split_application_multi()?;
+        if args.len() != arity {
+            return None;
+        }
+        match head.as_ref().decompose() {
+            Decomposition::Atom(Atom::Symbol(s)) if *s == symbol => Some(args),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "ibf")]
+    fn with_replaced_literal(
+        &self,
+        index: usize,
+        replacements: Vec<Vec<Literal>>,
+    ) -> Vec<Vec<Literal>> {
+        let mut out = Vec::with_capacity(replacements.len());
+        for mut replacement_literals in replacements {
+            let mut literals = self.literals[..index].to_vec();
+            literals.append(&mut replacement_literals);
+            literals.extend_from_slice(&self.literals[index + 1..]);
+            out.push(literals);
+        }
+        out
+    }
+
     pub fn find_boolean_reductions(&self, kernel_context: &KernelContext) -> Vec<Vec<Literal>> {
         let bool_type = Term::bool_type();
 
@@ -705,6 +737,55 @@ impl Clause {
                 continue;
             }
             if literal.right.is_true() {
+                #[cfg(feature = "ibf")]
+                {
+                    if let Some(args) =
+                        Self::split_symbol_application(&literal.left, Symbol::Not, 1)
+                    {
+                        let reduced = self.with_replaced_literal(
+                            i,
+                            vec![vec![Literal::from_signed_term(
+                                args[0].clone(),
+                                !literal.positive,
+                            )]],
+                        );
+                        answer.extend(reduced);
+                        continue;
+                    }
+
+                    if let Some(args) =
+                        Self::split_symbol_application(&literal.left, Symbol::And, 2)
+                    {
+                        let left = args[0].clone();
+                        let right = args[1].clone();
+                        let replacements = if literal.positive {
+                            vec![
+                                vec![Literal::positive(left)],
+                                vec![Literal::positive(right)],
+                            ]
+                        } else {
+                            vec![vec![Literal::negative(left), Literal::negative(right)]]
+                        };
+                        answer.extend(self.with_replaced_literal(i, replacements));
+                        continue;
+                    }
+
+                    if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Or, 2)
+                    {
+                        let left = args[0].clone();
+                        let right = args[1].clone();
+                        let replacements = if literal.positive {
+                            vec![vec![Literal::positive(left), Literal::positive(right)]]
+                        } else {
+                            vec![
+                                vec![Literal::negative(left)],
+                                vec![Literal::negative(right)],
+                            ]
+                        };
+                        answer.extend(self.with_replaced_literal(i, replacements));
+                        continue;
+                    }
+                }
                 continue;
             }
             // We make two copies since there are two ways to do it
@@ -1070,5 +1151,50 @@ mod tests {
         };
         assert_eq!(longer.num_args(), 2, "g0 should have 2 args after peeling");
         assert_eq!(shorter.num_args(), 1, "g1 should have 1 arg after peeling");
+    }
+
+    #[cfg(feature = "ibf")]
+    #[test]
+    fn test_boolean_reduction_signed_and_splits_clause() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let a = kctx.parse_term("c0");
+        let b = kctx.parse_term("c1");
+        let clause = Clause::new(
+            vec![Literal::positive(Term::and(a.clone(), b.clone()))],
+            &LocalContext::empty(),
+        );
+        let reductions = clause.boolean_reductions(&kctx);
+
+        let expected_a = Clause::new(vec![Literal::positive(a)], &LocalContext::empty());
+        let expected_b = Clause::new(vec![Literal::positive(b)], &LocalContext::empty());
+        assert!(
+            reductions.contains(&expected_a),
+            "expected reduction to include {}",
+            expected_a
+        );
+        assert!(
+            reductions.contains(&expected_b),
+            "expected reduction to include {}",
+            expected_b
+        );
+    }
+
+    #[cfg(feature = "ibf")]
+    #[test]
+    fn test_boolean_reduction_signed_not_flips_sign() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool");
+
+        let a = kctx.parse_term("c0");
+        let clause = Clause::new(
+            vec![Literal::positive(Term::not(a.clone()))],
+            &LocalContext::empty(),
+        );
+        let reductions = clause.boolean_reductions(&kctx);
+
+        let expected = Clause::new(vec![Literal::negative(a)], &LocalContext::empty());
+        assert_eq!(reductions, vec![expected]);
     }
 }
