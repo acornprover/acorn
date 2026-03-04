@@ -745,6 +745,19 @@ impl Clause {
                     continue;
                 }
 
+                #[cfg(feature = "ndc")]
+                if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Eq, 3) {
+                    let eq_left = args[1].clone();
+                    let eq_right = args[2].clone();
+                    let reduced_lit = if literal.positive {
+                        Literal::equals(eq_left, eq_right)
+                    } else {
+                        Literal::not_equals(eq_left, eq_right)
+                    };
+                    answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+                    continue;
+                }
+
                 if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::And, 2) {
                     let left = args[0].clone();
                     let right = args[1].clone();
@@ -1182,5 +1195,43 @@ mod tests {
 
         let expected = Clause::new(vec![Literal::negative(a)], &LocalContext::empty());
         assert_eq!(reductions, vec![expected]);
+    }
+
+    #[cfg(feature = "ndc")]
+    #[test]
+    fn test_boolean_reduction_eq_signed_to_equality_literal() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let left = kctx.parse_term("c0");
+        let right = kctx.parse_term("c1");
+        let eq_term = Term::eq(Term::bool_type(), left.clone(), right.clone());
+
+        let positive_clause = Clause::new(
+            vec![Literal::positive(eq_term.clone())],
+            &LocalContext::empty(),
+        );
+        let positive_reductions = positive_clause.boolean_reductions(&kctx);
+        let expected_positive = Clause::new(
+            vec![Literal::equals(left.clone(), right.clone())],
+            &LocalContext::empty(),
+        );
+        assert!(
+            positive_reductions.contains(&expected_positive),
+            "expected reduction to include {}",
+            expected_positive
+        );
+
+        let negative_clause = Clause::new(vec![Literal::negative(eq_term)], &LocalContext::empty());
+        let negative_reductions = negative_clause.boolean_reductions(&kctx);
+        let expected_negative = Clause::new(
+            vec![Literal::not_equals(left, right)],
+            &LocalContext::empty(),
+        );
+        assert!(
+            negative_reductions.contains(&expected_negative),
+            "expected reduction to include {}",
+            expected_negative
+        );
     }
 }
