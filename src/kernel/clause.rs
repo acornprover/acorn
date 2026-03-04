@@ -745,7 +745,6 @@ impl Clause {
                     continue;
                 }
 
-                #[cfg(feature = "ndc")]
                 if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Eq, 3) {
                     let eq_left = args[1].clone();
                     let eq_right = args[2].clone();
@@ -1197,7 +1196,6 @@ mod tests {
         assert_eq!(reductions, vec![expected]);
     }
 
-    #[cfg(feature = "ndc")]
     #[test]
     fn test_boolean_reduction_eq_signed_to_equality_literal() {
         let mut kctx = KernelContext::new();

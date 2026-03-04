@@ -420,22 +420,19 @@ impl<'a> Clausifier<'a> {
                     );
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
-                    #[cfg(feature = "ndc")]
-                    {
-                        // In non-distributive mode, keep an or-expression inline if it has
-                        // an and-child, instead of distributing `or` over that conjunction.
-                        let left_is_and = self
-                            .split_symbol_application(&args[0], Symbol::And, 2)
-                            .is_some();
-                        let right_is_and = self
-                            .split_symbol_application(&args[1], Symbol::And, 2)
-                            .is_some();
-                        if left_is_and || right_is_and {
-                            let simple_term =
-                                self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
-                            let literal = Literal::from_signed_term(simple_term, !negate);
-                            return Ok(Cnf::from_literal(literal));
-                        }
+                    // Keep an or-expression inline if it has an and-child, instead of
+                    // distributing `or` over that conjunction.
+                    let left_is_and = self
+                        .split_symbol_application(&args[0], Symbol::And, 2)
+                        .is_some();
+                    let right_is_and = self
+                        .split_symbol_application(&args[1], Symbol::And, 2)
+                        .is_some();
+                    if left_is_and || right_is_and {
+                        let simple_term =
+                            self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
+                        let literal = Literal::from_signed_term(simple_term, !negate);
+                        return Ok(Cnf::from_literal(literal));
                     }
 
                     if !negate {

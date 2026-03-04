@@ -395,10 +395,6 @@ fn test_conjunction_goal() {
 // It seems like some sort of monotonic-complexity-reducing reasoning might do it.
 //
 #[test]
-#[cfg_attr(
-    not(feature = "ndc"),
-    ignore = "known normalization/prover gap without ndc: axiom and identical theorem normalize into a hard search shape"
-)]
 fn test_complex_boolean() {
     let text = r#"
     let a: Bool = axiom
@@ -423,10 +419,6 @@ fn test_complex_boolean() {
 // the current prover search strategy.
 //
 #[test]
-#[cfg_attr(
-    not(feature = "ndc"),
-    ignore = "known normalization/prover gap without ndc: existential disjunction shape"
-)]
 fn test_exists_disjunction_same_as_axiom() {
     let text = r#"
     type Nat: axiom

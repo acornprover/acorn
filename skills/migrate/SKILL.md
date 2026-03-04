@@ -17,7 +17,7 @@ Perform a safe rollout for breaking acornlib/certificate format changes.
 
 ## Workflow
 1. Gate new behavior behind a feature flag.
-- Implement new behavior under a dedicated Cargo feature (example: `ndc`).
+- Implement new behavior under a dedicated Cargo feature (example: `my_feature`).
 - Keep default behavior unchanged.
 - Add tests for both modes where behavior is intentionally different.
 
@@ -45,7 +45,6 @@ const MANIFEST_VERSION: u32 = N;
   - does not write cache
   Command:
   `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
-- Add more detail to the corresponding acornlib theorem proofs.
 - Add more detail to the corresponding acornlib theorem proofs.
   - Assume there is already a valid proof in old/default mode.
   - Inspect the current detailed proof with:
