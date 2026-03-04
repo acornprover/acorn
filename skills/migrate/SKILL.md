@@ -115,8 +115,14 @@ Entry conditions:
 
 Required:
 - Stop and hand off for human review before any default flip.
+- Confirm default-mode whole-project verifiability (without writing cache):
+  - `cargo run --profile release -- verify --no-cache-skip --no-write-cache --fail-fast`
 - If there are `~/acornlib/src` proof changes, human reviews them and then merges/pushes upstream first.
 - Human handles all commit/push/upstream communication.
+- In the S4 report, state explicitly:
+  - "acornlib is verifiable both with and without the flag"
+  - "we're ready for the flip"
+  - "this is the final pre-flip review checkpoint"
 
 Next state:
 - `S5_flip_default` only after review approval and upstream `acornlib` updates are in.
