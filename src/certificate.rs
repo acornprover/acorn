@@ -25,9 +25,7 @@ use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
-#[cfg(feature = "ibf")]
 use crate::kernel::literal::Literal;
-#[cfg(any(test, feature = "ibf"))]
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
@@ -283,29 +281,17 @@ impl Certificate {
                 let mut view = Clausifier::new_mut(kernel_context.to_mut(), None, module_id);
                 let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
-                    #[cfg(feature = "ibf")]
-                    let inline_claim = {
-                        // In IBF mode, a claim line may intentionally keep a boolean
-                        // connective inline as a single signed literal term (for example,
-                        // `a and b`) rather than expanding it into multiple CNF clauses.
-                        let simple_term = view.clausify_term_to_simple_term(&term)?;
-                        Some(CertificateStep::Claim(Claim {
-                            clause: crate::kernel::clause::Clause::from_literals_unnormalized(
-                                vec![Literal::positive(simple_term)],
-                                &LocalContext::empty(),
-                            ),
-                            var_map: VariableMap::new(),
-                        }))
-                    };
-                    #[cfg(not(feature = "ibf"))]
-                    let inline_claim: Option<CertificateStep> = None;
-                    if let Some(claim) = inline_claim {
-                        return Ok(claim);
-                    }
-                    return Err(CodeGenError::GeneratedBadCode(format!(
-                        "claim must normalize to exactly one clause, got {}",
-                        clauses.len()
-                    )));
+                    // A claim line may intentionally keep a boolean connective inline
+                    // as a single signed literal term (for example, `a and b`) rather
+                    // than expanding it into multiple CNF clauses.
+                    let simple_term = view.clausify_term_to_simple_term(&term)?;
+                    return Ok(CertificateStep::Claim(Claim {
+                        clause: crate::kernel::clause::Clause::from_literals_unnormalized(
+                            vec![Literal::positive(simple_term)],
+                            &LocalContext::empty(),
+                        ),
+                        var_map: VariableMap::new(),
+                    }));
                 }
                 Ok(CertificateStep::Claim(Claim {
                     clause: clauses

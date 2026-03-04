@@ -6,9 +6,7 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-#[cfg(feature = "ibf")]
 use crate::kernel::symbol::Symbol;
-#[cfg(feature = "ibf")]
 use crate::kernel::term::Decomposition;
 use crate::kernel::term::Term;
 use crate::module::ModuleId;
@@ -694,7 +692,6 @@ impl Clause {
     /// Generates all clauses that can be derived from this clause using boolean reduction.
     /// Boolean reduction is replacing a boolean equality with a disjunction that it implies.
     /// Returns the resulting literals for each application.
-    #[cfg(feature = "ibf")]
     fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
         let (head, args) = term.as_ref().split_application_multi()?;
         if args.len() != arity {
@@ -706,7 +703,6 @@ impl Clause {
         }
     }
 
-    #[cfg(feature = "ibf")]
     fn with_replaced_literal(
         &self,
         index: usize,
@@ -737,54 +733,46 @@ impl Clause {
                 continue;
             }
             if literal.right.is_true() {
-                #[cfg(feature = "ibf")]
-                {
-                    if let Some(args) =
-                        Self::split_symbol_application(&literal.left, Symbol::Not, 1)
-                    {
-                        let reduced = self.with_replaced_literal(
-                            i,
-                            vec![vec![Literal::from_signed_term(
-                                args[0].clone(),
-                                !literal.positive,
-                            )]],
-                        );
-                        answer.extend(reduced);
-                        continue;
-                    }
+                if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Not, 1) {
+                    let reduced = self.with_replaced_literal(
+                        i,
+                        vec![vec![Literal::from_signed_term(
+                            args[0].clone(),
+                            !literal.positive,
+                        )]],
+                    );
+                    answer.extend(reduced);
+                    continue;
+                }
 
-                    if let Some(args) =
-                        Self::split_symbol_application(&literal.left, Symbol::And, 2)
-                    {
-                        let left = args[0].clone();
-                        let right = args[1].clone();
-                        let replacements = if literal.positive {
-                            vec![
-                                vec![Literal::positive(left)],
-                                vec![Literal::positive(right)],
-                            ]
-                        } else {
-                            vec![vec![Literal::negative(left), Literal::negative(right)]]
-                        };
-                        answer.extend(self.with_replaced_literal(i, replacements));
-                        continue;
-                    }
+                if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::And, 2) {
+                    let left = args[0].clone();
+                    let right = args[1].clone();
+                    let replacements = if literal.positive {
+                        vec![
+                            vec![Literal::positive(left)],
+                            vec![Literal::positive(right)],
+                        ]
+                    } else {
+                        vec![vec![Literal::negative(left), Literal::negative(right)]]
+                    };
+                    answer.extend(self.with_replaced_literal(i, replacements));
+                    continue;
+                }
 
-                    if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Or, 2)
-                    {
-                        let left = args[0].clone();
-                        let right = args[1].clone();
-                        let replacements = if literal.positive {
-                            vec![vec![Literal::positive(left), Literal::positive(right)]]
-                        } else {
-                            vec![
-                                vec![Literal::negative(left)],
-                                vec![Literal::negative(right)],
-                            ]
-                        };
-                        answer.extend(self.with_replaced_literal(i, replacements));
-                        continue;
-                    }
+                if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Or, 2) {
+                    let left = args[0].clone();
+                    let right = args[1].clone();
+                    let replacements = if literal.positive {
+                        vec![vec![Literal::positive(left), Literal::positive(right)]]
+                    } else {
+                        vec![
+                            vec![Literal::negative(left)],
+                            vec![Literal::negative(right)],
+                        ]
+                    };
+                    answer.extend(self.with_replaced_literal(i, replacements));
+                    continue;
                 }
                 continue;
             }
@@ -1153,7 +1141,6 @@ mod tests {
         assert_eq!(shorter.num_args(), 1, "g1 should have 1 arg after peeling");
     }
 
-    #[cfg(feature = "ibf")]
     #[test]
     fn test_boolean_reduction_signed_and_splits_clause() {
         let mut kctx = KernelContext::new();
@@ -1181,7 +1168,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "ibf")]
     #[test]
     fn test_boolean_reduction_signed_not_flips_sign() {
         let mut kctx = KernelContext::new();

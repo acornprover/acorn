@@ -781,15 +781,7 @@ fn test_normalizing_and_inside_arg() {
     );
 
     let mut norm = KernelContext::new();
-    #[cfg(feature = "ibf")]
     let expected = vec!["BoxedBool.new(and(BoxedBool.value(x0), BoxedBool.value(x1))) = f(x0, x1)"];
-    #[cfg(not(feature = "ibf"))]
-    let expected = vec![
-        "not s0_0(x0, x1) or BoxedBool.value(x0)",
-        "not s0_0(x0, x1) or BoxedBool.value(x1)",
-        "not BoxedBool.value(x0) or not BoxedBool.value(x1) or s0_0(x0, x1)",
-        "BoxedBool.new(s0_0(x0, x1)) = f(x0, x1)",
-    ];
     norm.check(&env, "goal", &expected);
 }
 

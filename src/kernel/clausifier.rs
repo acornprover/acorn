@@ -1210,23 +1210,8 @@ impl<'a> Clausifier<'a> {
         // (and/or/eq/not/forall/exists/match/etc) into atoms.
         let term_type = self.term_type_for_normalization(term, context);
         if term_type == Term::bool_type() && self.try_simple_term_to_term(term)?.is_none() {
-            #[cfg(feature = "ibf")]
-            {
-                // In IBF mode, keep complex booleans inline as terms.
-                return Ok(ExtendedTerm::Term(term.clone()));
-            }
-            #[cfg(not(feature = "ibf"))]
-            {
-                let skolem_term = self.synthesize_term_from_term(
-                    term,
-                    &Term::bool_type(),
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                return Ok(ExtendedTerm::Term(skolem_term));
-            }
+            // Keep complex booleans inline as terms.
+            return Ok(ExtendedTerm::Term(term.clone()));
         }
 
         self.term_to_extended_term(term, stack, next_var_id, synth, context)
@@ -1400,23 +1385,8 @@ impl<'a> Clausifier<'a> {
                     if let Some(simple) = self.try_simple_term_to_term(term)? {
                         return Ok(ExtendedTerm::Term(simple));
                     }
-                    #[cfg(feature = "ibf")]
-                    {
-                        // In IBF mode, keep complex booleans inline as terms.
-                        Ok(ExtendedTerm::Term(term.clone()))
-                    }
-                    #[cfg(not(feature = "ibf"))]
-                    {
-                        let skolem_term = self.synthesize_term_from_term(
-                            term,
-                            &Term::bool_type(),
-                            stack,
-                            next_var_id,
-                            synth,
-                            context,
-                        )?;
-                        Ok(ExtendedTerm::Term(skolem_term))
-                    }
+                    // Keep complex booleans inline as terms.
+                    Ok(ExtendedTerm::Term(term.clone()))
                 } else {
                     Ok(ExtendedTerm::Term(term.clone()))
                 }
@@ -1628,16 +1598,13 @@ impl<'a> Clausifier<'a> {
             // `false` is represented as `not true` in signed-term form.
             Some((term, false)) if term == Term::new_true() => Ok(Term::new_false()),
             Some(_) | None => {
-                #[cfg(feature = "ibf")]
+                // We may keep boolean formulas inline (e.g. `and(a, b)`).
+                // Allow those to pass through claim reconstruction as raw terms.
+                if !term.has_any_variable()
+                    && self.term_type_for_normalization(term, &LocalContext::empty())
+                        == Term::bool_type()
                 {
-                    // In IBF mode we may keep boolean formulas inline (e.g. `and(a, b)`).
-                    // Allow those to pass through claim reconstruction as raw terms.
-                    if !term.has_any_variable()
-                        && self.term_type_for_normalization(term, &LocalContext::empty())
-                            == Term::bool_type()
-                    {
-                        return Ok(term.clone());
-                    }
+                    return Ok(term.clone());
                 }
                 Err(format!(
                     "term '{}' cannot be represented as a simple term",

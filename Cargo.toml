@@ -44,9 +44,6 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Inline boolean formulas during clausification instead of synthesizing
-# abbreviation synthetics for complex boolean subterms.
-ibf = []
 
 [lib]
 doctest = false
