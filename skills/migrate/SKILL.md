@@ -11,6 +11,7 @@ Perform a safe rollout for breaking acornlib/certificate format changes.
 ## Workspace Assumptions
 - Run these `cargo run ...` commands from the `acorn` repo.
 - Edit theorem/proof source files under `~/acornlib/src`.
+- Use the edit tool for proof-file changes (do not use ad-hoc shell text mutation commands).
 - Do not run git commands as part of this workflow.
 - The human handles commit/push/upstream actions.
 
@@ -86,3 +87,6 @@ const MANIFEST_VERSION: u32 = N;
 
 8. Cleanup (final).
 - Remove obsolete feature-flag paths after deployment stabilizes.
+
+## Skill Upkeep
+- When repeated migration friction appears (new command pattern, recurring proof-gap pattern, recurring footgun), propose a concrete update to this skill and apply it.
