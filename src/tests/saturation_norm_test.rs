@@ -509,34 +509,6 @@ fn test_skolem_should_not_demonstrate_inhabitedness() {
     verify_fails(text);
 }
 
-#[cfg(feature = "sih")]
-#[test]
-fn test_skolem_inhabitedness_guard_blocks_unsound_inhabitedness() {
-    let text = r#"
-    structure Foo[T] {
-        item: T
-    }
-
-    let bar[T]: T -> Bool = axiom
-    let baz[T]: Foo[T] -> Bool = axiom
-
-    axiom ax1[T] {
-        exists(t: T) {
-            bar(t)
-        } implies exists(f: Foo[T]) {
-            baz(f)
-        }
-    }
-
-    theorem goal[T] {
-        exists(f: Foo[T]) {
-            true
-        }
-    }
-    "#;
-    verify_fails(text);
-}
-
 // This test exercises bugs where structures with methods containing
 // nested lambdas with if-then-else expressions would crash during normalization.
 // The issues were:

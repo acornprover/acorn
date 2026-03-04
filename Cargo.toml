@@ -44,8 +44,6 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Guard skolem creation by requiring provably inhabited codomain/result type.
-sih = []
 
 [lib]
 doctest = false

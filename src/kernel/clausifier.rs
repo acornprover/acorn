@@ -644,18 +644,12 @@ impl<'a> DeepClausifier<'a> {
         synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
-        let Some(skolem_terms) = self.make_skolem_terms_from_type_terms(
+        let skolem_terms = self.make_skolem_terms_from_type_terms(
             std::slice::from_ref(binder_type),
-            true,
             stack,
             synthesized,
             context,
-        )?
-        else {
-            // In `sih` mode, we can refuse skolemization for potentially uninhabited
-            // witness types. We then conservatively emit no clauses for this existential.
-            return Ok(Cnf::true_value());
-        };
+        )?;
         let skolem_term = skolem_terms.into_iter().next().unwrap();
         stack.push(TermBinding::Bound(skolem_term.clone()));
         let opened_body = self.open_binder_body(body, &skolem_term);
@@ -674,11 +668,10 @@ impl<'a> DeepClausifier<'a> {
     fn make_skolem_terms_from_type_terms(
         &mut self,
         skolem_type_terms: &[Term],
-        _require_inhabited_result: bool,
         stack: &Vec<TermBinding>,
         synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &LocalContext,
-    ) -> Result<Option<Vec<Term>>, String> {
+    ) -> Result<Vec<Term>, String> {
         let mut args = vec![];
         let mut arg_type_terms: Vec<Term> = vec![];
         let mut seen_vars = std::collections::HashSet::new();
@@ -724,17 +717,6 @@ impl<'a> DeepClausifier<'a> {
             let non_type_param_args = arg_type_terms.len() - num_type_params as usize;
             let result_type_term =
                 t.convert_free_to_bound_with_depth(num_type_params, non_type_param_args as u16);
-            #[cfg(feature = "sih")]
-            {
-                if _require_inhabited_result
-                    && !self.skolem_result_type_is_provably_inhabited(
-                        &result_type_term,
-                        &arg_type_terms,
-                    )
-                {
-                    return Ok(None);
-                }
-            }
 
             let mut skolem_type_term = result_type_term;
             for arg_type in arg_type_terms.iter().rev() {
@@ -751,23 +733,7 @@ impl<'a> DeepClausifier<'a> {
             let skolem_term = Term::new(skolem_atom, args.clone());
             output.push(skolem_term);
         }
-        Ok(Some(output))
-    }
-
-    #[cfg(feature = "sih")]
-    fn skolem_result_type_is_provably_inhabited(
-        &self,
-        result_type_term: &Term,
-        arg_type_terms: &[Term],
-    ) -> bool {
-        // result_type_term is interpreted under the Pi binders induced by arg_type_terms.
-        // LocalContext index 0 corresponds to the innermost binder, so reverse order.
-        let mut local_context = LocalContext::empty();
-        for arg_type in arg_type_terms.iter().rev() {
-            local_context.push_type(arg_type.clone());
-        }
-        self.kernel_context()
-            .provably_inhabited(result_type_term, Some(&local_context))
+        Ok(output)
     }
 
     fn make_skolem_term_from_type_term(
@@ -777,16 +743,12 @@ impl<'a> DeepClausifier<'a> {
         synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &LocalContext,
     ) -> Result<Term, String> {
-        let Some(mut terms) = self.make_skolem_terms_from_type_terms(
+        let mut terms = self.make_skolem_terms_from_type_terms(
             std::slice::from_ref(skolem_type_term),
-            false,
             stack,
             synthesized,
             context,
-        )?
-        else {
-            return Err("internal error: skolem creation unexpectedly blocked".to_string());
-        };
+        )?;
         Ok(terms.pop().unwrap())
     }
 
@@ -1065,16 +1027,12 @@ impl<'a> DeepClausifier<'a> {
                 if negate {
                     // f != g for Bool-valued functions:
                     // skolemize an argument tuple and assert result disagreement.
-                    let Some(arg_terms) = self.make_skolem_terms_from_type_terms(
+                    let arg_terms = self.make_skolem_terms_from_type_terms(
                         &fn_arg_types,
-                        true,
                         stack,
                         synth,
                         context,
-                    )?
-                    else {
-                        return Ok(Cnf::true_value());
-                    };
+                    )?;
                     let args: Vec<_> = arg_terms.iter().cloned().map(ExtendedTerm::Term).collect();
                     let left_pos = self.apply_term_to_cnf(
                         left,
@@ -1183,16 +1141,8 @@ impl<'a> DeepClausifier<'a> {
             let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
             let right = self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
             if negate {
-                let Some(args) = self.make_skolem_terms_from_type_terms(
-                    &fn_arg_types,
-                    true,
-                    stack,
-                    synth,
-                    context,
-                )?
-                else {
-                    return Ok(Cnf::true_value());
-                };
+                let args =
+                    self.make_skolem_terms_from_type_terms(&fn_arg_types, stack, synth, context)?;
                 return left.apply(&args).eq_to_cnf(right.apply(&args), true);
             }
 
