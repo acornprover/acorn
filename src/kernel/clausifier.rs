@@ -1210,15 +1210,23 @@ impl<'a> Clausifier<'a> {
         // (and/or/eq/not/forall/exists/match/etc) into atoms.
         let term_type = self.term_type_for_normalization(term, context);
         if term_type == Term::bool_type() && self.try_simple_term_to_term(term)?.is_none() {
-            let skolem_term = self.synthesize_term_from_term(
-                term,
-                &Term::bool_type(),
-                stack,
-                next_var_id,
-                synth,
-                context,
-            )?;
-            return Ok(ExtendedTerm::Term(skolem_term));
+            #[cfg(feature = "ibf")]
+            {
+                // In IBF mode, keep complex booleans inline as terms.
+                return Ok(ExtendedTerm::Term(term.clone()));
+            }
+            #[cfg(not(feature = "ibf"))]
+            {
+                let skolem_term = self.synthesize_term_from_term(
+                    term,
+                    &Term::bool_type(),
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                return Ok(ExtendedTerm::Term(skolem_term));
+            }
         }
 
         self.term_to_extended_term(term, stack, next_var_id, synth, context)
@@ -1392,15 +1400,23 @@ impl<'a> Clausifier<'a> {
                     if let Some(simple) = self.try_simple_term_to_term(term)? {
                         return Ok(ExtendedTerm::Term(simple));
                     }
-                    let skolem_term = self.synthesize_term_from_term(
-                        term,
-                        &Term::bool_type(),
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-                    Ok(ExtendedTerm::Term(skolem_term))
+                    #[cfg(feature = "ibf")]
+                    {
+                        // In IBF mode, keep complex booleans inline as terms.
+                        Ok(ExtendedTerm::Term(term.clone()))
+                    }
+                    #[cfg(not(feature = "ibf"))]
+                    {
+                        let skolem_term = self.synthesize_term_from_term(
+                            term,
+                            &Term::bool_type(),
+                            stack,
+                            next_var_id,
+                            synth,
+                            context,
+                        )?;
+                        Ok(ExtendedTerm::Term(skolem_term))
+                    }
                 } else {
                     Ok(ExtendedTerm::Term(term.clone()))
                 }
