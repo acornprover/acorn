@@ -382,33 +382,45 @@ impl Certificate {
                                     code
                                 )));
                             }
-                            // Trivial condition requires the type to be inhabited
-                            let kernel_context = kernel_context.as_ref();
-                            for (name, acorn_type) in &decls {
-                                let type_term = kernel_context
-                                    .type_store
-                                    .get_type_term(acorn_type)
-                                    .map_err(|e| {
-                                        CodeGenError::GeneratedBadCode(format!(
-                                            "cannot convert type '{}' to term: {}",
-                                            acorn_type, e
-                                        ))
-                                    })?;
-                                if !kernel_context.provably_inhabited(&type_term, None) {
-                                    return Err(CodeGenError::GeneratedBadCode(format!(
+                            #[cfg(feature = "naw")]
+                            {
+                                return Err(CodeGenError::GeneratedBadCode(
+                                    "trivial `let ... satisfy { true }` witnesses are disabled \
+                                     under --features naw; provide a concrete example or a \
+                                     nontrivial satisfy condition"
+                                        .to_string(),
+                                ));
+                            }
+                            #[cfg(not(feature = "naw"))]
+                            {
+                                // Trivial condition requires the type to be inhabited
+                                let kernel_context = kernel_context.as_ref();
+                                for (name, acorn_type) in &decls {
+                                    let type_term = kernel_context
+                                        .type_store
+                                        .get_type_term(acorn_type)
+                                        .map_err(|e| {
+                                            CodeGenError::GeneratedBadCode(format!(
+                                                "cannot convert type '{}' to term: {}",
+                                                acorn_type, e
+                                            ))
+                                        })?;
+                                    if !kernel_context.provably_inhabited(&type_term, None) {
+                                        return Err(CodeGenError::GeneratedBadCode(format!(
                                         "cannot create witness '{}' of type '{}' with trivial condition: \
                                      type is not provably inhabited",
                                         name, acorn_type
                                     )));
+                                    }
                                 }
-                            }
-                            if decls.len() != 1 {
-                                return Err(CodeGenError::GeneratedBadCode(
+                                if decls.len() != 1 {
+                                    return Err(CodeGenError::GeneratedBadCode(
                                     "let ... satisfy with trivial condition may declare exactly one arbitrary witness"
                                         .to_string(),
                                 ));
+                                }
+                                None
                             }
-                            None
                         }
                     };
 
@@ -1526,6 +1538,36 @@ mod tests {
             CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
             _ => panic!("expected claim step"),
         }
+    }
+
+    #[cfg(feature = "naw")]
+    #[test]
+    fn test_parse_code_line_rejects_trivial_arbitrary_witness_under_naw() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let result = Certificate::parse_code_line(
+            "let s0: Bool satisfy { true }",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("trivial arbitrary witness should be disabled under naw"),
+        };
+
+        assert!(
+            err.to_string().contains("disabled under --features naw"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

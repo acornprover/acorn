@@ -1184,6 +1184,15 @@ impl CodeGenerator<'_> {
         let new_arbitraries =
             names.add_arbitrary_for_clause(self.bindings, kernel_context, &clause)?;
 
+        #[cfg(feature = "naw")]
+        if !new_arbitraries.is_empty() {
+            return Err(Error::GeneratedBadCode(
+                "cannot generate certificate: arbitrary witness constants are disabled under \
+                 --features naw"
+                    .to_string(),
+            ));
+        }
+
         // Define arbitrary variables.
         for symbol in new_arbitraries {
             steps.push(CertificateStep::DefineArbitrary { symbol });
@@ -1444,16 +1453,26 @@ impl CodeGenerator<'_> {
     ) -> Result<String> {
         match step {
             CertificateStep::DefineArbitrary { symbol } => {
-                let Symbol::ScopedConstant(local_id) = symbol else {
-                    return Err(Error::internal(
-                        "DefineArbitrary expected a local scoped constant symbol",
-                    ));
-                };
-                let name = kernel_context.symbol_table.name_for_local_id(*local_id);
-                let type_term = kernel_context.symbol_table.get_type(*symbol);
-                let acorn_type = kernel_context.type_store.type_term_to_acorn_type(type_term);
-                let ty_code = self.type_to_code(&acorn_type)?;
-                Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
+                #[cfg(feature = "naw")]
+                {
+                    return Err(Error::GeneratedBadCode(format!(
+                        "cannot serialize DefineArbitrary({}) under --features naw",
+                        symbol
+                    )));
+                }
+                #[cfg(not(feature = "naw"))]
+                {
+                    let Symbol::ScopedConstant(local_id) = symbol else {
+                        return Err(Error::internal(
+                            "DefineArbitrary expected a local scoped constant symbol",
+                        ));
+                    };
+                    let name = kernel_context.symbol_table.name_for_local_id(*local_id);
+                    let type_term = kernel_context.symbol_table.get_type(*symbol);
+                    let acorn_type = kernel_context.type_store.type_term_to_acorn_type(type_term);
+                    let ty_code = self.type_to_code(&acorn_type)?;
+                    Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
+                }
             }
             CertificateStep::DefineSynthetic {
                 atoms,
