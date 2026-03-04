@@ -45,6 +45,21 @@ const MANIFEST_VERSION: u32 = N;
   Command:
   `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
 - Add more detail to the corresponding acornlib theorem proofs.
+- Add more detail to the corresponding acornlib theorem proofs.
+  - Assume there is already a valid proof in old/default mode.
+  - Inspect the current detailed proof with:
+    `cargo run --profile release -- select MODULENAME LINENUMBER`
+  - Run `select` without the migration feature flag.
+  - Use the emitted step-by-step statements/reasons to decide what to explicate.
+  - Good candidates for explication are statements whose reasons are:
+    - definitions
+    - theorems
+    - boolean reduction
+    - simplification
+  - Insert explicating statements in the `.ac` file:
+    - normally: insert statements before the line being explicated
+    - if that line has a `by` block: insert statements at the end of the `by` block
+  - Do not delete existing statements. Only add statements.
 - Iterate on a single module while fixing:
   - old/default mode, single module, writes cache:
     `cargo run --profile release -- verify <module> --no-cache-skip --fail-fast`
