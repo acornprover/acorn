@@ -15,77 +15,165 @@ Perform a safe rollout for breaking acornlib/certificate format changes.
 - Do not run git commands as part of this workflow.
 - The human handles commit/push/upstream actions.
 
-## Workflow
-1. Gate new behavior behind a feature flag.
-- Implement new behavior under a dedicated Cargo feature (example: `my_feature`).
-- Keep default behavior unchanged.
-- Add tests for both modes where behavior is intentionally different.
+## Workflow (Strict State Machine)
+Treat migration as a state machine. Do not skip states. Do not run commands from later states early.
 
-2. Check whether migration is needed.
-- Run:
-  `cargo run --profile release --features <feature> -- reverify`
-- If this succeeds end-to-end, stop. Do not migrate.
+### State S0: Feature Prepared
+Preconditions:
+- New behavior is behind `--features <feature>`.
+- Default behavior is unchanged.
+- Local tests for feature and default modes exist where needed.
 
-3. If feature-mode reverify fails, start migration mode.
-- Bump manifest version by +1 under the feature:
+Transition command:
+- `cargo run --profile release --features <feature> -- reverify`
+
+Outcomes:
+- If success: go to `S_done_no_migration`.
+- If failure: go to `S1_enable_manifest_gate`.
+
+### State S1: Enable Manifest Gate
+When entered:
+- Any time `S0` feature-mode `reverify` fails.
+
+Required change:
 ```rust
 #[cfg(feature = "<feature>")]
 const MANIFEST_VERSION: u32 = N + 1;
 #[cfg(not(feature = "<feature>"))]
 const MANIFEST_VERSION: u32 = N;
 ```
-- Keep checked-in certificate files (`jsonl`) in the old format during this phase.
 
-4. Run the migration loop until feature-mode prover can regenerate everything.
-- Find any proofs the feature-mode automatic prover cannot handle (whole project).
-  Run a fail-fast whole-project probe that:
-  - does not skip by hashes
-  - tries existing certs first
-  - falls back to search when needed
-  - does not write cache
-  Command:
-  `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
-- Add more detail to the corresponding acornlib theorem proofs.
-  - Assume there is already a valid proof in old/default mode.
-  - Inspect the current detailed proof with:
-    `cargo run --profile release -- select MODULENAME LINENUMBER`
-  - Run `select` without the migration feature flag.
-  - Use the emitted step-by-step statements/reasons to decide what to explicate.
-  - Good candidates for explication are statements whose reasons are:
-    - definitions
-    - theorems
-    - boolean reduction
-    - simplification
-  - Insert explicating statements in the `.ac` file:
-    - normally: insert statements before the line being explicated
-    - if that line has a `by` block: insert statements at the end of the `by` block
-  - Do not delete existing statements. Only add statements.
-- Iterate on a single module while fixing:
-  - old/default mode, single module, writes cache:
-    `cargo run --profile release -- verify <module> --no-cache-skip --fail-fast`
-  - feature mode, single module, does not write cache:
-    `cargo run --profile release --features <feature> -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
-- Keep cert files in old format while iterating.
-- Repeat until whole-project feature-mode probe succeeds.
-- Then run full feature-mode reverify:
-  `cargo run --profile release --features <feature> -- reverify`
+Rule:
+- Keep checked-in certificate files (`jsonl`) in old format during migration loop.
 
-5. Freeze proof-content changes and stop for review.
-- Stop for user review before flipping defaults.
-- Hand off local changes to the human for commit/push.
+Next state:
+- `S2_probe`.
 
-6. After review, flip default behavior to the new feature.
-- Adopt the feature behavior as default in `acorn`.
-- Regenerate certs in the new format:
-  `verify --no-cache-skip`
-- Run final safety check with full cert validation:
-  `cargo run --profile release --features validate -- reverify`
+### State S2: Whole-Project Prover Probe
+Purpose:
+- Check whether feature-mode prover can regenerate proofs without touching cache.
 
-7. Perform tied deployment.
-- User-only step: the human handles deployment, public communication, and rollout messaging.
+Required command:
+- `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
 
-8. Cleanup (final).
-- Remove obsolete feature-flag paths after deployment stabilizes.
+Outcomes:
+- If success: go to `S4` (ready for review, then flag flip).
+- If failure: go to `S3_fix_loop`.
 
-## Skill Upkeep
-- When repeated migration friction appears (new command pattern, recurring proof-gap pattern, recurring footgun), propose a concrete update to this skill and apply it.
+Hard guard:
+- Do **not** inspect/edit theorem proofs before this probe fails.
+
+### State S3: Module-Level Fix Loop
+Loop until whole-project probe succeeds.
+
+For each failing theorem/module:
+- Inspect proof detail in default mode only:
+  - `cargo run --profile release -- select MODULENAME LINENUMBER`
+- Edit files under `~/acornlib/src` using the edit tool.
+- Add statements only; do not delete existing statements.
+- Good explication sources:
+  - definitions
+  - theorems
+  - boolean reduction
+  - simplification
+- Placement rule:
+  - before target line, or at end of `by` block if target line has one.
+
+Per-iteration checks:
+- Default mode module check (writes cache):
+  - `cargo run --profile release -- verify <module> --no-cache-skip --fail-fast`
+- Feature mode module check (no cache writes):
+  - `cargo run --profile release --features <feature> -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+
+Exit condition:
+- Whole-project feature probe succeeds:
+  - `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
+
+Hard guard:
+- During this phase, feature-mode `reverify` may fail on old cert format. Do not use it as pass/fail.
+
+Blocked-condition exit:
+- If a module/theorem cannot be made to pass in feature mode after reasonable proof-explication attempts, treat this as a likely feature bug (not a proof-gap-only issue).
+- Do not keep looping blindly. Exit the fix loop and report to the user with diagnostics.
+- Gather and report:
+  - failing module and line/theorem
+  - exact failing command used
+  - error output
+  - whether default-mode module verify passes for the same target
+  - any minimal reduced repro you can extract
+  - likely subsystem suspects (parser/elaboration/clausification/reduction/checker/prover)
+- Next state on this path:
+  - `S_blocked_feature_bug`
+
+### State S4: Review Checkpoint
+Entry conditions:
+- Arrived from `S2` success after:
+  - feature-mode `reverify` failed
+  - manifest gate was enabled
+  - feature-mode prover probe succeeded
+- No proof edits are required in this path; migration is ready for review and potential flag flip.
+
+Required:
+- Stop and hand off for human review before any default flip.
+- If there are `~/acornlib/src` proof changes, human reviews them and then merges/pushes upstream first.
+- Human handles all commit/push/upstream communication.
+
+Next state:
+- `S5_flip_default` only after review approval and upstream `acornlib` updates are in.
+
+### State S5: Flip Default + Regenerate
+Preconditions:
+- `acorn` is up to date with `master`.
+- `acornlib` is up to date with `master` (including any reviewed migration proof edits from `S4`).
+
+Actions:
+- Adopt feature behavior as default in `acorn`.
+- Remove obsolete feature-flag code paths for this migration.
+- Regenerate certs in new format:
+  - `cargo run --profile release -- verify --no-cache-skip`
+- Final validation:
+  - `cargo run --profile release --features validate -- reverify`
+
+Next state:
+- `S6_deploy_ready`
+
+### Terminal State: S6_deploy_ready
+Meaning:
+- Flip/default regeneration/validation work is complete and ready for user-led deployment.
+
+Actions:
+- User handles tied deploy/public rollout messaging.
+
+Required report:
+- current state = `S6_deploy_ready`
+- result = migration implementation complete; waiting for user deployment steps
+- next state = none (stop)
+
+### Terminal State: S_blocked_feature_bug
+Meaning:
+- Migration loop (`S3`) is blocked by a likely feature bug.
+
+Required report:
+- current state = `S_blocked_feature_bug`
+- include diagnostics gathered in `S3` blocked-condition exit
+- next state = wait for user direction / bugfix work
+
+### Terminal State: S_done_no_migration
+Meaning:
+- Feature-mode `reverify` succeeded in `S0`.
+- No migration work is required.
+
+Required report:
+- current state = `S_done_no_migration`
+- command run = `cargo run --profile release --features <feature> -- reverify`
+- result = success
+- next state = none (stop)
+
+### Reporting Contract (Mandatory)
+After each state transition, report:
+- current state
+- command run
+- pass/fail result
+- next state
+
+Never report progress without naming the current state.
