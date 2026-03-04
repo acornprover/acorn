@@ -139,9 +139,18 @@ pub struct SymbolTable {
     /// For example, if we have `nil: forall[T]. List[T]`, then List is in this set.
     inhabited_type_constructors: ImHashSet<GroundTypeId>,
 
+    /// A witness-provider symbol for each inhabited type constructor.
+    /// The symbol has polymorphic type-level arguments and no value-level arguments.
+    /// For example, `nil: forall[T]. List[T]` witnesses `List`.
+    inhabited_type_constructor_witnesses: ImHashMap<GroundTypeId, Symbol>,
+
     /// Typeclasses that are known to provide inhabitants for their instance types.
     /// For example, if we have `point: forall[P: Pointed]. P`, then Pointed is in this set.
     inhabited_typeclasses: ImHashSet<TypeclassId>,
+
+    /// A witness-provider symbol for each inhabited typeclass.
+    /// For example, `point: forall[P: Pointed]. P` witnesses `Pointed`.
+    inhabited_typeclass_witnesses: ImHashMap<TypeclassId, Symbol>,
 }
 
 impl SymbolTable {
@@ -158,7 +167,9 @@ impl SymbolTable {
             match_eliminator_info: ImHashMap::new(),
             type_to_element: ImHashMap::new(),
             inhabited_type_constructors: ImHashSet::new(),
+            inhabited_type_constructor_witnesses: ImHashMap::new(),
             inhabited_typeclasses: ImHashSet::new(),
+            inhabited_typeclass_witnesses: ImHashMap::new(),
         }
     }
 
@@ -167,7 +178,7 @@ impl SymbolTable {
         // Also track inhabited type constructors for polymorphic types.
         // If var_type is Pi(Type, ...) or Pi(Typeclass, ...), the return type's
         // ground type constructor is inhabited for any type arguments.
-        self.record_inhabited_type_constructor(&var_type);
+        self.record_inhabited_type_constructor(&var_type, symbol);
 
         self.type_to_element.entry(var_type).or_insert(symbol);
     }
@@ -175,7 +186,7 @@ impl SymbolTable {
     /// If the type is a polymorphic type (Pi with Type/Typeclass inputs),
     /// record its return type's ground type constructor as inhabited.
     /// Also tracks typeclasses that provide inhabitants for their instance types.
-    fn record_inhabited_type_constructor(&mut self, var_type: &Term) {
+    fn record_inhabited_type_constructor(&mut self, var_type: &Term, symbol: Symbol) {
         let mut current = var_type.as_ref();
         let mut depth = 0; // Track how many Pi levels we've descended
 
@@ -195,8 +206,19 @@ impl SymbolTable {
                         // This means the function returns a value of the typeclass-constrained type,
                         // proving that the typeclass makes its instance type inhabited.
                         // For example: point: forall[P: Pointed]. P has type Pi(Typeclass(Pointed), x0)
-                        if output.atomic_variable() == Some(depth) {
+                        let output_var = if output.is_atomic() {
+                            match output.get_head_atom() {
+                                Atom::FreeVariable(i) | Atom::BoundVariable(i) => Some(*i),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if output_var == Some(depth) {
                             self.inhabited_typeclasses.insert(*tc_id);
+                            self.inhabited_typeclass_witnesses
+                                .entry(*tc_id)
+                                .or_insert(symbol);
                         }
                         current = output;
                         depth += 1;
@@ -215,6 +237,9 @@ impl SymbolTable {
         if !current.is_pi() {
             if let Atom::Symbol(Symbol::Type(ground_id)) = current.get_head_atom() {
                 self.inhabited_type_constructors.insert(*ground_id);
+                self.inhabited_type_constructor_witnesses
+                    .entry(*ground_id)
+                    .or_insert(symbol);
             }
         }
     }
@@ -224,9 +249,21 @@ impl SymbolTable {
         self.inhabited_type_constructors.contains(&ground_id)
     }
 
+    /// Get a witness-provider symbol for an inhabited type constructor.
+    pub fn get_type_constructor_witness(&self, ground_id: GroundTypeId) -> Option<Symbol> {
+        self.inhabited_type_constructor_witnesses
+            .get(&ground_id)
+            .copied()
+    }
+
     /// Check if a typeclass is known to provide inhabitants for its instance types.
     pub fn is_typeclass_inhabited(&self, tc_id: TypeclassId) -> bool {
         self.inhabited_typeclasses.contains(&tc_id)
+    }
+
+    /// Get a witness-provider symbol for an inhabited typeclass.
+    pub fn get_typeclass_witness(&self, tc_id: TypeclassId) -> Option<Symbol> {
+        self.inhabited_typeclass_witnesses.get(&tc_id).copied()
     }
 
     /// Mark a typeclass as providing inhabitants for its instance types.
@@ -927,8 +964,22 @@ impl SymbolTable {
         for id in other.inhabited_type_constructors.iter() {
             self.inhabited_type_constructors.insert(*id);
         }
+        for (ground_id, symbol) in other.inhabited_type_constructor_witnesses.iter() {
+            if !self
+                .inhabited_type_constructor_witnesses
+                .contains_key(ground_id)
+            {
+                self.inhabited_type_constructor_witnesses
+                    .insert(*ground_id, *symbol);
+            }
+        }
         for id in other.inhabited_typeclasses.iter() {
             self.inhabited_typeclasses.insert(*id);
+        }
+        for (tc_id, symbol) in other.inhabited_typeclass_witnesses.iter() {
+            if !self.inhabited_typeclass_witnesses.contains_key(tc_id) {
+                self.inhabited_typeclass_witnesses.insert(*tc_id, *symbol);
+            }
         }
     }
 
@@ -970,8 +1021,22 @@ impl SymbolTable {
         for id in other.inhabited_type_constructors.iter() {
             self.inhabited_type_constructors.insert(*id);
         }
+        for (ground_id, symbol) in other.inhabited_type_constructor_witnesses.iter() {
+            if !self
+                .inhabited_type_constructor_witnesses
+                .contains_key(ground_id)
+            {
+                self.inhabited_type_constructor_witnesses
+                    .insert(*ground_id, *symbol);
+            }
+        }
         for id in other.inhabited_typeclasses.iter() {
             self.inhabited_typeclasses.insert(*id);
+        }
+        for (tc_id, symbol) in other.inhabited_typeclass_witnesses.iter() {
+            if !self.inhabited_typeclass_witnesses.contains_key(tc_id) {
+                self.inhabited_typeclass_witnesses.insert(*tc_id, *symbol);
+            }
         }
     }
 }

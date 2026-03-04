@@ -9,6 +9,7 @@ use crate::kernel::symbol_table::SymbolTable;
 use crate::kernel::synthetic::SyntheticRegistry;
 use crate::kernel::term::Term;
 use crate::kernel::type_store::TypeStore;
+use crate::kernel::types::TypeclassId;
 use crate::module::ModuleId;
 use tracing::trace;
 
@@ -103,113 +104,157 @@ impl KernelContext {
         }
     }
 
-    /// Returns true if we've proven that the given type has at least one element.
-    /// This is a conservative check - it may return false for types that are inhabited
-    /// but where we haven't explicitly registered an inhabitant.
+    /// Finds a concrete witness term for the given type, if one is known.
     ///
-    /// The optional `local_context` parameter is used in polymorphic mode to look up
-    /// constraints on type variables (e.g., to determine that P: Pointed is inhabited).
+    /// The returned term is in kernel `Term` form and may reference the same local variables
+    /// as `var_type` (for example, when instantiating a typeclass witness at a local type var).
+    ///
+    /// The optional `local_context` parameter is used to resolve constraints on type variables.
+    pub fn find_inhabitant(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+    ) -> Option<Term> {
+        if let Some((domain, codomain)) = var_type.as_ref().split_pi() {
+            let codomain_term = codomain.to_owned();
+            let shifted_codomain = codomain_term.shift_bound(0, -1);
+            let domain_term = domain.to_owned();
+
+            if domain_term == shifted_codomain {
+                // Identity function inhabits T -> T.
+                return Some(Term::lambda(
+                    domain_term,
+                    Term::atom(Atom::BoundVariable(0)),
+                ));
+            }
+
+            // If codomain is inhabited, a constant function inhabits the Pi type.
+            if let Some(codomain_witness) = self.find_inhabitant(&shifted_codomain, local_context) {
+                return Some(Term::lambda(
+                    domain_term,
+                    // Entering a lambda adds one binder depth.
+                    codomain_witness.shift_bound(0, 1),
+                ));
+            }
+            return None;
+        }
+
+        if let Some(var_id) = match var_type.as_ref().get_head_atom() {
+            Atom::FreeVariable(id) | Atom::BoundVariable(id) => Some(*id),
+            _ => None,
+        } {
+            if let Some(ctx) = local_context {
+                if let Some(constraint_type) = ctx.get_var_type(var_id as usize) {
+                    if constraint_type.as_ref().is_type0() {
+                        // Unconstrained type variable may be empty.
+                        return None;
+                    }
+                    if let Some(tc_id) = constraint_type.as_ref().as_typeclass() {
+                        if let Some(provider) = self.find_typeclass_provider(tc_id) {
+                            return Some(
+                                Term::atom(Atom::Symbol(provider))
+                                    .apply(std::slice::from_ref(var_type)),
+                            );
+                        }
+                        if self.is_typeclass_marked_inhabited(tc_id) {
+                            // Preserves legacy inhabitedness behavior for typeclass-constrained
+                            // variables even when no explicit provider symbol is available.
+                            return Some(Term::new_true());
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if let Some(symbol) = self.symbol_table.get_element_of_type(var_type) {
+            return Some(Term::atom(Atom::Symbol(symbol)));
+        }
+
+        match var_type.as_ref().get_head_atom() {
+            Atom::Symbol(Symbol::Bool) => Some(Term::new_true()),
+            // Any concrete type can witness Type0; keep the canonical Bool choice.
+            Atom::Symbol(Symbol::Type0) => Some(Term::bool_type()),
+            Atom::Symbol(Symbol::Type(ground_id)) => {
+                if let Some(provider) = self.symbol_table.get_type_constructor_witness(*ground_id) {
+                    let mut witness = Term::atom(Atom::Symbol(provider));
+                    let args: Vec<Term> = var_type.iter_args().map(|arg| arg.to_owned()).collect();
+                    if !args.is_empty() {
+                        witness = witness.apply(&args);
+                    }
+                    return Some(witness);
+                }
+
+                if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id) {
+                    if let Some(provider) = self.find_typeclass_provider(tc_id) {
+                        return Some(
+                            Term::atom(Atom::Symbol(provider))
+                                .apply(std::slice::from_ref(var_type)),
+                        );
+                    }
+                    if self.is_typeclass_marked_inhabited(tc_id) {
+                        return Some(Term::new_true());
+                    }
+                }
+                None
+            }
+            Atom::Symbol(Symbol::Typeclass(tc_id)) => self.find_type_witness_for_typeclass(*tc_id),
+            _ => None,
+        }
+    }
+
+    /// Returns true if we've proven that the given type has at least one element.
+    ///
+    /// This is intentionally defined in terms of `find_inhabitant`, so inhabitedness is
+    /// constructive: if this returns true, a witness term can be retrieved.
     pub fn provably_inhabited(
         &self,
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> bool {
-        // Check for function types first.
-        // A function type A -> B is inhabited if:
-        // 1. The codomain B is inhabited (we can create a constant function), OR
-        // 2. The domain A equals the codomain B (the identity function exists)
-        if let Some((domain, codomain)) = var_type.as_ref().split_pi() {
-            // For non-dependent function types, check if domain equals codomain.
-            // Due to de Bruijn indexing, the codomain is inside the Pi's scope,
-            // so we need to shift it down by 1 to compare with the domain.
-            // For example, T -> T is represented as Pi(b0, b1) where both refer to
-            // the same outer binding, but b1 is shifted because it's inside the Pi.
-            let codomain_term = codomain.to_owned();
-            let shifted_codomain = codomain_term.shift_bound(0, -1);
-            if domain.to_owned() == shifted_codomain {
-                // Identity function always exists: T -> T is inhabited for any T
-                return true;
-            }
-            // When recursing on the codomain, use the shifted version so indices
-            // align with the context (which doesn't include the Pi's binding)
-            return self.provably_inhabited(&shifted_codomain, local_context);
-        }
+        self.find_inhabitant(var_type, local_context).is_some()
+    }
 
-        // In polymorphic mode, check if this is a type variable with a constraint.
-        // For example, if var_type is FreeVariable(0) or BoundVariable(0) representing P: Pointed,
-        // look up the constraint (Pointed) in the local context.
-        let var_type_ref = var_type.as_ref();
-        if var_type_ref.is_atomic() {
-            let var_id = match var_type_ref.get_head_atom() {
-                Atom::FreeVariable(id) => Some(*id),
-                Atom::BoundVariable(id) => Some(*id),
-                _ => None,
-            };
-            if let Some(var_id) = var_id {
-                if let Some(ctx) = local_context {
-                    if let Some(constraint_type) = ctx.get_var_type(var_id as usize) {
-                        // If the constraint is TypeSort, this is an unconstrained type variable.
-                        // Unconstrained types are NOT provably inhabited (could be empty).
-                        if constraint_type.as_ref().is_type0() {
-                            return false;
-                        }
-                        return self.provably_inhabited(constraint_type, local_context);
-                    }
-                }
+    fn find_typeclass_provider(&self, tc_id: TypeclassId) -> Option<Symbol> {
+        if let Some(symbol) = self.symbol_table.get_typeclass_witness(tc_id) {
+            return Some(symbol);
+        }
+        for base_id in self.type_store.get_typeclass_extends(tc_id) {
+            if let Some(symbol) = self.symbol_table.get_typeclass_witness(base_id) {
+                return Some(symbol);
             }
         }
+        None
+    }
 
-        match var_type.as_ref().get_head_atom() {
-            // Bool is inhabited (true, false)
-            Atom::Symbol(Symbol::Bool) => return true,
-
-            // TypeSort is inhabited (any type can be used as a value of type Type)
-            Atom::Symbol(Symbol::Type0) => return true,
-
-            // Check if the type's head is a type constructor known to be inhabited.
-            // For example, List[T] is inhabited if we have nil: forall[T]. List[T].
-            Atom::Symbol(Symbol::Type(ground_id)) => {
-                if self.symbol_table.is_type_constructor_inhabited(*ground_id) {
-                    return true;
-                }
-                // In non-polymorphic mode, check if this ground type is an arbitrary type
-                // with a typeclass constraint that makes it inhabited.
-                if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id) {
-                    if self.symbol_table.is_typeclass_inhabited(tc_id) {
-                        return true;
-                    }
-                    // Also check if this typeclass extends a typeclass that provides inhabitants.
-                    for base_id in self.type_store.get_typeclass_extends(tc_id) {
-                        if self.symbol_table.is_typeclass_inhabited(base_id) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            // Check if this is a typeclass-constrained type variable.
-            // For example, P: Pointed is inhabited if Pointed has a constant like point: P.
-            Atom::Symbol(Symbol::Typeclass(tc_id)) => {
-                if self.symbol_table.is_typeclass_inhabited(*tc_id) {
-                    return true;
-                }
-                // Also check if this typeclass extends a typeclass that provides inhabitants.
-                for base_id in self.type_store.get_typeclass_extends(*tc_id) {
-                    if self.symbol_table.is_typeclass_inhabited(base_id) {
-                        return true;
-                    }
-                }
-            }
-
-            _ => {}
-        }
-
-        // Check for an exact type match
-        if self.symbol_table.get_element_of_type(var_type).is_some() {
+    fn is_typeclass_marked_inhabited(&self, tc_id: TypeclassId) -> bool {
+        if self.symbol_table.is_typeclass_inhabited(tc_id) {
             return true;
         }
-
+        for base_id in self.type_store.get_typeclass_extends(tc_id) {
+            if self.symbol_table.is_typeclass_inhabited(base_id) {
+                return true;
+            }
+        }
         false
+    }
+
+    fn find_type_witness_for_typeclass(&self, tc_id: TypeclassId) -> Option<Term> {
+        if let Some(ground_id) = self.type_store.find_instance_of_typeclass(tc_id) {
+            return Some(Term::ground_type(ground_id));
+        }
+        for base_id in self.type_store.get_typeclass_extends(tc_id) {
+            if let Some(ground_id) = self.type_store.find_instance_of_typeclass(base_id) {
+                return Some(Term::ground_type(ground_id));
+            }
+        }
+
+        if self.is_typeclass_marked_inhabited(tc_id) {
+            // Preserve prior inhabitedness behavior for typeclass-kinded variables when no
+            // concrete instance is known; Bool is a stable canonical type witness.
+            return Some(Term::bool_type());
+        }
+        None
     }
 
     /// Creates a test KernelContext with pre-populated scoped constants (c0, c1, ..., c{n-1})
@@ -1243,6 +1288,7 @@ mod tests {
     #[test]
     fn test_provably_inhabited_identity_function() {
         use crate::kernel::atom::Atom;
+        use crate::kernel::atom::AtomId;
         use crate::kernel::local_context::LocalContext;
 
         let ctx = KernelContext::new();
@@ -1264,5 +1310,67 @@ mod tests {
             ctx.provably_inhabited(&t_to_t, Some(&local_ctx)),
             "T -> T should be provably inhabited"
         );
+
+        let witness = ctx
+            .find_inhabitant(&t_to_t, Some(&local_ctx))
+            .expect("expected identity witness");
+        let expected = Term::lambda(
+            b0,
+            // Inside the lambda body, the newly bound argument is b0.
+            Term::atom(Atom::BoundVariable(0 as AtomId)),
+        );
+        assert_eq!(witness, expected);
+    }
+
+    #[test]
+    fn test_find_inhabitant_instantiates_type_constructor_witness() {
+        use crate::kernel::atom::Atom;
+
+        let mut ctx = KernelContext::new();
+        ctx.parse_type_constructor("List", 1);
+
+        // g0 : Π(T: Type). List(T)
+        let list_id = ctx.type_store.get_ground_id_by_name("List").unwrap();
+        let nil_type = Term::pi(
+            Term::type_sort(),
+            Term::ground_type(list_id).apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        ctx.symbol_table.add_global_constant(nil_type);
+
+        let list_bool = Term::ground_type(list_id).apply(&[Term::bool_type()]);
+        let witness = ctx
+            .find_inhabitant(&list_bool, None)
+            .expect("expected List witness");
+
+        let expected = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(&[Term::bool_type()]);
+        assert_eq!(witness, expected);
+        assert!(ctx.provably_inhabited(&list_bool, None));
+    }
+
+    #[test]
+    fn test_find_inhabitant_for_typeclass_constrained_variable() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::local_context::LocalContext;
+
+        let mut ctx = KernelContext::new();
+        ctx.parse_typeclass("Pointed");
+
+        // g0 : Π(P: Pointed). P
+        let point_type = ctx.parse_pi("P: Pointed", "P");
+        ctx.symbol_table.add_global_constant(point_type);
+
+        let pointed_id = ctx.type_store.get_typeclass_id_by_name("Pointed").unwrap();
+        let mut local_ctx = LocalContext::empty();
+        local_ctx.push_type(Term::typeclass(pointed_id));
+
+        let p_type = Term::atom(Atom::FreeVariable(0));
+        let witness = ctx
+            .find_inhabitant(&p_type, Some(&local_ctx))
+            .expect("expected witness for constrained variable");
+
+        let expected = ctx.parse_term("g0(x0)");
+        assert_eq!(witness, expected);
+        assert!(ctx.provably_inhabited(&p_type, Some(&local_ctx)));
     }
 }
