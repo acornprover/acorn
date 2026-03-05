@@ -31,7 +31,7 @@ All commands are run from `~/acorn`.
 
    ```
    cd vscode/extension/acornlib
-   git pull
+   git pull origin master
    cd ../../..
    ```
 
