@@ -64,6 +64,18 @@ fn ite_symbol_type_ref() -> &'static Term {
     &ITE_TYPE
 }
 
+fn choose_symbol_type_ref() -> &'static Term {
+    use std::sync::LazyLock;
+    static CHOOSE_TYPE: LazyLock<Term> = LazyLock::new(|| {
+        // Pi(T: Type0). (T -> Bool) -> T
+        // Under the input arrow binder, T is at de Bruijn index 1.
+        let predicate_type = Term::pi(Term::atom(Atom::BoundVariable(1)), Term::bool_type());
+        let result_type = Term::atom(Atom::BoundVariable(1));
+        Term::pi(Term::type_sort(), Term::pi(predicate_type, result_type))
+    });
+    &CHOOSE_TYPE
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NewConstantType {
     Global,
@@ -330,6 +342,7 @@ impl SymbolTable {
             Symbol::And | Symbol::Or => bool_binary_symbol_type_ref(),
             Symbol::Eq => eq_symbol_type_ref(),
             Symbol::Ite => ite_symbol_type_ref(),
+            Symbol::Choose => choose_symbol_type_ref(),
             Symbol::Empty
             | Symbol::Bool
             | Symbol::Type0
@@ -352,6 +365,7 @@ impl SymbolTable {
             Symbol::And | Symbol::Or => bool_binary_symbol_type_ref().clone(),
             Symbol::Eq => eq_symbol_type_ref().clone(),
             Symbol::Ite => ite_symbol_type_ref().clone(),
+            Symbol::Choose => choose_symbol_type_ref().clone(),
             Symbol::Empty | Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => {
                 Term::type_sort()
             }

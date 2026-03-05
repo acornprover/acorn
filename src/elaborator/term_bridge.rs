@@ -77,7 +77,8 @@ impl<'a> TermBridge<'a> {
             | Atom::Symbol(Symbol::And)
             | Atom::Symbol(Symbol::Or)
             | Atom::Symbol(Symbol::Eq)
-            | Atom::Symbol(Symbol::Ite) => {
+            | Atom::Symbol(Symbol::Ite)
+            | Atom::Symbol(Symbol::Choose) => {
                 panic!("logical symbols should be handled in denormalize_term")
             }
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
@@ -542,6 +543,7 @@ impl<'a> TermBridge<'a> {
             Atom::Symbol(Symbol::Or) => Some(Symbol::Or),
             Atom::Symbol(Symbol::Eq) => Some(Symbol::Eq),
             Atom::Symbol(Symbol::Ite) => Some(Symbol::Ite),
+            Atom::Symbol(Symbol::Choose) => Some(Symbol::Choose),
             _ => None,
         };
 
@@ -728,6 +730,12 @@ impl<'a> TermBridge<'a> {
                         Box::new(args.next().unwrap()),
                         Box::new(args.next().unwrap()),
                         Box::new(args.next().unwrap()),
+                    );
+                }
+                Symbol::Choose => {
+                    panic!(
+                        "choose terms cannot be denormalized to AcornValue yet: {}",
+                        term
                     );
                 }
                 _ => unreachable!("unexpected logical symbol: {}", symbol),

@@ -82,6 +82,7 @@ impl KernelContext {
             Atom::Symbol(Symbol::Or) => "or".to_string(),
             Atom::Symbol(Symbol::Eq) => "eq".to_string(),
             Atom::Symbol(Symbol::Ite) => "ite".to_string(),
+            Atom::Symbol(Symbol::Choose) => "choose".to_string(),
             Atom::Symbol(Symbol::Empty) => "Empty".to_string(),
             Atom::Symbol(Symbol::Bool) => "Bool".to_string(),
             Atom::Symbol(Symbol::Type0) => "Type".to_string(),
@@ -1110,6 +1111,7 @@ impl KernelContext {
             "or" => Term::atom(Atom::Symbol(Symbol::Or)),
             "eq" => Term::atom(Atom::Symbol(Symbol::Eq)),
             "ite" => Term::atom(Atom::Symbol(Symbol::Ite)),
+            "choose" => Term::atom(Atom::Symbol(Symbol::Choose)),
             _ => {
                 // Fall back to Term::parse for anything else
                 Term::parse(s)
@@ -1379,6 +1381,26 @@ mod tests {
         let expected = Term::pi(comm_ring_type, Term::pi(b0, Term::pi(b1, b2)));
 
         assert_eq!(add_type, expected);
+    }
+
+    #[test]
+    fn test_choose_builtin_parsing_and_type() {
+        use crate::kernel::atom::Atom;
+
+        let ctx = KernelContext::new();
+
+        let choose_term = ctx.parse_term("choose");
+        assert_eq!(choose_term, Term::atom(Atom::Symbol(Symbol::Choose)));
+        assert_eq!(ctx.atom_str(&Atom::Symbol(Symbol::Choose)), "choose");
+
+        let expected_type = Term::pi(
+            Term::type_sort(),
+            Term::pi(
+                Term::pi(Term::atom(Atom::BoundVariable(1)), Term::bool_type()),
+                Term::atom(Atom::BoundVariable(1)),
+            ),
+        );
+        assert_eq!(*ctx.symbol_table.get_type(Symbol::Choose), expected_type);
     }
 
     #[test]

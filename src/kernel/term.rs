@@ -795,7 +795,8 @@ impl<'a> TermRef<'a> {
                 | TermComponent::Atom(Atom::Symbol(Symbol::And))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Or))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Eq))
-                | TermComponent::Atom(Atom::Symbol(Symbol::Ite)) => {
+                | TermComponent::Atom(Atom::Symbol(Symbol::Ite))
+                | TermComponent::Atom(Atom::Symbol(Symbol::Choose)) => {
                     // Built-in type/logical symbols contribute to weight
                     weight1 += 1;
                 }
@@ -1823,6 +1824,11 @@ impl Term {
     /// Create an equality term: `left = right` at type `eq_type`.
     pub fn eq(eq_type: Term, left: Term, right: Term) -> Term {
         Term::atom(Atom::Symbol(Symbol::Eq)).apply(&[eq_type, left, right])
+    }
+
+    /// Create a choice term: `choose(choice_type, predicate)`.
+    pub fn choose(choice_type: Term, predicate: Term) -> Term {
+        Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[choice_type, predicate])
     }
 
     /// Create a new Term representing a variable with the given index.
