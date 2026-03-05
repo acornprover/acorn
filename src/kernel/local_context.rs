@@ -103,6 +103,11 @@ impl LocalContext {
         self.var_types[var_id] = var_type;
     }
 
+    /// Truncate the context to keep only the first `len` variable types.
+    pub fn truncate(&mut self, len: usize) {
+        self.var_types.truncate(len);
+    }
+
     /// Returns the number of variables in this context.
     pub fn len(&self) -> usize {
         self.var_types.len()

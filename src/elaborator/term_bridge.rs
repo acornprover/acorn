@@ -400,6 +400,20 @@ impl<'a> TermBridge<'a> {
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(input_term) as AtomId;
+                let next_var_remapping_storage = var_remapping.map(|mapping| {
+                    let mut extended = mapping.to_vec();
+                    if extended.len() <= fresh_var as usize {
+                        extended.resize(fresh_var as usize + 1, None);
+                    }
+                    let next_index = extended
+                        .iter()
+                        .filter_map(|x| *x)
+                        .max()
+                        .map_or(0, |m| m + 1);
+                    extended[fresh_var as usize] = Some(next_index);
+                    extended
+                });
+                let next_var_remapping = next_var_remapping_storage.as_deref();
                 let opened_body = body
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
@@ -408,7 +422,7 @@ impl<'a> TermBridge<'a> {
                     &opened_body,
                     &next_context,
                     arbitrary_names,
-                    var_remapping,
+                    next_var_remapping,
                     type_param_names,
                     type_var_id_to_name,
                     instantiate_type_vars,
@@ -434,6 +448,20 @@ impl<'a> TermBridge<'a> {
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(binder_type_term) as AtomId;
+                let next_var_remapping_storage = var_remapping.map(|mapping| {
+                    let mut extended = mapping.to_vec();
+                    if extended.len() <= fresh_var as usize {
+                        extended.resize(fresh_var as usize + 1, None);
+                    }
+                    let next_index = extended
+                        .iter()
+                        .filter_map(|x| *x)
+                        .max()
+                        .map_or(0, |m| m + 1);
+                    extended[fresh_var as usize] = Some(next_index);
+                    extended
+                });
+                let next_var_remapping = next_var_remapping_storage.as_deref();
                 let opened_body = body
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
@@ -442,7 +470,7 @@ impl<'a> TermBridge<'a> {
                     &opened_body,
                     &next_context,
                     arbitrary_names,
-                    var_remapping,
+                    next_var_remapping,
                     type_param_names,
                     type_var_id_to_name,
                     instantiate_type_vars,
@@ -468,6 +496,20 @@ impl<'a> TermBridge<'a> {
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(binder_type_term) as AtomId;
+                let next_var_remapping_storage = var_remapping.map(|mapping| {
+                    let mut extended = mapping.to_vec();
+                    if extended.len() <= fresh_var as usize {
+                        extended.resize(fresh_var as usize + 1, None);
+                    }
+                    let next_index = extended
+                        .iter()
+                        .filter_map(|x| *x)
+                        .max()
+                        .map_or(0, |m| m + 1);
+                    extended[fresh_var as usize] = Some(next_index);
+                    extended
+                });
+                let next_var_remapping = next_var_remapping_storage.as_deref();
                 let opened_body = body
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
@@ -476,7 +518,7 @@ impl<'a> TermBridge<'a> {
                     &opened_body,
                     &next_context,
                     arbitrary_names,
-                    var_remapping,
+                    next_var_remapping,
                     type_param_names,
                     type_var_id_to_name,
                     instantiate_type_vars,

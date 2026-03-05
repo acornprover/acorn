@@ -567,23 +567,10 @@ impl Certificate {
             generic_code
         };
 
-        let used_var_count = claim
-            .clause
-            .literals
-            .iter()
-            .filter_map(|lit| {
-                let left_max = lit.left.max_variable();
-                let right_max = lit.right.max_variable();
-                match (left_max, right_max) {
-                    (Some(l), Some(r)) => Some(l.max(r)),
-                    (Some(l), None) => Some(l),
-                    (None, Some(r)) => Some(r),
-                    (None, None) => None,
-                }
-            })
-            .max()
-            .map(|max| (max + 1) as usize)
-            .unwrap_or(0);
+        // Use the full local context rather than only variables appearing directly
+        // in the clause literals. Claim argument terms can reference additional
+        // in-scope variables (for example through nested lambdas).
+        let used_var_count = local_context.len();
 
         let kernel_context = kernel_context;
 
@@ -706,10 +693,23 @@ impl Certificate {
                 local_context,
                 false,
             );
+            let initial_var_names: Vec<String> = (0..local_context.len())
+                .map(|i| {
+                    value_decl_name_by_var
+                        .get(i)
+                        .and_then(|n| n.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| format!("x{}", i))
+                })
+                .collect();
             let arg_code = if let Some(synthetic_names) = synthetic_names {
-                generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
+                generator.value_to_code_with_initial_vars_and_synthetic_names(
+                    &arg_value,
+                    &initial_var_names,
+                    synthetic_names,
+                )?
             } else {
-                generator.value_to_code(&arg_value)?
+                generator.value_to_code_with_initial_vars(&arg_value, &initial_var_names)?
             };
             value_arg_codes.push(Self::dequalify_synthetic_name_refs(
                 arg_code,

@@ -491,8 +491,101 @@ impl<'a> TermRef<'a> {
                 // Return the Type kind
                 Term::type_sort()
             }
-            Decomposition::Lambda(_, _) => {
-                panic!("Lambda terms should not reach get_type_with_context before normalization")
+            Decomposition::Lambda(input, body) => {
+                fn abstract_free_var_as_bound_at_depth(
+                    term: &Term,
+                    var_id: AtomId,
+                    depth: u16,
+                ) -> Term {
+                    match term.as_ref().decompose() {
+                        Decomposition::Atom(atom) => match atom {
+                            Atom::FreeVariable(i) if *i == var_id => {
+                                Term::atom(Atom::BoundVariable(depth))
+                            }
+                            Atom::BoundVariable(i) if *i >= depth => {
+                                Term::atom(Atom::BoundVariable(*i + 1))
+                            }
+                            _ => term.clone(),
+                        },
+                        Decomposition::Application(func, arg) => {
+                            let new_func = abstract_free_var_as_bound_at_depth(
+                                &func.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_arg = abstract_free_var_as_bound_at_depth(
+                                &arg.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            new_func.apply(&[new_arg])
+                        }
+                        Decomposition::Pi(input, output) => {
+                            let new_input = abstract_free_var_as_bound_at_depth(
+                                &input.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_output = abstract_free_var_as_bound_at_depth(
+                                &output.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::pi(new_input, new_output)
+                        }
+                        Decomposition::Lambda(input, body) => {
+                            let new_input = abstract_free_var_as_bound_at_depth(
+                                &input.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::lambda(new_input, new_body)
+                        }
+                        Decomposition::ForAll(binder_type, body) => {
+                            let new_binder_type = abstract_free_var_as_bound_at_depth(
+                                &binder_type.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::forall(new_binder_type, new_body)
+                        }
+                        Decomposition::Exists(binder_type, body) => {
+                            let new_binder_type = abstract_free_var_as_bound_at_depth(
+                                &binder_type.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::exists(new_binder_type, new_body)
+                        }
+                    }
+                }
+
+                let input_type = input.to_owned();
+                let mut nested_context = local_context.clone();
+                let fresh_var = nested_context.push_type(input_type.clone()) as AtomId;
+                let replacement = Term::new_variable(fresh_var);
+                let opened_body = body
+                    .to_owned()
+                    .substitute_bound(0, &replacement)
+                    .shift_bound(0, -1);
+                let body_type = opened_body.get_type_with_context(&nested_context, kernel_context);
+                let output_type = abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
+                Term::pi(input_type, output_type)
             }
             Decomposition::ForAll(_, _) | Decomposition::Exists(_, _) => {
                 // Quantifiers are propositions
@@ -515,11 +608,14 @@ impl<'a> TermRef<'a> {
         false
     }
 
-    /// Check if this term contains any variables.
+    /// Check if this term contains any free variables.
+    ///
+    /// Bound variables under binders are structural and do not participate in
+    /// unification, so they are intentionally excluded here.
     pub fn has_any_variable(&self) -> bool {
         for component in self.components {
             if let TermComponent::Atom(atom) = component {
-                if atom.is_variable() {
+                if atom.is_free_variable() {
                     return true;
                 }
             }

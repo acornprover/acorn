@@ -41,6 +41,9 @@ enum Atom {
 
     /// Boolean constant false.
     False,
+
+    /// De Bruijn bound variable index (structural, not a pattern wildcard).
+    BoundVariable(u16),
 }
 
 /// Edges form the structure of paths through the PDT.
@@ -53,6 +56,15 @@ enum Edge {
     /// Arrow (Pi type): followed by input type, output type.
     /// Used when function types appear as values (e.g., id[Bool -> Bool]).
     Arrow,
+
+    /// Lambda binder: followed by input type, body.
+    Lambda,
+
+    /// ForAll binder: followed by binder type, body.
+    ForAll,
+
+    /// Exists binder: followed by binder type, body.
+    Exists,
 
     /// A leaf atom.
     Atom(Atom),
@@ -82,6 +94,10 @@ const ATOM_SYMBOL_AND: u8 = 16;
 const ATOM_SYMBOL_OR: u8 = 17;
 const ATOM_SYMBOL_EQ: u8 = 18;
 const ATOM_SYMBOL_ITE: u8 = 19;
+const ATOM_BOUND_VARIABLE: u8 = 20;
+const LAMBDA: u8 = 21;
+const FORALL: u8 = 22;
+const EXISTS: u8 = 23;
 
 impl Edge {
     /// Returns the discriminant byte for this edge.
@@ -89,12 +105,16 @@ impl Edge {
         match self {
             Edge::Application => APPLICATION,
             Edge::Arrow => ARROW,
+            Edge::Lambda => LAMBDA,
+            Edge::ForAll => FORALL,
+            Edge::Exists => EXISTS,
             Edge::LiteralForm(true) => LITERAL_POSITIVE,
             Edge::LiteralForm(false) => LITERAL_NEGATIVE,
             Edge::Atom(atom) => match atom {
                 Atom::Variable(_) => ATOM_VARIABLE,
                 Atom::True => ATOM_TRUE,
                 Atom::False => ATOM_FALSE,
+                Atom::BoundVariable(_) => ATOM_BOUND_VARIABLE,
                 Atom::Symbol(Symbol::True) => ATOM_TRUE,
                 Atom::Symbol(Symbol::False) => ATOM_FALSE,
                 Atom::Symbol(Symbol::Empty) => ATOM_SYMBOL_EMPTY,
@@ -120,11 +140,17 @@ impl Edge {
     fn append_to(&self, v: &mut Vec<u8>) {
         v.push(self.discriminant());
         match self {
-            Edge::Application | Edge::Arrow | Edge::LiteralForm(_) => {
+            Edge::Application
+            | Edge::Arrow
+            | Edge::Lambda
+            | Edge::ForAll
+            | Edge::Exists
+            | Edge::LiteralForm(_) => {
                 v.extend_from_slice(&0u16.to_ne_bytes());
             }
             Edge::Atom(atom) => match atom {
                 Atom::Variable(i) => v.extend_from_slice(&i.to_ne_bytes()),
+                Atom::BoundVariable(i) => v.extend_from_slice(&i.to_ne_bytes()),
                 Atom::True | Atom::False => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::True) | Atom::Symbol(Symbol::False) => {
                     v.extend_from_slice(&0u16.to_ne_bytes())
@@ -170,6 +196,9 @@ impl Edge {
         match discriminant {
             APPLICATION => (Edge::Application, 3),
             ARROW => (Edge::Arrow, 3),
+            LAMBDA => (Edge::Lambda, 3),
+            FORALL => (Edge::ForAll, 3),
+            EXISTS => (Edge::Exists, 3),
             LITERAL_POSITIVE => (Edge::LiteralForm(true), 3),
             LITERAL_NEGATIVE => (Edge::LiteralForm(false), 3),
             ATOM_VARIABLE => {
@@ -178,6 +207,10 @@ impl Edge {
             }
             ATOM_TRUE => (Edge::Atom(Atom::True), 3),
             ATOM_FALSE => (Edge::Atom(Atom::False), 3),
+            ATOM_BOUND_VARIABLE => {
+                let id = u16::from_ne_bytes([bytes[1], bytes[2]]);
+                (Edge::Atom(Atom::BoundVariable(id)), 3)
+            }
             ATOM_SYMBOL_GLOBAL => {
                 // GlobalConstant uses 5 bytes: 1 discriminant + 2 module_id + 2 local_id
                 let module_id = u16::from_ne_bytes([bytes[1], bytes[2]]);
@@ -267,12 +300,7 @@ fn key_from_term_structure(term: TermRef, key: &mut Vec<u8>) {
         Decomposition::Atom(atom) => {
             let edge_atom = match atom {
                 KernelAtom::FreeVariable(v) => Atom::Variable(*v),
-                KernelAtom::BoundVariable(i) => {
-                    panic!(
-                        "BoundVariable({}) in PDT term - should have been substituted",
-                        i
-                    )
-                }
+                KernelAtom::BoundVariable(i) => Atom::BoundVariable(*i),
                 KernelAtom::Symbol(Symbol::True) => Atom::True,
                 KernelAtom::Symbol(Symbol::False) => Atom::False,
                 KernelAtom::Symbol(Symbol::Typeclass(_)) => {
@@ -296,14 +324,20 @@ fn key_from_term_structure(term: TermRef, key: &mut Vec<u8>) {
             key_from_term_structure(input, key);
             key_from_term_structure(output, key);
         }
-        Decomposition::Lambda(_, _) => {
-            panic!("Lambda in PDT term structure is not supported yet");
+        Decomposition::Lambda(input, body) => {
+            Edge::Lambda.append_to(key);
+            key_from_term_structure(input, key);
+            key_from_term_structure(body, key);
         }
-        Decomposition::ForAll(_, _) => {
-            panic!("ForAll in PDT term structure is not supported yet");
+        Decomposition::ForAll(binder_type, body) => {
+            Edge::ForAll.append_to(key);
+            key_from_term_structure(binder_type, key);
+            key_from_term_structure(body, key);
         }
-        Decomposition::Exists(_, _) => {
-            panic!("Exists in PDT term structure is not supported yet");
+        Decomposition::Exists(binder_type, body) => {
+            Edge::Exists.append_to(key);
+            key_from_term_structure(binder_type, key);
+            key_from_term_structure(body, key);
         }
     }
 }
@@ -589,7 +623,22 @@ fn types_compatible(
     query_context: &LocalContext,
     kernel_context: &KernelContext,
 ) -> bool {
-    let bound_type = bound_term.get_type_with_context(query_context, kernel_context);
+    let bound_type = match bound_term.decompose() {
+        Decomposition::Atom(KernelAtom::BoundVariable(i)) => {
+            // Bound variables are indexed from the innermost binder.
+            // In the query context, binders are appended as we descend, so b0 is the last entry.
+            let i = *i as usize;
+            let context_idx = match query_context.len().checked_sub(i + 1) {
+                Some(idx) => idx,
+                None => return false,
+            };
+            match query_context.get_var_type(context_idx) {
+                Some(var_type) => var_type.clone(),
+                None => return false,
+            }
+        }
+        _ => bound_term.get_type_with_context(query_context, kernel_context),
+    };
 
     // Universe level check: when pattern_var_type is TypeSort (expecting a type like Foo, Nat),
     // we should only accept proper types, not value-level expressions that compute to Type.
@@ -820,12 +869,7 @@ where
                     // Skip structural matching for FreeVariables
                     None
                 }
-                KernelAtom::BoundVariable(i) => {
-                    panic!(
-                        "BoundVariable({}) in PDT search - should have been substituted",
-                        i
-                    )
-                }
+                KernelAtom::BoundVariable(i) => Some(Atom::BoundVariable(*i)),
                 KernelAtom::Symbol(Symbol::True) => Some(Atom::True),
                 KernelAtom::Symbol(Symbol::False) => Some(Atom::False),
                 KernelAtom::Symbol(Symbol::Typeclass(_)) => return true, // Skip typeclasses in structure
@@ -890,11 +934,13 @@ where
                 new_terms.push(output);
                 new_terms.extend_from_slice(rest);
 
+                let mut extended_context = local_context.clone();
+                extended_context.push_type(input.to_owned());
                 if !find_matches_while(
                     &new_subtrie,
                     key,
                     &new_terms,
-                    local_context,
+                    &extended_context,
                     kernel_context,
                     all_metadata,
                     stack_limit - 1,
@@ -905,14 +951,86 @@ where
                 }
             }
         }
-        Decomposition::Lambda(_, _) => {
-            panic!("Lambda in PDT search is not supported yet");
+        Decomposition::Lambda(input, body) => {
+            Edge::Lambda.append_to(key);
+            let new_subtrie = subtrie.subtrie(key as &[u8]);
+
+            if !new_subtrie.is_empty() {
+                let mut new_terms: Vec<TermRef<'a>> = Vec::with_capacity(2 + rest.len());
+                new_terms.push(input);
+                new_terms.push(body);
+                new_terms.extend_from_slice(rest);
+
+                let mut extended_context = local_context.clone();
+                extended_context.push_type(input.to_owned());
+                if !find_matches_while(
+                    &new_subtrie,
+                    key,
+                    &new_terms,
+                    &extended_context,
+                    kernel_context,
+                    all_metadata,
+                    stack_limit - 1,
+                    replacements,
+                    callback,
+                ) {
+                    return false;
+                }
+            }
         }
-        Decomposition::ForAll(_, _) => {
-            panic!("ForAll in PDT search is not supported yet");
+        Decomposition::ForAll(binder_type, body) => {
+            Edge::ForAll.append_to(key);
+            let new_subtrie = subtrie.subtrie(key as &[u8]);
+
+            if !new_subtrie.is_empty() {
+                let mut new_terms: Vec<TermRef<'a>> = Vec::with_capacity(2 + rest.len());
+                new_terms.push(binder_type);
+                new_terms.push(body);
+                new_terms.extend_from_slice(rest);
+
+                let mut extended_context = local_context.clone();
+                extended_context.push_type(binder_type.to_owned());
+                if !find_matches_while(
+                    &new_subtrie,
+                    key,
+                    &new_terms,
+                    &extended_context,
+                    kernel_context,
+                    all_metadata,
+                    stack_limit - 1,
+                    replacements,
+                    callback,
+                ) {
+                    return false;
+                }
+            }
         }
-        Decomposition::Exists(_, _) => {
-            panic!("Exists in PDT search is not supported yet");
+        Decomposition::Exists(binder_type, body) => {
+            Edge::Exists.append_to(key);
+            let new_subtrie = subtrie.subtrie(key as &[u8]);
+
+            if !new_subtrie.is_empty() {
+                let mut new_terms: Vec<TermRef<'a>> = Vec::with_capacity(2 + rest.len());
+                new_terms.push(binder_type);
+                new_terms.push(body);
+                new_terms.extend_from_slice(rest);
+
+                let mut extended_context = local_context.clone();
+                extended_context.push_type(binder_type.to_owned());
+                if !find_matches_while(
+                    &new_subtrie,
+                    key,
+                    &new_terms,
+                    &extended_context,
+                    kernel_context,
+                    all_metadata,
+                    stack_limit - 1,
+                    replacements,
+                    callback,
+                ) {
+                    return false;
+                }
+            }
         }
     }
 
@@ -1214,6 +1332,7 @@ pub fn compute_unbound_var_remap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::atom::Atom as KernelAtom;
 
     #[test]
     fn test_edge_roundtrip() {
@@ -1715,5 +1834,33 @@ mod tests {
 
         // TypeSort should NOT match x0 (a type variable expecting concrete types)
         assert!(!found, "TypeSort should NOT match type variable x0: Type");
+    }
+
+    #[test]
+    fn test_pdt_matching_bound_variable_under_lambda_does_not_panic() {
+        // Pattern: lambda(Bool => x0), with x0 : Bool.
+        // Query:   lambda(Bool => b0), where b0 is bound by the lambda.
+        // Matching should not panic when checking replacement types.
+        let kctx = KernelContext::new();
+        let pattern_lctx = kctx.parse_local(&["Bool"]);
+        let pattern_term = Term::lambda(Term::bool_type(), Term::atom(KernelAtom::FreeVariable(0)));
+
+        let mut tree: Pdt<&str> = Pdt::new();
+        tree.insert_pair(
+            &pattern_term,
+            &Term::new_true(),
+            "lambda_pattern",
+            &pattern_lctx,
+        );
+
+        let query_term = Term::lambda(Term::bool_type(), Term::atom(KernelAtom::BoundVariable(0)));
+        let query_lctx = LocalContext::empty();
+
+        let result = std::panic::catch_unwind(|| {
+            tree.find_pair(&query_term, &Term::new_true(), &query_lctx, &kctx)
+        });
+
+        assert!(result.is_ok(), "PDT match should not panic under binders");
+        assert_eq!(result.unwrap(), Some(&"lambda_pattern"));
     }
 }

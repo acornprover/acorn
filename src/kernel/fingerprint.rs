@@ -97,12 +97,10 @@ fn get_type_category(
 ) -> TypeCategory {
     match term.decompose() {
         Decomposition::Atom(atom) => match atom {
-            Atom::FreeVariable(i) => {
-                let var_type = local_context
-                    .get_var_type(*i as usize)
-                    .expect("Variable not found in LocalContext");
-                TypeCategory::from_type_ref(var_type.as_ref())
-            }
+            Atom::FreeVariable(i) => local_context
+                .get_var_type(*i as usize)
+                .map(|var_type| TypeCategory::from_type_ref(var_type.as_ref()))
+                .unwrap_or(TypeCategory::Variable),
             Atom::BoundVariable(_) => TypeCategory::Variable,
             Atom::Symbol(symbol) => {
                 let symbol_type = kernel_context.symbol_table.get_type(*symbol);
@@ -115,9 +113,10 @@ fn get_type_category(
 
             // Get the head's type
             let head_type = match head_atom {
-                Atom::FreeVariable(i) => local_context
-                    .get_var_type(*i as usize)
-                    .expect("Variable not found in LocalContext"),
+                Atom::FreeVariable(i) => match local_context.get_var_type(*i as usize) {
+                    Some(var_type) => var_type,
+                    None => return TypeCategory::Variable,
+                },
                 Atom::Symbol(symbol) => kernel_context.symbol_table.get_type(*symbol),
                 Atom::BoundVariable(_) => return TypeCategory::Variable,
             };

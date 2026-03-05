@@ -917,6 +917,29 @@ impl CodeGenerator<'_> {
         Ok(expr.to_string())
     }
 
+    fn value_to_code_with_names_and_initial_vars(
+        &mut self,
+        value: &AcornValue,
+        names: &SyntheticNameSet,
+        initial_var_names: &[String],
+    ) -> Result<String> {
+        let initial_len = self.var_names.len();
+        self.var_names.extend(initial_var_names.iter().cloned());
+        let expr = self.value_to_expr(value, false, names)?;
+        self.var_names.truncate(initial_len);
+        Ok(expr.to_string())
+    }
+
+    /// Like value_to_code, but treats `initial_var_names` as already in-scope stack variables.
+    pub fn value_to_code_with_initial_vars(
+        &mut self,
+        value: &AcornValue,
+        initial_var_names: &[String],
+    ) -> Result<String> {
+        let empty_names = SyntheticNameSet::new();
+        self.value_to_code_with_names_and_initial_vars(value, &empty_names, initial_var_names)
+    }
+
     /// Like value_to_code, but with explicit synthetic naming for replaced/imported synthetics.
     pub fn value_to_code_with_synthetic_names(
         &mut self,
@@ -926,6 +949,18 @@ impl CodeGenerator<'_> {
         let mut names = SyntheticNameSet::new();
         names.synthetic_names = synthetic_names.clone();
         self.value_to_code_with_names(value, &names)
+    }
+
+    /// Like value_to_code_with_synthetic_names, but also preloads in-scope variable names.
+    pub fn value_to_code_with_initial_vars_and_synthetic_names(
+        &mut self,
+        value: &AcornValue,
+        initial_var_names: &[String],
+        synthetic_names: &HashMap<(ModuleId, AtomId), String>,
+    ) -> Result<String> {
+        let mut names = SyntheticNameSet::new();
+        names.synthetic_names = synthetic_names.clone();
+        self.value_to_code_with_names_and_initial_vars(value, &names, initial_var_names)
     }
 
     /// Generate code for one kernel-level synthetic definition step.
@@ -1871,15 +1906,6 @@ impl CodeGenerator<'_> {
         match value {
             AcornValue::Variable(i, _) => {
                 if *i >= self.var_names.len() as u16 {
-                    // This is definitely wrong.
-                    // We use this for the hover, but it would be better to fix it.
-                    #[cfg(test)]
-                    panic!(
-                        "Variable index {} out of range (var_names has {} entries)",
-                        i,
-                        self.var_names.len()
-                    );
-                    #[cfg(not(test))]
                     Ok(Expression::generate_identifier(&format!("v{}", i)))
                 } else {
                     Ok(Expression::generate_identifier(

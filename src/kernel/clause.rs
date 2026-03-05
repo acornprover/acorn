@@ -7,8 +7,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
-use crate::kernel::term::Decomposition;
-use crate::kernel::term::Term;
+use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::module::ModuleId;
 
 /// A Clause represents a disjunction (an "or") of literals.
@@ -344,16 +343,17 @@ impl Clause {
             for literal in &self.literals {
                 literal.validate_type(&self.context, kernel_context);
 
-                // Check that literals don't contain bound variables
-                if literal.left.has_bound_variable() {
+                // Bound variables are allowed under binders (lambda/pi/quantifiers),
+                // but not if they escape into top-level term positions.
+                if literal.left.has_escaping_bound_variable() {
                     panic!(
-                        "Clause validation failed: left side of literal contains bound variable. Literal: {}",
+                        "Clause validation failed: left side of literal contains escaping bound variable. Literal: {}",
                         literal
                     );
                 }
-                if literal.right.has_bound_variable() {
+                if literal.right.has_escaping_bound_variable() {
                     panic!(
-                        "Clause validation failed: right side of literal contains bound variable. Literal: {}",
+                        "Clause validation failed: right side of literal contains escaping bound variable. Literal: {}",
                         literal
                     );
                 }
@@ -704,6 +704,61 @@ impl Clause {
     }
 
     fn simplify_ite_term(term: &Term) -> Term {
+        fn substitute_bound_capture_avoiding(
+            term: TermRef<'_>,
+            index: u16,
+            replacement: &Term,
+            depth: u16,
+        ) -> Term {
+            match term.decompose() {
+                Decomposition::Atom(Atom::BoundVariable(i)) if *i == index + depth => {
+                    replacement.shift_bound(0, depth as i16)
+                }
+                Decomposition::Atom(_) => term.to_owned(),
+                Decomposition::Application(function, argument) => {
+                    let function =
+                        substitute_bound_capture_avoiding(function, index, replacement, depth);
+                    let argument =
+                        substitute_bound_capture_avoiding(argument, index, replacement, depth);
+                    function.apply(&[argument])
+                }
+                Decomposition::Pi(input, output) => {
+                    let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
+                    let output =
+                        substitute_bound_capture_avoiding(output, index, replacement, depth + 1);
+                    Term::pi(input, output)
+                }
+                Decomposition::Lambda(input, body) => {
+                    let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
+                    let body =
+                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+                    Term::lambda(input, body)
+                }
+                Decomposition::ForAll(binder_type, body) => {
+                    let binder_type =
+                        substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
+                    let body =
+                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+                    Term::forall(binder_type, body)
+                }
+                Decomposition::Exists(binder_type, body) => {
+                    let binder_type =
+                        substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
+                    let body =
+                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+                    Term::exists(binder_type, body)
+                }
+            }
+        }
+
+        fn beta_reduce_head_lambda(body: TermRef<'_>, argument: &Term) -> Term {
+            // Standard de Bruijn beta reduction:
+            // shift(-1, subst(0, shift(1, arg), body))
+            let lifted_argument = argument.shift_bound(0, 1);
+            let substituted = substitute_bound_capture_avoiding(body, 0, &lifted_argument, 0);
+            substituted.shift_bound(0, -1)
+        }
+
         fn recurse(term: &Term) -> Term {
             let rebuilt = match term.as_ref().decompose() {
                 Decomposition::Atom(_) => term.clone(),
@@ -733,6 +788,14 @@ impl Clause {
                     Term::exists(binder_type, body)
                 }
             };
+
+            // Beta-reduce a head lambda application: (function(x) { body })(arg) -> body[arg/x]
+            if let Decomposition::Application(function, argument) = rebuilt.as_ref().decompose() {
+                if let Decomposition::Lambda(_, body) = function.decompose() {
+                    let reduced = beta_reduce_head_lambda(body, &argument.to_owned());
+                    return recurse(&reduced);
+                }
+            }
 
             if let Some(args) = Clause::split_symbol_application(&rebuilt, Symbol::Ite, 4) {
                 if args[1].is_true() {
@@ -773,6 +836,25 @@ impl Clause {
 
         for i in 0..self.literals.len() {
             let literal = &self.literals[i];
+
+            // Reduce signed boolean constants:
+            // true / not false are tautological literals (drop this reduction path),
+            // false / not true are impossible literals and can be removed from the disjunction.
+            if literal.is_signed_term()
+                && (literal.left.is_true() || literal.left == Term::new_false())
+            {
+                let literal_is_true = if literal.left.is_true() {
+                    literal.positive
+                } else {
+                    !literal.positive
+                };
+                if !literal_is_true {
+                    // A false literal in a disjunction can be removed.
+                    // If it was the only literal, this yields the empty (impossible) clause.
+                    answer.extend(self.with_replaced_literal(i, vec![vec![]]));
+                }
+                continue;
+            }
 
             // General reduction for if-then-else terms:
             // ite(T, true, t, e)  -> t
@@ -1429,5 +1511,27 @@ mod tests {
             "expected reduction to include {}",
             else_clause
         );
+    }
+
+    #[test]
+    fn test_beta_reduction_under_binder_is_capture_avoiding() {
+        // forall(Bool => (lambda(Bool => lambda(Bool => b1)))(b0))
+        // should beta-reduce to:
+        // forall(Bool => lambda(Bool => b1))
+        // where b1 still refers to the outer forall binder.
+        let lambda = Term::lambda(
+            Term::bool_type(),
+            Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1))),
+        );
+        let applied = lambda.apply(&[Term::atom(Atom::BoundVariable(0))]);
+        let term = Term::forall(Term::bool_type(), applied);
+
+        let reduced = Clause::simplify_ite_term(&term);
+        let expected = Term::forall(
+            Term::bool_type(),
+            Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1))),
+        );
+
+        assert_eq!(reduced, expected);
     }
 }

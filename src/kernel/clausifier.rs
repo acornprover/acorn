@@ -802,7 +802,7 @@ impl<'a> Clausifier<'a> {
             | crate::kernel::term::Decomposition::Exists(_, _) => {
                 let mut arg_terms = Vec::with_capacity(args.len());
                 for arg in args {
-                    arg_terms.push(arg.to_term()?);
+                    arg_terms.push(self.extended_term_to_term(arg, context, synthesized)?);
                 }
                 let (applied, consumed) = self.instantiate_binder_prefix(function, &arg_terms);
                 for arg in arg_terms.iter().take(consumed) {
@@ -1050,17 +1050,23 @@ impl<'a> Clausifier<'a> {
                 let right_neg =
                     self.apply_term_to_cnf(right, args, true, stack, next_var_id, synth, context)?;
 
-                if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg) {
+                let result = if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg)
+                {
                     if let Some((right_term, right_sign)) = right_pos.match_negated(&right_neg) {
                         let positive = left_sign == right_sign;
                         let literal = Literal::new(positive, left_term.clone(), right_term.clone());
-                        return Ok(Cnf::from_literal(literal));
+                        Cnf::from_literal(literal)
+                    } else {
+                        let l_imp_r = left_neg.or(right_pos);
+                        let r_imp_l = left_pos.or(right_neg);
+                        l_imp_r.and(r_imp_l)
                     }
-                }
-
-                let l_imp_r = left_neg.or(right_pos);
-                let r_imp_l = left_pos.or(right_neg);
-                return Ok(l_imp_r.and(r_imp_l));
+                } else {
+                    let l_imp_r = left_neg.or(right_pos);
+                    let r_imp_l = left_pos.or(right_neg);
+                    l_imp_r.and(r_imp_l)
+                };
+                return Ok(result);
             }
 
             let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
@@ -1209,16 +1215,23 @@ impl<'a> Clausifier<'a> {
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if term.as_ref().is_lambda() {
-            let lambda_type = self.term_type_for_normalization(term, context);
-            let skolem_term = self.synthesize_term_from_term(
-                term,
-                &lambda_type,
-                stack,
-                next_var_id,
-                synth,
-                context,
-            )?;
-            return Ok(ExtendedTerm::Term(skolem_term));
+            #[cfg(feature = "nls")]
+            {
+                return self.term_to_extended_term(term, stack, next_var_id, synth, context);
+            }
+            #[cfg(not(feature = "nls"))]
+            {
+                let lambda_type = self.term_type_for_normalization(term, context);
+                let skolem_term = self.synthesize_term_from_term(
+                    term,
+                    &lambda_type,
+                    stack,
+                    next_var_id,
+                    synth,
+                    context,
+                )?;
+                return Ok(ExtendedTerm::Term(skolem_term));
+            }
         }
 
         // For boolean arguments, synthesize non-simple formulas
@@ -1268,8 +1281,9 @@ impl<'a> Clausifier<'a> {
                 spine1.push(sub_then);
                 spine2.push(sub_else);
             }
-            ExtendedTerm::Lambda(_, _) => {
-                return Err("unhandled case: secret lambda".to_string());
+            lambda @ ExtendedTerm::Lambda(_, _) => {
+                let lambda_term = self.extended_term_to_term(lambda, context, synth)?;
+                spine1.push(lambda_term);
             }
         }
 
@@ -1290,8 +1304,12 @@ impl<'a> Clausifier<'a> {
                     spine1.push(sub_then);
                     spine2.push(sub_else);
                 }
-                ExtendedTerm::Lambda(_, _) => {
-                    return Err("unhandled case: lambda arg".to_string());
+                lambda @ ExtendedTerm::Lambda(_, _) => {
+                    let lambda_term = self.extended_term_to_term(lambda, context, synth)?;
+                    if !spine2.is_empty() {
+                        spine2.push(lambda_term.clone());
+                    }
+                    spine1.push(lambda_term);
                 }
             }
         }
@@ -1389,11 +1407,11 @@ impl<'a> Clausifier<'a> {
                 Err(format!("quantifier in unexpected term position: {}", term))
             }
             _ => {
-                if term == &Term::new_false() {
-                    return Err("false literal in unexpected position".to_string());
-                }
                 if term == &Term::new_true() {
                     return Ok(ExtendedTerm::Term(Term::new_true()));
+                }
+                if term == &Term::new_false() {
+                    return Ok(ExtendedTerm::Term(Term::new_false()));
                 }
 
                 let term_type = self.term_type_for_normalization(term, context);
@@ -1675,8 +1693,18 @@ impl<'a> Clausifier<'a> {
                     else_term,
                 ]))
             }
-            ExtendedTerm::Lambda(_, t) => {
-                Err(format!("cannot convert lambda {} to simple term", t))
+            ExtendedTerm::Lambda(args, body) => {
+                let mut out = body;
+                // Rebuild de Bruijn binders from the lambda's free-variable form.
+                for (depth, (var_id, _)) in args.iter().rev().enumerate() {
+                    out = self.abstract_free_var_as_bound_at_depth(&out, *var_id, depth as u16);
+                }
+                for (_, input_type) in args.into_iter().rev() {
+                    out = Term::lambda(input_type, out);
+                }
+                // Ensure the reconstructed lambda is typeable under this context.
+                let _ = self.term_type_for_normalization(&out, local_context);
+                Ok(out)
             }
         }
     }
