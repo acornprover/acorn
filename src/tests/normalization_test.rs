@@ -849,26 +849,11 @@ fn test_normalizing_nested_lambdas() {
     );
 
     let mut norm = KernelContext::new();
-    #[cfg(feature = "nls")]
-    {
-        norm.check(
-            &env,
-            "goal",
-            &["sum(map(range(x0), T0_0)) = double_sum(x0, x1, x2)"],
-        );
-    }
-    #[cfg(not(feature = "nls"))]
-    {
-        norm.check(
-            &env,
-            "goal",
-            &[
-                "sum(map(range(x0), s0_1(x1, x0, x2, x3))) = s0_0(x1, x0, x2, x3)",
-                "s0_1(x0, x1, x2, x3, x4) = x2(x3, x4)",
-                "sum(map(range(x0), s0_0(x0, x1, x2))) = double_sum(x0, x1, x2)",
-            ],
-        );
-    }
+    norm.check(
+        &env,
+        "goal",
+        &["sum(map(range(x0), T0_0)) = double_sum(x0, x1, x2)"],
+    );
 }
 
 #[test]

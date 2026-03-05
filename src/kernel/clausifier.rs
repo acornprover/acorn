@@ -111,19 +111,6 @@ impl<'a> Clausifier<'a> {
         self.type_var_map.as_ref()
     }
 
-    /// Get the kinds of type variables in sorted order by their IDs.
-    /// Returns the types (e.g., Type) that each type variable has.
-    /// Empty in non-polymorphic mode.
-    fn get_type_var_kinds(&self) -> Vec<Term> {
-        if let Some(type_var_map) = &self.type_var_map {
-            let mut entries: Vec<_> = type_var_map.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            entries.iter().map(|(_, kind)| kind.clone()).collect()
-        } else {
-            vec![]
-        }
-    }
-
     /// Term-native normalization path.
     ///
     /// This normalizes an elaborated kernel `Term` directly to clauses.
@@ -661,22 +648,6 @@ impl<'a> Clausifier<'a> {
         Ok(output)
     }
 
-    fn make_skolem_term_from_type_term(
-        &mut self,
-        skolem_type_term: &Term,
-        stack: &Vec<TermBinding>,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
-        context: &LocalContext,
-    ) -> Result<Term, String> {
-        let mut terms = self.make_skolem_terms_from_type_terms(
-            std::slice::from_ref(skolem_type_term),
-            stack,
-            synthesized,
-            context,
-        )?;
-        Ok(terms.pop().unwrap())
-    }
-
     fn term_and_to_cnf(
         &mut self,
         left: &Term,
@@ -1134,78 +1105,6 @@ impl<'a> Clausifier<'a> {
         left.eq_to_cnf(right, negate)
     }
 
-    /// Introduce (or reuse) a synthetic term that stands for `value` at `value_type`.
-    ///
-    /// This is the bridge from rich term structure to a simple atom that later CNF steps can
-    /// refer to. We create a fresh synthetic application `s(...)`, define it with `s = value`,
-    /// and register the definition in the synthetic registry so equivalent definitions can be
-    /// deduplicated.
-    fn synthesize_term_from_term(
-        &mut self,
-        value: &Term,
-        value_type: &Term,
-        stack: &mut Vec<TermBinding>,
-        next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
-        context: &mut LocalContext,
-    ) -> Result<Term, String> {
-        let skolem_term =
-            self.make_skolem_term_from_type_term(value_type, stack, synth, context)?;
-        let skolem_id = if let Atom::Symbol(Symbol::Synthetic(m, id)) = *skolem_term.get_head_atom()
-        {
-            (m, id)
-        } else {
-            return Err("internal error: skolem term is not synthetic".to_string());
-        };
-
-        let synthetic_type = self
-            .kernel_context()
-            .symbol_table
-            .get_type(Symbol::Synthetic(skolem_id.0, skolem_id.1))
-            .clone();
-
-        let type_vars = self.get_type_var_kinds();
-        let synthetic_types = vec![synthetic_type.clone()];
-
-        let definition_cnf = self.term_eq_to_cnf(
-            &skolem_term,
-            value,
-            false,
-            stack,
-            next_var_id,
-            synth,
-            context,
-        )?;
-        let num_type_vars = type_vars.len();
-        let clauses = definition_cnf
-            .clone()
-            .into_clauses_with_pinned(context, num_type_vars);
-        let key_clauses: Vec<Clause> = clauses
-            .iter()
-            .map(|c| c.invalidate_synthetics(&[skolem_id]))
-            .collect();
-
-        if let Some(existing_def) = self.kernel_context().synthetic_registry.lookup_by_key(
-            &type_vars,
-            &synthetic_types,
-            &key_clauses,
-        ) {
-            let (existing_m, existing_id) = existing_def.atoms[0];
-            let existing_atom = Atom::Symbol(Symbol::Synthetic(existing_m, existing_id));
-            Ok(Term::new(existing_atom, skolem_term.args().to_vec()))
-        } else {
-            let clauses = definition_cnf.into_clauses_with_pinned(context, num_type_vars);
-            self.as_mut()?.define_synthetic_atoms(
-                vec![skolem_id],
-                type_vars,
-                vec![synthetic_type],
-                clauses,
-                None,
-            )?;
-            Ok(skolem_term)
-        }
-    }
-
     fn arg_term_to_extended(
         &mut self,
         term: &Term,
@@ -1215,23 +1114,7 @@ impl<'a> Clausifier<'a> {
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if term.as_ref().is_lambda() {
-            #[cfg(feature = "nls")]
-            {
-                return self.term_to_extended_term(term, stack, next_var_id, synth, context);
-            }
-            #[cfg(not(feature = "nls"))]
-            {
-                let lambda_type = self.term_type_for_normalization(term, context);
-                let skolem_term = self.synthesize_term_from_term(
-                    term,
-                    &lambda_type,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                return Ok(ExtendedTerm::Term(skolem_term));
-            }
+            return self.term_to_extended_term(term, stack, next_var_id, synth, context);
         }
 
         // For boolean arguments, synthesize non-simple formulas
