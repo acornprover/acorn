@@ -793,13 +793,11 @@ mod tests {
         );
     }
 
-    /// Reproduces a `naw`-mode cert roundtrip bug:
-    /// when a claim argument is a constant lambda (binder present, binder var unused),
-    /// parsing the generated cert can fail with:
-    /// "term cannot be represented as a simple term".
+    /// Regression: `naw`-mode cert parsing must accept constant-lambda claim arguments.
+    /// This shape is produced by explicit inhabitant witnesses for function types.
     #[cfg(feature = "naw")]
     #[test]
-    fn test_make_cert_constant_lambda_claim_arg_repro() {
+    fn test_make_cert_constant_lambda_claim_arg_roundtrip() {
         use crate::certificate::Certificate;
         use crate::elaborator::binding_map::BindingMap;
         use crate::module::ModuleId;
@@ -827,23 +825,13 @@ mod tests {
         let project = Project::new_mock();
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kctx);
-        let err = match Certificate::parse_cert_steps(
+        let steps = Certificate::parse_cert_steps(
             &lines,
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
-        ) {
-            Ok(_) => panic!(
-                "expected parse failure for constant-lambda claim argument bug repro; lines={:?}",
-                lines
-            ),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("term cannot be represented as a simple term"),
-            "unexpected error: {}",
-            err
-        );
+        )
+        .expect("constant-lambda claim argument should parse");
+        assert_eq!(steps.len(), 1, "expected one claim step");
     }
 }

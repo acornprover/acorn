@@ -928,7 +928,7 @@ impl Certificate {
             let term = elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
             let mut term_view =
                 Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
-            let term = term_view.clausify_term_to_simple_term(&term)?;
+            let term = term_view.clausify_term_for_claim_arg(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
 

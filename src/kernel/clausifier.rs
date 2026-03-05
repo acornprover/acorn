@@ -1636,6 +1636,19 @@ impl<'a> Clausifier<'a> {
         }
     }
 
+    /// Convert a claim argument term for `claim_with_args` parsing.
+    ///
+    /// Prefer simple-term encoding when available (to preserve existing certificate shape),
+    /// but allow richer closed terms (for example lambdas) so cert parsing can round-trip
+    /// generated witnesses.
+    pub fn clausify_term_for_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
+        match self.clausify_term_to_simple_term(term) {
+            Ok(simple) => Ok(simple),
+            Err(_) if !term.has_free_variable() => Ok(term.clone()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Converts an ExtendedTerm to a simple Term.
     /// The local_context provides variable type information.
     fn extended_term_to_term(
