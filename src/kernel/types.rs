@@ -3,12 +3,12 @@ use std::fmt;
 
 use crate::module::ModuleId;
 
-// Note: Empty, Bool, and TypeSort are now Symbol variants (in symbol.rs),
+// Note: Bool and TypeSort are now Symbol variants (in symbol.rs),
 // not GroundTypeIds. GroundTypeId is now only used for user-defined ground types.
 
 /// A type ID that refers ONLY to a ground type (no internal structure).
 /// Examples: Nat, Int, user-defined data types without parameters.
-/// NOT for: function types, parameterized types like List[T], or built-in types (Empty, Bool, TypeSort).
+/// NOT for: function types, parameterized types like List[T], or built-in types (Bool, TypeSort).
 ///
 /// This distinction is important because:
 /// - `Term::ground_type(GroundTypeId)` creates an atomic type term

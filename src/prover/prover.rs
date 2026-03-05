@@ -361,7 +361,7 @@ impl Prover {
                 .get_local_context()
                 .get_var_types()
                 .iter()
-                .any(|t| t.as_ref().is_type_param_kind());
+                .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
             let needs_specialization = rewrite_step.clause.has_any_variable() || has_type_params;
 
             let inspiration_id = match step.source.inspiration_id {

@@ -424,7 +424,7 @@ impl<'a> Unifier<'a> {
         // that should be bound to types like Foo, Nat), we should only accept proper types,
         // not value-level expressions that happen to return Type.
         //
-        // Valid: Type symbols (Foo, Bool, Empty), type variables (FreeVariable)
+        // Valid: Type symbols (Foo, Bool), type variables (FreeVariable)
         // Invalid: TypeSort itself, function applications (GlobalConstant, ScopedConstant)
         if matches!(
             var_type.as_ref().decompose(),
@@ -434,7 +434,6 @@ impl<'a> Unifier<'a> {
                 // Accept: proper types and type variables
                 Atom::Symbol(Symbol::Type(_))
                 | Atom::Symbol(Symbol::Bool)
-                | Atom::Symbol(Symbol::Empty)
                 | Atom::FreeVariable(_) => {
                     // OK - these are proper types
                 }
@@ -510,9 +509,8 @@ impl<'a> Unifier<'a> {
             } else if matches!(
                 term.as_ref().decompose(),
                 Decomposition::Atom(Atom::Symbol(Symbol::Bool))
-                    | Decomposition::Atom(Atom::Symbol(Symbol::Empty))
             ) {
-                // Built-in types (Bool, Empty) don't implement any typeclasses
+                // Built-in type Bool doesn't implement any typeclasses
                 return false;
             } else {
                 // term is not a simple type - check its type
@@ -853,29 +851,28 @@ mod tests {
     #[test]
     fn test_unifying_functional_variable() {
         // This test checks that a variable can unify with a constant in functional position.
-        // Variable(1) should unify with GlobalConstant(3), both with type Empty -> Bool.
+        // Variable(1) should unify with GlobalConstant(3), both with type Bool -> Bool.
         let ctx = test_ctx();
-        // g3 has type Empty -> Bool
-        let empty_to_bool = ctx
+        // g3 has type Bool -> Bool
+        let bool_to_bool = ctx
             .symbol_table
             .get_type(Symbol::GlobalConstant(ModuleId(0), 3))
             .clone();
 
-        let empty0 = Term::atom(Atom::FreeVariable(0));
+        let bool0 = Term::atom(Atom::FreeVariable(0));
         let const_f_term = Term::new(
             Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 3)),
-            vec![empty0.clone()],
+            vec![bool0.clone()],
         );
-        let var_f_term = Term::new(Atom::FreeVariable(1), vec![empty0.clone()]);
+        let var_f_term = Term::new(Atom::FreeVariable(1), vec![bool0.clone()]);
 
-        // Set up a unifier where Variable(0) has EMPTY type and Variable(1) has Empty -> Bool type
+        // Set up a unifier where x0: Bool and x1: Bool -> Bool
         let mut u = Unifier::new(3, &ctx);
-        // x0: EMPTY, x1: Empty -> Bool
-        let local_ctx = LocalContext::from_types(vec![Term::empty_type(), empty_to_bool]);
+        let local_ctx = LocalContext::from_types(vec![Term::bool_type(), bool_to_bool]);
         let local_ctx_ref: &'static LocalContext = Box::leak(Box::new(local_ctx));
         u.set_input_context(Scope::LEFT, local_ctx_ref);
         u.set_input_context(Scope::RIGHT, local_ctx_ref);
-        u.set_output_var_types(vec![Term::empty_type(); 10]);
+        u.set_output_var_types(vec![Term::bool_type(); 10]);
         u.assert_unify(Scope::LEFT, &const_f_term, Scope::RIGHT, &var_f_term);
     }
 

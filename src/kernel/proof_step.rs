@@ -700,17 +700,13 @@ impl ProofStep {
         // The rewritten literal's variables come from both the target and the new_subterm.
         let rewritten_context = {
             let target_context = target_step.clause.get_local_context();
-            let mut var_types = target_context.get_var_types().to_vec();
-            let empty_type = Term::empty_type();
+            let mut combined = target_context.clone();
             for (i, vt) in new_subterm_context.get_var_types().iter().enumerate() {
-                if i >= var_types.len() {
-                    var_types.resize(i + 1, empty_type.clone());
-                    var_types[i] = vt.clone();
-                } else if var_types[i] == empty_type {
-                    var_types[i] = vt.clone();
+                if let Some(vt) = vt {
+                    combined.set_type(i, vt.clone());
                 }
             }
-            LocalContext::from_types(var_types)
+            combined
         };
 
         let (clause, var_ids) =

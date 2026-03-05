@@ -83,7 +83,6 @@ const ATOM_FALSE: u8 = 5;
 const ATOM_SYMBOL_GLOBAL: u8 = 6;
 const ATOM_SYMBOL_SCOPED: u8 = 7;
 const ATOM_SYMBOL_SYNTHETIC: u8 = 8;
-const ATOM_SYMBOL_EMPTY: u8 = 9;
 const ATOM_SYMBOL_BOOL: u8 = 10;
 const ATOM_SYMBOL_TYPESORT: u8 = 11;
 const ATOM_SYMBOL_TYPE: u8 = 12;
@@ -118,7 +117,6 @@ impl Edge {
                 Atom::BoundVariable(_) => ATOM_BOUND_VARIABLE,
                 Atom::Symbol(Symbol::True) => ATOM_TRUE,
                 Atom::Symbol(Symbol::False) => ATOM_FALSE,
-                Atom::Symbol(Symbol::Empty) => ATOM_SYMBOL_EMPTY,
                 Atom::Symbol(Symbol::Bool) => ATOM_SYMBOL_BOOL,
                 Atom::Symbol(Symbol::Type0) => ATOM_SYMBOL_TYPESORT,
                 Atom::Symbol(Symbol::Type(_)) => ATOM_SYMBOL_TYPE,
@@ -157,7 +155,6 @@ impl Edge {
                 Atom::Symbol(Symbol::True) | Atom::Symbol(Symbol::False) => {
                     v.extend_from_slice(&0u16.to_ne_bytes())
                 }
-                Atom::Symbol(Symbol::Empty) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Bool) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Type0) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Not) => v.extend_from_slice(&0u16.to_ne_bytes()),
@@ -242,7 +239,6 @@ impl Edge {
                     5,
                 )
             }
-            ATOM_SYMBOL_EMPTY => (Edge::Atom(Atom::Symbol(Symbol::Empty)), 3),
             ATOM_SYMBOL_BOOL => (Edge::Atom(Atom::Symbol(Symbol::Bool)), 3),
             ATOM_SYMBOL_TYPESORT => (Edge::Atom(Atom::Symbol(Symbol::Type0)), 3),
             ATOM_SYMBOL_NOT => (Edge::Atom(Atom::Symbol(Symbol::Not)), 3),
@@ -648,7 +644,7 @@ fn types_compatible(
     // we should only accept proper types, not value-level expressions that compute to Type.
     //
     // Valid matches:
-    // - Type symbols: Foo, Bool, Empty (Symbol::Type, Symbol::Bool, Symbol::Empty)
+    // - Type symbols: Foo, Bool (Symbol::Type, Symbol::Bool)
     // - Type constructor applications: List[Int] (Symbol::Type applied to args)
     //
     // Invalid matches:
@@ -663,7 +659,6 @@ fn types_compatible(
             // Type-level terms: type symbols and type constructors
             KernelAtom::Symbol(Symbol::Type(_))
             | KernelAtom::Symbol(Symbol::Bool)
-            | KernelAtom::Symbol(Symbol::Empty)
             | KernelAtom::FreeVariable(_) => {
                 // Accept: proper types and type variables
             }
@@ -1055,7 +1050,9 @@ fn verify_type_compatibility(
             // Pattern didn't have this many variables - that's fine
             continue;
         }
-        let pattern_var_type = &pattern_var_types[i];
+        let Some(pattern_var_type) = &pattern_var_types[i] else {
+            continue;
+        };
         if !types_compatible(
             replacement,
             pattern_var_type,
@@ -1084,21 +1081,20 @@ pub fn replace_term_variables(
     replacement_context: &LocalContext,
     shift: Option<AtomId>,
 ) -> (Term, LocalContext) {
-    let mut output_types: Vec<Term> = replacement_context.get_var_types().to_vec();
+    let mut output_context = replacement_context.clone();
 
     fn replace_recursive(
         term: TermRef,
         term_context: &LocalContext,
         replacements: &[TermRef],
         shift: Option<AtomId>,
-        output_types: &mut Vec<Term>,
+        output_context: &mut LocalContext,
     ) -> Term {
         match term.decompose() {
             Decomposition::Atom(KernelAtom::FreeVariable(var_id)) => {
                 let idx = *var_id as usize;
-                // Check if we have a replacement (non-empty) for this variable
                 let has_replacement =
-                    idx < replacements.len() && !replacements[idx].is_empty_type();
+                    idx < replacements.len() && output_context.get_var_type(idx).is_some();
                 if has_replacement {
                     // Replace with the replacement term
                     replacements[idx].to_owned()
@@ -1114,47 +1110,54 @@ pub fn replace_term_variables(
                         .get_var_type(idx)
                         .cloned()
                         .expect("variable type not found in term_context");
-                    if new_idx >= output_types.len() {
-                        output_types.resize(new_idx + 1, Term::empty_type());
-                    }
-                    output_types[new_idx] = var_type;
+                    output_context.set_type(new_idx, var_type);
                     Term::atom(KernelAtom::FreeVariable(new_var_id))
                 }
             }
             Decomposition::Atom(_) => term.to_owned(),
             Decomposition::Application(func, arg) => {
                 let replaced_func =
-                    replace_recursive(func, term_context, replacements, shift, output_types);
+                    replace_recursive(func, term_context, replacements, shift, output_context);
                 let replaced_arg =
-                    replace_recursive(arg, term_context, replacements, shift, output_types);
+                    replace_recursive(arg, term_context, replacements, shift, output_context);
                 replaced_func.apply(&[replaced_arg])
             }
             Decomposition::Pi(input, output) => {
                 let replaced_input =
-                    replace_recursive(input, term_context, replacements, shift, output_types);
+                    replace_recursive(input, term_context, replacements, shift, output_context);
                 let replaced_output =
-                    replace_recursive(output, term_context, replacements, shift, output_types);
+                    replace_recursive(output, term_context, replacements, shift, output_context);
                 Term::pi(replaced_input, replaced_output)
             }
             Decomposition::Lambda(input, body) => {
                 let replaced_input =
-                    replace_recursive(input, term_context, replacements, shift, output_types);
+                    replace_recursive(input, term_context, replacements, shift, output_context);
                 let replaced_body =
-                    replace_recursive(body, term_context, replacements, shift, output_types);
+                    replace_recursive(body, term_context, replacements, shift, output_context);
                 Term::lambda(replaced_input, replaced_body)
             }
             Decomposition::ForAll(binder_type, body) => {
-                let replaced_binder_type =
-                    replace_recursive(binder_type, term_context, replacements, shift, output_types);
+                let replaced_binder_type = replace_recursive(
+                    binder_type,
+                    term_context,
+                    replacements,
+                    shift,
+                    output_context,
+                );
                 let replaced_body =
-                    replace_recursive(body, term_context, replacements, shift, output_types);
+                    replace_recursive(body, term_context, replacements, shift, output_context);
                 Term::forall(replaced_binder_type, replaced_body)
             }
             Decomposition::Exists(binder_type, body) => {
-                let replaced_binder_type =
-                    replace_recursive(binder_type, term_context, replacements, shift, output_types);
+                let replaced_binder_type = replace_recursive(
+                    binder_type,
+                    term_context,
+                    replacements,
+                    shift,
+                    output_context,
+                );
                 let replaced_body =
-                    replace_recursive(body, term_context, replacements, shift, output_types);
+                    replace_recursive(body, term_context, replacements, shift, output_context);
                 Term::exists(replaced_binder_type, replaced_body)
             }
         }
@@ -1165,10 +1168,9 @@ pub fn replace_term_variables(
         term_context,
         replacements,
         shift,
-        &mut output_types,
+        &mut output_context,
     );
-    let result_context = LocalContext::from_types(output_types);
-    (result_term, result_context)
+    (result_term, output_context)
 }
 
 /// Substitutes variables in a term using explicit binding and remapping maps.
@@ -1251,6 +1253,7 @@ pub fn substitute_term(
 pub fn compute_unbound_var_remap(
     output_term: &Term,
     pattern_context: &LocalContext,
+    base_context: &LocalContext,
     bindings: &HashMap<AtomId, Term>,
     start_var_id: AtomId,
 ) -> (HashMap<AtomId, AtomId>, LocalContext) {
@@ -1265,7 +1268,7 @@ pub fn compute_unbound_var_remap(
     }
 
     if unbound_vars.is_empty() {
-        return (HashMap::new(), LocalContext::empty_ref().clone());
+        return (HashMap::new(), base_context.clone());
     }
 
     // Sort unbound variables by type dependency:
@@ -1308,14 +1311,8 @@ pub fn compute_unbound_var_remap(
         next_output_var += 1;
     }
 
-    // Build output context: for each new output var, compute its type
-    // by substituting into the pattern variable's type
-    // The output context needs entries for all variables from 0 to max_output_var
-    let max_output_var = next_output_var;
-    let mut output_types: Vec<Term> = Vec::with_capacity(max_output_var as usize);
-    for _ in 0..max_output_var {
-        output_types.push(Term::empty_type());
-    }
+    // Build output context: start from existing local types and then add new variables.
+    let mut output_context = base_context.clone();
 
     // Process in order of output var ID (type vars first, so dependencies are satisfied)
     let mut ordered_vars: Vec<(AtomId, AtomId)> = var_remap.iter().map(|(&k, &v)| (k, v)).collect();
@@ -1325,11 +1322,10 @@ pub fn compute_unbound_var_remap(
         if let Some(pattern_type) = pattern_context.get_var_type(pattern_var as usize) {
             // Substitute into the type using bindings and var_remap
             let output_type = substitute_term(pattern_type, bindings, &var_remap);
-            output_types[output_var as usize] = output_type;
+            output_context.set_type(output_var as usize, output_type);
         }
     }
 
-    let output_context = LocalContext::from_types(output_types);
     (var_remap, output_context)
 }
 

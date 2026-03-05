@@ -429,11 +429,6 @@ impl<'a> TermRef<'a> {
         self.is_atomic() && matches!(self.get_head_atom(), Atom::Symbol(Symbol::Bool))
     }
 
-    /// Returns true if this is the Empty type.
-    pub fn is_empty_type(&self) -> bool {
-        self.is_atomic() && matches!(self.get_head_atom(), Atom::Symbol(Symbol::Empty))
-    }
-
     /// Returns true if this is Type0 (the type of types, aka kind *).
     pub fn is_type0(&self) -> bool {
         self.is_atomic() && matches!(self.get_head_atom(), Atom::Symbol(Symbol::Type0))
@@ -788,8 +783,7 @@ impl<'a> TermRef<'a> {
                 | TermComponent::Atom(Atom::Symbol(Symbol::False)) => {
                     // True/False don't contribute to weight
                 }
-                TermComponent::Atom(Atom::Symbol(Symbol::Empty))
-                | TermComponent::Atom(Atom::Symbol(Symbol::Bool))
+                TermComponent::Atom(Atom::Symbol(Symbol::Bool))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Type0))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Not))
                 | TermComponent::Atom(Atom::Symbol(Symbol::And))
@@ -1515,18 +1509,6 @@ impl Term {
         use std::sync::LazyLock;
         static BOOL_TYPE: LazyLock<Term> = LazyLock::new(Term::bool_type);
         &BOOL_TYPE
-    }
-
-    /// Returns a Term for the Empty type.
-    pub fn empty_type() -> Term {
-        Term::atom(Atom::Symbol(Symbol::Empty))
-    }
-
-    /// Returns a static reference to the Empty type.
-    pub fn empty_type_ref() -> &'static Term {
-        use std::sync::LazyLock;
-        static EMPTY_TYPE: LazyLock<Term> = LazyLock::new(Term::empty_type);
-        &EMPTY_TYPE
     }
 
     /// Returns a Term for the Type kind (the type of proper types).

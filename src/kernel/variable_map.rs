@@ -51,35 +51,16 @@ impl VariableMap {
 
     /// Builds a LocalContext from all the variables in the replacement terms.
     /// We need the input_context to look up variable types.
-    ///
-    /// Note: The returned context may have gaps filled with EMPTY placeholders.
-    /// This is because replacement terms may contain non-sequential variable IDs
-    /// (e.g., x3 without x0, x1, x2). The context uses index-based lookup, so we
-    /// need entries at all indices up to the max variable ID.
-    /// These placeholders are safe because:
-    /// 1. They're only used temporarily in unnormalized clauses
-    /// 2. When the clause is normalized, variable IDs become sequential
-    /// 3. The remap operation only keeps entries for actual variables
     pub fn build_output_context(&self, input_context: &LocalContext) -> LocalContext {
-        let empty_type = Term::empty_type();
-        let mut var_types: Vec<Option<Term>> = vec![];
+        let mut output = LocalContext::empty();
         for opt_term in &self.map {
             if let Some(term) = opt_term {
                 for (var_id, var_type) in term.collect_vars(input_context) {
-                    let idx = var_id as usize;
-                    if idx >= var_types.len() {
-                        var_types.resize(idx + 1, None);
-                    }
-                    var_types[idx] = Some(var_type);
+                    output.set_type(var_id as usize, var_type);
                 }
             }
         }
-        LocalContext::from_types(
-            var_types
-                .into_iter()
-                .map(|t| t.unwrap_or_else(|| empty_type.clone()))
-                .collect(),
-        )
+        output
     }
 
     pub fn get_mapping(&self, i: AtomId) -> Option<&Term> {

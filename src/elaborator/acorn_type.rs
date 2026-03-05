@@ -326,9 +326,6 @@ impl TypeParam {
 /// This is the "richer" form of a type. The environment uses these types; the prover uses ids.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum AcornType {
-    /// Nothing can ever be the empty type.
-    Empty,
-
     /// Booleans are special
     Bool,
 
@@ -410,7 +407,7 @@ impl AcornType {
                     param.find_type_vars(vars, source)?;
                 }
             }
-            // Empty, Bool, and Arbitrary types don't contain type variables
+            // Built-in scalar types and Arbitrary types don't contain type variables
             _ => {}
         }
         Ok(())
@@ -577,7 +574,6 @@ impl AcornType {
     pub fn has_generic(&self) -> bool {
         match self {
             AcornType::Bool
-            | AcornType::Empty
             | AcornType::Arbitrary(..)
             | AcornType::Type0
             | AcornType::TypeclassConstraint(_) => false,
@@ -805,10 +801,9 @@ impl AcornType {
                 ));
                 combined
             }
-            AcornType::Bool
-            | AcornType::Empty
-            | AcornType::Type0
-            | AcornType::TypeclassConstraint(_) => Variance::None,
+            AcornType::Bool | AcornType::Type0 | AcornType::TypeclassConstraint(_) => {
+                Variance::None
+            }
         }
     }
 
@@ -855,7 +850,6 @@ impl fmt::Display for AcornType {
                 Ok(())
             }
             AcornType::Function(function_type) => write!(f, "{}", function_type),
-            AcornType::Empty => write!(f, "empty"),
             AcornType::Variable(param) => {
                 // A type variable has a name that is generally hidden from the user.
                 // You can't use these in explicit code, so this won't be used for codegen.

@@ -80,7 +80,7 @@ fn register_typeclasses(kernel_context: &mut KernelContext, acorn_type: &AcornTy
         AcornType::TypeclassConstraint(typeclass) => {
             kernel_context.type_store.add_typeclass(typeclass);
         }
-        AcornType::Bool | AcornType::Empty | AcornType::Type0 => {}
+        AcornType::Bool | AcornType::Type0 => {}
     }
 }
 

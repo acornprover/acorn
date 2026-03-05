@@ -417,6 +417,7 @@ impl RewriteTree {
                     let (var_remap, new_context) = compute_unbound_var_remap(
                         &value.output,
                         &value.output_context,
+                        local_context,
                         &bindings,
                         next_var,
                     );
@@ -754,6 +755,9 @@ mod tests {
             // In particular, if there are variables with type=FreeVariable(n),
             // then n should have type=Type
             for (i, var_type) in rewrite.context.get_var_types().iter().enumerate() {
+                let Some(var_type) = var_type else {
+                    continue;
+                };
                 if let Decomposition::Atom(KernelAtom::FreeVariable(type_var_id)) =
                     var_type.as_ref().decompose()
                 {

@@ -11,7 +11,9 @@ use crate::kernel::types::TypeclassId;
 pub struct LocalContext {
     /// The types of variables, indexed by variable id.
     /// var_types[i] is the type (as a Term) for variable x_i.
-    var_types: Vec<Term>,
+    ///
+    /// Some entries may be None in intermediate contexts where variable IDs are sparse.
+    var_types: Vec<Option<Term>>,
 }
 
 use std::sync::LazyLock;
@@ -41,18 +43,20 @@ impl LocalContext {
     /// # Panics
     /// Panics if any variable ID in `var_ids` is out of bounds for this context.
     pub fn remap(&self, var_ids: &[AtomId]) -> LocalContext {
-        let var_types: Vec<Term> = var_ids
+        let var_types: Vec<Option<Term>> = var_ids
             .iter()
             .map(|&id| {
-                self.get_var_type(id as usize)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "LocalContext::remap: variable x{} not found (context has {} variables)",
-                            id,
-                            self.len()
-                        )
-                    })
-                    .renumber_variables(var_ids)
+                Some(
+                    self.get_var_type(id as usize)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "LocalContext::remap: variable x{} not found (context has {} variables)",
+                                id,
+                                self.len()
+                            )
+                        })
+                        .renumber_variables(var_ids),
+                )
             })
             .collect();
 
@@ -67,20 +71,19 @@ impl LocalContext {
 
     /// Get the type of a variable by its id.
     pub fn get_var_type(&self, var_id: usize) -> Option<&Term> {
-        self.var_types.get(var_id)
+        self.var_types.get(var_id).and_then(|t| t.as_ref())
     }
 
     /// Returns the typeclass constraint if the variable's type is a typeclass.
     /// When a type variable is constrained to a typeclass (e.g., `M: Monoid`),
     /// its type in the context is stored as `Symbol::Typeclass(monoid_id)`.
     pub fn get_typeclass_constraint(&self, var_id: usize) -> Option<TypeclassId> {
-        self.var_types
-            .get(var_id)
+        self.get_var_type(var_id)
             .and_then(|t| t.as_ref().as_typeclass())
     }
 
     /// Returns a slice of all variable types.
-    pub fn get_var_types(&self) -> &[Term] {
+    pub fn get_var_types(&self) -> &[Option<Term>] {
         &self.var_types
     }
 
@@ -89,18 +92,17 @@ impl LocalContext {
     /// Returns the assigned variable ID.
     pub fn push_type(&mut self, var_type: Term) -> usize {
         let var_id = self.var_types.len();
-        self.var_types.push(var_type);
+        self.var_types.push(Some(var_type));
         var_id
     }
 
     /// Set type for a variable at a specific index.
-    /// If the context is too short, it will be extended with EMPTY placeholders.
+    /// If the context is too short, it will be extended with missing entries.
     pub fn set_type(&mut self, var_id: usize, var_type: Term) {
         if var_id >= self.var_types.len() {
-            // Extend with EMPTY placeholders for gap indices
-            self.var_types.resize(var_id + 1, Term::empty_type());
+            self.var_types.resize(var_id + 1, None);
         }
-        self.var_types[var_id] = var_type;
+        self.var_types[var_id] = Some(var_type);
     }
 
     /// Truncate the context to keep only the first `len` variable types.
@@ -123,13 +125,17 @@ impl LocalContext {
     /// replaced with a concrete term.
     pub fn replace_variable(&mut self, var_id: AtomId, replacement: &Term) {
         for var_type in &mut self.var_types {
-            *var_type = var_type.replace_variable(var_id, replacement);
+            if let Some(t) = var_type.as_mut() {
+                *t = t.replace_variable(var_id, replacement);
+            }
         }
     }
 
     /// Create a new LocalContext from types.
     pub fn from_types(var_types: Vec<Term>) -> LocalContext {
-        LocalContext { var_types }
+        LocalContext {
+            var_types: var_types.into_iter().map(Some).collect(),
+        }
     }
 
     /// Validates that variable types only reference lower-numbered variables.
@@ -141,28 +147,15 @@ impl LocalContext {
     /// Returns true if all variable types satisfy this constraint.
     pub fn validate_variable_ordering(&self) -> bool {
         for (i, var_type) in self.var_types.iter().enumerate() {
-            if let Some(max_var) = var_type.max_variable() {
-                if max_var as usize >= i {
-                    return false;
+            if let Some(var_type) = var_type {
+                if let Some(max_var) = var_type.max_variable() {
+                    if max_var as usize >= i {
+                        return false;
+                    }
                 }
             }
         }
         true
-    }
-
-    /// Validates that no variable has the Empty type.
-    ///
-    /// The Empty type is a placeholder that should never appear in a valid context.
-    /// Having a variable with Empty type indicates an error in clause construction.
-    ///
-    /// Returns None if valid, or Some(var_id) for the first variable with Empty type.
-    pub fn find_empty_type(&self) -> Option<usize> {
-        for (i, var_type) in self.var_types.iter().enumerate() {
-            if var_type.as_ref().is_empty_type() {
-                return Some(i);
-            }
-        }
-        None
     }
 }
 
@@ -207,7 +200,7 @@ mod tests {
     fn test_remap_preserves_types() {
         // Create a context with a Pi type (function type)
         let pi_type = Term::pi(Term::bool_type(), Term::bool_type());
-        let ground_type = Term::empty_type();
+        let ground_type = Term::type_sort();
 
         let ctx = LocalContext::from_types(vec![ground_type.clone(), pi_type.clone()]);
 
@@ -222,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_remap_empty() {
-        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::empty_type()]);
+        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
 
         // Remap to empty
         let remapped = ctx.remap(&[]);
@@ -233,21 +226,21 @@ mod tests {
     #[test]
     fn test_remap_duplicates_variable() {
         // It's valid to include the same variable ID multiple times
-        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::empty_type()]);
+        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
 
         let remapped = ctx.remap(&[0, 0, 1, 0]);
 
         assert_eq!(remapped.len(), 4);
         assert_eq!(remapped.get_var_type(0), Some(&Term::bool_type()));
         assert_eq!(remapped.get_var_type(1), Some(&Term::bool_type()));
-        assert_eq!(remapped.get_var_type(2), Some(&Term::empty_type()));
+        assert_eq!(remapped.get_var_type(2), Some(&Term::type_sort()));
         assert_eq!(remapped.get_var_type(3), Some(&Term::bool_type()));
     }
 
     #[test]
     #[should_panic(expected = "variable x5 not found")]
     fn test_remap_panics_on_out_of_bounds() {
-        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::empty_type()]);
+        let ctx = LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
 
         // Try to remap with an out-of-bounds variable ID
         ctx.remap(&[0, 5]);

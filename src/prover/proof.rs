@@ -206,7 +206,7 @@ impl<'a> Proof<'a> {
                 .get_local_context()
                 .get_var_types()
                 .iter()
-                .any(|t| t.as_ref().is_type_param_kind());
+                .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
             if step.rule.is_underlying_assumption()
                 && !step.clause.has_any_variable()
                 && !has_type_params

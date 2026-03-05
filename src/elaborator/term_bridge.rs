@@ -182,7 +182,6 @@ impl<'a> TermBridge<'a> {
                 AcornValue::constant(name, vec![], acorn_type.clone(), acorn_type, vec![])
             }
             Atom::Symbol(Symbol::Type(_))
-            | Atom::Symbol(Symbol::Empty)
             | Atom::Symbol(Symbol::Bool)
             | Atom::Symbol(Symbol::Type0) => {
                 panic!(
@@ -595,7 +594,6 @@ impl<'a> TermBridge<'a> {
                     Decomposition::Atom(atom) => match atom {
                         Atom::Symbol(Symbol::Type(_))
                         | Atom::Symbol(Symbol::Bool)
-                        | Atom::Symbol(Symbol::Empty)
                         | Atom::Symbol(Symbol::Type0)
                         | Atom::Symbol(Symbol::Typeclass(_)) => true,
                         Atom::FreeVariable(i) => local_context
@@ -852,14 +850,16 @@ impl<'a> TermBridge<'a> {
         let mut var_remapping: Vec<Option<u16>> = Vec::new();
         let mut new_index: u16 = 0;
         for i in 0..num_vars {
-            let type_term = &var_types_raw[i];
+            let Some(type_term) = &var_types_raw[i] else {
+                var_remapping.push(None);
+                continue;
+            };
             let is_type_var = type_term.as_ref().is_type_param_kind();
             let is_arbitrary = arbitrary_names
                 .map(|m| m.contains_key(type_term))
                 .unwrap_or(false);
-            let is_empty_placeholder = type_term.as_ref().is_empty_type();
 
-            if is_type_var || is_arbitrary || is_empty_placeholder {
+            if is_type_var || is_arbitrary {
                 var_remapping.push(None);
             } else {
                 var_remapping.push(Some(new_index));
@@ -892,7 +892,8 @@ impl<'a> TermBridge<'a> {
             .take(num_vars)
             .enumerate()
             .filter(|(i, _)| var_remapping.get(*i).copied().flatten().is_some())
-            .map(|(_, type_term)| {
+            .filter_map(|(_, type_term)| type_term.as_ref())
+            .map(|type_term| {
                 self.kernel_context
                     .type_store
                     .type_term_to_acorn_type(type_term)

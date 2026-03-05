@@ -48,7 +48,7 @@ pub struct TypeStore {
 
 impl TypeStore {
     pub fn new() -> TypeStore {
-        // Empty, Bool, and TypeSort are now Symbol variants, not GroundTypeIds.
+        // Bool and TypeSort are Symbol variants, not GroundTypeIds.
         // No pre-registration needed.
         TypeStore {
             ground_id_to_type: ImVector::new(),
@@ -95,12 +95,12 @@ impl TypeStore {
 
     /// Internal implementation that registers ground types.
     /// Only user-defined ground types (bare Data types, Arbitrary) get GroundTypeIds.
-    /// Empty, Bool, and TypeSort are Symbol variants, not GroundTypeIds.
+    /// Bool and TypeSort are Symbol variants, not GroundTypeIds.
     /// Non-ground types (Function, parameterized Data) are just recursively processed.
     fn add_type_internal(&mut self, acorn_type: &AcornType) {
         match acorn_type {
-            // Empty and Bool are now Symbol variants, no registration needed
-            AcornType::Empty | AcornType::Bool => {}
+            // Built-in scalar types are Symbol variants, no registration needed
+            AcornType::Bool => {}
 
             // Bare data type: assign a new GroundTypeId
             AcornType::Data(datatype, params) if params.is_empty() => {
@@ -256,7 +256,7 @@ impl TypeStore {
     }
 
     /// Convert an AcornType to a type Term.
-    /// Only ground types (Bool, Empty, bare data types, arbitrary types) need to be registered.
+    /// Only ground types (Bool, bare data types, arbitrary types) need to be registered.
     /// Function types and parameterized data types are constructed on the fly.
     ///
     /// If `type_var_map` is provided, type variables are converted to FreeVariable atoms
@@ -271,7 +271,6 @@ impl TypeStore {
     ) -> Term {
         match acorn_type {
             // Built-in types: use dedicated Symbol variants
-            AcornType::Empty => Term::empty_type(),
             AcornType::Bool => Term::bool_type(),
 
             AcornType::Data(datatype, params) if params.is_empty() => {
@@ -376,7 +375,6 @@ impl TypeStore {
         use crate::kernel::atom::Atom;
 
         match acorn_type {
-            AcornType::Empty => Term::empty_type(),
             AcornType::Bool => Term::bool_type(),
 
             AcornType::Data(datatype, type_args) if type_args.is_empty() => {
@@ -490,9 +488,6 @@ impl TypeStore {
         // Check for built-in types first
         if type_term.as_ref().is_bool_type() {
             return AcornType::Bool;
-        }
-        if type_term.as_ref().is_empty_type() {
-            return AcornType::Empty;
         }
         // Type0 is the "type of types" (kind *). Return the new AcornType::Type0 variant.
         if type_term.as_ref().is_type0() {
@@ -702,9 +697,6 @@ impl TypeStore {
         if type_term.as_ref().is_bool_type() {
             return AcornType::Bool;
         }
-        if type_term.as_ref().is_empty_type() {
-            return AcornType::Empty;
-        }
         if type_term.as_ref().is_type0() {
             return AcornType::Type0;
         }
@@ -896,9 +888,6 @@ impl TypeStore {
         // Check for built-in types first
         if type_term.as_ref().is_bool_type() {
             return AcornType::Bool;
-        }
-        if type_term.as_ref().is_empty_type() {
-            return AcornType::Empty;
         }
         // Type0 is the "type of types" (kind *). Return the new AcornType::Type0 variant.
         if type_term.as_ref().is_type0() {
@@ -1372,9 +1361,7 @@ mod tests {
     #[test]
     fn test_type_store_defaults() {
         let store = TypeStore::new();
-        // Empty and Bool are now Symbol variants - verify via to_type_term
-        let empty_term = store.to_type_term(&AcornType::Empty);
-        assert!(empty_term.as_ref().is_empty_type());
+        // Bool is a Symbol variant - verify via to_type_term
         let bool_term = store.to_type_term(&AcornType::Bool);
         assert!(bool_term.as_ref().is_bool_type());
     }
@@ -1387,10 +1374,6 @@ mod tests {
         let bool_term = store.to_type_term(&AcornType::Bool);
         assert!(bool_term.as_ref().is_atomic());
         assert!(bool_term.as_ref().is_bool_type());
-
-        let empty_term = store.to_type_term(&AcornType::Empty);
-        assert!(empty_term.as_ref().is_atomic());
-        assert!(empty_term.as_ref().is_empty_type());
     }
 
     #[test]

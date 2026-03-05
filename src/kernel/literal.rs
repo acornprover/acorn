@@ -278,6 +278,9 @@ impl Literal {
 
             // Validate types in local context
             for (i, var_type) in local_context.get_var_types().iter().enumerate() {
+                let Some(var_type) = var_type else {
+                    continue;
+                };
                 if !var_type.validate_structure_impl() {
                     panic!(
                         "Malformed type in LocalContext for variable x{}: {:?}",

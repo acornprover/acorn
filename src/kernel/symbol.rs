@@ -34,9 +34,6 @@ pub enum Symbol {
     // This is introduced by prover rules (e.g. existential activation), not directly by parsing.
     Choose,
 
-    // The Empty type (bottom type).
-    Empty,
-
     // The Bool type.
     Bool,
 
@@ -46,7 +43,7 @@ pub enum Symbol {
 
     // A ground type, used in type terms to represent user-defined types like Nat, Int, etc.
     // Ground types have no internal structure - they are atomic type constants.
-    // Note: Empty, Bool, and Type0 are NOT GroundTypeIds - they have their own variants.
+    // Note: Bool and Type0 are NOT GroundTypeIds - they have their own variants.
     Type(GroundTypeId),
 
     // A typeclass used as a type constraint for type variables.
@@ -81,7 +78,6 @@ impl fmt::Display for Symbol {
             Symbol::Eq => write!(f, "eq"),
             Symbol::Ite => write!(f, "ite"),
             Symbol::Choose => write!(f, "choose"),
-            Symbol::Empty => write!(f, "Empty"),
             Symbol::Bool => write!(f, "Bool"),
             Symbol::Type0 => write!(f, "Type0"),
             Symbol::Type(t) => write!(f, "T{}_{}", t.module_id().get(), t.local_id()),

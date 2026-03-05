@@ -343,11 +343,9 @@ impl SymbolTable {
             Symbol::Eq => eq_symbol_type_ref(),
             Symbol::Ite => ite_symbol_type_ref(),
             Symbol::Choose => choose_symbol_type_ref(),
-            Symbol::Empty
-            | Symbol::Bool
-            | Symbol::Type0
-            | Symbol::Type(_)
-            | Symbol::Typeclass(_) => Term::type_sort_ref(),
+            Symbol::Bool | Symbol::Type0 | Symbol::Type(_) | Symbol::Typeclass(_) => {
+                Term::type_sort_ref()
+            }
             Symbol::Synthetic(m, i) => &self.synthetic_types[m.get() as usize][i as usize],
             Symbol::GlobalConstant(m, i) => {
                 &self.global_constant_types[m.get() as usize][i as usize]
@@ -366,9 +364,7 @@ impl SymbolTable {
             Symbol::Eq => eq_symbol_type_ref().clone(),
             Symbol::Ite => ite_symbol_type_ref().clone(),
             Symbol::Choose => choose_symbol_type_ref().clone(),
-            Symbol::Empty | Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => {
-                Term::type_sort()
-            }
+            Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => Term::type_sort(),
             Symbol::Type(ground_id) => type_store.get_type_kind(ground_id),
             Symbol::Synthetic(m, i) => self.synthetic_types[m.get() as usize][i as usize].clone(),
             Symbol::GlobalConstant(m, i) => {

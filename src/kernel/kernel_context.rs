@@ -83,7 +83,6 @@ impl KernelContext {
             Atom::Symbol(Symbol::Eq) => "eq".to_string(),
             Atom::Symbol(Symbol::Ite) => "ite".to_string(),
             Atom::Symbol(Symbol::Choose) => "choose".to_string(),
-            Atom::Symbol(Symbol::Empty) => "Empty".to_string(),
             Atom::Symbol(Symbol::Bool) => "Bool".to_string(),
             Atom::Symbol(Symbol::Type0) => "Type".to_string(),
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
@@ -345,6 +344,9 @@ impl KernelContext {
         local_context: &LocalContext,
     ) -> Option<Term> {
         for (var_id, var_type) in local_context.get_var_types().iter().enumerate() {
+            let Some(var_type) = var_type else {
+                continue;
+            };
             if let Some(var_tc) = var_type.as_ref().as_typeclass() {
                 if var_tc == required_tc || self.type_store.typeclass_extends(var_tc, required_tc) {
                     return Some(Term::new_variable(var_id as AtomId));
@@ -355,12 +357,12 @@ impl KernelContext {
     }
 
     /// Creates a test KernelContext with pre-populated scoped constants (c0, c1, ..., c{n-1})
-    /// all with EMPTY type. For use in tests that parse terms like "c0(x0)".
+    /// all with Bool type. For use in tests that parse terms like "c0(x0)".
     #[cfg(test)]
     pub fn test_with_scoped_constants(n: usize) -> KernelContext {
         let mut ctx = KernelContext::new();
         for _ in 0..n {
-            ctx.symbol_table.add_scoped_constant(Term::empty_type());
+            ctx.symbol_table.add_scoped_constant(Term::bool_type());
         }
         ctx
     }
@@ -387,21 +389,21 @@ impl KernelContext {
     }
 
     /// Creates a test KernelContext with pre-populated scoped constants, global constants,
-    /// and synthetics. All types will be EMPTY.
+    /// and synthetics. All types will be Bool.
     /// For use in tests that parse terms like "c0", "g0", "s0".
     #[cfg(test)]
     pub fn test_with_constants(num_scoped: usize, num_global: usize) -> KernelContext {
         let mut ctx = KernelContext::new();
         for _ in 0..num_scoped {
-            ctx.symbol_table.add_scoped_constant(Term::empty_type());
+            ctx.symbol_table.add_scoped_constant(Term::bool_type());
         }
         for _ in 0..num_global {
-            ctx.symbol_table.add_global_constant(Term::empty_type());
+            ctx.symbol_table.add_global_constant(Term::bool_type());
         }
         // Also add synthetics for tests that use "s0_0", "s0_1", etc.
         for _ in 0..10 {
             ctx.symbol_table
-                .declare_synthetic(ModuleId(0), Term::empty_type());
+                .declare_synthetic(ModuleId(0), Term::bool_type());
         }
         ctx
     }
@@ -435,8 +437,8 @@ impl KernelContext {
     /// - g0, c0: (Bool, Bool) -> Bool
     /// - g1, c1: Bool -> Bool
     /// - g2, c2: (Bool, Bool, Bool) -> Bool
-    /// - g3, c3: Empty -> Bool (for tests with EMPTY-typed args)
-    /// - g4, c4: (Empty, Empty) -> Empty
+    /// - g3, c3: Bool -> Bool
+    /// - g4, c4: (Bool, Bool) -> Bool
     /// - g5-g9, c5-c9: Bool
     #[cfg(test)]
     pub fn test_with_function_types() -> KernelContext {
@@ -457,13 +459,13 @@ impl KernelContext {
             arg_types: vec![AcornType::Bool, AcornType::Bool, AcornType::Bool],
             return_type: Box::new(AcornType::Bool),
         });
-        let empty_to_bool = AcornType::Function(FunctionType {
-            arg_types: vec![AcornType::Empty],
+        let bool_to_bool_alt = AcornType::Function(FunctionType {
+            arg_types: vec![AcornType::Bool],
             return_type: Box::new(AcornType::Bool),
         });
-        let empty2_to_empty = AcornType::Function(FunctionType {
-            arg_types: vec![AcornType::Empty, AcornType::Empty],
-            return_type: Box::new(AcornType::Empty),
+        let bool2_to_bool_alt = AcornType::Function(FunctionType {
+            arg_types: vec![AcornType::Bool, AcornType::Bool],
+            return_type: Box::new(AcornType::Bool),
         });
         // Higher-order type like true_below: (Bool -> Bool, Bool) -> Bool
         let func_bool_to_bool = AcornType::Function(FunctionType {
@@ -480,8 +482,8 @@ impl KernelContext {
         ctx.type_store.add_type(&bool_to_bool);
         ctx.type_store.add_type(&bool2_to_bool);
         ctx.type_store.add_type(&bool3_to_bool);
-        ctx.type_store.add_type(&empty_to_bool);
-        ctx.type_store.add_type(&empty2_to_empty);
+        ctx.type_store.add_type(&bool_to_bool_alt);
+        ctx.type_store.add_type(&bool2_to_bool_alt);
         ctx.type_store.add_type(&func_bool_to_bool);
         ctx.type_store.add_type(&func_to_bool);
 
@@ -497,13 +499,13 @@ impl KernelContext {
             .type_store
             .get_type_term(&bool3_to_bool)
             .expect("type should be valid");
-        let type_empty_to_bool = ctx
+        let type_bool_to_bool_alt = ctx
             .type_store
-            .get_type_term(&empty_to_bool)
+            .get_type_term(&bool_to_bool_alt)
             .expect("type should be valid");
-        let type_empty2_to_empty = ctx
+        let type_bool2_to_bool_alt = ctx
             .type_store
-            .get_type_term(&empty2_to_empty)
+            .get_type_term(&bool2_to_bool_alt)
             .expect("type should be valid");
         let type_func_bool_to_bool = ctx
             .type_store
@@ -522,9 +524,9 @@ impl KernelContext {
         ctx.symbol_table
             .add_global_constant(type_bool3_to_bool.clone()); // g2
         ctx.symbol_table
-            .add_global_constant(type_empty_to_bool.clone()); // g3
+            .add_global_constant(type_bool_to_bool_alt.clone()); // g3
         ctx.symbol_table
-            .add_global_constant(type_empty2_to_empty.clone()); // g4
+            .add_global_constant(type_bool2_to_bool_alt.clone()); // g4
         for _ in 5..10 {
             ctx.symbol_table.add_global_constant(Term::bool_type());
         }
@@ -543,9 +545,9 @@ impl KernelContext {
         ctx.symbol_table
             .add_scoped_constant(type_bool3_to_bool.clone()); // c2
         ctx.symbol_table
-            .add_scoped_constant(type_empty_to_bool.clone()); // c3
+            .add_scoped_constant(type_bool_to_bool_alt.clone()); // c3
         ctx.symbol_table
-            .add_scoped_constant(type_empty2_to_empty.clone()); // c4
+            .add_scoped_constant(type_bool2_to_bool_alt.clone()); // c4
         for _ in 5..10 {
             ctx.symbol_table.add_scoped_constant(Term::bool_type());
         }
@@ -710,7 +712,6 @@ impl KernelContext {
             // Simple type name - try various lookups
             match s {
                 "Bool" => Term::bool_type(),
-                "Empty" => Term::empty_type(),
                 "Type" => Term::type_sort(),
                 _ => {
                     // Try typeclass first
@@ -916,7 +917,6 @@ impl KernelContext {
             // Simple type name or other
             match s {
                 "Bool" => Term::bool_type(),
-                "Empty" => Term::empty_type(),
                 "Type" => Term::type_sort(),
                 _ => self
                     .type_store
@@ -941,20 +941,20 @@ impl KernelContext {
         match first_char {
             'c' => {
                 while self.symbol_table.num_scoped_constants() <= id {
-                    self.symbol_table.add_scoped_constant(Term::empty_type());
+                    self.symbol_table.add_scoped_constant(Term::bool_type());
                 }
                 self.symbol_table.set_scoped_constant_type(id, type_term);
             }
             'g' => {
                 while self.symbol_table.num_global_constants() <= id {
-                    self.symbol_table.add_global_constant(Term::empty_type());
+                    self.symbol_table.add_global_constant(Term::bool_type());
                 }
                 self.symbol_table.set_global_constant_type(id, type_term);
             }
             's' => {
                 while self.symbol_table.num_synthetics() <= id {
                     self.symbol_table
-                        .declare_synthetic(ModuleId(0), Term::empty_type());
+                        .declare_synthetic(ModuleId(0), Term::bool_type());
                 }
                 self.symbol_table.set_synthetic_type(id, type_term);
             }
@@ -993,13 +993,13 @@ impl KernelContext {
         match first_char {
             'c' => {
                 while self.symbol_table.num_scoped_constants() <= id {
-                    self.symbol_table.add_scoped_constant(Term::empty_type());
+                    self.symbol_table.add_scoped_constant(Term::bool_type());
                 }
                 self.symbol_table.set_scoped_constant_type(id, type_term);
             }
             'g' => {
                 while self.symbol_table.num_global_constants() <= id {
-                    self.symbol_table.add_global_constant(Term::empty_type());
+                    self.symbol_table.add_global_constant(Term::bool_type());
                 }
                 self.symbol_table.set_global_constant_type(id, type_term);
             }
@@ -1102,7 +1102,6 @@ impl KernelContext {
         // Built-in types and constants
         match s {
             "Bool" => Term::bool_type(),
-            "Empty" => Term::empty_type(),
             "Type" => Term::type_sort(),
             "true" => Term::atom(Atom::Symbol(Symbol::True)),
             "false" => Term::atom(Atom::Symbol(Symbol::False)),
@@ -1219,13 +1218,13 @@ mod tests {
         for i in 0..10 {
             let symbol = Symbol::ScopedConstant(i);
             let type_term = ctx.symbol_table.get_type(symbol);
-            assert_eq!(*type_term, Term::empty_type());
+            assert_eq!(*type_term, Term::bool_type());
         }
         // Verify we can look up the types for global constants g0_0-g0_9
         for i in 0..10 {
             let symbol = Symbol::GlobalConstant(ModuleId(0), i);
             let type_term = ctx.symbol_table.get_type(symbol);
-            assert_eq!(*type_term, Term::empty_type());
+            assert_eq!(*type_term, Term::bool_type());
         }
     }
 

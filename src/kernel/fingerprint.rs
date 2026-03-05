@@ -16,9 +16,6 @@ enum TypeCategory {
     /// A ground type, distinguished by ID (user-defined ground types only)
     Ground(GroundTypeId),
 
-    /// The Empty type (built-in)
-    Empty,
-
     /// The Bool type (built-in)
     Bool,
 
@@ -48,8 +45,6 @@ impl TypeCategory {
             TypeCategory::Typeclass(tc_id)
         } else if type_ref.is_bool_type() {
             TypeCategory::Bool
-        } else if type_ref.is_empty_type() {
-            TypeCategory::Empty
         } else if type_ref.is_type0() {
             TypeCategory::Type0
         } else if let Some(gid) = type_ref.as_type_atom() {
@@ -71,13 +66,11 @@ impl TypeCategory {
             // Variables match anything
             (TypeCategory::Variable, _) | (_, TypeCategory::Variable) => true,
             // Typeclasses can match ground types (possibly instances) or other typeclasses
-            // Built-in types (Bool, Empty, Type0) can also potentially have typeclass instances
+            // Built-in types (Bool, Type0) can also potentially have typeclass instances
             (TypeCategory::Typeclass(_), TypeCategory::Ground(_))
             | (TypeCategory::Ground(_), TypeCategory::Typeclass(_))
             | (TypeCategory::Typeclass(_), TypeCategory::Bool)
             | (TypeCategory::Bool, TypeCategory::Typeclass(_))
-            | (TypeCategory::Typeclass(_), TypeCategory::Empty)
-            | (TypeCategory::Empty, TypeCategory::Typeclass(_))
             | (TypeCategory::Typeclass(_), TypeCategory::Type0)
             | (TypeCategory::Type0, TypeCategory::Typeclass(_))
             | (TypeCategory::Typeclass(_), TypeCategory::Typeclass(_)) => true,

@@ -525,6 +525,9 @@ impl SyntheticNameSet {
         local_context: &LocalContext,
     ) -> Result<Option<Term>> {
         for (var_id, candidate_type) in local_context.get_var_types().iter().enumerate() {
+            let Some(candidate_type) = candidate_type else {
+                continue;
+            };
             if candidate_type.as_ref().is_type_param_kind() {
                 continue;
             }
@@ -881,7 +884,6 @@ impl CodeGenerator<'_> {
                     Box::new(rhs),
                 ))
             }
-            AcornType::Empty => Err(Error::internal("empty type generated")),
             AcornType::Bool => Err(Error::internal("Bool unbound")),
             AcornType::Type0 => Ok(Expression::generate_identifier("Type0")),
             AcornType::TypeclassConstraint(tc) => {
@@ -1370,9 +1372,9 @@ impl CodeGenerator<'_> {
         // This yields a claim map that does not depend on concrete variable IDs.
         let mut replacement_arbitrary_map = VariableMap::new();
         for var_id in 0..replacement_context.len() {
-            let var_type = replacement_context
-                .get_var_type(var_id)
-                .expect("replacement context should provide all var types");
+            let Some(var_type) = replacement_context.get_var_type(var_id) else {
+                continue;
+            };
             if let Some(term) =
                 names.term_for_variable_type(kernel_context, var_type, replacement_context)?
             {
@@ -1387,9 +1389,9 @@ impl CodeGenerator<'_> {
             let Some(mapped_term) = replacement_arbitrary_map.get_mapping(var_id as AtomId) else {
                 continue;
             };
-            let expected_type = replacement_context
-                .get_var_type(var_id)
-                .expect("replacement context should provide all var types");
+            let Some(expected_type) = replacement_context.get_var_type(var_id) else {
+                continue;
+            };
             let mapped_type =
                 Self::term_type_for_certificate(mapped_term, replacement_context, kernel_context);
             Self::infer_type_param_bindings_from_type_pattern(
@@ -1407,9 +1409,9 @@ impl CodeGenerator<'_> {
             if var_id >= generic_len {
                 continue;
             }
-            let var_type = generic_context
-                .get_var_type(var_id)
-                .expect("generic context should provide all var types");
+            let Some(var_type) = generic_context.get_var_type(var_id) else {
+                continue;
+            };
             let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
             let specialized = apply_to_term(specialized.as_ref(), &replacement_type_map);
             Self::ensure_no_foreign_scoped_constants_in_term(
@@ -1444,9 +1446,9 @@ impl CodeGenerator<'_> {
             {
                 continue;
             }
-            let generic_type = generic_context
-                .get_var_type(var_id)
-                .expect("generic context should provide all var types");
+            let Some(generic_type) = generic_context.get_var_type(var_id) else {
+                continue;
+            };
             let mapped_type =
                 Self::term_type_for_certificate(&mapped_term, generic_context, kernel_context);
             Self::infer_type_param_bindings_from_type_pattern(
@@ -1461,9 +1463,9 @@ impl CodeGenerator<'_> {
             if claim_var_map.has_mapping(var_id) {
                 continue;
             }
-            let var_type = generic_context
-                .get_var_type(var_id as usize)
-                .expect("generic context should provide all var types");
+            let Some(var_type) = generic_context.get_var_type(var_id as usize) else {
+                continue;
+            };
             if var_type.as_ref().is_type_param_kind() {
                 continue;
             }
@@ -2683,9 +2685,9 @@ mod tests {
         let replacement_context = kernel_context.parse_local(&["Type", "x0"]);
 
         let mut var_map = VariableMap::new();
-        var_map.set(0, kernel_context.parse_term("Empty"));
-        // x0 and x1 here are in replacement_context; x0 should be inferred as Bool from x1's symbol.
-        var_map.set(1, kernel_context.parse_term("g1(x0, Empty, x1)"));
+        var_map.set(0, kernel_context.parse_term("Bool"));
+        // x0 and x1 here are in replacement_context; x0 should be inferred as Bool from x1's type.
+        var_map.set(1, kernel_context.parse_term("g1(x0, Bool, x1)"));
 
         let mut names = SyntheticNameSet::new();
 

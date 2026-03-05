@@ -319,14 +319,6 @@ impl Clause {
 
         #[cfg(any(test, feature = "validate"))]
         {
-            // Check that no variable has the Empty type
-            if let Some(var_id) = self.context.find_empty_type() {
-                panic!(
-                    "Clause validation failed: variable x{} has Empty type. Clause: {}",
-                    var_id, self
-                );
-            }
-
             // Check for self-referential or forward-referencing types
             // A variable's type can only reference lower-numbered variables
             if !self.context.validate_variable_ordering() {
@@ -405,16 +397,22 @@ impl Clause {
         // - Remove the next `num_to_replace` types (existential variables becoming synthetics)
         // - Keep the rest (shifted down)
         let types = self.context.get_var_types();
-        let mut new_types = Vec::new();
+        let mut new_context = LocalContext::empty();
+        let mut target_idx = 0usize;
         // Keep types before skip (type variables)
         for i in 0..skip.min(types.len()) {
-            new_types.push(types[i].clone());
+            if let Some(var_type) = &types[i] {
+                new_context.set_type(target_idx, var_type.clone());
+            }
+            target_idx += 1;
         }
         // Skip the replacement range, keep the rest
         for i in (skip + num_to_replace)..types.len() {
-            new_types.push(types[i].clone());
+            if let Some(var_type) = &types[i] {
+                new_context.set_type(target_idx, var_type.clone());
+            }
+            target_idx += 1;
         }
-        let new_context = LocalContext::from_types(new_types);
         // Use pinned normalization to keep type variables (x0..x_{skip-1}) at their positions
         Clause::new_with_pinned_vars(new_literals, &new_context, skip)
             .canonicalize_with_pinned(skip)
@@ -1306,21 +1304,6 @@ mod tests {
         // g0(c0) is Bool -> Bool applied to Bool = Bool, c1 is Bool, so this is valid
         let clause = kctx.parse_clause("g0(c0) = c1", &[]);
         assert_eq!(clause.literals.len(), 1);
-    }
-
-    /// Test that validation catches variables with Empty type.
-    #[test]
-    #[should_panic(expected = "has Empty type")]
-    fn test_validation_catches_empty_type() {
-        let kctx = KernelContext::new();
-        // Create a context with a variable that has Empty type
-        let context = LocalContext::from_types(vec![Term::empty_type()]);
-        // Create a simple literal using x0
-        let term = Term::atom(Atom::FreeVariable(0));
-        let literal = Literal::positive(term);
-        let clause = Clause::new(vec![literal], &context);
-        // Validation should panic
-        clause.validate(&kctx);
     }
 
     /// Test that extensionality works with asymmetric arities.
