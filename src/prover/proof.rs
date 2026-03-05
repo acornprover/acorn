@@ -792,4 +792,58 @@ mod tests {
             "expected at least one generated certificate line"
         );
     }
+
+    /// Reproduces a `naw`-mode cert roundtrip bug:
+    /// when a claim argument is a constant lambda (binder present, binder var unused),
+    /// parsing the generated cert can fail with:
+    /// "term cannot be represented as a simple term".
+    #[cfg(feature = "naw")]
+    #[test]
+    fn test_make_cert_constant_lambda_claim_arg_repro() {
+        use crate::certificate::Certificate;
+        use crate::elaborator::binding_map::BindingMap;
+        use crate::module::ModuleId;
+        use crate::project::Project;
+        use std::borrow::Cow;
+
+        let kctx = KernelContext::new();
+        let generic_clause = kctx.parse_clause("x0(x1)", &["Bool -> Bool", "Bool"]);
+        let mut var_map = VariableMap::new();
+        // Constant lambda: binder exists, but the body ignores it.
+        var_map.set(0, Term::lambda(Term::bool_type(), Term::new_true()));
+        var_map.set(1, Term::new_true());
+        let concrete_steps = vec![crate::prover::proof::ConcreteStep {
+            generic: generic_clause,
+            var_maps: vec![(var_map, LocalContext::empty())],
+        }];
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let cert =
+            Certificate::from_concrete_steps("goal".to_string(), &concrete_steps, &kctx, &bindings)
+                .expect("certificate generation should succeed");
+        let lines = cert.proof.expect("proof lines should exist");
+
+        // Repro assertion: currently this generated cert does not round-trip through parser.
+        let project = Project::new_mock();
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kctx);
+        let err = match Certificate::parse_cert_steps(
+            &lines,
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        ) {
+            Ok(_) => panic!(
+                "expected parse failure for constant-lambda claim argument bug repro; lines={:?}",
+                lines
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("term cannot be represented as a simple term"),
+            "unexpected error: {}",
+            err
+        );
+    }
 }
