@@ -196,6 +196,43 @@ fn test_normalizing_exists() {
     norm.check(&env, "goal", &["addx(s0_0, zero) = one"]);
 }
 
+#[cfg(feature = "iet")]
+#[test]
+fn test_normalizing_exists_inline_with_iet() {
+    use crate::kernel::term::Decomposition;
+
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        type Nat: axiom
+        let zero: Nat = axiom
+        let one: Nat = axiom
+        let addx: (Nat, Nat) -> Nat = axiom
+        theorem goal { exists(x: Nat) { addx(x, zero) = one } }
+        "#,
+    );
+    let mut norm = KernelContext::new();
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 1, "expected one clause");
+    let clause = &clauses[0];
+    assert_eq!(clause.literals.len(), 1, "expected one literal");
+    let lit = &clause.literals[0];
+    assert!(
+        lit.is_signed_term() && lit.positive,
+        "expected a positive signed-term literal, got {}",
+        lit
+    );
+    assert!(
+        matches!(lit.left.as_ref().decompose(), Decomposition::Exists(_, _)),
+        "expected inline exists term, got {}",
+        lit.left
+    );
+    assert!(
+        !clause.has_synthetic(),
+        "inline exists clausification should not synthesize skolems"
+    );
+}
+
 #[test]
 fn test_denormalizing_disjunction() {
     let mut env = Environment::test();

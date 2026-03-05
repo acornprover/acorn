@@ -703,6 +703,29 @@ impl Clause {
         }
     }
 
+    /// If `term` has shape `exists(T => b0 = t)` or `exists(T => t = b0)` with
+    /// a closed witness term `t`, reduce it to the instantiated body.
+    ///
+    /// This captures the obvious existential-introduction case without skolemization.
+    fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
+        let (_binder_type, body) = term.as_ref().split_exists()?;
+        let body = body.to_owned();
+        let args = Self::split_symbol_application(&body, Symbol::Eq, 3)?;
+        let b0 = Term::atom(Atom::BoundVariable(0));
+        let witness = if args[1] == b0 {
+            args[2].clone()
+        } else if args[2] == b0 {
+            args[1].clone()
+        } else {
+            return None;
+        };
+        if witness.has_bound_variable() {
+            return None;
+        }
+        let instantiated = body.substitute_bound(0, &witness).shift_bound(0, -1);
+        Some((witness, instantiated))
+    }
+
     fn simplify_ite_term(term: &Term) -> Term {
         fn substitute_bound_capture_avoiding(
             term: TermRef<'_>,
@@ -928,6 +951,18 @@ impl Clause {
                         Literal::equals(eq_left, eq_right)
                     } else {
                         Literal::not_equals(eq_left, eq_right)
+                    };
+                    answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+                    continue;
+                }
+
+                if let Some((_witness, reduced)) =
+                    Self::reduce_exists_with_obvious_witness(&literal.left)
+                {
+                    let reduced_lit = if literal.positive {
+                        Literal::positive(reduced)
+                    } else {
+                        Literal::negative(reduced)
                     };
                     answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
                     continue;
@@ -1406,6 +1441,61 @@ mod tests {
             negative_reductions.contains(&expected_negative),
             "expected reduction to include {}",
             expected_negative
+        );
+    }
+
+    #[test]
+    fn test_boolean_reduction_exists_eq_self_witness() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool");
+
+        let exists_term = Term::exists(
+            Term::bool_type(),
+            Term::eq(
+                Term::bool_type(),
+                Term::atom(Atom::BoundVariable(0)),
+                kctx.parse_term("c0"),
+            ),
+        );
+        let clause = Clause::new(vec![Literal::positive(exists_term)], &LocalContext::empty());
+        let reductions = clause.boolean_reductions(&kctx);
+        let has_non_exists_reduction = reductions.iter().any(|clause| {
+            clause
+                .literals
+                .iter()
+                .all(|lit| !lit.left.as_ref().is_exists() && !lit.right.as_ref().is_exists())
+        });
+        assert!(
+            has_non_exists_reduction,
+            "expected at least one reduction to eliminate the exists term"
+        );
+    }
+
+    #[test]
+    fn test_boolean_reduction_exists_eq_var_witness() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool");
+
+        let exists_term = Term::exists(
+            Term::bool_type(),
+            Term::eq(
+                Term::bool_type(),
+                Term::atom(Atom::BoundVariable(0)),
+                Term::new_variable(0),
+            ),
+        );
+        let context = LocalContext::from_types(vec![Term::bool_type()]);
+        let clause = Clause::new(vec![Literal::positive(exists_term)], &context);
+        let reductions = clause.boolean_reductions(&kctx);
+        let has_non_exists_reduction = reductions.iter().any(|clause| {
+            clause
+                .literals
+                .iter()
+                .all(|lit| !lit.left.as_ref().is_exists() && !lit.right.as_ref().is_exists())
+        });
+        assert!(
+            has_non_exists_reduction,
+            "expected at least one reduction to eliminate the exists term"
         );
     }
 

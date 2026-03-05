@@ -354,11 +354,20 @@ impl<'a> Clausifier<'a> {
                     )
                 }
             }
-            crate::kernel::term::Decomposition::Exists(binder_type, body) => {
+            crate::kernel::term::Decomposition::Exists(_binder_type, _body) => {
+                #[cfg(feature = "iet")]
+                {
+                    // Keep existential formulas inline as signed terms.
+                    // This avoids introducing skolem witnesses during clausification.
+                    let literal = Literal::from_signed_term(term.clone(), !negate);
+                    return Ok(Cnf::from_literal(literal));
+                }
+
+                #[cfg(not(feature = "iet"))]
                 if !negate {
                     self.exists_term_to_cnf(
-                        &binder_type.to_owned(),
-                        &body.to_owned(),
+                        &_binder_type.to_owned(),
+                        &_body.to_owned(),
                         false,
                         stack,
                         next_var_id,
@@ -367,8 +376,8 @@ impl<'a> Clausifier<'a> {
                     )
                 } else {
                     self.forall_term_to_cnf(
-                        &binder_type.to_owned(),
-                        &body.to_owned(),
+                        &_binder_type.to_owned(),
+                        &_body.to_owned(),
                         true,
                         stack,
                         next_var_id,
