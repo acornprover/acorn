@@ -60,6 +60,7 @@ pub enum TokenType {
     SelfToken,
     Inductive,
     Match,
+    Choose,
     Constraint,
     Implies,
     Typeclass,
@@ -113,6 +114,7 @@ pub fn keyword_map() -> &'static BTreeMap<&'static str, TokenType> {
             ("self", TokenType::SelfToken),
             ("inductive", TokenType::Inductive),
             ("match", TokenType::Match),
+            ("choose", TokenType::Choose),
             ("constraint", TokenType::Constraint),
             ("implies", TokenType::Implies),
             ("typeclass", TokenType::Typeclass),
@@ -428,6 +430,7 @@ impl TokenType {
             TokenType::SelfToken => "self",
             TokenType::Inductive => "inductive",
             TokenType::Match => "match",
+            TokenType::Choose => "choose",
             TokenType::Constraint => "constraint",
             TokenType::Implies => "implies",
             TokenType::Typeclass => "typeclass",
@@ -515,7 +518,11 @@ impl Token {
 
     /// Checks if a given identifier name is reserved for system use.
     pub fn is_reserved_name(name: &str) -> bool {
-        name == "new" || name == "self" || name == "induction" || name == "constraint"
+        name == "new"
+            || name == "self"
+            || name == "induction"
+            || name == "constraint"
+            || name == "choose"
     }
 
     /// Checks if this token is a reserved name.
@@ -652,6 +659,7 @@ impl Token {
             | TokenType::SelfToken
             | TokenType::Inductive
             | TokenType::Match
+            | TokenType::Choose
             | TokenType::Constraint
             | TokenType::Implies
             | TokenType::Typeclass
@@ -1017,5 +1025,12 @@ mod tests {
         assert_eq!(tokens.len(), 12);
         assert_eq!(tokens[3].token_type, TokenType::Axiom);
         assert_eq!(tokens[4].token_type, TokenType::NewLine);
+    }
+
+    #[test]
+    fn test_choose_is_keyword_and_reserved_name() {
+        let tokens = Token::scan("choose");
+        assert_eq!(tokens[0].token_type, TokenType::Choose);
+        assert!(Token::is_reserved_name("choose"));
     }
 }

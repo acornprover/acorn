@@ -1022,7 +1022,7 @@ fn test_env_typeclass_attributes_with_function_satisfy() {
             }
 
             attributes F: Foo {
-                let choose(a: F) -> b: F satisfy {
+                let pick(a: F) -> b: F satisfy {
                     a = b
                 }
             }
@@ -1034,9 +1034,9 @@ fn test_env_typeclass_attributes_with_function_satisfy() {
             instance Bar: Foo
 
             theorem goal(b: Bar) {
-                Foo.choose[Bar](b) = b
+                Foo.pick[Bar](b) = b
             } by {
-                Foo.choose[Bar](b) = b
+                Foo.pick[Bar](b) = b
             }
         "#,
     );

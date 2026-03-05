@@ -106,14 +106,14 @@ fn test_inductive_match_attribute_typechecks() {
     );
     env.add(
         r#"
-        define choose[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
+        define select[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
             Option.match(o, on_none, on_some)
         }
         "#,
     );
     env.bad(
         r#"
-        define choose_bad[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
+        define select_bad[T](o: Option[T], on_none: Bool, on_some: T -> Bool) -> Bool {
             Option.match(o, on_some, on_none)
         }
         "#,
