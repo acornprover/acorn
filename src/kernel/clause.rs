@@ -704,7 +704,9 @@ impl Clause {
     /// If `term` has shape `exists(T => b0 = t)` or `exists(T => t = b0)` with
     /// a closed witness term `t`, reduce it to the instantiated body.
     ///
-    /// This captures the obvious existential-introduction case without skolemization.
+    /// This captures the obvious existential-introduction case in `iet` mode
+    /// without introducing synthetic skolems.
+    #[cfg(feature = "iet")]
     fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
         let (_binder_type, body) = term.as_ref().split_exists()?;
         let body = body.to_owned();
@@ -722,6 +724,19 @@ impl Clause {
         }
         let instantiated = body.substitute_bound(0, &witness).shift_bound(0, -1);
         Some((witness, instantiated))
+    }
+
+    /// Reduce `exists(T => body)` to `body[choose(T, function(x:T){body})/x]`.
+    ///
+    /// This is the generic existential-activation path for `iet` mode.
+    #[cfg(feature = "iet")]
+    fn reduce_exists_with_choose(term: &Term) -> Option<Term> {
+        let (binder_type, body) = term.as_ref().split_exists()?;
+        let binder_type = binder_type.to_owned();
+        let body = body.to_owned();
+        let predicate = Term::lambda(binder_type.clone(), body.clone());
+        let choose_term = Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[binder_type, predicate]);
+        Some(body.substitute_bound(0, &choose_term).shift_bound(0, -1))
     }
 
     fn simplify_ite_term(term: &Term) -> Term {
@@ -954,16 +969,30 @@ impl Clause {
                     continue;
                 }
 
-                if let Some((_witness, reduced)) =
-                    Self::reduce_exists_with_obvious_witness(&literal.left)
+                #[cfg(feature = "iet")]
                 {
-                    let reduced_lit = if literal.positive {
-                        Literal::positive(reduced)
-                    } else {
-                        Literal::negative(reduced)
-                    };
-                    answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
-                    continue;
+                    if literal.positive {
+                        if let Some((_witness, reduced)) =
+                            Self::reduce_exists_with_obvious_witness(&literal.left)
+                        {
+                            answer.extend(
+                                self.with_replaced_literal(
+                                    i,
+                                    vec![vec![Literal::positive(reduced)]],
+                                ),
+                            );
+                            continue;
+                        }
+                        if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
+                            answer.extend(
+                                self.with_replaced_literal(
+                                    i,
+                                    vec![vec![Literal::positive(reduced)]],
+                                ),
+                            );
+                            continue;
+                        }
+                    }
                 }
 
                 if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::And, 2) {
@@ -1427,6 +1456,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_exists_eq_self_witness() {
         let mut kctx = KernelContext::new();
@@ -1454,6 +1484,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_exists_eq_var_witness() {
         let mut kctx = KernelContext::new();
@@ -1480,6 +1511,36 @@ mod tests {
             has_non_exists_reduction,
             "expected at least one reduction to eliminate the exists term"
         );
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_negated_exists_has_no_witness_activation() {
+        let kctx = KernelContext::new();
+        let exists_term = Term::exists(Term::bool_type(), Term::new_true());
+        let clause = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
+
+        // A negated existential should not trigger choose/witness activation.
+        assert!(clause.boolean_reductions(&kctx).is_empty());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_not_exists_reduces_once_then_stops() {
+        let kctx = KernelContext::new();
+        let exists_term = Term::exists(Term::bool_type(), Term::new_true());
+        let clause = Clause::new(
+            vec![Literal::positive(Term::not(exists_term.clone()))],
+            &LocalContext::empty(),
+        );
+
+        let first = clause.boolean_reductions(&kctx);
+        let expected = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
+        assert_eq!(first, vec![expected.clone()]);
+
+        // If this ever produces another reduction, we reintroduced
+        // negated-existential witness activation.
+        assert!(expected.boolean_reductions(&kctx).is_empty());
     }
 
     #[test]

@@ -2413,6 +2413,7 @@ mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
     use crate::project::Project;
 
+    #[cfg(not(feature = "iet"))]
     #[test]
     fn test_polymorphic_synthetic_declaration() {
         use crate::processor::Processor;
@@ -2451,6 +2452,7 @@ mod tests {
         processor.test_parse_code(&codes[0], &bindings, &kernel_context);
     }
 
+    #[cfg(not(feature = "iet"))]
     #[test]
     fn test_polymorphic_synthetic_with_typeclass() {
         use crate::processor::Processor;

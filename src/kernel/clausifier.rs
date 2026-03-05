@@ -357,10 +357,24 @@ impl<'a> Clausifier<'a> {
             crate::kernel::term::Decomposition::Exists(_binder_type, _body) => {
                 #[cfg(feature = "iet")]
                 {
-                    // Keep existential formulas inline as signed terms.
-                    // This avoids introducing skolem witnesses during clausification.
-                    let literal = Literal::from_signed_term(term.clone(), !negate);
-                    return Ok(Cnf::from_literal(literal));
+                    if !negate {
+                        // Keep positive existential formulas inline as signed terms.
+                        // This avoids introducing skolem witnesses during clausification.
+                        let literal = Literal::from_signed_term(term.clone(), true);
+                        return Ok(Cnf::from_literal(literal));
+                    }
+                    // not exists(x:T){P(x)} is equivalent to forall(x:T){not P(x)}.
+                    // Route the negated path through forall clausification so proof search
+                    // can still instantiate it without introducing choose terms.
+                    return self.forall_term_to_cnf(
+                        &_binder_type.to_owned(),
+                        &_body.to_owned(),
+                        true,
+                        stack,
+                        next_var_id,
+                        synth,
+                        context,
+                    );
                 }
 
                 #[cfg(not(feature = "iet"))]

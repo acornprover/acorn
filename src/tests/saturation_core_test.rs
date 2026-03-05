@@ -1608,6 +1608,7 @@ fn test_proving_of_existence() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
@@ -1615,6 +1616,14 @@ fn test_proving_of_existence() {
             "function(x0: Foo) { not f(x0) }(s0)",
         ],
     );
+    #[cfg(feature = "iet")]
+    {
+        assert_eq!(proof.len(), 1);
+        assert_eq!(
+            proof[0],
+            "function(x0: Foo) { not f(x0) }(choose(k0: Foo) { f(k0) })"
+        );
+    }
 }
 
 #[test]
@@ -1647,6 +1656,7 @@ fn test_proving_of_conjunction_existence() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
@@ -1655,6 +1665,11 @@ fn test_proving_of_conjunction_existence() {
             "not f(s0)",
         ],
     );
+    #[cfg(feature = "iet")]
+    {
+        assert!(proof.iter().any(|line| line.contains("choose(")));
+        assert!(proof.iter().all(|line| !line.starts_with("let s")));
+    }
 }
 
 #[test]
@@ -1687,6 +1702,7 @@ fn test_proving_with_skolem() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
@@ -1695,6 +1711,15 @@ fn test_proving_with_skolem() {
             "function(x0: Foo) { not f(x0) or g(x0, s0(x0)) }(x)",
         ],
     );
+    #[cfg(feature = "iet")]
+    {
+        assert!(proof
+            .iter()
+            .any(|line| line
+                == "function(x0: Foo) { not f(x0) or exists(k0: Foo) { g(x0, k0) } }(x)"));
+        assert!(proof.iter().any(|line| line.contains("choose(")));
+        assert!(proof.iter().all(|line| !line.starts_with("let s")));
+    }
 }
 
 #[test]

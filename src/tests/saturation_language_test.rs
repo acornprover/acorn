@@ -1494,6 +1494,26 @@ fn test_cannot_inhabit_arbitrary_type() {
     verify_fails(text);
 }
 
+#[cfg(feature = "iet")]
+#[test]
+fn test_negated_exists_axiom_does_not_imply_false() {
+    // Regression test for negated-existential handling in IET mode:
+    // from "not exists(x: T) { true }" we must NOT be able to conclude false
+    // for arbitrary T.
+    let text = r#"
+    axiom no_elem[T] {
+        not exists(x: T) {
+            true
+        }
+    }
+
+    theorem contradiction[T] {
+        false
+    }
+    "#;
+    verify_fails(text);
+}
+
 #[test]
 fn test_cannot_inhabit_arbitrary_type_self_equality() {
     // Self-equality is always true, so this is equivalent to "true".
@@ -1684,10 +1704,17 @@ fn test_inhabited_const() {
         true
     }
     "#;
-    // This definition should fail to normalize because it involves an exists
-    // over a potentially uninhabited type T.
-    let result = verify(text);
-    assert!(result.is_err(), "expected an error, got {:?}", result);
+    #[cfg(feature = "iet")]
+    {
+        verify_succeeds(text);
+    }
+    #[cfg(not(feature = "iet"))]
+    {
+        // This definition should fail to normalize because it involves an exists
+        // over a potentially uninhabited type T.
+        let result = verify(text);
+        assert!(result.is_err(), "expected an error, got {:?}", result);
+    }
 }
 
 /// Regression test: when a certificate uses a typeclass constraint from a function

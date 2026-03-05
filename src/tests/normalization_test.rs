@@ -79,6 +79,7 @@ fn test_tautology_elimination() {
     norm.check(&env, "two", &[]);
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_nested_skolemization() {
     let mut env = Environment::test();
@@ -180,6 +181,7 @@ fn test_functional_equality() {
     norm.check(&env, "goal", &["zerof(x0, x1) = zerof(x2, x1)"]);
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_exists() {
     let mut env = Environment::test();
@@ -254,6 +256,7 @@ fn test_denormalizing_disjunction() {
     );
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_functional_skolemization() {
     // This matches a pattern that failed in finite_constraint proving
@@ -451,6 +454,7 @@ fn test_normalizing_functional_or() {
     );
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_equals_exists() {
     let mut env = Environment::test();
@@ -472,6 +476,7 @@ fn test_normalizing_equals_exists() {
     norm.check(&env, "goal", &["not b or f(s0_0)", "not f(x0) or b"]);
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_not_or_exists() {
     let mut env = Environment::test();
@@ -495,6 +500,7 @@ fn test_normalizing_not_or_exists() {
     norm.check(&env, "goal", &["not f(x0)", "not g(x0)"]);
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_exists_inside_if() {
     let mut env = Environment::test();
@@ -620,6 +626,7 @@ fn test_normalizing_func_eq_inside_lambda() {
     );
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_exists_inside_lambda() {
     let mut env = Environment::test();
@@ -674,6 +681,7 @@ fn test_normalizing_forall_inside_lambda() {
     );
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_exists_inside_neq_lambda() {
     let mut env = Environment::test();
@@ -728,6 +736,7 @@ fn test_normalizing_forall_inside_neq_lambda() {
     );
 }
 
+#[cfg(not(feature = "iet"))]
 #[test]
 fn test_normalizing_pre_expanded_exists_inside_lambda() {
     let mut env = Environment::test();
