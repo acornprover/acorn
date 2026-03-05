@@ -111,6 +111,16 @@ fn test_parsing_true_false_keywords() {
 }
 
 #[test]
+fn test_choose_not_allowed_in_surface_expression() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("let foo: Nat -> Bool = axiom");
+    env.bad("let b: Bool = choose");
+    env.bad("let b: Bool = choose(true)");
+    env.bad("let b: Bool = choose(x: Nat) { foo(x) }");
+}
+
+#[test]
 fn test_nothing_after_explicit_false() {
     let mut env = Environment::test();
     env.add("let b: Bool = axiom");
