@@ -121,6 +121,20 @@ impl VariableMap {
         special_context: &LocalContext,
         kernel_context: &KernelContext,
     ) -> bool {
+        fn type_in_context(
+            term: TermRef,
+            context: &LocalContext,
+            kernel_context: &KernelContext,
+        ) -> Option<Term> {
+            match term.decompose() {
+                Decomposition::Atom(Atom::BoundVariable(i)) => {
+                    let idx = context.len().checked_sub(*i as usize + 1)?;
+                    context.get_var_type(idx).cloned()
+                }
+                _ => Some(term.get_type_with_context(context, kernel_context)),
+            }
+        }
+
         // Type checking is only needed when matching a variable to a term.
         // For other cases (atom vs atom, application vs application), if the
         // subterms match structurally, their types are guaranteed to match.
@@ -130,7 +144,10 @@ impl VariableMap {
                 // Get the variable's type directly from the context (cheap lookup)
                 // rather than computing it via get_type_with_context.
                 let var_type = general_context.get_var_type(*i as usize).unwrap();
-                let special_type = special.get_type_with_context(special_context, kernel_context);
+                let Some(special_type) = type_in_context(special, special_context, kernel_context)
+                else {
+                    return false;
+                };
                 if var_type != &special_type {
                     return false;
                 }
@@ -158,17 +175,104 @@ impl VariableMap {
                 )
             }
             (Decomposition::Lambda(g_input, g_body), Decomposition::Lambda(s_input, s_body)) => {
-                self.match_terms(
+                if !self.match_terms(
                     g_input,
                     s_input,
                     general_context,
                     special_context,
                     kernel_context,
-                ) && self.match_terms(
+                ) {
+                    return false;
+                }
+
+                let mut extended_general_context = general_context.clone();
+                extended_general_context.push_type(g_input.to_owned());
+                let mut extended_special_context = special_context.clone();
+                extended_special_context.push_type(s_input.to_owned());
+
+                self.match_terms(
                     g_body,
                     s_body,
+                    &extended_general_context,
+                    &extended_special_context,
+                    kernel_context,
+                )
+            }
+            (Decomposition::Pi(g_input, g_output), Decomposition::Pi(s_input, s_output)) => {
+                if !self.match_terms(
+                    g_input,
+                    s_input,
                     general_context,
                     special_context,
+                    kernel_context,
+                ) {
+                    return false;
+                }
+
+                let mut extended_general_context = general_context.clone();
+                extended_general_context.push_type(g_input.to_owned());
+                let mut extended_special_context = special_context.clone();
+                extended_special_context.push_type(s_input.to_owned());
+
+                self.match_terms(
+                    g_output,
+                    s_output,
+                    &extended_general_context,
+                    &extended_special_context,
+                    kernel_context,
+                )
+            }
+            (
+                Decomposition::ForAll(g_binder_type, g_body),
+                Decomposition::ForAll(s_binder_type, s_body),
+            ) => {
+                if !self.match_terms(
+                    g_binder_type,
+                    s_binder_type,
+                    general_context,
+                    special_context,
+                    kernel_context,
+                ) {
+                    return false;
+                }
+
+                let mut extended_general_context = general_context.clone();
+                extended_general_context.push_type(g_binder_type.to_owned());
+                let mut extended_special_context = special_context.clone();
+                extended_special_context.push_type(s_binder_type.to_owned());
+
+                self.match_terms(
+                    g_body,
+                    s_body,
+                    &extended_general_context,
+                    &extended_special_context,
+                    kernel_context,
+                )
+            }
+            (
+                Decomposition::Exists(g_binder_type, g_body),
+                Decomposition::Exists(s_binder_type, s_body),
+            ) => {
+                if !self.match_terms(
+                    g_binder_type,
+                    s_binder_type,
+                    general_context,
+                    special_context,
+                    kernel_context,
+                ) {
+                    return false;
+                }
+
+                let mut extended_general_context = general_context.clone();
+                extended_general_context.push_type(g_binder_type.to_owned());
+                let mut extended_special_context = special_context.clone();
+                extended_special_context.push_type(s_binder_type.to_owned());
+
+                self.match_terms(
+                    g_body,
+                    s_body,
+                    &extended_general_context,
+                    &extended_special_context,
                     kernel_context,
                 )
             }
@@ -487,5 +591,41 @@ impl fmt::Display for VariableMap {
             first = false;
         }
         write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_terms_with_lambda_bound_variable_does_not_panic() {
+        let kctx = KernelContext::new();
+        let general_context = LocalContext::from_types(vec![Term::bool_type()]);
+        let special_context = LocalContext::empty();
+
+        let general = Term::lambda(Term::bool_type(), Term::atom(Atom::FreeVariable(0)));
+        let special = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+
+        let mut var_map = VariableMap::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            var_map.match_terms(
+                general.as_ref(),
+                special.as_ref(),
+                &general_context,
+                &special_context,
+                &kctx,
+            )
+        }));
+
+        assert!(result.is_ok(), "match_terms should not panic under binders");
+        assert!(
+            result.unwrap(),
+            "lambda pattern should match lambda with bound body"
+        );
+        assert_eq!(
+            var_map.get_mapping(0),
+            Some(&Term::atom(Atom::BoundVariable(0)))
+        );
     }
 }
