@@ -733,10 +733,24 @@ impl<'a> TermBridge<'a> {
                     );
                 }
                 Symbol::Choose => {
-                    panic!(
-                        "choose terms cannot be denormalized to AcornValue yet: {}",
-                        term
-                    );
+                    if type_args.len() != 1 || value_args.len() != 1 {
+                        panic!("malformed choose term during denormalization: {}", term);
+                    }
+                    let choice_type = type_args.into_iter().next().unwrap();
+                    let predicate = value_args.into_iter().next().unwrap();
+                    let AcornValue::Lambda(arg_types, body) = predicate else {
+                        panic!(
+                            "malformed choose predicate during denormalization (expected lambda): {}",
+                            term
+                        );
+                    };
+                    if arg_types.len() != 1 || arg_types[0] != choice_type {
+                        panic!(
+                            "malformed choose predicate binder type during denormalization: {}",
+                            term
+                        );
+                    }
+                    return AcornValue::choose(choice_type, *body);
                 }
                 _ => unreachable!("unexpected logical symbol: {}", symbol),
             }

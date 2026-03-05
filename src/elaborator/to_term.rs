@@ -200,6 +200,20 @@ fn elaborate_value_to_term_with_stack(
             BinderKind::Exists,
         ),
 
+        AcornValue::Choose(choice_type, body) => {
+            let choice_type_term =
+                elaborate_type_to_term(kernel_context, choice_type, type_var_map);
+            let predicate = elaborate_binder_to_term(
+                kernel_context,
+                std::slice::from_ref(choice_type),
+                body,
+                type_var_map,
+                stack,
+                BinderKind::Lambda,
+            )?;
+            Ok(logical_head(Symbol::Choose).apply(&[choice_type_term, predicate]))
+        }
+
         AcornValue::Binary(op, left, right) => {
             let left_term =
                 elaborate_value_to_term_with_stack(kernel_context, left, type_var_map, stack)?;
@@ -1243,6 +1257,10 @@ mod tests {
                         ),
                     ),
                 ),
+            ),
+            (
+                "choose",
+                AcornValue::choose(bool_ty.clone(), AcornValue::Variable(0, bool_ty.clone())),
             ),
             (
                 "value_application",

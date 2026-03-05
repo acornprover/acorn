@@ -35,6 +35,10 @@ pub struct Evaluator<'a> {
     /// semantics of a token.
     /// This may not be from the same module as the bindings, so we need to be careful.
     token_map: Option<&'a mut TokenMap>,
+
+    /// Whether the evaluator accepts `choose(...) { ... }` binder syntax.
+    /// This is currently intended for certificate parsing only.
+    allow_choose: bool,
 }
 
 impl<'a> Evaluator<'a> {
@@ -44,10 +48,20 @@ impl<'a> Evaluator<'a> {
         bindings: &'a BindingMap,
         token_map: Option<&'a mut TokenMap>,
     ) -> Self {
+        Self::new_with_allow_choose(project, bindings, token_map, false)
+    }
+
+    pub fn new_with_allow_choose(
+        project: &'a Project,
+        bindings: &'a BindingMap,
+        token_map: Option<&'a mut TokenMap>,
+        allow_choose: bool,
+    ) -> Self {
         Self {
             project,
             bindings,
             token_map,
+            allow_choose,
         }
     }
 
@@ -303,14 +317,20 @@ impl<'a> Evaluator<'a> {
             Expression::Concatenation(function, args) if !args.is_type() => (function, args),
             _ => {
                 // This can only be a no-argument constructor.
-                let mut no_token_evaluator = Evaluator::new(self.project, self.bindings, None);
+                let mut no_token_evaluator = Evaluator::new_with_allow_choose(
+                    self.project,
+                    self.bindings,
+                    None,
+                    self.allow_choose,
+                );
                 let constructor =
                     no_token_evaluator.evaluate_value(pattern, Some(expected_type))?;
                 let (i, total) = self.expect_constructor(expected_type, &constructor, pattern)?;
                 return Ok((constructor, vec![], i, total));
             }
         };
-        let mut no_token_evaluator = Evaluator::new(self.project, self.bindings, None);
+        let mut no_token_evaluator =
+            Evaluator::new_with_allow_choose(self.project, self.bindings, None, self.allow_choose);
         let potential_constructor =
             no_token_evaluator.evaluate_potential_value(&mut Stack::new(), fn_exp, None)?;
         let constructor = match potential_constructor {
@@ -627,8 +647,13 @@ impl<'a> Evaluator<'a> {
                 if let Some(bindings) = self.project.get_bindings(module) {
                     // Funny case where the bindings aren't in the same module as the token.
                     // Be careful not to track the token map here.
-                    Evaluator::new(self.project, bindings, None)
-                        .evaluate_name(name_token, stack, None)?
+                    Evaluator::new_with_allow_choose(
+                        self.project,
+                        bindings,
+                        None,
+                        self.allow_choose,
+                    )
+                    .evaluate_name(name_token, stack, None)?
                 } else {
                     return Err(name_token.error("could not load bindings for module"));
                 }
@@ -952,7 +977,7 @@ impl<'a> Evaluator<'a> {
         let value = match expression {
             Expression::Singleton(token) => match token.token_type {
                 TokenType::Axiom => panic!("axiomatic values should be handled elsewhere"),
-                TokenType::ForAll | TokenType::Exists | TokenType::Function => {
+                TokenType::ForAll | TokenType::Exists | TokenType::Function | TokenType::Choose => {
                     return Err(token.error("binder keywords cannot be used as values"));
                 }
                 TokenType::True | TokenType::False => {
@@ -1218,7 +1243,12 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Create a new evaluator with the modified bindings
-                    let mut evaluator = Evaluator::new(self.project, &new_bindings, None);
+                    let mut evaluator = Evaluator::new_with_allow_choose(
+                        self.project,
+                        &new_bindings,
+                        None,
+                        self.allow_choose,
+                    );
 
                     // Evaluate type arguments in the generic lambda's type-parameter scope,
                     // so self-instantiation like function[T](...)[T] is representable.
@@ -1335,12 +1365,22 @@ impl<'a> Evaluator<'a> {
                 let body_type = match token.token_type {
                     TokenType::ForAll => Some(&AcornType::Bool),
                     TokenType::Exists => Some(&AcornType::Bool),
+                    TokenType::Choose => Some(&AcornType::Bool),
                     _ => None,
                 };
                 let ret_val = match self.evaluate_value_with_stack(stack, body, body_type) {
                     Ok(value) => match token.token_type {
                         TokenType::ForAll => Ok(AcornValue::ForAll(arg_types, Box::new(value))),
                         TokenType::Exists => Ok(AcornValue::Exists(arg_types, Box::new(value))),
+                        TokenType::Choose => {
+                            if !self.allow_choose {
+                                Err(token.error("choose expressions are not allowed here"))
+                            } else if arg_types.len() != 1 {
+                                Err(token.error("choose requires exactly one bound variable"))
+                            } else {
+                                Ok(AcornValue::choose(arg_types[0].clone(), value))
+                            }
+                        }
                         TokenType::Function => Ok(AcornValue::Lambda(arg_types, Box::new(value))),
                         _ => Err(token.error("expected a binder identifier token")),
                     },

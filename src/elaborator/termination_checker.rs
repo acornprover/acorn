@@ -56,6 +56,13 @@ impl TerminationChecker {
                 self.traverse(value);
                 self.substructure_map.truncate(stack_size);
             }
+            AcornValue::Choose(_, value) => {
+                // The chosen witness is not assumed to be a substructure.
+                let stack_size = self.substructure_map.len();
+                self.substructure_map.push(None);
+                self.traverse(value);
+                self.substructure_map.truncate(stack_size);
+            }
             AcornValue::Not(value) => {
                 self.traverse(value);
             }

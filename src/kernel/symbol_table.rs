@@ -859,6 +859,7 @@ impl SymbolTable {
                 AcornValue::Lambda(_, subvalue)
                 | AcornValue::ForAll(_, subvalue)
                 | AcornValue::Exists(_, subvalue)
+                | AcornValue::Choose(_, subvalue)
                 | AcornValue::Not(subvalue)
                 | AcornValue::Try(subvalue, _) => {
                     register_match_symbols_for_value(symbol_table, type_store, subvalue);

@@ -99,6 +99,10 @@ fn collect_type_var_names_from_value_recursive(value: &AcornValue, names: &mut V
             }
             collect_type_var_names_from_value_recursive(v, names);
         }
+        AcornValue::Choose(choice_type, v) => {
+            collect_type_var_names_recursive(choice_type, names);
+            collect_type_var_names_from_value_recursive(v, names);
+        }
         AcornValue::Lambda(args, body) => {
             for t in args {
                 collect_type_var_names_recursive(t, names);
@@ -316,6 +320,14 @@ fn rename_type_vars_in_value(
                 )),
             )
         }
+        AcornValue::Choose(choice_type, v) => AcornValue::Choose(
+            rename_type_vars_in_type(choice_type, rename_map),
+            Box::new(rename_type_vars_in_value(
+                v,
+                rename_map,
+                defining_synthetics,
+            )),
+        ),
         AcornValue::Lambda(quants, v) => {
             let new_quants = quants
                 .iter()
@@ -1863,7 +1875,7 @@ impl CodeGenerator<'_> {
         &mut self,
         names: &SyntheticNameSet,
         token_type: TokenType,
-        quants: &Vec<AcornType>,
+        quants: &[AcornType],
         value: &AcornValue,
         use_x: bool,
     ) -> Result<Expression> {
@@ -2171,6 +2183,13 @@ impl CodeGenerator<'_> {
             AcornValue::Exists(quants, value) => {
                 self.generate_quantifier_expr(names, TokenType::Exists, quants, value, false)
             }
+            AcornValue::Choose(choice_type, value) => self.generate_quantifier_expr(
+                names,
+                TokenType::Choose,
+                std::slice::from_ref(choice_type),
+                value,
+                false,
+            ),
             AcornValue::Lambda(quants, value) => {
                 self.generate_quantifier_expr(names, TokenType::Function, quants, value, true)
             }

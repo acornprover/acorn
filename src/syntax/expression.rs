@@ -965,7 +965,7 @@ fn parse_partial_expressions(
                 partials.push_back(PartialExpression::Expression(Expression::Singleton(token)));
             }
 
-            TokenType::ForAll | TokenType::Exists | TokenType::Function => {
+            TokenType::ForAll | TokenType::Exists | TokenType::Function | TokenType::Choose => {
                 if expected_type != ExpressionType::Value {
                     return Err(token.error("quantifiers cannot be used here"));
                 }

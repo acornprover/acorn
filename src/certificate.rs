@@ -265,7 +265,7 @@ impl Certificate {
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
-        let mut evaluator = Evaluator::new(project, bindings, None);
+        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
         let mut claim_step_from_expr =
             |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
                 let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
@@ -314,7 +314,8 @@ impl Certificate {
                 }
                 let result = (|| -> Result<CertificateStep, CodeGenError> {
                     // Re-create evaluator with updated bindings
-                    let mut evaluator = Evaluator::new(project, bindings, None);
+                    let mut evaluator =
+                        Evaluator::new_with_allow_choose(project, bindings, None, true);
 
                     // Parse declarations
                     let mut decls = vec![];
@@ -777,7 +778,7 @@ impl Certificate {
             ));
         };
 
-        let mut evaluator = Evaluator::new(project, bindings, None);
+        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
         let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
         Self::try_deserialize_claim_with_args_value(evaluated, bindings, kernel_context)?
             .ok_or_else(|| {
@@ -1529,6 +1530,31 @@ mod tests {
             &mut kernel_context_cow,
         )
         .expect("plain claim parsing should succeed");
+
+        match step {
+            CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
+            _ => panic!("expected claim step"),
+        }
+    }
+
+    #[test]
+    fn test_parse_code_line_accepts_choose_claim_shape() {
+        let code = r#"
+            theorem goal {
+                true = true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let step = Certificate::parse_code_line(
+            "choose(x0: Bool) { x0 } = true",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("choose claim parsing should succeed for certificate parsing");
 
         match step {
             CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
