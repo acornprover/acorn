@@ -12,10 +12,18 @@ Perform a safe rollout for breaking acornlib/certificate format changes.
 - Run these `cargo run ...` commands from the `acorn` repo.
 - Edit theorem/proof source files under `~/acornlib/src`.
 - Use the edit tool for proof-file changes (do not use ad-hoc shell text mutation commands).
-- Do not run git commands as part of this workflow.
+- Read-only git commands are allowed (`status`, `log`, `show`, `diff`, etc.).
+- Do not run mutating git commands as part of this workflow (`add`, `commit`, `push`, `pull`, `merge`, `rebase`, `cherry-pick`, `reset`, `checkout`).
 - The human handles commit/push/upstream actions.
-- In sandboxed Codex runs, commands that write cache files under `~/acornlib/build` may require escalated permissions.
-- For cache-writing steps, confirm writes actually happened by checking `git -C ~/acornlib status --short`.
+- In sandboxed Codex runs, any command expected to write `~/acornlib/build/*` must be run with escalated permissions.
+- After every cache-writing command, confirm writes actually happened with `git -C ~/acornlib status --short`.
+
+## Write Verification Protocol (Mandatory)
+For any step that is expected to update `~/acornlib/build`:
+1. Run the command (with escalated permissions in sandboxed runs).
+2. Immediately run `git -C ~/acornlib status --short`.
+3. If no expected write evidence appears, treat it as a failed step (usually permissions) and rerun with escalated permissions.
+4. Do not advance state until write evidence is confirmed.
 
 ## Workflow (Strict State Machine)
 Treat migration as a state machine. Do not skip states. Do not run commands from later states early.
@@ -54,21 +62,39 @@ Next state:
 ### State S2: Whole-Project Prover Probe
 Purpose:
 - Check whether feature-mode prover can regenerate proofs without touching cache.
+- Ensure newly generated feature-mode certs are immediately checkable.
 
 Required command:
-- `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
+- `cargo run --profile release --features <feature>,validate -- verify --no-cache-skip --no-write-cache --fail-fast`
 
 Outcomes:
 - If success: go to `S4` (ready for review, then flag flip).
-- If failure: go to `S3_fix_loop`.
+- If failure: go to `S3_probe`.
+- If this command panics (for example, "newly generated cert should be checkable"), go to `S_blocked_feature_bug`.
 
 Hard guard:
 - Do **not** inspect/edit theorem proofs before this probe fails.
 
-### State S3: Module-Level Fix Loop
-Loop until whole-project probe succeeds.
+### State S3_probe: Identify Failing Module/Theorem
+Purpose:
+- Start one fix-loop iteration from an `S2` failure.
 
-For each failing theorem/module:
+Actions:
+- Extract failing module/theorem/line from the failing output.
+- Reproduce quickly with no-write checks:
+  - `cargo run --profile release -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+  - `cargo run --profile release --features <feature>,validate -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+
+Outcomes:
+- If failure is reproduced in feature mode: go to `S3_edit`.
+- If not reproducible (flaky/stale): go back to `S2_probe`.
+- If feature-mode verify panics, go to `S_blocked_feature_bug`.
+
+### State S3_edit: Edit Proofs
+Purpose:
+- Make minimal source edits for the currently failing target.
+
+Actions:
 - Inspect proof detail in default mode only:
   - `cargo run --profile release -- select MODULENAME LINENUMBER`
 - Edit files under `~/acornlib/src` using the edit tool.
@@ -81,34 +107,58 @@ For each failing theorem/module:
 - Placement rule:
   - before target line, or at end of `by` block if target line has one.
 
-Per-iteration checks:
-- Default mode module check (writes cache):
+Next state:
+- `S3_check`.
+
+### State S3_check: Validate Edited Module
+Purpose:
+- Validate the current module in both modes before looping.
+
+Required commands:
+- Default mode module check (no-write):
+  - `cargo run --profile release -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+- Feature mode module check (no-write):
+  - `cargo run --profile release --features <feature>,validate -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+
+Conditional command:
+- If and only if this iteration included explicit edits under `~/acornlib/src` for this module:
   - `cargo run --profile release -- verify <module> --no-cache-skip --fail-fast`
-- Feature mode module check (no cache writes):
-  - `cargo run --profile release --features <feature> -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+  - then confirm write evidence with `git -C ~/acornlib status --short`.
 
 Permission note:
-- If the cache-writing module check is expected to update `~/acornlib/build` but no files change, rerun that command with escalated permissions.
+- In sandboxed Codex runs, run the conditional cache-writing check with escalated permissions.
+- If a cache-writing check is expected to update `~/acornlib/build` but no files change, do not continue; rerun with escalated permissions and re-check write evidence.
 
-Exit condition:
-- Whole-project feature probe succeeds:
-  - `cargo run --profile release --features <feature> -- verify --no-cache-skip --no-write-cache --fail-fast`
+Outcomes:
+- If both no-write module checks pass: go to `S3_decide`.
+- If feature-mode module check fails: go back to `S3_edit`.
+- If default-mode module check fails after edits: go back to `S3_edit`.
+- If feature-mode verify panics, go to `S_blocked_feature_bug`.
+
+### State S3_decide: Loop Decision
+Purpose:
+- Decide whether to continue module loop or exit to review.
+
+Required command:
+- `cargo run --profile release --features <feature>,validate -- verify --no-cache-skip --no-write-cache --fail-fast`
+
+Outcomes:
+- If success: go to `S4`.
+- If failure on another target: go to `S3_probe`.
+- If repeated attempts on same target are not converging: go to `S_blocked_feature_bug`.
+- If feature-mode verify panics, go to `S_blocked_feature_bug`.
 
 Hard guard:
-- During this phase, feature-mode `reverify` may fail on old cert format. Do not use it as pass/fail.
+- During all `S3_*` states, feature-mode `reverify` may fail on old cert format. Do not use it as pass/fail.
 
-Blocked-condition exit:
-- If a module/theorem cannot be made to pass in feature mode after reasonable proof-explication attempts, treat this as a likely feature bug (not a proof-gap-only issue).
-- Do not keep looping blindly. Exit the fix loop and report to the user with diagnostics.
-- Gather and report:
-  - failing module and line/theorem
-  - exact failing command used
-  - error output
-  - whether default-mode module verify passes for the same target
-  - any minimal reduced repro you can extract
-  - likely subsystem suspects (parser/elaboration/clausification/reduction/checker/prover)
-- Next state on this path:
-  - `S_blocked_feature_bug`
+Blocked-condition diagnostics (required when entering `S_blocked_feature_bug`):
+- failing module and line/theorem
+- exact failing command used
+- error output
+- whether failure was a panic in feature+validate verify
+- whether default-mode module verify passes for the same target
+- any minimal reduced repro you can extract
+- likely subsystem suspects (parser/elaboration/clausification/reduction/checker/prover)
 
 ### State S4: Review Checkpoint
 Entry conditions:
@@ -146,8 +196,9 @@ Actions:
   - `cargo run --profile release --features validate -- reverify`
 
 Permission note:
-- The regeneration step writes `~/acornlib/build/*`; in sandboxed Codex runs, request escalated permissions if needed.
+- In sandboxed Codex runs, run regeneration with escalated permissions.
 - After regeneration, verify expected cache updates with `git -C ~/acornlib status --short`.
+- If regeneration reports success but write evidence is missing, treat it as failed and rerun regeneration with escalated permissions.
 
 Next state:
 - `S6_deploy_ready`
@@ -166,7 +217,7 @@ Required report:
 
 ### Terminal State: S_blocked_feature_bug
 Meaning:
-- Migration loop (`S3`) is blocked by a likely feature bug.
+- Migration loop (`S3_probe`/`S3_edit`/`S3_check`/`S3_decide`) is blocked by a likely feature bug.
 
 Required report:
 - current state = `S_blocked_feature_bug`
