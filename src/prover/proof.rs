@@ -745,4 +745,51 @@ mod tests {
             simp_info.simplifying_ids.len()
         );
     }
+
+    /// Regression test for certificate generation in `naw` mode:
+    /// a replacement-context witness for `Bool -> Bool` is lambda-shaped (identity),
+    /// so cert generation must compute lambda types without panicking.
+    #[cfg(feature = "naw")]
+    #[test]
+    fn test_make_cert_handles_lambda_witness_in_replacement_context() {
+        let kctx = KernelContext::new();
+        let generic_clause = kctx.parse_clause("x0", &["Bool", "Bool -> Bool"]);
+        let base_step = ProofStep::mock_from_clause(generic_clause.clone());
+
+        // Keep x0 as a replacement-context variable so cert generation must materialize
+        // a witness for its type (which is lambda-shaped in `naw` mode).
+        let mut premise_var_map = VariableMap::new();
+        premise_var_map.set(0, Term::new_variable(0));
+        let replacement_context = generic_clause.get_local_context().clone();
+
+        let mut final_clause = premise_var_map.specialize_clause_with_replacement_context(
+            &generic_clause,
+            &replacement_context,
+            &kctx,
+        );
+        final_clause.normalize_var_ids_no_flip();
+
+        let final_step = ProofStep::specialization(
+            0,
+            0,
+            &base_step,
+            final_clause,
+            PremiseMap::new(vec![premise_var_map], vec![], replacement_context),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &base_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let bindings =
+            crate::elaborator::binding_map::BindingMap::new(crate::module::ModuleId::default());
+        let cert = proof
+            .make_cert("goal".to_string(), &bindings)
+            .expect("certificate generation should succeed");
+        let lines = cert.proof.expect("proof lines should exist");
+        assert!(
+            !lines.is_empty(),
+            "expected at least one generated certificate line"
+        );
+    }
 }

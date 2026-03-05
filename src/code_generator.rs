@@ -1177,6 +1177,88 @@ impl CodeGenerator<'_> {
         }
     }
 
+    /// Open a binder body by substituting bound variable 0 and reducing binder depth by one.
+    fn open_binder_body(body: &Term, replacement: &Term) -> Term {
+        body.substitute_bound(0, replacement).shift_bound(0, -1)
+    }
+
+    /// Abstract one free variable into a new outer bound variable.
+    fn abstract_free_var_as_bound_at_depth(term: &Term, var_id: AtomId, depth: u16) -> Term {
+        match term.as_ref().decompose() {
+            Decomposition::Atom(atom) => match atom {
+                Atom::FreeVariable(i) if *i == var_id => Term::atom(Atom::BoundVariable(depth)),
+                Atom::BoundVariable(i) if *i >= depth => Term::atom(Atom::BoundVariable(*i + 1)),
+                _ => term.clone(),
+            },
+            Decomposition::Application(func, arg) => {
+                let new_func =
+                    Self::abstract_free_var_as_bound_at_depth(&func.to_owned(), var_id, depth);
+                let new_arg =
+                    Self::abstract_free_var_as_bound_at_depth(&arg.to_owned(), var_id, depth);
+                new_func.apply(&[new_arg])
+            }
+            Decomposition::Pi(input, output) => {
+                let new_input =
+                    Self::abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
+                let new_output = Self::abstract_free_var_as_bound_at_depth(
+                    &output.to_owned(),
+                    var_id,
+                    depth + 1,
+                );
+                Term::pi(new_input, new_output)
+            }
+            Decomposition::Lambda(input, body) => {
+                let new_input =
+                    Self::abstract_free_var_as_bound_at_depth(&input.to_owned(), var_id, depth);
+                let new_body =
+                    Self::abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::lambda(new_input, new_body)
+            }
+            Decomposition::ForAll(binder_type, body) => {
+                let new_binder_type = Self::abstract_free_var_as_bound_at_depth(
+                    &binder_type.to_owned(),
+                    var_id,
+                    depth,
+                );
+                let new_body =
+                    Self::abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::forall(new_binder_type, new_body)
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let new_binder_type = Self::abstract_free_var_as_bound_at_depth(
+                    &binder_type.to_owned(),
+                    var_id,
+                    depth,
+                );
+                let new_body =
+                    Self::abstract_free_var_as_bound_at_depth(&body.to_owned(), var_id, depth + 1);
+                Term::exists(new_binder_type, new_body)
+            }
+        }
+    }
+
+    /// Like `Term::get_type_with_context`, but supports lambda terms.
+    fn term_type_for_certificate(
+        term: &Term,
+        context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Term {
+        if let Some((input, body)) = term.as_ref().split_lambda() {
+            let input_type = input.to_owned();
+            let fresh_var = context.len() as AtomId;
+            let mut nested_context = context.clone();
+            nested_context.push_type(input_type.clone());
+            let opened_body =
+                Self::open_binder_body(&body.to_owned(), &Term::new_variable(fresh_var));
+            let body_type =
+                Self::term_type_for_certificate(&opened_body, &nested_context, kernel_context);
+            let output_type = Self::abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
+            Term::pi(input_type, output_type)
+        } else {
+            term.get_type_with_context(context, kernel_context)
+        }
+    }
+
     fn ensure_no_foreign_scoped_constants_in_term(
         term: &Term,
         kernel_context: &KernelContext,
@@ -1314,7 +1396,7 @@ impl CodeGenerator<'_> {
                 .get_var_type(var_id)
                 .expect("replacement context should provide all var types");
             let mapped_type =
-                mapped_term.get_type_with_context(replacement_context, kernel_context);
+                Self::term_type_for_certificate(mapped_term, replacement_context, kernel_context);
             Self::infer_type_param_bindings_from_type_pattern(
                 expected_type.as_ref(),
                 mapped_type.as_ref(),
@@ -1342,7 +1424,7 @@ impl CodeGenerator<'_> {
             )?;
             if var_type.as_ref().is_type_param_kind() {
                 let specialized_type =
-                    specialized.get_type_with_context(generic_context, kernel_context);
+                    Self::term_type_for_certificate(&specialized, generic_context, kernel_context);
                 if !specialized_type.as_ref().is_type_param_kind()
                     || matches!(
                         specialized.as_ref().decompose(),
@@ -1370,7 +1452,8 @@ impl CodeGenerator<'_> {
             let generic_type = generic_context
                 .get_var_type(var_id)
                 .expect("generic context should provide all var types");
-            let mapped_type = mapped_term.get_type_with_context(generic_context, kernel_context);
+            let mapped_type =
+                Self::term_type_for_certificate(&mapped_term, generic_context, kernel_context);
             Self::infer_type_param_bindings_from_type_pattern(
                 generic_type.as_ref(),
                 mapped_type.as_ref(),
@@ -1447,7 +1530,8 @@ impl CodeGenerator<'_> {
             }
 
             let expected_concrete = apply_to_term(expected_type.as_ref(), &claim_var_map);
-            let mapped_type = term.get_type_with_context(generic_context, kernel_context);
+            let mapped_type =
+                Self::term_type_for_certificate(term, generic_context, kernel_context);
             let mapped_concrete = apply_to_term(mapped_type.as_ref(), &claim_var_map);
             if expected_concrete != mapped_concrete {
                 Some((
