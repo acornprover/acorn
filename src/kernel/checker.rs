@@ -706,9 +706,6 @@ mod tests {
         let Error::GeneratedBadCode(msg) = err else {
             panic!("expected GeneratedBadCode");
         };
-        #[cfg(feature = "naw")]
-        assert!(msg.contains("disabled under --features naw"));
-        #[cfg(not(feature = "naw"))]
-        assert!(msg.contains("exactly one arbitrary witness"));
+        assert!(msg.contains("witnesses are disabled"));
     }
 }

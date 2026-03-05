@@ -417,10 +417,6 @@ pub struct SyntheticNameSet {
     /// The names we have assigned to synthetic atoms so far.
     pub synthetic_names: HashMap<(ModuleId, AtomId), String>,
 
-    /// The scoped symbols for arbitraries, keyed by concrete type term.
-    /// These are allocated during generation so claims can be made fully concrete.
-    pub arbitrary_symbols: HashMap<Term, Symbol>,
-
     /// Synthetics we've already emitted a definition line for.
     defined_synthetics: HashSet<(ModuleId, AtomId)>,
 }
@@ -430,7 +426,6 @@ impl SyntheticNameSet {
         SyntheticNameSet {
             next_s: 0,
             synthetic_names: HashMap::new(),
-            arbitrary_symbols: HashMap::new(),
             defined_synthetics: HashSet::new(),
         }
     }
@@ -477,58 +472,26 @@ impl SyntheticNameSet {
 
     fn ensure_arbitrary_for_type(
         &mut self,
-        bindings: &BindingMap,
+        _bindings: &BindingMap,
         kernel_context: &mut KernelContext,
         concrete_type: &Term,
         local_context: &LocalContext,
     ) -> Result<Option<Symbol>> {
-        #[cfg(feature = "naw")]
-        let _ = bindings;
-        #[cfg(not(feature = "naw"))]
-        let _ = local_context;
-
-        #[cfg(feature = "naw")]
-        {
-            if kernel_context
-                .find_inhabitant(concrete_type, Some(local_context))
-                .is_some()
-            {
-                return Ok(None);
-            }
-            if Self::find_local_witness_for_concrete_type(
-                kernel_context,
-                concrete_type,
-                local_context,
-            )?
+        if kernel_context
+            .find_inhabitant(concrete_type, Some(local_context))
             .is_some()
-            {
-                return Ok(None);
-            }
-            return Err(Error::GeneratedBadCode(format!(
-                "cannot generate certificate under --features naw: no explicit inhabitant found for type '{}'",
-                concrete_type
-            )));
-        }
-
-        #[cfg(not(feature = "naw"))]
         {
-            if self.arbitrary_symbols.contains_key(concrete_type) {
-                return Ok(None);
-            }
-            let acorn_type = kernel_context
-                .type_store
-                .type_term_to_acorn_type(concrete_type);
-            let name = bindings.next_indexed_var('s', &mut self.next_s);
-            let cname = ConstantName::Unqualified(bindings.module_id(), name);
-            let atom = kernel_context.add_scoped_constant(cname, &acorn_type, None);
-            let Atom::Symbol(symbol) = atom else {
-                return Err(Error::internal(
-                    "add_scoped_constant did not produce a symbol",
-                ));
-            };
-            self.arbitrary_symbols.insert(concrete_type.clone(), symbol);
-            Ok(Some(symbol))
+            return Ok(None);
         }
+        if Self::find_local_witness_for_concrete_type(kernel_context, concrete_type, local_context)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        Err(Error::GeneratedBadCode(format!(
+            "cannot generate certificate: no explicit inhabitant found for type '{}'",
+            concrete_type
+        )))
     }
 
     fn concrete_type_for_term(
@@ -544,7 +507,6 @@ impl SyntheticNameSet {
             .map_err(Error::internal)
     }
 
-    #[cfg(feature = "naw")]
     fn find_local_witness_for_concrete_type(
         kernel_context: &KernelContext,
         concrete_type: &Term,
@@ -587,18 +549,7 @@ impl SyntheticNameSet {
             return Ok(None);
         }
         let concrete_type = Self::concrete_type_for_term(kernel_context, var_type, local_context)?;
-        #[cfg(feature = "naw")]
-        {
-            Ok(kernel_context.find_inhabitant(&concrete_type, Some(local_context)))
-        }
-        #[cfg(not(feature = "naw"))]
-        {
-            Ok(self
-                .arbitrary_symbols
-                .get(&concrete_type)
-                .copied()
-                .map(|symbol| Term::atom(Atom::Symbol(symbol))))
-        }
+        Ok(kernel_context.find_inhabitant(&concrete_type, Some(local_context)))
     }
 
     fn add_arbitrary_for_term(
@@ -1328,12 +1279,9 @@ impl CodeGenerator<'_> {
         let new_arbitraries =
             names.add_arbitrary_for_clause(self.bindings, kernel_context, &clause)?;
 
-        #[cfg(feature = "naw")]
         if !new_arbitraries.is_empty() {
             return Err(Error::GeneratedBadCode(
-                "cannot generate certificate: arbitrary witness constants are disabled under \
-                 --features naw"
-                    .to_string(),
+                "cannot generate certificate: arbitrary witness constants are disabled".to_string(),
             ));
         }
 
@@ -1598,28 +1546,10 @@ impl CodeGenerator<'_> {
         kernel_context: &KernelContext,
     ) -> Result<String> {
         match step {
-            CertificateStep::DefineArbitrary { symbol } => {
-                #[cfg(feature = "naw")]
-                {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "cannot serialize DefineArbitrary({}) under --features naw",
-                        symbol
-                    )));
-                }
-                #[cfg(not(feature = "naw"))]
-                {
-                    let Symbol::ScopedConstant(local_id) = symbol else {
-                        return Err(Error::internal(
-                            "DefineArbitrary expected a local scoped constant symbol",
-                        ));
-                    };
-                    let name = kernel_context.symbol_table.name_for_local_id(*local_id);
-                    let type_term = kernel_context.symbol_table.get_type(*symbol);
-                    let acorn_type = kernel_context.type_store.type_term_to_acorn_type(type_term);
-                    let ty_code = self.type_to_code(&acorn_type)?;
-                    Ok(format!("let {}: {} satisfy {{ true }}", name, ty_code))
-                }
-            }
+            CertificateStep::DefineArbitrary { symbol } => Err(Error::GeneratedBadCode(format!(
+                "cannot serialize DefineArbitrary({})",
+                symbol
+            ))),
             CertificateStep::DefineSynthetic {
                 atoms,
                 type_vars,
@@ -2694,9 +2624,6 @@ mod tests {
 
     #[test]
     fn test_claim_replay_handles_replacement_type_var_inference() {
-        use crate::elaborator::acorn_type::AcornType;
-        use crate::elaborator::names::ConstantName;
-        use crate::kernel::atom::Atom;
         use crate::kernel::certificate_step::CertificateStep;
         use crate::kernel::variable_map::VariableMap;
         use crate::processor::Processor;
@@ -2716,23 +2643,6 @@ mod tests {
         var_map.set(1, kernel_context.parse_term("g1(x0, Empty, x1)"));
 
         let mut names = SyntheticNameSet::new();
-        let type_key = SyntheticNameSet::concrete_type_for_term(
-            &kernel_context,
-            replacement_context
-                .get_var_type(1)
-                .expect("replacement var type should exist"),
-            &replacement_context,
-        )
-        .expect("replacement type key should resolve");
-        let bool_symbol_atom = kernel_context.add_scoped_constant(
-            ConstantName::Unqualified(bindings.module_id(), "s_test".to_string()),
-            &AcornType::Bool,
-            None,
-        );
-        let Atom::Symbol(bool_symbol) = bool_symbol_atom else {
-            panic!("expected symbol");
-        };
-        names.arbitrary_symbols.insert(type_key, bool_symbol);
 
         let mut generator = CodeGenerator::new(&bindings);
         let mut steps = vec![];

@@ -1727,24 +1727,12 @@ fn test_proving_with_free_variable() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    #[cfg(feature = "naw")]
     assert_proof_lines(
         proof,
         &[
             "function(x0: Foo) { f(x0) }(Foo.bar)",
             "function(x0: Foo) { not f(x0) or g }(Foo.bar)",
             "function(x0: Foo) { not f(x0) }(Foo.bar)",
-        ],
-    );
-
-    #[cfg(not(feature = "naw"))]
-    assert_proof_lines(
-        proof,
-        &[
-            "let s0: Foo satisfy { true }",
-            "function(x0: Foo) { f(x0) }(s0)",
-            "function(x0: Foo) { not f(x0) or g }(s0)",
-            "function(x0: Foo) { not f(x0) }(s0)",
         ],
     );
 }

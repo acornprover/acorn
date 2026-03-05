@@ -382,45 +382,11 @@ impl Certificate {
                                     code
                                 )));
                             }
-                            #[cfg(feature = "naw")]
-                            {
-                                return Err(CodeGenError::GeneratedBadCode(
-                                    "trivial `let ... satisfy { true }` witnesses are disabled \
-                                     under --features naw; provide a concrete example or a \
-                                     nontrivial satisfy condition"
-                                        .to_string(),
-                                ));
-                            }
-                            #[cfg(not(feature = "naw"))]
-                            {
-                                // Trivial condition requires the type to be inhabited
-                                let kernel_context = kernel_context.as_ref();
-                                for (name, acorn_type) in &decls {
-                                    let type_term = kernel_context
-                                        .type_store
-                                        .get_type_term(acorn_type)
-                                        .map_err(|e| {
-                                            CodeGenError::GeneratedBadCode(format!(
-                                                "cannot convert type '{}' to term: {}",
-                                                acorn_type, e
-                                            ))
-                                        })?;
-                                    if !kernel_context.provably_inhabited(&type_term, None) {
-                                        return Err(CodeGenError::GeneratedBadCode(format!(
-                                        "cannot create witness '{}' of type '{}' with trivial condition: \
-                                     type is not provably inhabited",
-                                        name, acorn_type
-                                    )));
-                                    }
-                                }
-                                if decls.len() != 1 {
-                                    return Err(CodeGenError::GeneratedBadCode(
-                                    "let ... satisfy with trivial condition may declare exactly one arbitrary witness"
-                                        .to_string(),
-                                ));
-                                }
-                                None
-                            }
+                            return Err(CodeGenError::GeneratedBadCode(
+                                "trivial `let ... satisfy { true }` witnesses are disabled; \
+                                 provide a concrete example or a nontrivial satisfy condition"
+                                    .to_string(),
+                            ));
                         }
                     };
 
@@ -1570,9 +1536,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "naw")]
     #[test]
-    fn test_parse_code_line_rejects_trivial_arbitrary_witness_under_naw() {
+    fn test_parse_code_line_rejects_trivial_arbitrary_witness() {
         let code = r#"
             theorem goal {
                 true
@@ -1590,11 +1555,11 @@ mod tests {
         );
         let err = match result {
             Err(err) => err,
-            Ok(_) => panic!("trivial arbitrary witness should be disabled under naw"),
+            Ok(_) => panic!("trivial arbitrary witness should be disabled"),
         };
 
         assert!(
-            err.to_string().contains("disabled under --features naw"),
+            err.to_string().contains("witnesses are disabled"),
             "unexpected error: {}",
             err
         );

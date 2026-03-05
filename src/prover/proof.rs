@@ -746,10 +746,9 @@ mod tests {
         );
     }
 
-    /// Regression test for certificate generation in `naw` mode:
+    /// Regression test for certificate generation with explicit witnesses:
     /// a replacement-context witness for `Bool -> Bool` is lambda-shaped (identity),
     /// so cert generation must compute lambda types without panicking.
-    #[cfg(feature = "naw")]
     #[test]
     fn test_make_cert_handles_lambda_witness_in_replacement_context() {
         let kctx = KernelContext::new();
@@ -757,7 +756,7 @@ mod tests {
         let base_step = ProofStep::mock_from_clause(generic_clause.clone());
 
         // Keep x0 as a replacement-context variable so cert generation must materialize
-        // a witness for its type (which is lambda-shaped in `naw` mode).
+        // a witness for its type (which is lambda-shaped in this mode).
         let mut premise_var_map = VariableMap::new();
         premise_var_map.set(0, Term::new_variable(0));
         let replacement_context = generic_clause.get_local_context().clone();
@@ -793,9 +792,8 @@ mod tests {
         );
     }
 
-    /// Regression: `naw`-mode cert parsing must accept constant-lambda claim arguments.
+    /// Regression: cert parsing must accept constant-lambda claim arguments.
     /// This shape is produced by explicit inhabitant witnesses for function types.
-    #[cfg(feature = "naw")]
     #[test]
     fn test_make_cert_constant_lambda_claim_arg_roundtrip() {
         use crate::certificate::Certificate;
