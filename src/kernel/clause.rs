@@ -749,6 +749,16 @@ impl Clause {
         Some(body.substitute_bound(0, &choose_term).shift_bound(0, -1))
     }
 
+    /// Reduce `not forall(T => body)` to `exists(T => not body)`.
+    #[cfg(feature = "iet")]
+    fn reduce_negated_forall(term: &Term) -> Option<Term> {
+        let (binder_type, body) = term.as_ref().split_forall()?;
+        Some(Term::exists(
+            binder_type.to_owned(),
+            Term::not(body.to_owned()),
+        ))
+    }
+
     fn simplify_ite_term(term: &Term) -> Term {
         fn substitute_bound_capture_avoiding(
             term: TermRef<'_>,
@@ -1075,6 +1085,13 @@ impl Clause {
                             ));
                             continue;
                         }
+                    } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
+                        answer.extend(self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![Literal::positive(reduced)]],
+                            &self.context,
+                        ));
+                        continue;
                     } else if let Some((reduced, output_context)) =
                         Self::reduce_negated_exists(&literal.left, &self.context)
                     {
@@ -1659,6 +1676,31 @@ mod tests {
         let second = expected.boolean_reductions(&kctx);
         assert_eq!(second, vec![Clause::impossible()]);
         assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_negated_forall_becomes_exists_negated_body() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
+
+        let forall_term = Term::forall(
+            Term::bool_type(),
+            kctx.parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
+        let expected = Clause::new(
+            vec![Literal::positive(Term::exists(
+                Term::bool_type(),
+                Term::not(
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                ),
+            ))],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
     #[cfg(feature = "iet")]
