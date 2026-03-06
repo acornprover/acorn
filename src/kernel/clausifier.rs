@@ -343,6 +343,15 @@ impl<'a> Clausifier<'a> {
                         context,
                     )
                 } else {
+                    #[cfg(feature = "iet")]
+                    {
+                        // Keep negated universals inline under iet so later boolean
+                        // reductions can open them via exists/choose without skolemizing.
+                        let literal = Literal::from_signed_term(term.clone(), false);
+                        return Ok(Cnf::from_literal(literal));
+                    }
+
+                    #[cfg(not(feature = "iet"))]
                     self.exists_term_to_cnf(
                         &binder_type.to_owned(),
                         &body.to_owned(),
@@ -561,6 +570,7 @@ impl<'a> Clausifier<'a> {
         Ok(result)
     }
 
+    #[cfg(not(feature = "iet"))]
     fn exists_term_to_cnf(
         &mut self,
         binder_type: &Term,
@@ -1626,5 +1636,61 @@ impl<'a> Clausifier<'a> {
                 Term::not(eq_term)
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "iet"))]
+mod tests {
+    use super::Clausifier;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::term::{Decomposition, Term};
+    use crate::module::ModuleId;
+
+    #[test]
+    fn test_iet_negated_forall_clausification_stays_inline_without_synthetics() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constant("g0", "Bool -> Bool");
+
+        let forall_term = Term::forall(
+            Term::bool_type(),
+            kernel_context
+                .parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clauses = {
+            let mut view = Clausifier::new_mut(&mut kernel_context, None, ModuleId(0));
+            view.clausify_term_to_denormalized_clauses(&Term::not(forall_term))
+                .expect("negated forall should clausify")
+        };
+
+        assert!(
+            kernel_context.get_synthetic_ids().is_empty(),
+            "iet negated forall clausification should not introduce synthetic witnesses",
+        );
+        assert_eq!(
+            clauses.len(),
+            1,
+            "expected a single clause for negated forall"
+        );
+        assert!(
+            !clauses[0].has_synthetic(),
+            "negated forall clause should stay synthetic-free: {:?}",
+            clauses[0]
+        );
+        assert_eq!(clauses[0].literals.len(), 1, "expected a single literal");
+        assert!(
+            !clauses[0].literals[0].positive,
+            "expected negated forall to remain a negative literal: {:?}",
+            clauses[0].literals[0]
+        );
+        assert!(
+            matches!(
+                clauses[0].literals[0].left.as_ref().decompose(),
+                Decomposition::ForAll(_, _)
+            ),
+            "expected literal to keep the forall term inline: {:?}",
+            clauses[0].literals[0]
+        );
     }
 }
