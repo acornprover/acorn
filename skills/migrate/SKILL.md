@@ -35,7 +35,7 @@ Preconditions:
 - Local tests for feature and default modes exist where needed.
 
 Transition command:
-- `cargo run --profile release --features <feature> -- reverify`
+- `cargo run --profile release --features <feature> -- check`
 
 Outcomes:
 - If success: go to `S_done_no_migration`.
@@ -43,7 +43,7 @@ Outcomes:
 
 ### State S1: Enable Manifest Gate
 When entered:
-- Any time `S0` feature-mode `reverify` fails.
+- Any time `S0` feature-mode `check` fails.
 
 Required change:
 ```rust
@@ -149,7 +149,7 @@ Outcomes:
 - If feature-mode verify panics, go to `S_blocked_feature_bug`.
 
 Hard guard:
-- During all `S3_*` states, feature-mode `reverify` may fail on old cert format. Do not use it as pass/fail.
+- During all `S3_*` states, feature-mode `check` may fail on old cert format. Do not use it as pass/fail.
 
 Blocked-condition diagnostics (required when entering `S_blocked_feature_bug`):
 - failing module and line/theorem
@@ -163,7 +163,7 @@ Blocked-condition diagnostics (required when entering `S_blocked_feature_bug`):
 ### State S4: Review Checkpoint
 Entry conditions:
 - Arrived from `S2` success after:
-  - feature-mode `reverify` failed
+  - feature-mode `check` failed
   - manifest gate was enabled
   - feature-mode prover probe succeeded
 - No proof edits are required in this path; migration is ready for review and potential flag flip.
@@ -193,7 +193,7 @@ Actions:
 - Regenerate certs in new format:
   - `cargo run --profile release -- verify --no-cache-skip`
 - Final validation:
-  - `cargo run --profile release --features validate -- reverify`
+  - `cargo run --profile release --features validate -- check`
 
 Permission note:
 - In sandboxed Codex runs, run regeneration with escalated permissions.
@@ -226,12 +226,12 @@ Required report:
 
 ### Terminal State: S_done_no_migration
 Meaning:
-- Feature-mode `reverify` succeeded in `S0`.
+- Feature-mode `check` succeeded in `S0`.
 - No migration work is required.
 
 Required report:
 - current state = `S_done_no_migration`
-- command run = `cargo run --profile release --features <feature> -- reverify`
+- command run = `cargo run --profile release --features <feature> -- check`
 - result = success
 - next state = none (stop)
 

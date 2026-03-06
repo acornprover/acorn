@@ -1563,6 +1563,36 @@ mod tests {
     }
 
     #[test]
+    fn test_checker_rejects_unjustified_choose_claim() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let step = Certificate::parse_code_line(
+            "choose(x0: Bool) { x0 } = true",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("choose claim parsing should succeed for certificate parsing");
+
+        let mut checker = Checker::new();
+        let err = checker
+            .check_cert_steps(&[step], None, &kernel_context)
+            .expect_err("arbitrary choose claim should not be accepted");
+        assert!(
+            err.to_string().contains("not obviously true"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_parse_code_line_rejects_trivial_arbitrary_witness() {
         let code = r#"
             theorem goal {

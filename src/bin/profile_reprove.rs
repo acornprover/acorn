@@ -26,7 +26,7 @@ fn main() {
 
         let mut verifier = Verifier::new(current_dir.clone(), config, Some(MODULE.to_string()))
             .expect("Failed to create verifier");
-        verifier.builder.reverify = false; // Run search like verify does
+        verifier.builder.check_mode = false; // Run search like verify does
         verifier.builder.check_hashes = false; // Don't skip based on hashes
 
         let output = verifier.run().unwrap();

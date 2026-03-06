@@ -5,18 +5,18 @@
   `cargo check`
   `cargo fmt`
 
-- If we make changes to the elaborator or the kernel, we should run a full reverify to ensure we didn't
+- If we make changes to the elaborator or the kernel, we should run a full check to ensure we didn't
   break anything.
-  `cargo run --profile release --features validate -- reverify`
+  `cargo run --profile release --features validate -- check`
 
   This verifies the code in `~/acornlib`, which you can inspect to figure out verification failures.
 
 - If a unit test breaks, but just in the verifier or prover, we should try to add another,
   narrower unit test, that catches the problem in the underlying data structure.
 
-- If we run into an error during reverification, to debug it, it can help to
-  run the reverification just on the module that failed at a higher log level. For example:
-  `RUST_LOG=acorn=trace cargo run --profile release -- reverify list.list_base`
+- If we run into an error during check mode, to debug it, it can help to
+  run check just on the module that failed at a higher log level. For example:
+  `RUST_LOG=acorn=trace cargo run --profile release -- check list.list_base`
 
 - To evaluate performance, we should do a release build:
 
@@ -24,7 +24,7 @@
 
   and then see how long it takes to run the commands:
 
-  `time cargo run --profile release -- reverify`
+  `time cargo run --profile release -- check`
   `time cargo run --profile release -- reprove real.double_sum`
 
   This is important to do if we are doing something performance-sensitive, like altering the basic Term
@@ -37,7 +37,7 @@
 
   When you do a full reprove, it's okay if some propositions can't be verified. What indicates a real problem is if the prover crashes.
 
-- If we find errors during a "reverify" or "reprove" operation, we should add a unit test that catches
+- If we find errors during a "check" or "reprove" operation, we should add a unit test that catches
   this case.
 
 ## Project Structure

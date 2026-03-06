@@ -2212,7 +2212,7 @@ fn test_certificate_type_params_are_step_local() {
 }
 
 // Regression: certificates generated while proving a polymorphic structure
-// constructor definition must reverify with the goal's type parameters in scope.
+// constructor definition must check with the goal's type parameters in scope.
 #[test]
 fn test_subgroup_identity_existence_cert_generation() {
     verify_succeeds(

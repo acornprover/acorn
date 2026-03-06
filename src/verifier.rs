@@ -291,7 +291,7 @@ mod tests {
         let line_count = jsonl_content.lines().count();
         assert_eq!(line_count, 1,);
 
-        // Now test reverify mode with verifier3 (all modules)
+        // Now test check mode with verifier3 (all modules)
         let mut verifier3 = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig::default(),
@@ -299,22 +299,22 @@ mod tests {
         )
         .unwrap();
         verifier3.builder.check_hashes = false;
-        verifier3.builder.reverify = true;
+        verifier3.builder.check_mode = true;
         let result3 = verifier3.run();
         assert!(
             result3.is_ok(),
-            "Third verifier in reverify mode should successfully run: {:?}",
+            "Third verifier in check mode should successfully run: {:?}",
             result3
         );
 
-        // Check that we proved one goal in reverify mode, via cached cert
+        // Check that we proved one goal in check mode, via cached cert
         let output3 = result3.unwrap();
         assert_eq!(output3.status, BuildStatus::Good);
         assert_eq!(output3.metrics.goals_total, 1);
         assert_eq!(output3.metrics.goals_success, 1);
         assert_eq!(output3.metrics.certs_cached, 1);
         assert_eq!(output3.metrics.certs_unused, 0);
-        // In reverify mode, we should never reach the search phase
+        // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
     }
 
@@ -947,7 +947,7 @@ mod tests {
         )
         .unwrap();
         verifier.builder.check_hashes = false;
-        verifier.builder.reverify = false;
+        verifier.builder.check_mode = false;
         verifier.builder.operation_verb = "reproved";
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);
@@ -961,16 +961,16 @@ mod tests {
             "default.jsonl should never be written for default.ac modules"
         );
 
-        let mut reverify = Verifier::new(
+        let mut check = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig::default(),
             None,
         )
         .unwrap();
-        reverify.builder.reverify = true;
-        reverify.builder.check_hashes = false;
-        let reverify_output = reverify.run().unwrap();
-        assert_eq!(reverify_output.status, BuildStatus::Good);
+        check.builder.check_mode = true;
+        check.builder.check_hashes = false;
+        let check_output = check.run().unwrap();
+        assert_eq!(check_output.status, BuildStatus::Good);
     }
 
     #[test]

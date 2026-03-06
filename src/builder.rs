@@ -61,11 +61,11 @@ pub struct Builder<'a> {
     /// I.e., errors that happen when you try to import a module that itself has an error.
     pub log_secondary_errors: bool,
 
-    /// In reverify mode, we are checking to make sure that all goals are covered by existing certs.
+    /// In check mode, we make sure all goals are covered by existing certs.
     /// In this situation, it's an error if we run into any goal that is missing a cert,
     /// or any cert that fails checking.
     /// In normal mode, this is okay, because it could be that we modified the file.
-    pub reverify: bool,
+    pub check_mode: bool,
 
     /// Whether we skip goals that match hashes in the cache.
     pub check_hashes: bool,
@@ -111,7 +111,7 @@ pub struct Builder<'a> {
     /// Only used when single_goal is also set.
     pub cert_override: Option<Certificate>,
 
-    /// The verb to use in failure messages (e.g., "verified", "reverified", "reproved").
+    /// The verb to use in failure messages (e.g., "verified", "checked", "reproved").
     pub operation_verb: &'static str,
 
     /// Timeout in seconds for proof search. Defaults to 5.0.
@@ -315,7 +315,7 @@ impl<'a> Builder<'a> {
             metrics: BuildMetrics::new(),
             log_when_slow: false,
             log_secondary_errors: true,
-            reverify: false,
+            check_mode: false,
             check_hashes: true,
             clean_certs: false,
             strict: false,
@@ -725,8 +725,8 @@ impl<'a> Builder<'a> {
 
                     return Ok(());
                 }
-                Err(e) if self.reverify => {
-                    // In reverify mode, a bad cert is an error
+                Err(e) if self.check_mode => {
+                    // In check mode, a bad cert is an error
                     if false {
                         // Print a command to reproduce this failure
                         let module_name = self
@@ -737,7 +737,7 @@ impl<'a> Builder<'a> {
                         let external_line = goal.first_line + 1;
                         let cert_json = serde_json::to_string(&cert_to_use).unwrap_or_default();
                         self.log_global(format!(
-                            "To reproduce: acorn reverify {} --line {} --cert '{}'",
+                            "To reproduce: acorn check {} --line {} --cert '{}'",
                             module_name, external_line, cert_json
                         ));
                     }
@@ -753,8 +753,8 @@ impl<'a> Builder<'a> {
             }
         }
 
-        // In reverify mode, we should never reach the search phase
-        if self.reverify {
+        // In check mode, we should never reach the search phase
+        if self.check_mode {
             return Err(BuildError::goal(goal, "no certificate found"));
         }
 
@@ -1142,8 +1142,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
 
-            // Log module name when doing whole-project reprove (not reverify, not reading cache, no goal filter)
-            if self.goal_filter.is_none() && !self.check_hashes && !self.reverify {
+            // Log module name when doing whole-project reprove (not check, not reading cache, no goal filter)
+            if self.goal_filter.is_none() && !self.check_hashes && !self.check_mode {
                 self.log_global(format!("reproving: {}", target));
             }
 

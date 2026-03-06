@@ -1,5 +1,5 @@
 // The Acorn CLI.
-// You can run a language server, verify a file, or reverify the whole project.
+// You can run a language server, verify a file, or check the whole project.
 
 use acorn::cleaner::{ModuleCleaner, ProjectCleaner};
 use acorn::doc_generator::DocGenerator;
@@ -190,13 +190,13 @@ enum Command {
         timeout: Option<f32>,
     },
 
-    /// Reverify all goals, erroring if any goal requires a search
-    #[clap(alias = "check")]
-    Reverify {
-        /// Target module or file to reverify (can be a filename, module name, or module:line)
+    /// Check all goals, erroring if any goal requires a search
+    #[clap(alias = "reverify")]
+    Check {
+        /// Target module or file to check (can be a filename, module name, or module:line)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to reverify. Supports TARGET:LINE syntax. If not provided, reverifies all files in the library."
+            help = "Module or filename to check. Supports TARGET:LINE syntax. If not provided, checks all files in the library."
         )]
         target: Option<String>,
 
@@ -385,7 +385,7 @@ async fn main() {
 
             verifier.builder.verbose = line_selection.is_some();
             verifier.line_selection = line_selection;
-            verifier.builder.reverify = false;
+            verifier.builder.check_mode = false;
             verifier.builder.strict = strict;
             verifier.builder.check_hashes = !no_cache_skip && !strict;
             verifier.exit_on_warning = fail_fast;
@@ -406,7 +406,7 @@ async fn main() {
             }
         }
 
-        Some(Command::Reverify {
+        Some(Command::Check {
             target,
             line_positional,
             line_flag,
@@ -421,11 +421,11 @@ async fn main() {
                 }
             };
 
-            // Reverify command doesn't support line ranges
+            // Check command doesn't support line ranges
             let line_selection = match line_sel {
                 Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
                 Some(LineSelection::Range(_, _)) => {
-                    println!("Error: reverify command does not support line ranges");
+                    println!("Error: check command does not support line ranges");
                     std::process::exit(1);
                 }
                 None => None,
@@ -447,9 +447,9 @@ async fn main() {
 
             verifier.builder.verbose = line_selection.is_some();
             verifier.line_selection = line_selection;
-            verifier.builder.reverify = true;
+            verifier.builder.check_mode = true;
             verifier.builder.check_hashes = false;
-            verifier.builder.operation_verb = "reverified";
+            verifier.builder.operation_verb = "checked";
 
             // Parse and set the certificate override if provided
             if let Some(cert_json) = cert {
@@ -527,7 +527,7 @@ async fn main() {
 
             verifier.builder.verbose = line_selection.is_some();
             verifier.line_selection = line_selection;
-            verifier.builder.reverify = false; // Run search like verify does
+            verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
             verifier.builder.operation_verb = "reproved";
             verifier.exit_on_warning = fail_fast;
@@ -767,7 +767,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.reverify = false;
+            verifier.builder.check_mode = false;
             verifier.builder.check_hashes = true;
 
             match verifier.run() {
