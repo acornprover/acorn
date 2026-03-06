@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
+use tracing::trace;
 
 use super::active_set::ActiveSet;
 use super::passive_set::PassiveSet;
@@ -58,6 +59,13 @@ pub struct Prover {
 }
 
 impl Prover {
+    fn goal_name_for_trace(&self) -> &str {
+        self.goal
+            .as_ref()
+            .map(|goal| goal.name.as_str())
+            .unwrap_or("<unset>")
+    }
+
     fn bindings_with_type_params<'a>(
         bindings: &'a BindingMap,
         type_params: &[TypeParam],
@@ -482,17 +490,40 @@ impl Prover {
         }
 
         if let Some(passive_steps) = self.passive_set.get_contradiction() {
+            trace!(
+                target: "acorn::prover::activation",
+                goal = self.goal_name_for_trace(),
+                passive_count = passive_steps.len(),
+                "found passive contradiction"
+            );
             self.report_passive_contradiction(passive_steps);
             return true;
         }
 
-        let step = match self.passive_set.pop() {
+        let (step, was_shallow) = match self.passive_set.pop_with_shallow() {
             Some(step) => step,
             None => {
                 // We're out of clauses to process, so we can't make any more progress.
+                trace!(
+                    target: "acorn::prover::activation",
+                    goal = self.goal_name_for_trace(),
+                    "passive set exhausted"
+                );
                 return true;
             }
         };
+
+        trace!(
+            target: "acorn::prover::activation",
+            goal = self.goal_name_for_trace(),
+            active_id = self.active_set.next_id(),
+            shallow = was_shallow,
+            depth = step.depth,
+            truthiness = ?step.truthiness,
+            rule = step.rule.name(),
+            clause = %step.clause,
+            "activating clause"
+        );
 
         if step.truthiness != Truthiness::Factual {
             self.nonfactual_activations += 1;
@@ -617,6 +648,13 @@ impl Prover {
         let start_time = std::time::Instant::now();
         loop {
             if shallow_only && !self.passive_set.all_shallow {
+                trace!(
+                    target: "acorn::prover::activation",
+                    goal = self.goal_name_for_trace(),
+                    active_count = self.active_set.len(),
+                    passive_count = self.passive_set.len(),
+                    "stopping at shallow frontier"
+                );
                 return Outcome::Exhausted;
             }
             if self.activate_next(kernel_context) {

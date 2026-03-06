@@ -253,16 +253,22 @@ impl PassiveSet {
         }
     }
 
-    pub fn pop(&mut self) -> Option<ProofStep> {
+    // Returns the next step to activate, along with whether its score was still shallow.
+    pub fn pop_with_shallow(&mut self) -> Option<(ProofStep, bool)> {
         // Remove the largest entry from queue
         let (score, id) = self.queue.pop_last()?;
+        let was_shallow = score.is_shallow();
         if !score.is_shallow() {
             self.all_shallow = false;
         }
         match self.clauses[id].take() {
-            Some((step, _)) => Some(step),
+            Some((step, _)) => Some((step, was_shallow)),
             None => panic!("Queue and clauses are out of sync"),
         }
+    }
+
+    pub fn pop(&mut self) -> Option<ProofStep> {
+        self.pop_with_shallow().map(|(step, _)| step)
     }
 
     pub fn is_empty(&self) -> bool {
