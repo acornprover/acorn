@@ -26,6 +26,48 @@ pub struct BooleanReductionResult {
 }
 
 impl Clause {
+    fn normalize_with_var_ids_prefilled(
+        literals: Vec<Literal>,
+        context: &LocalContext,
+        mut var_ids: Vec<AtomId>,
+    ) -> (Clause, Vec<AtomId>) {
+        // Pair each literal with its initial index, filtering out impossible literals.
+        let mut indexed_literals: Vec<(Literal, usize)> = literals
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, lit)| {
+                if lit.is_impossible() {
+                    None
+                } else {
+                    Some((lit, i))
+                }
+            })
+            .collect();
+        indexed_literals.sort();
+
+        let mut output_literals = vec![];
+        for (literal, _input_index) in indexed_literals {
+            if !output_literals.is_empty() {
+                let last_index = output_literals.len() - 1;
+                if literal == output_literals[last_index] {
+                    // Duplicate literal, skip it.
+                    continue;
+                }
+            }
+            output_literals.push(literal);
+        }
+
+        for literal in &mut output_literals {
+            literal.normalize_var_ids_with_context(&mut var_ids, context);
+        }
+
+        let clause = Clause {
+            literals: output_literals,
+            context: context.remap(&var_ids),
+        };
+        (clause, var_ids)
+    }
+
     /// Get the local context for this clause.
     /// This returns the context that stores variable types for this clause.
     pub fn get_local_context(&self) -> &LocalContext {
@@ -68,45 +110,7 @@ impl Clause {
         literals: Vec<Literal>,
         context: &LocalContext,
     ) -> (Clause, Vec<AtomId>) {
-        // Pair each literal with its initial index, filtering out impossible literals.
-        let mut indexed_literals: Vec<(Literal, usize)> = literals
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, lit)| {
-                if lit.is_impossible() {
-                    None
-                } else {
-                    Some((lit, i))
-                }
-            })
-            .collect();
-        indexed_literals.sort();
-
-        let mut output_literals = vec![];
-        for (literal, _input_index) in indexed_literals {
-            if !output_literals.is_empty() {
-                let last_index = output_literals.len() - 1;
-                if literal == output_literals[last_index] {
-                    // Duplicate literal, skip it.
-                    continue;
-                }
-            }
-            output_literals.push(literal);
-        }
-
-        // Normalize variable IDs, rebuilding the context.
-        // var_ids will contain the original variable IDs in their new order.
-        // We use normalize_var_ids_with_context to ensure type dependencies come first.
-        let mut var_ids = vec![];
-        for i in 0..output_literals.len() {
-            output_literals[i].normalize_var_ids_with_context(&mut var_ids, context);
-        }
-
-        let clause = Clause {
-            literals: output_literals,
-            context: context.remap(&var_ids),
-        };
-        (clause, var_ids)
+        Self::normalize_with_var_ids_prefilled(literals, context, vec![])
     }
 
     /// Sorts literals.
@@ -874,8 +878,16 @@ impl Clause {
     fn normalize_boolean_reduction(
         literals: Vec<Literal>,
         context: LocalContext,
+        pinned_old_var_count: usize,
     ) -> BooleanReductionResult {
-        let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
+        let (_, default_var_ids) = Clause::normalize_with_var_ids(literals.clone(), &context);
+        let pinned_old_vars: Vec<AtomId> = default_var_ids
+            .iter()
+            .copied()
+            .filter(|id| (*id as usize) < pinned_old_var_count)
+            .collect();
+        let (clause, var_ids) =
+            Clause::normalize_with_var_ids_prefilled(literals, &context, pinned_old_vars);
         BooleanReductionResult {
             clause,
             var_ids,
@@ -891,7 +903,9 @@ impl Clause {
     ) -> Vec<BooleanReductionResult> {
         self.with_replaced_literal(index, replacements)
             .into_iter()
-            .map(|literals| Self::normalize_boolean_reduction(literals, context.clone()))
+            .map(|literals| {
+                Self::normalize_boolean_reduction(literals, context.clone(), self.context.len())
+            })
             .collect()
     }
 
@@ -1131,10 +1145,12 @@ impl Clause {
             answer.push(Self::normalize_boolean_reduction(
                 first,
                 self.context.clone(),
+                self.context.len(),
             ));
             answer.push(Self::normalize_boolean_reduction(
                 second,
                 self.context.clone(),
+                self.context.len(),
             ));
         }
         answer
@@ -1665,10 +1681,10 @@ mod tests {
             ],
             &LocalContext::from_types(vec![Term::bool_type()]),
         );
-        let expected = Clause::new(
+        let expected = Clause::from_literals_unnormalized(
             vec![
-                Literal::positive(kctx.parse_term("g0").apply(&[outer_var])),
                 Literal::negative(kctx.parse_term("g1").apply(&[Term::new_variable(1)])),
+                Literal::positive(kctx.parse_term("g0").apply(&[outer_var])),
             ],
             &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
         );

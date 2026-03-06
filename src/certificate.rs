@@ -22,11 +22,13 @@ use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
+use crate::kernel::clause::Clause;
 use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
@@ -811,6 +813,7 @@ impl Certificate {
         }
 
         let mut kernel_context_clone = kernel_context.clone();
+        let mut type_param_kinds = vec![];
         let type_var_map = if type_param_names.is_empty() {
             None
         } else {
@@ -826,6 +829,7 @@ impl Certificate {
                 } else {
                     Term::type_sort()
                 };
+                type_param_kinds.push(var_type.clone());
                 map.insert(name.clone(), (i as AtomId, var_type));
             }
             Some(map)
@@ -843,6 +847,28 @@ impl Certificate {
         );
         let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
+            if let Some(clause) =
+                Self::try_deserialize_single_literal_clause(&generic_term, &type_param_kinds)
+            {
+                let mut term_kernel_context = kernel_context.clone();
+                let mut var_map = VariableMap::new();
+                for (var_id, acorn_type) in type_args.iter().enumerate() {
+                    let type_term = kernel_context
+                        .type_store
+                        .to_type_term_with_vars(acorn_type, None);
+                    var_map.set(var_id as AtomId, type_term);
+                }
+                let value_offset = var_map.len();
+                for (var_id, arg) in args.iter().enumerate() {
+                    let term =
+                        elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
+                    let mut term_view =
+                        Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
+                    let term = term_view.clausify_term_for_claim_arg(&term)?;
+                    var_map.set((value_offset + var_id) as AtomId, term);
+                }
+                return Ok(Some(Claim { clause, var_map }));
+            }
             // This lambda form only round-trips to `Claim { clause, var_map }` when
             // the body clausifies to a single clause. If it doesn't, let callers
             // fall back to plain claim parsing.
@@ -871,6 +897,65 @@ impl Certificate {
         }
 
         Ok(Some(Claim { clause, var_map }))
+    }
+
+    fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
+        let (head, args) = term.as_ref().split_application_multi()?;
+        if args.len() != arity {
+            return None;
+        }
+        match head.get_head_atom() {
+            crate::kernel::atom::Atom::Symbol(s) if *s == symbol => Some(args),
+            _ => None,
+        }
+    }
+
+    fn try_term_to_single_denormalized_literal(term: &Term) -> Option<Literal> {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            if let Some(eq_args) = Self::split_symbol_application(&args[0], Symbol::Eq, 3) {
+                return Some(Literal::not_equals(eq_args[1].clone(), eq_args[2].clone()));
+            }
+            return Some(Literal::negative(args[0].clone()));
+        }
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
+            return Some(Literal::equals(args[1].clone(), args[2].clone()));
+        }
+        if Self::split_symbol_application(term, Symbol::And, 2).is_some()
+            || Self::split_symbol_application(term, Symbol::Or, 2).is_some()
+            || matches!(
+                term.as_ref().decompose(),
+                Decomposition::ForAll(_, _)
+                    | Decomposition::Exists(_, _)
+                    | Decomposition::Lambda(_, _)
+            )
+        {
+            return None;
+        }
+        Some(Literal::positive(term.clone()))
+    }
+
+    fn try_deserialize_single_literal_clause(
+        generic_term: &Term,
+        type_param_kinds: &[Term],
+    ) -> Option<Clause> {
+        let mut local_context = LocalContext::empty();
+        for kind in type_param_kinds {
+            local_context.push_type(kind.clone());
+        }
+
+        let mut body = generic_term.clone();
+        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
+            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
+            body = binder_body
+                .to_owned()
+                .substitute_bound(0, &Term::new_variable(fresh_var))
+                .shift_bound(0, -1);
+        }
+        let literal = Self::try_term_to_single_denormalized_literal(&body)?;
+        Some(Clause::from_literals_unnormalized(
+            vec![literal],
+            &local_context,
+        ))
     }
 
     /// Check this certificate. It is expected that it has a proof.
@@ -1345,6 +1430,33 @@ mod tests {
             CertificateStep::Claim(claim) => assert_eq!(claim, expected),
             _ => panic!("expected claim step"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_claim_with_args_preserves_single_not_if_literal() {
+        let code = r#"
+            type Nat: axiom
+            let suc: Nat -> Nat = axiom
+            let zero: Nat = axiom
+            let a: Nat = axiom
+
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+        let line = "function(x0: Nat) { not if a = zero { x0 = zero } else { suc(x0) = a } }(choose(k0: Nat) { a = suc(k0) })";
+
+        let claim =
+            Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
+                .expect("deserialization should preserve a single not-if literal");
+
+        assert_eq!(claim.clause.get_local_context().len(), 1);
+        assert_eq!(claim.var_map.len(), 1);
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
+            .expect("serialization should succeed");
+        assert_eq!(serialized, line);
     }
 
     #[test]

@@ -209,6 +209,25 @@ impl ActiveSet {
         clause.literals.len() > 1 && self.long_clauses.contains(clause)
     }
 
+    fn boolean_reduction_is_sound(
+        reduction: &crate::kernel::clause::BooleanReductionResult,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        for var_id in 0..reduction.pre_norm_context.len() {
+            let var_id = var_id as AtomId;
+            if reduction.var_ids.contains(&var_id) {
+                continue;
+            }
+            let Some(var_type) = reduction.pre_norm_context.get_var_type(var_id as usize) else {
+                continue;
+            };
+            if !kernel_context.provably_inhabited(var_type, Some(&reduction.pre_norm_context)) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Finds all resolutions that can be done with a given proof step.
     /// The "new clause" is the one that is being activated, and the "old clause" is the existing one.
     pub fn find_resolutions(
@@ -993,6 +1012,9 @@ impl ActiveSet {
         let mut answer = vec![];
 
         for reduction in clause.find_boolean_reductions(kernel_context) {
+            if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
+                continue;
+            }
             let premise_map = PremiseMap::new(
                 vec![VariableMap::new()],
                 reduction.var_ids,

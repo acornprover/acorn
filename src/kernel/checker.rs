@@ -406,8 +406,11 @@ impl Checker {
                             })
                             .unwrap_or_default();
                         return Err(Error::GeneratedBadCode(format!(
-                            "Claim '{}' is not obviously true{} (generic form: '{}')",
-                            clause, cert_line_context, claim.clause
+                            "Claim at step {} is not obviously true{} (generic debug: {:?}; specialized debug: {:?})",
+                            step_index + 1,
+                            cert_line_context,
+                            claim.clause,
+                            clause,
                         )));
                     };
 
