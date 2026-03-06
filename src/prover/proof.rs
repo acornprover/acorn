@@ -832,4 +832,160 @@ mod tests {
         .expect("constant-lambda claim argument should parse");
         assert_eq!(steps.len(), 1, "expected one claim step");
     }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_iet_exists_conjunction_reconstruction_preserves_concrete_simplifying_instantiation() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::proof_step::Truthiness;
+
+        let mut kctx = KernelContext::new();
+        kctx.parse_type_constructor("Foo", 0);
+        kctx.parse_constant("c0", "Foo")
+            .parse_constant("g0", "Foo -> Bool")
+            .parse_constant("g1", "Foo -> Bool")
+            .parse_constant("g2", "(Foo, Foo) -> Bool")
+            .parse_constant("g3", "(Foo, Foo) -> Bool");
+
+        let neg_goal = {
+            let clause = kctx.parse_clause("not g2(c0, x0) or not g3(x0, x1)", &["Foo", "Foo"]);
+            let mut step = ProofStep::mock_from_clause(clause);
+            step.truthiness = Truthiness::Counterfactual;
+            step
+        };
+        let axiom1 = {
+            let clause = kctx.parse_clause("not g0(x0) or g1(x0)", &["Foo"]);
+            let mut step = ProofStep::mock_from_clause(clause);
+            step.truthiness = Truthiness::Factual;
+            step
+        };
+        let axiom2 = {
+            let foo_type = kctx.parse_type("Foo");
+            let exists_body =
+                Term::and(kctx.parse_term("g2(x0, b1)"), kctx.parse_term("g3(b1, b0)"));
+            let exists_term = Term::exists(
+                foo_type.clone(),
+                Term::exists(foo_type.clone(), exists_body),
+            );
+            let clause = Clause::new(
+                vec![
+                    Literal::negative(kctx.parse_term("g1(x0)")),
+                    Literal::positive(exists_term),
+                ],
+                &LocalContext::from_types(vec![foo_type]),
+            );
+            let mut step = ProofStep::mock_from_clause(clause);
+            step.truthiness = Truthiness::Factual;
+            step
+        };
+        let hyp = {
+            let clause = kctx.parse_clause("g0(c0)", &[]);
+            let mut step = ProofStep::mock_from_clause(clause);
+            step.truthiness = Truthiness::Hypothetical;
+            step
+        };
+
+        let mut active = ActiveSet::new();
+        let (_neg_goal_id, _) = active.activate(neg_goal.clone(), &kctx);
+        let (_axiom1_id, _) = active.activate(axiom1.clone(), &kctx);
+        let (_axiom2_id, _) = active.activate(axiom2.clone(), &kctx);
+        let (_hyp_id, hyp_outputs) = active.activate(hyp.clone(), &kctx);
+
+        let g_clause = kctx.parse_clause("g1(c0)", &[]);
+        let g_step = hyp_outputs
+            .into_iter()
+            .find(|step| step.clause == g_clause)
+            .expect("expected g0(c0) to resolve to g1(c0)");
+        let (_g_id, g_outputs) = active.activate(g_step.clone(), &kctx);
+
+        let foo_type = kctx.parse_type("Foo");
+        let exists_body = Term::and(kctx.parse_term("g2(c0, b1)"), kctx.parse_term("g3(b1, b0)"));
+        let exists_clause = Clause::new(
+            vec![Literal::positive(Term::exists(
+                foo_type.clone(),
+                Term::exists(foo_type, exists_body),
+            ))],
+            &LocalContext::empty(),
+        );
+        let exists_step = g_outputs
+            .into_iter()
+            .find(|step| step.clause == exists_clause)
+            .expect("expected g(a) to resolve to existential");
+        let (exists_id, exists_outputs) = active.activate(exists_step.clone(), &kctx);
+        assert_eq!(exists_id, 5);
+
+        let inner_exists_step = exists_outputs
+            .into_iter()
+            .find(|step| step.clause.to_string().contains("choose"))
+            .expect("expected existential boolean reduction output");
+        let (_inner_exists_id, inner_exists_outputs) =
+            active.activate(inner_exists_step.clone(), &kctx);
+
+        let conjunction_step = inner_exists_outputs
+            .into_iter()
+            .find(|step| step.clause.to_string().starts_with("and("))
+            .expect("expected conjunction after second exists reduction");
+        let (_conjunction_id, conjunction_outputs) =
+            active.activate(conjunction_step.clone(), &kctx);
+
+        let h1_step = conjunction_outputs
+            .iter()
+            .find(|step| step.clause.to_string().starts_with("g0_2("))
+            .cloned()
+            .expect("expected first conjunct");
+        let h2_step = conjunction_outputs
+            .iter()
+            .find(|step| step.clause.to_string().starts_with("g0_3("))
+            .cloned()
+            .expect("expected second conjunct");
+
+        let (_h1_id, h1_outputs) = active.activate(h1_step.clone(), &kctx);
+
+        let (_h2_id, _h2_outputs) = active.activate(h2_step.clone(), &kctx);
+
+        let not_h2_step = h1_outputs
+            .iter()
+            .find(|step| step.clause.to_string().starts_with("not g0_3("))
+            .cloned()
+            .expect("expected negative g3 clause");
+        let (not_h2_id, _not_h2_outputs) = active.activate(not_h2_step.clone(), &kctx);
+        assert_eq!(not_h2_id, 10);
+
+        let simplified_h2 = active
+            .simplify(h2_step.clone(), &kctx)
+            .expect("expected h2 step to simplify");
+        assert!(
+            simplified_h2.clause.is_impossible(),
+            "expected contradiction, got {}",
+            simplified_h2.clause
+        );
+
+        let mut proof = Proof::new(&kctx);
+        for id in 0..=10 {
+            proof.add_step(ProofStepId::Active(id), active.get_step(id));
+        }
+        proof.add_step(ProofStepId::Final, &simplified_h2);
+
+        let concrete_clauses: Vec<_> = proof
+            .collect_concrete_steps()
+            .expect("concrete step reconstruction should succeed")
+            .into_iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+
+        let expected_negative_h2 = Clause::new(
+            vec![Literal::negative(h2_step.clause.literals[0].left.clone())],
+            &LocalContext::empty(),
+        );
+        assert!(
+            concrete_clauses.contains(&expected_negative_h2),
+            "expected reconstructed clauses to include the concrete simplifying clause {}\nactual clauses:\n{}",
+            expected_negative_h2,
+            concrete_clauses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 }
