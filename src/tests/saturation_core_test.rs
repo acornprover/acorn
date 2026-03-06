@@ -1990,10 +1990,7 @@ fn test_proving_using_unimported_function() {
 
 #[test]
 fn test_proving_list_contains() {
-    let mut p = Project::new_mock();
-    p.mock(
-        "/mock/main.ac",
-        r#"
+    let text = r#"
         inductive List[T] {
             nil
             cons(T, List[T])
@@ -2027,10 +2024,9 @@ fn test_proving_list_contains() {
         theorem goal[T](ts: List[T]) {
             finite_constraint(ts.contains)
         }
-        "#,
-    );
+        "#;
 
-    prove(&mut p, "main", "goal");
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]

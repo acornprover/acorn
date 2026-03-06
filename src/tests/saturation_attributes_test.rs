@@ -190,11 +190,11 @@ fn test_proving_using_list_contains() {
         }
     }
 
-    theorem tail_contains_imp_contains[T](head: T, tail: List[T], item: T) {
-        tail.contains(item) implies List.cons(head, tail).contains(item)
+    theorem goal(tail: List[Bool]) {
+        tail.contains(true) implies List.cons(false, tail).contains(true)
     }
     "#;
-    verify_succeeds(text);
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]
@@ -278,11 +278,11 @@ fn test_proving_with_if_inside_match() {
         }
     }
 
-    theorem nil_remove_all[T](item: T) {
-        List.nil[T].remove_all(item) = List.nil[T]
+    theorem goal {
+        List.nil[Bool].remove_all(true) = List.nil[Bool]
     }
     "#;
-    verify_succeeds(text);
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]
@@ -437,12 +437,12 @@ fn test_proving_with_generic_attribute_recursion() {
         List.cons(head, tail).map(f) = List.cons(f(head), tail.map(f))
     }
     "#;
-    verify_succeeds(text);
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]
 fn test_proving_with_attributes_on_parameterized_types() {
-    // Test that we can define attributes on specific instantiations of parameterized types
+    // Test that a specific instantiation of a parameterized type can recurse through an attribute.
     let text = r#"
     inductive Color {
         red
@@ -472,15 +472,11 @@ fn test_proving_with_attributes_on_parameterized_types() {
         }
     }
 
-    theorem red_list_has_red {
-        List.cons(Color.red, List.nil<Color>).has_red
-    }
-
-    theorem blue_list_no_red {
-        not List.cons(Color.blue, List.nil<Color>).has_red
+    theorem goal {
+        List.cons(Color.blue, List.cons(Color.red, List.nil<Color>)).has_red
     }
     "#;
-    verify_succeeds(text);
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]

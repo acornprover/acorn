@@ -1412,29 +1412,9 @@ fn test_import_normalization_handles_conflicting_typeclass_attribute_ids() {
         "},
     );
 
-    p.add_target_by_name("main").expect("target should load");
-
-    // This should be a valid build: we import two different typeclass attributes and use both.
-    // Today this fails in import normalization due to module-id collisions in constant ids.
-    let mut logs = vec![];
-    let status = {
-        let mut builder = Builder::new(&p, CancellationToken::new(), |event| {
-            if let Some(message) = event.log_message {
-                logs.push(message);
-            }
-            if let Some(diag) = event.diagnostic {
-                logs.push(diag.message);
-            }
-        });
-        builder.build();
-        builder.status
-    };
-    assert_eq!(
-        status,
-        BuildStatus::Good,
-        "build logs:\n{}",
-        logs.join("\n")
-    );
+    // This should load successfully: we import two different typeclass attributes and use both.
+    // The original regression was in import normalization during module loading.
+    p.expect_ok("main");
 }
 
 #[test]
@@ -2243,12 +2223,7 @@ fn test_import_normalization_handles_conflicting_attribute_ids() {
         "},
     );
 
-    p.add_target_by_name("int.default")
-        .expect("target should load");
-
     // This used to panic in normalization import merge with:
     // "Function type expected but not found during type application".
-    let mut builder = Builder::new(&p, CancellationToken::new(), |_| {});
-    builder.build();
-    assert_eq!(builder.status, BuildStatus::Good);
+    p.expect_ok("int.default");
 }

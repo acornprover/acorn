@@ -185,52 +185,6 @@ pub fn verify_fails(text: &str) {
 
 /// Verifies a single goal by name in the provided text.
 /// Returns the outcome of the search, and panics if cert generation/checking fails.
-pub fn verify_line(text: &str, goal_name: &str) -> Result<Outcome, String> {
-    init_test_tracing();
-    let mut project = Project::new_mock();
-    project.mock("/mock/main.ac", text);
-    let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
-        LoadState::Error(e) => panic!("error: {}", e),
-        _ => panic!("no module"),
-    };
-
-    for cursor in env.iter_goals() {
-        let goal = cursor.goal().unwrap();
-        if goal.name == goal_name {
-            let goal_env = cursor.goal_env().unwrap();
-
-            let mut processor = Processor::with_imports(None, env)?;
-            processor.add_module_facts(&cursor)?;
-            let normalized_goal = cursor
-                .normalized_goal()
-                .ok_or_else(|| "missing normalized goal".to_string())?;
-            processor.set_normalized_goal(normalized_goal);
-            let goal_kernel_context = &normalized_goal.kernel_context;
-            let outcome = processor.search(ProverMode::Test, goal_kernel_context);
-            if outcome != Outcome::Success {
-                return Ok(outcome);
-            }
-            let cert = processor
-                .prover()
-                .make_cert(&goal_env.bindings, goal_kernel_context, true)
-                .map_err(|e| e.to_string())?;
-            if let Err(e) = processor.check_cert(
-                &cert,
-                None,
-                goal_kernel_context,
-                &project,
-                &goal_env.bindings,
-            ) {
-                panic!("check_cert failed: {}", e);
-            }
-            return Ok(Outcome::Success);
-        }
-    }
-    panic!("goal '{}' not found in text", goal_name);
-}
-
 pub const THING: &str = r#"
     type Thing: axiom
     let t: Thing = axiom
