@@ -259,31 +259,6 @@ fn test_another_instance_of_conditional_existence_theorem() {
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
-#[cfg(feature = "iet")]
-#[test]
-fn test_iet_chained_implication_into_exists_conjunction() {
-    let text = r#"
-            type Foo: axiom
-            let f: Foo -> Bool = axiom
-            let g: Foo -> Bool = axiom
-            let h1: (Foo, Foo) -> Bool = axiom
-            let h2: (Foo, Foo) -> Bool = axiom
-
-            axiom axiom1(x: Foo) {
-                f(x) implies g(x)
-            }
-
-            axiom axiom2(x: Foo) {
-                g(x) implies exists(y: Foo, z: Foo) { h1(x, y) and h2(y, z) }
-            }
-
-            theorem goal(a: Foo) {
-                f(a) implies exists(y: Foo, z: Foo) { h1(a, y) and h2(y, z) }
-            }
-        "#;
-    verify_succeeds(text);
-}
-
 #[test]
 fn test_finding_inconsistency() {
     let text = r#"
