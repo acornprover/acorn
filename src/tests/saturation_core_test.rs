@@ -416,6 +416,35 @@ fn test_verify_existence_theorem() {
 }
 
 #[test]
+fn test_finding_implied_exists() {
+    verify_succeeds(
+        r#"
+            type Foo: axiom
+            let b: Foo = axiom
+            let foo: Foo -> Bool = axiom
+            let bar: (Foo, Foo) -> Bool = axiom
+            let qux: Foo -> Foo = axiom
+
+            axiom foo_implies_exists(a: Foo) {
+                foo(a) implies exists(i: Foo, j: Foo) {
+                    bar(i, j) and bar(j, a) and qux(i) = qux(j)
+                }
+            }
+
+            axiom foo_b {
+                foo(b)
+            }
+
+            theorem goal {
+                exists (i: Foo, j: Foo) {
+                    bar(i, j) and bar(j, b) and qux(i) = qux(j)
+                }
+            }
+            "#,
+    );
+}
+
+#[test]
 fn test_rewrite_consistency() {
     // In practice this caught an inconsistency that came from bad rewrite logic.
     verify_succeeds(
