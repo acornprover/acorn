@@ -1569,7 +1569,8 @@ fn test_cannot_avoid_inhabitedness_through_resolution() {
 #[test]
 fn test_cannot_avoid_inhabitedness_through_resolution_with_concrete_uninhabited_type() {
     // This should be rejected: FiniteSet might be empty, so we cannot derive a
-    // contradiction by instantiating forall(x: FiniteSet) clauses with an arbitrary witness.
+    // contradiction by instantiating forall(x: FiniteSet) clauses with a witness picked only
+    // from inhabitedness.
     let text = r#"
     inductive Set {
         empty

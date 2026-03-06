@@ -420,10 +420,10 @@ pub struct CodeGenerator<'a> {
 
 /// Mutable naming state shared across certificate generation steps.
 ///
-/// This tracks stable names for synthetic IDs and arbitrary witnesses so a later
+/// This tracks stable names for synthetic IDs so a later
 /// step can refer to names introduced in an earlier step.
 pub struct SyntheticNameSet {
-    /// We use variables named s0, s1, s2, etc for synthetic atoms and arbitrary witnesses.
+    /// We use variables named s0, s1, s2, etc for synthetic atoms.
     pub next_s: u32,
 
     /// The names we have assigned to synthetic atoms so far.
@@ -482,23 +482,21 @@ impl SyntheticNameSet {
         }
     }
 
-    fn ensure_arbitrary_for_type(
-        &mut self,
-        _bindings: &BindingMap,
-        kernel_context: &mut KernelContext,
+    fn ensure_explicit_inhabitant_for_type(
+        kernel_context: &KernelContext,
         concrete_type: &Term,
         local_context: &LocalContext,
-    ) -> Result<Option<Symbol>> {
+    ) -> Result<()> {
         if kernel_context
             .find_inhabitant(concrete_type, Some(local_context))
             .is_some()
         {
-            return Ok(None);
+            return Ok(());
         }
         if Self::find_local_witness_for_concrete_type(kernel_context, concrete_type, local_context)?
             .is_some()
         {
-            return Ok(None);
+            return Ok(());
         }
         Err(Error::GeneratedBadCode(format!(
             "cannot generate certificate: no explicit inhabitant found for type '{}'",
@@ -540,21 +538,19 @@ impl SyntheticNameSet {
         Ok(None)
     }
 
-    fn ensure_arbitrary_for_variable_type(
-        &mut self,
-        bindings: &BindingMap,
-        kernel_context: &mut KernelContext,
+    fn ensure_explicit_inhabitant_for_variable_type(
+        kernel_context: &KernelContext,
         var_type: &Term,
         local_context: &LocalContext,
-    ) -> Result<Option<Symbol>> {
+    ) -> Result<()> {
         if var_type.as_ref().is_type_param_kind() {
-            return Ok(None);
+            return Ok(());
         }
         let concrete_type = Self::concrete_type_for_term(kernel_context, var_type, local_context)?;
-        self.ensure_arbitrary_for_type(bindings, kernel_context, &concrete_type, local_context)
+        Self::ensure_explicit_inhabitant_for_type(kernel_context, &concrete_type, local_context)
     }
 
-    fn term_for_variable_type(
+    fn inhabitant_for_variable_type(
         &self,
         kernel_context: &KernelContext,
         var_type: &Term,
@@ -567,13 +563,10 @@ impl SyntheticNameSet {
         Ok(kernel_context.find_inhabitant(&concrete_type, Some(local_context)))
     }
 
-    fn add_arbitrary_for_term(
-        &mut self,
-        bindings: &BindingMap,
-        kernel_context: &mut KernelContext,
+    fn ensure_explicit_inhabitants_for_term(
+        kernel_context: &KernelContext,
         term: &Term,
         local_context: &LocalContext,
-        new_entries: &mut Vec<Symbol>,
     ) -> Result<()> {
         match term.as_ref().decompose() {
             Decomposition::Atom(Atom::FreeVariable(var_id)) => {
@@ -582,108 +575,81 @@ impl SyntheticNameSet {
                     .get_var_type(*var_id as usize)
                     .cloned()
                     .expect("Variable should have type in LocalContext");
-                if let Some(symbol) = self.ensure_arbitrary_for_variable_type(
-                    bindings,
+                Self::ensure_explicit_inhabitant_for_variable_type(
                     kernel_context,
                     &var_type,
                     local_context,
-                )? {
-                    new_entries.push(symbol);
-                }
+                )?;
             }
             Decomposition::Atom(_) => {}
             Decomposition::Application(func, arg) => {
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &func.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &arg.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
             }
             Decomposition::Pi(input, output) => {
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &input.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &output.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
             }
             Decomposition::Lambda(input, body) => {
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &input.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &body.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
             }
             Decomposition::ForAll(binder_type, body) | Decomposition::Exists(binder_type, body) => {
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &binder_type.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
-                self.add_arbitrary_for_term(
-                    bindings,
+                Self::ensure_explicit_inhabitants_for_term(
                     kernel_context,
                     &body.to_owned(),
                     local_context,
-                    new_entries,
                 )?;
             }
         }
         Ok(())
     }
 
-    /// For any variables in this clause, add an arbitrary variable.
-    fn add_arbitrary_for_clause(
-        &mut self,
-        bindings: &BindingMap,
-        kernel_context: &mut KernelContext,
+    /// Ensure every value variable appearing in this clause has an explicit inhabitant.
+    fn ensure_explicit_inhabitants_for_clause(
+        &self,
+        kernel_context: &KernelContext,
         clause: &Clause,
-    ) -> Result<Vec<Symbol>> {
+    ) -> Result<()> {
         let local_context = clause.get_local_context();
-        let mut new_entries = vec![];
         for literal in &clause.literals {
             for term in [&literal.left, &literal.right] {
-                self.add_arbitrary_for_term(
-                    bindings,
-                    kernel_context,
-                    term,
-                    local_context,
-                    &mut new_entries,
-                )?;
+                Self::ensure_explicit_inhabitants_for_term(kernel_context, term, local_context)?;
             }
         }
-        Ok(new_entries)
+        Ok(())
     }
 
-    fn build_arbitrary_var_map(
+    fn build_inhabitant_var_map(
         &self,
         kernel_context: &KernelContext,
         clause: &Clause,
@@ -695,7 +661,7 @@ impl SyntheticNameSet {
                 .get_var_type(i)
                 .expect("LocalContext should have all variable types");
             if let Some(term) =
-                self.term_for_variable_type(kernel_context, var_type, local_context)?
+                self.inhabitant_for_variable_type(kernel_context, var_type, local_context)?
             {
                 var_map.set(i as AtomId, term);
             }
@@ -1325,25 +1291,13 @@ impl CodeGenerator<'_> {
         // indices when some variables are replaced with constants.
         clause.normalize_var_ids_no_flip();
 
-        let new_arbitraries =
-            names.add_arbitrary_for_clause(self.bindings, kernel_context, &clause)?;
+        names.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
 
-        if !new_arbitraries.is_empty() {
-            return Err(Error::GeneratedBadCode(
-                "cannot generate certificate: arbitrary witness constants are disabled".to_string(),
-            ));
-        }
-
-        // Define arbitrary variables.
-        for symbol in new_arbitraries {
-            steps.push(CertificateStep::DefineArbitrary { symbol });
-        }
-
-        // Replace remaining free value variables with the allocated arbitrary symbols.
+        // Replace remaining free value variables with explicit inhabitants.
         let clause_context = clause.get_local_context().clone();
-        let arbitrary_var_map = names.build_arbitrary_var_map(kernel_context, &clause)?;
+        let inhabitant_var_map = names.build_inhabitant_var_map(kernel_context, &clause)?;
 
-        clause = arbitrary_var_map.specialize_clause_with_replacement_context(
+        clause = inhabitant_var_map.specialize_clause_with_replacement_context(
             &clause,
             &clause_context,
             kernel_context,
@@ -1368,25 +1322,25 @@ impl CodeGenerator<'_> {
         );
         steps.extend(synthetic_steps);
 
-        // Convert replacement-context free variables into explicit arbitrary symbols by type.
+        // Convert replacement-context free variables into explicit inhabitants by type.
         // This yields a claim map that does not depend on concrete variable IDs.
-        let mut replacement_arbitrary_map = VariableMap::new();
+        let mut replacement_inhabitant_map = VariableMap::new();
         for var_id in 0..replacement_context.len() {
             let Some(var_type) = replacement_context.get_var_type(var_id) else {
                 continue;
             };
             if let Some(term) =
-                names.term_for_variable_type(kernel_context, var_type, replacement_context)?
+                names.inhabitant_for_variable_type(kernel_context, var_type, replacement_context)?
             {
-                replacement_arbitrary_map.set(var_id as AtomId, term);
+                replacement_inhabitant_map.set(var_id as AtomId, term);
             }
         }
 
-        // Infer replacement-context type variables from value-variable arbitraries.
-        // Example: if x1: x0 and x1 is mapped to a Bool witness symbol, infer x0 = Bool.
+        // Infer replacement-context type variables from value-variable inhabitants.
+        // Example: if x1: x0 and x1 is mapped to a Bool inhabitant, infer x0 = Bool.
         let mut replacement_type_map = VariableMap::new();
         for var_id in 0..replacement_context.len() {
-            let Some(mapped_term) = replacement_arbitrary_map.get_mapping(var_id as AtomId) else {
+            let Some(mapped_term) = replacement_inhabitant_map.get_mapping(var_id as AtomId) else {
                 continue;
             };
             let Some(expected_type) = replacement_context.get_var_type(var_id) else {
@@ -1412,7 +1366,7 @@ impl CodeGenerator<'_> {
             let Some(var_type) = generic_context.get_var_type(var_id) else {
                 continue;
             };
-            let specialized = apply_to_term(term.as_ref(), &replacement_arbitrary_map);
+            let specialized = apply_to_term(term.as_ref(), &replacement_inhabitant_map);
             let specialized = apply_to_term(specialized.as_ref(), &replacement_type_map);
             Self::ensure_no_foreign_scoped_constants_in_term(
                 &specialized,
@@ -1470,7 +1424,7 @@ impl CodeGenerator<'_> {
                 continue;
             }
             if let Some(term) =
-                names.term_for_variable_type(kernel_context, var_type, generic_context)?
+                names.inhabitant_for_variable_type(kernel_context, var_type, generic_context)?
             {
                 claim_var_map.set(var_id, term);
             }
@@ -1595,10 +1549,6 @@ impl CodeGenerator<'_> {
         kernel_context: &KernelContext,
     ) -> Result<String> {
         match step {
-            CertificateStep::DefineArbitrary { symbol } => Err(Error::GeneratedBadCode(format!(
-                "cannot serialize DefineArbitrary({})",
-                symbol
-            ))),
             CertificateStep::DefineSynthetic {
                 atoms,
                 type_vars,

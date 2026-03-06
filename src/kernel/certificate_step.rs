@@ -1,6 +1,5 @@
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
-use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleId;
@@ -21,13 +20,6 @@ pub struct Claim {
 /// line of certificate code.
 #[derive(Clone, PartialEq, Eq)]
 pub enum CertificateStep {
-    /// Define one arbitrary witness constant for a concrete type.
-    DefineArbitrary {
-        /// Kernel symbol for the witness constant.
-        /// This is expected to be a local scoped constant.
-        symbol: Symbol,
-    },
-
     /// Define one synthetic group produced by normalization.
     DefineSynthetic {
         /// Synthetic atom IDs introduced together by this definition.

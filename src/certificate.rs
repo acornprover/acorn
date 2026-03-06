@@ -375,7 +375,7 @@ impl Certificate {
                         .to_mut()
                         .get_synthetic_definition(&exists_value, type_var_map.as_ref())
                     {
-                        Some(def) => Some(def.clone()),
+                        Some(def) => def.clone(),
                         None => {
                             if condition_value != AcornValue::Bool(true) {
                                 return Err(CodeGenError::GeneratedBadCode(format!(
@@ -391,92 +391,63 @@ impl Certificate {
                         }
                     };
 
-                    if let Some(def) = &synthetic_definition {
-                        let atoms = &def.atoms;
-                        if atoms.len() != decls.len() {
-                            return Err(CodeGenError::GeneratedBadCode(
-                                "let ... satisfy declaration count does not match synthetic definition"
-                                    .to_string(),
-                            ));
-                        }
-                        for (i, (name, acorn_type)) in decls.iter().enumerate() {
-                            let (module_id, local_id) = atoms[i];
-                            let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
-
-                            let (param_names, generic_type) = if !type_params.is_empty() {
-                                let names: Vec<String> =
-                                    type_params.iter().map(|p| p.name.clone()).collect();
-                                (names, acorn_type.genericize(&type_params))
-                            } else {
-                                (vec![], acorn_type.clone())
-                            };
-
-                            let user_cname = ConstantName::unqualified(bindings.module_id(), name);
-                            let type_args: Vec<_> = type_params
-                                .iter()
-                                .map(|p| AcornType::Variable(p.clone()))
-                                .collect();
-
-                            let resolved_value = AcornValue::constant(
-                                synthetic_cname.clone(),
-                                type_args,
-                                acorn_type.clone(),
-                                generic_type.clone(),
-                                param_names.clone(),
-                            );
-
-                            let potential_value = if !type_params.is_empty() {
-                                PotentialValue::Unresolved(UnresolvedConstant {
-                                    name: synthetic_cname.clone(),
-                                    params: type_params.clone(),
-                                    generic_type: generic_type.clone(),
-                                    args: vec![],
-                                })
-                            } else {
-                                PotentialValue::Resolved(resolved_value)
-                            };
-
-                            bindings.to_mut().add_constant_alias(
-                                user_cname,
-                                synthetic_cname,
-                                potential_value,
-                                vec![],
-                                None,
-                            );
-                        }
-                        Ok(CertificateStep::DefineSynthetic {
-                            atoms: def.atoms.clone(),
-                            type_vars: def.type_vars.clone(),
-                            clauses: def.clauses.clone(),
-                        })
-                    } else {
-                        let (name, acorn_type) = decls
-                            .first()
-                            .expect("decls should have exactly one element for trivial let");
-                        let cname = ConstantName::unqualified(bindings.module_id(), name);
-                        bindings.to_mut().add_unqualified_constant(
-                            name,
-                            vec![],
-                            acorn_type.clone(),
-                            None,
-                            None,
-                            vec![],
-                            None,
-                            String::new(),
-                        );
-                        let atom = kernel_context.to_mut().add_scoped_constant(
-                            cname.clone(),
-                            acorn_type,
-                            type_var_map.as_ref(),
-                        );
-                        let Atom::Symbol(symbol) = atom else {
-                            return Err(CodeGenError::GeneratedBadCode(
-                                "internal error: add_scoped_constant returned non-symbol atom"
-                                    .to_string(),
-                            ));
-                        };
-                        Ok(CertificateStep::DefineArbitrary { symbol })
+                    let atoms = &synthetic_definition.atoms;
+                    if atoms.len() != decls.len() {
+                        return Err(CodeGenError::GeneratedBadCode(
+                            "let ... satisfy declaration count does not match synthetic definition"
+                                .to_string(),
+                        ));
                     }
+                    for (i, (name, acorn_type)) in decls.iter().enumerate() {
+                        let (module_id, local_id) = atoms[i];
+                        let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
+
+                        let (param_names, generic_type) = if !type_params.is_empty() {
+                            let names: Vec<String> =
+                                type_params.iter().map(|p| p.name.clone()).collect();
+                            (names, acorn_type.genericize(&type_params))
+                        } else {
+                            (vec![], acorn_type.clone())
+                        };
+
+                        let user_cname = ConstantName::unqualified(bindings.module_id(), name);
+                        let type_args: Vec<_> = type_params
+                            .iter()
+                            .map(|p| AcornType::Variable(p.clone()))
+                            .collect();
+
+                        let resolved_value = AcornValue::constant(
+                            synthetic_cname.clone(),
+                            type_args,
+                            acorn_type.clone(),
+                            generic_type.clone(),
+                            param_names.clone(),
+                        );
+
+                        let potential_value = if !type_params.is_empty() {
+                            PotentialValue::Unresolved(UnresolvedConstant {
+                                name: synthetic_cname.clone(),
+                                params: type_params.clone(),
+                                generic_type: generic_type.clone(),
+                                args: vec![],
+                            })
+                        } else {
+                            PotentialValue::Resolved(resolved_value)
+                        };
+
+                        bindings.to_mut().add_constant_alias(
+                            user_cname,
+                            synthetic_cname,
+                            potential_value,
+                            vec![],
+                            None,
+                        );
+                    }
+                    Ok(CertificateStep::DefineSynthetic {
+                        atoms: synthetic_definition.atoms.clone(),
+                        type_vars: synthetic_definition.type_vars.clone(),
+                        clauses: synthetic_definition.clauses.clone(),
+                    })
                 })();
 
                 // Type parameters in certificate lines are local to that line.
@@ -1593,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_code_line_rejects_trivial_arbitrary_witness() {
+    fn test_parse_code_line_rejects_trivial_witness_declaration() {
         let code = r#"
             theorem goal {
                 true
@@ -1611,7 +1582,7 @@ mod tests {
         );
         let err = match result {
             Err(err) => err,
-            Ok(_) => panic!("trivial arbitrary witness should be disabled"),
+            Ok(_) => panic!("trivial witness declaration should be disabled"),
         };
 
         assert!(

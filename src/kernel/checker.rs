@@ -404,8 +404,7 @@ impl Checker {
                     clause.normalize();
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
-                CertificateStep::DefineArbitrary { .. }
-                | CertificateStep::DefineSynthetic { .. } => {}
+                CertificateStep::DefineSynthetic { .. } => {}
             }
         }
 
@@ -677,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rejects_multi_arbitrary_declaration() {
+    fn test_parse_rejects_multi_trivial_witness_declaration() {
         use crate::certificate::Certificate;
         use crate::processor::Processor;
         use crate::project::Project;
