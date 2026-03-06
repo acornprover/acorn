@@ -1310,7 +1310,10 @@ impl<'a> Clausifier<'a> {
             }
             crate::kernel::term::Decomposition::ForAll(_, _)
             | crate::kernel::term::Decomposition::Exists(_, _) => {
-                Err(format!("quantifier in unexpected term position: {}", term))
+                // Quantifiers can legitimately appear as boolean subterms inside
+                // higher-order arguments (for example choose predicates).
+                // Keep them inline as terms in these positions.
+                Ok(ExtendedTerm::Term(term.clone()))
             }
             _ => {
                 if term == &Term::new_true() {

@@ -318,6 +318,49 @@ mod tests {
         assert_eq!(output3.metrics.searches_total, 0);
     }
 
+    #[cfg(all(feature = "iet", feature = "validate"))]
+    #[test]
+    fn test_iet_validate_handles_exists_conjunction_in_generated_cert() {
+        let (acornlib, src, _build) = setup();
+
+        let bug_ac = src.child("bug.ac");
+        bug_ac
+            .write_str(
+                r#"
+                type Foo: axiom
+                let f: Foo -> Bool = axiom
+                let g: Foo -> Bool = axiom
+                let h1: (Foo, Foo) -> Bool = axiom
+                let h2: (Foo, Foo) -> Bool = axiom
+
+                axiom axiom1(x: Foo) {
+                    f(x) implies g(x)
+                }
+
+                axiom axiom2(x: Foo) {
+                    g(x) implies exists(y: Foo, z: Foo) { h1(x, y) and h2(y, z) }
+                }
+
+                theorem goal(a: Foo) {
+                    f(a) implies exists(y: Foo, z: Foo) { h1(a, y) and h2(y, z) }
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("bug".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        let output = verifier.run().expect(
+            "iet+validate verify should not panic/check-cert-fail on exists conjunction certificates",
+        );
+        assert_eq!(output.status, BuildStatus::Good);
+    }
+
     #[test]
     fn test_verifier_uses_nested_cache() {
         let (acornlib, src, build) = setup();
