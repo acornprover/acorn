@@ -363,18 +363,10 @@ impl<'a> Clausifier<'a> {
                         let literal = Literal::from_signed_term(term.clone(), true);
                         return Ok(Cnf::from_literal(literal));
                     }
-                    // not exists(x:T){P(x)} is equivalent to forall(x:T){not P(x)}.
-                    // Route the negated path through forall clausification so proof search
-                    // can still instantiate it without introducing choose terms.
-                    return self.forall_term_to_cnf(
-                        &_binder_type.to_owned(),
-                        &_body.to_owned(),
-                        true,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    );
+                    // Preserve negated existentials inline so they can meet positive
+                    // existential conclusions in the indexed resolution path.
+                    let literal = Literal::from_signed_term(term.clone(), false);
+                    return Ok(Cnf::from_literal(literal));
                 }
 
                 #[cfg(not(feature = "iet"))]

@@ -415,6 +415,7 @@ fn test_verify_existence_theorem() {
     );
 }
 
+#[cfg(feature = "iet")]
 #[test]
 fn test_finding_implied_exists() {
     verify_succeeds(

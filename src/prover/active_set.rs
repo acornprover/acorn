@@ -992,14 +992,16 @@ impl ActiveSet {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
-        for literals in clause.find_boolean_reductions(kernel_context) {
-            let context = activated_step.clause.get_local_context().clone();
-            let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
-            let premise_map = PremiseMap::new(vec![VariableMap::new()], var_ids, context);
+        for reduction in clause.find_boolean_reductions(kernel_context) {
+            let premise_map = PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            );
             let step = ProofStep::direct(
                 activated_step,
                 Rule::BooleanReduction(SingleSourceInfo { id: activated_id }),
-                clause,
+                reduction.clause,
                 premise_map,
             );
             answer.push(step);

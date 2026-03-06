@@ -19,6 +19,12 @@ pub struct Clause {
     pub context: LocalContext,
 }
 
+pub struct BooleanReductionResult {
+    pub clause: Clause,
+    pub var_ids: Vec<AtomId>,
+    pub pre_norm_context: LocalContext,
+}
+
 impl Clause {
     /// Get the local context for this clause.
     /// This returns the context that stores variable types for this clause.
@@ -865,7 +871,47 @@ impl Clause {
         out
     }
 
-    pub fn find_boolean_reductions(&self, kernel_context: &KernelContext) -> Vec<Vec<Literal>> {
+    fn normalize_boolean_reduction(
+        literals: Vec<Literal>,
+        context: LocalContext,
+    ) -> BooleanReductionResult {
+        let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
+        BooleanReductionResult {
+            clause,
+            var_ids,
+            pre_norm_context: context,
+        }
+    }
+
+    fn with_replaced_literal_and_context(
+        &self,
+        index: usize,
+        replacements: Vec<Vec<Literal>>,
+        context: &LocalContext,
+    ) -> Vec<BooleanReductionResult> {
+        self.with_replaced_literal(index, replacements)
+            .into_iter()
+            .map(|literals| Self::normalize_boolean_reduction(literals, context.clone()))
+            .collect()
+    }
+
+    #[cfg(feature = "iet")]
+    fn reduce_negated_exists(term: &Term, context: &LocalContext) -> Option<(Term, LocalContext)> {
+        let (binder_type, body) = term.as_ref().split_exists()?;
+        let mut output_context = context.clone();
+        let fresh_var = output_context.push_type(binder_type.to_owned()) as AtomId;
+        let replacement = Term::new_variable(fresh_var);
+        let reduced = body
+            .to_owned()
+            .substitute_bound(0, &replacement)
+            .shift_bound(0, -1);
+        Some((reduced, output_context))
+    }
+
+    pub fn find_boolean_reductions(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Vec<BooleanReductionResult> {
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];
@@ -887,7 +933,11 @@ impl Clause {
                 if !literal_is_true {
                     // A false literal in a disjunction can be removed.
                     // If it was the only literal, this yields the empty (impossible) clause.
-                    answer.extend(self.with_replaced_literal(i, vec![vec![]]));
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![]],
+                        &self.context,
+                    ));
                 }
                 continue;
             }
@@ -900,13 +950,21 @@ impl Clause {
             if reduced_left != literal.left {
                 let reduced_lit =
                     Literal::new(literal.positive, reduced_left, literal.right.clone());
-                answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+                answer.extend(self.with_replaced_literal_and_context(
+                    i,
+                    vec![vec![reduced_lit]],
+                    &self.context,
+                ));
             }
             let reduced_right = Self::simplify_ite_term(&literal.right);
             if reduced_right != literal.right {
                 let reduced_lit =
                     Literal::new(literal.positive, literal.left.clone(), reduced_right);
-                answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+                answer.extend(self.with_replaced_literal_and_context(
+                    i,
+                    vec![vec![reduced_lit]],
+                    &self.context,
+                ));
             }
 
             // Branch reduction for equalities/inequalities with ITE:
@@ -922,7 +980,11 @@ impl Clause {
                     vec![Literal::negative(condition.clone()), then_lit],
                     vec![Literal::positive(condition), else_lit],
                 ];
-                answer.extend(self.with_replaced_literal(i, replacements));
+                answer.extend(self.with_replaced_literal_and_context(
+                    i,
+                    replacements,
+                    &self.context,
+                ));
             }
             if let Some(args) = Self::split_symbol_application(&literal.right, Symbol::Ite, 4) {
                 let condition = args[1].clone();
@@ -934,7 +996,11 @@ impl Clause {
                     vec![Literal::negative(condition.clone()), then_lit],
                     vec![Literal::positive(condition), else_lit],
                 ];
-                answer.extend(self.with_replaced_literal(i, replacements));
+                answer.extend(self.with_replaced_literal_and_context(
+                    i,
+                    replacements,
+                    &self.context,
+                ));
             }
 
             if literal
@@ -946,12 +1012,13 @@ impl Clause {
             }
             if literal.right.is_true() {
                 if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::Not, 1) {
-                    let reduced = self.with_replaced_literal(
+                    let reduced = self.with_replaced_literal_and_context(
                         i,
                         vec![vec![Literal::from_signed_term(
                             args[0].clone(),
                             !literal.positive,
                         )]],
+                        &self.context,
                     );
                     answer.extend(reduced);
                     continue;
@@ -965,7 +1032,11 @@ impl Clause {
                     } else {
                         Literal::not_equals(eq_left, eq_right)
                     };
-                    answer.extend(self.with_replaced_literal(i, vec![vec![reduced_lit]]));
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![reduced_lit]],
+                        &self.context,
+                    ));
                     continue;
                 }
 
@@ -975,23 +1046,30 @@ impl Clause {
                         if let Some((_witness, reduced)) =
                             Self::reduce_exists_with_obvious_witness(&literal.left)
                         {
-                            answer.extend(
-                                self.with_replaced_literal(
-                                    i,
-                                    vec![vec![Literal::positive(reduced)]],
-                                ),
-                            );
+                            answer.extend(self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &self.context,
+                            ));
                             continue;
                         }
                         if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
-                            answer.extend(
-                                self.with_replaced_literal(
-                                    i,
-                                    vec![vec![Literal::positive(reduced)]],
-                                ),
-                            );
+                            answer.extend(self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &self.context,
+                            ));
                             continue;
                         }
+                    } else if let Some((reduced, output_context)) =
+                        Self::reduce_negated_exists(&literal.left, &self.context)
+                    {
+                        answer.extend(self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![Literal::negative(reduced)]],
+                            &output_context,
+                        ));
+                        continue;
                     }
                 }
 
@@ -1006,7 +1084,11 @@ impl Clause {
                     } else {
                         vec![vec![Literal::negative(left), Literal::negative(right)]]
                     };
-                    answer.extend(self.with_replaced_literal(i, replacements));
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        replacements,
+                        &self.context,
+                    ));
                     continue;
                 }
 
@@ -1021,7 +1103,11 @@ impl Clause {
                             vec![Literal::negative(right)],
                         ]
                     };
-                    answer.extend(self.with_replaced_literal(i, replacements));
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        replacements,
+                        &self.context,
+                    ));
                     continue;
                 }
                 continue;
@@ -1042,8 +1128,14 @@ impl Clause {
             }
             first.extend_from_slice(&self.literals[i + 1..]);
             second.extend_from_slice(&self.literals[i + 1..]);
-            answer.push(first);
-            answer.push(second);
+            answer.push(Self::normalize_boolean_reduction(
+                first,
+                self.context.clone(),
+            ));
+            answer.push(Self::normalize_boolean_reduction(
+                second,
+                self.context.clone(),
+            ));
         }
         answer
     }
@@ -1053,7 +1145,7 @@ impl Clause {
     pub fn boolean_reductions(&self, kernel_context: &KernelContext) -> Vec<Clause> {
         self.find_boolean_reductions(kernel_context)
             .into_iter()
-            .map(|literals| Clause::new(literals, &self.context))
+            .map(|reduction| reduction.clause)
             .collect()
     }
 }
@@ -1515,13 +1607,23 @@ mod tests {
 
     #[cfg(feature = "iet")]
     #[test]
-    fn test_boolean_reduction_negated_exists_has_no_witness_activation() {
-        let kctx = KernelContext::new();
-        let exists_term = Term::exists(Term::bool_type(), Term::new_true());
-        let clause = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
+    fn test_boolean_reduction_negated_exists_opens_to_free_variable() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
 
-        // A negated existential should not trigger choose/witness activation.
-        assert!(clause.boolean_reductions(&kctx).is_empty());
+        let exists_term = Term::exists(
+            Term::bool_type(),
+            kctx.parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clause = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
+        let expected = Clause::new(
+            vec![Literal::negative(
+                kctx.parse_term("g0").apply(&[Term::new_variable(0)]),
+            )],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
     #[cfg(feature = "iet")]
@@ -1538,9 +1640,39 @@ mod tests {
         let expected = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
         assert_eq!(first, vec![expected.clone()]);
 
-        // If this ever produces another reduction, we reintroduced
-        // negated-existential witness activation.
-        assert!(expected.boolean_reductions(&kctx).is_empty());
+        let second = expected.boolean_reductions(&kctx);
+        assert_eq!(second, vec![Clause::impossible()]);
+        assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_negated_exists_surfaces_to_clause_level() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
+        kctx.parse_constant("g1", "Bool -> Bool");
+
+        let outer_var = Term::new_variable(0);
+        let exists_term = Term::exists(
+            Term::bool_type(),
+            kctx.parse_term("g1")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clause = Clause::new(
+            vec![
+                Literal::positive(kctx.parse_term("g0").apply(&[outer_var.clone()])),
+                Literal::negative(exists_term),
+            ],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let expected = Clause::new(
+            vec![
+                Literal::positive(kctx.parse_term("g0").apply(&[outer_var])),
+                Literal::negative(kctx.parse_term("g1").apply(&[Term::new_variable(1)])),
+            ],
+            &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
     #[test]
