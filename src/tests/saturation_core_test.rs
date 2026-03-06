@@ -259,6 +259,7 @@ fn test_another_instance_of_conditional_existence_theorem() {
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
+#[cfg(feature = "iet")]
 #[test]
 fn test_iet_chained_implication_into_exists_conjunction() {
     let text = r#"
