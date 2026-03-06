@@ -28,6 +28,13 @@ For any step that is expected to update `~/acornlib/build`:
 ## Workflow (Strict State Machine)
 Treat migration as a state machine. Do not skip states. Do not run commands from later states early.
 
+## Panic Rule (Critical)
+- Any panic from feature-mode `verify` is an immediate transition to `S_blocked_feature_bug`.
+- On such a panic, stop proof migration immediately.
+- Do **not** continue theorem/proof edits, proof reshaping, or module-loop retries after the panic.
+- Do **not** treat the panic as a normal proof failure even if it appears proof-shape-dependent or disappears after a rewrite.
+- First collect the blocked-condition diagnostics, then debug the prover/feature implementation.
+
 ### State S0: Feature Prepared
 Preconditions:
 - New behavior is behind `--features <feature>`.
@@ -70,7 +77,7 @@ Required command:
 Outcomes:
 - If success: go to `S4` (ready for review, then flag flip).
 - If failure: go to `S3_probe`.
-- If this command panics (for example, "newly generated cert should be checkable"), go to `S_blocked_feature_bug`.
+- If this command panics (for example, "newly generated cert should be checkable"), stop immediately and go to `S_blocked_feature_bug`. Do **not** inspect/edit proofs after the panic.
 
 Hard guard:
 - Do **not** inspect/edit theorem proofs before this probe fails.
@@ -88,7 +95,7 @@ Actions:
 Outcomes:
 - If failure is reproduced in feature mode: go to `S3_edit`.
 - If not reproducible (flaky/stale): go back to `S2_probe`.
-- If feature-mode verify panics, go to `S_blocked_feature_bug`.
+- If feature-mode verify panics, stop immediately and go to `S_blocked_feature_bug`. Do **not** continue the migration loop.
 
 ### State S3_edit: Edit Proofs
 Purpose:
@@ -133,7 +140,7 @@ Outcomes:
 - If both no-write module checks pass: go to `S3_decide`.
 - If feature-mode module check fails: go back to `S3_edit`.
 - If default-mode module check fails after edits: go back to `S3_edit`.
-- If feature-mode verify panics, go to `S_blocked_feature_bug`.
+- If feature-mode verify panics, stop immediately and go to `S_blocked_feature_bug`. Do **not** continue proof edits for that target.
 
 ### State S3_decide: Loop Decision
 Purpose:
@@ -146,12 +153,13 @@ Outcomes:
 - If success: go to `S4`.
 - If failure on another target: go to `S3_probe`.
 - If repeated attempts on same target are not converging: go to `S_blocked_feature_bug`.
-- If feature-mode verify panics, go to `S_blocked_feature_bug`.
+- If feature-mode verify panics, stop immediately and go to `S_blocked_feature_bug`. Do **not** continue migration work in `S3_*`.
 
 Hard guard:
 - During all `S3_*` states, feature-mode `check` may fail on old cert format. Do not use it as pass/fail.
 
 Blocked-condition diagnostics (required when entering `S_blocked_feature_bug`):
+- collect these before any further proof edits
 - failing module and line/theorem
 - exact failing command used
 - error output
@@ -218,6 +226,7 @@ Required report:
 ### Terminal State: S_blocked_feature_bug
 Meaning:
 - Migration loop (`S3_probe`/`S3_edit`/`S3_check`/`S3_decide`) is blocked by a likely feature bug.
+- No further proof migration should be attempted until the panic/feature bug is understood.
 
 Required report:
 - current state = `S_blocked_feature_bug`
