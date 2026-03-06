@@ -417,6 +417,38 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_basic_induction() {
+        use crate::processor::Processor;
+        use crate::prover::{Outcome, ProverMode};
+
+        let (mut processor, _bindings, normalized_goal) = Processor::test_goal(
+            r#"
+            inductive Nat {
+                zero
+                suc(Nat)
+            }
+
+            let p: Nat -> Bool = axiom
+
+            axiom base {
+                p(Nat.zero)
+            }
+
+            axiom step(x: Nat) {
+                p(x) implies p(x.suc)
+            }
+
+            theorem goal(n: Nat) {
+                p(n)
+            }
+            "#,
+        );
+
+        let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
+        assert_eq!(outcome, Outcome::Success);
+    }
+
+    #[test]
     fn test_verifier_uses_nested_cache() {
         let (acornlib, src, build) = setup();
 
