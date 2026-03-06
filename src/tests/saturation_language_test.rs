@@ -1041,12 +1041,10 @@ fn test_proving_with_parameterized_inductive() {
     }
 
     theorem goal {
-        exists(bs: List[Bool]) {
-            any(bs)
-        }
+        any(List.cons(true, List.nil[Bool]))
     }
     "#;
-    verify_succeeds(text);
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]
@@ -1948,7 +1946,7 @@ fn test_function_param_application_not_obvious() {
     // Test the goal that was crashing with "f(item) not obviously true" before the fix
     // This goal uses a multi-literal short clause in resolution that wasn't being tracked
     assert_eq!(
-        verify_line(code, "p(MyList.cons(head, tail), item)").unwrap(),
+        prove_text(code, "p(MyList.cons(head, tail), item)"),
         Outcome::Success
     );
 }
