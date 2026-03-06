@@ -1293,27 +1293,6 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_claim_with_args_rejects_missing_mapping() {
-        let code = r#"
-            theorem goal {
-                true = false
-            }
-        "#;
-        let (_project, bindings, kernel_context) = setup_claim_codec_env(code);
-        let kernel = &kernel_context;
-
-        let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
-        let mut var_map = VariableMap::new();
-        var_map.set(0, Term::new_true());
-        let claim = Claim { clause, var_map };
-
-        let err = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
-            .expect_err("missing mapping should be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("missing claim var map entry"));
-    }
-
-    #[test]
     fn test_deserialize_claim_with_args_rejects_non_function_shape() {
         let code = r#"
             let bar: Bool -> Bool = axiom

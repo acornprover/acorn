@@ -255,6 +255,26 @@ impl Checker {
             return Some(self.reasons[*step_id].clone());
         }
 
+        if clause.has_any_variable() {
+            let candidates: Vec<Clause> = self.exact_variable_clauses.keys().cloned().collect();
+            for candidate in &candidates {
+                let Some(mut reduced_clause) =
+                    self.simplify_variable_clause_with_concrete_facts(candidate, kernel_context)
+                else {
+                    continue;
+                };
+                reduced_clause.normalize();
+                if reduced_clause == canonical_clause {
+                    trace!(
+                        clause = %clause,
+                        result = "simplified_variable_clause",
+                        "checking clause"
+                    );
+                    return Some(StepReason::EqualityGraph);
+                }
+            }
+        }
+
         trace!(clause = %clause, result = "failed", "checking clause");
         None
     }
@@ -552,6 +572,23 @@ mod tests {
 
         let generic = context.parse_clause("not g0(x0, c0) or c1", &["Bool"]);
         checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        let reduced = context.parse_clause("not g0(x0, c0)", &["Bool"]);
+        assert!(checker.check_clause(&reduced, &context).is_some());
+    }
+
+    #[test]
+    fn test_checker_simplifies_variable_clause_after_concrete_fact_arrives() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        context.parse_constant("g0", "(Bool, Bool) -> Bool");
+
+        let mut checker = Checker::new();
+        let generic = context.parse_clause("not g0(x0, c0) or c1", &["Bool"]);
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        let not_baz = context.parse_clause("not c1", &[]);
+        checker.insert_clause(&not_baz, StepReason::Testing, &context);
 
         let reduced = context.parse_clause("not g0(x0, c0)", &["Bool"]);
         assert!(checker.check_clause(&reduced, &context).is_some());

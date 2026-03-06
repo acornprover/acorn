@@ -501,6 +501,22 @@ impl VariableMap {
                 self.match_term_no_type_check(g_func, s_func)
                     && self.match_term_no_type_check(g_arg, s_arg)
             }
+            (Decomposition::Pi(g_input, g_output), Decomposition::Pi(s_input, s_output))
+            | (
+                Decomposition::Lambda(g_input, g_output),
+                Decomposition::Lambda(s_input, s_output),
+            )
+            | (
+                Decomposition::ForAll(g_input, g_output),
+                Decomposition::ForAll(s_input, s_output),
+            )
+            | (
+                Decomposition::Exists(g_input, g_output),
+                Decomposition::Exists(s_input, s_output),
+            ) => {
+                self.match_term_no_type_check(g_input, s_input)
+                    && self.match_term_no_type_check(g_output, s_output)
+            }
             _ => false,
         }
     }
@@ -578,6 +594,7 @@ impl fmt::Display for VariableMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::literal::Literal;
 
     #[test]
     fn test_match_terms_with_lambda_bound_variable_does_not_panic() {
@@ -608,5 +625,30 @@ mod tests {
             var_map.get_mapping(0),
             Some(&Term::atom(Atom::BoundVariable(0)))
         );
+    }
+
+    #[test]
+    fn test_match_literal_handles_choose_with_nested_exists() {
+        let kctx = KernelContext::new();
+        let foo = kctx.parse_type("Bool");
+        let choose_general = Term::choose(
+            foo.clone(),
+            Term::lambda(
+                foo.clone(),
+                Term::exists(
+                    foo,
+                    Term::and(
+                        Term::atom(Atom::BoundVariable(1)),
+                        Term::atom(Atom::BoundVariable(0)),
+                    ),
+                ),
+            ),
+        );
+        let choose_special = choose_general.clone();
+        let general = Literal::negative(Term::atom(Atom::FreeVariable(0)).apply(&[choose_general]));
+        let special = Literal::negative(Term::atom(Atom::FreeVariable(1)).apply(&[choose_special]));
+
+        let mut var_map = VariableMap::new();
+        assert!(var_map.match_literal(&general, &special, false));
     }
 }

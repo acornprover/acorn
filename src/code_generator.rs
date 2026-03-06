@@ -1292,11 +1292,8 @@ impl CodeGenerator<'_> {
         clause.normalize_var_ids_no_flip();
 
         names.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
-
-        // Replace remaining free value variables with explicit inhabitants.
         let clause_context = clause.get_local_context().clone();
         let inhabitant_var_map = names.build_inhabitant_var_map(kernel_context, &clause)?;
-
         clause = inhabitant_var_map.specialize_clause_with_replacement_context(
             &clause,
             &clause_context,
@@ -1310,7 +1307,6 @@ impl CodeGenerator<'_> {
             self.bindings.module_id(),
         )?;
 
-        // Create synthetic definition steps.
         let synthetic_ids =
             SyntheticNameSet::collect_synthetic_ids_from_clauses(std::slice::from_ref(&clause));
         let mut synthetic_steps = vec![];
