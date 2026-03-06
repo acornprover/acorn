@@ -645,6 +645,14 @@ impl<'a> Unifier<'a> {
                 self.unify_internal(scope1, i1, scope2, i2)
                     && self.unify_internal(scope1, b1, scope2, b2)
             }
+            (Decomposition::ForAll(t1, b1), Decomposition::ForAll(t2, b2)) => {
+                self.unify_internal(scope1, t1, scope2, t2)
+                    && self.unify_internal(scope1, b1, scope2, b2)
+            }
+            (Decomposition::Exists(t1, b1), Decomposition::Exists(t2, b2)) => {
+                self.unify_internal(scope1, t1, scope2, t2)
+                    && self.unify_internal(scope1, b1, scope2, b2)
+            }
             // Structural mismatch (e.g., Atom vs Application, Application vs Pi)
             _ => false,
         }
@@ -874,6 +882,49 @@ mod tests {
         u.set_input_context(Scope::RIGHT, local_ctx_ref);
         u.set_output_var_types(vec![Term::bool_type(); 10]);
         u.assert_unify(Scope::LEFT, &const_f_term, Scope::RIGHT, &var_f_term);
+    }
+
+    #[test]
+    fn test_unify_variable_against_choose_term_with_nested_exists() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_type_constructor("Foo", 0);
+        ctx.parse_constant("g0", "(Foo, Foo) -> Bool");
+
+        let foo_type = ctx.parse_type("Foo");
+        let choose_with_exists = Term::choose(
+            foo_type.clone(),
+            Term::lambda(
+                foo_type.clone(),
+                Term::exists(foo_type.clone(), Term::new_true()),
+            ),
+        );
+        let choose_target = Term::choose(
+            foo_type.clone(),
+            Term::lambda(
+                foo_type.clone(),
+                Term::and(Term::new_true(), Term::new_true()),
+            ),
+        );
+
+        let general = ctx
+            .parse_term("g0")
+            .apply(&[choose_with_exists.clone(), Term::new_variable(0)]);
+        let special = ctx
+            .parse_term("g0")
+            .apply(&[choose_with_exists, choose_target.clone()]);
+
+        let mut u = Unifier::new(3, &ctx);
+        let left_ctx = LocalContext::from_types(vec![foo_type]);
+        u.set_input_context(Scope::LEFT, &left_ctx);
+        u.set_input_context(Scope::RIGHT, LocalContext::empty_ref());
+
+        assert!(u.unify(Scope::LEFT, &general, Scope::RIGHT, &special));
+        let (maps, _ctx) = u.into_maps_with_context();
+        let left_map = maps
+            .into_iter()
+            .find(|(scope, _)| *scope == Scope::LEFT)
+            .expect("left scope map");
+        assert_eq!(left_map.1.get_mapping(0), Some(&choose_target));
     }
 
     #[test]
