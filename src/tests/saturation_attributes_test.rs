@@ -573,6 +573,7 @@ fn test_proving_with_complex_attributes() {
         let b = Color.blue
         universal.contains(b) and b != Color.red
         universal.has_non(Color.red)
+        universal.contains(Color.red)
         universal.has_red
     }
     "#;
