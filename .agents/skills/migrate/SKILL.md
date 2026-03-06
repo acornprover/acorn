@@ -1,12 +1,12 @@
 ---
 name: migrate
-description: Migrate acornlib certificate/build-cache formats across breaking verifier or proof-format changes. Use when introducing a feature-flagged format change (for example clausification, normalization, or certificate encoding changes) and you need a safe rollout plan with manifest-version gating.
+description: Use when asked to migrate to a feature flag or roll out a manifest-gated acornlib certificate/build-cache or proof-format change. This skill covers feature-flag migrations, including the state-machine workflow for verifier, proof, and cache migrations.
 ---
 
 # Migrate
 
 ## Goal
-Perform a safe rollout for breaking acornlib/certificate format changes.
+Perform a safe rollout for feature-flag migrations and other breaking acornlib/certificate format changes.
 
 ## Workspace Assumptions
 - Run these `cargo run ...` commands from the `acorn` repo.
