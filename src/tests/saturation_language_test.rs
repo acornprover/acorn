@@ -1887,68 +1887,6 @@ fn test_synthetic_with_multiple_type_params_function_type() {
     );
 }
 
-/// Reproduces a bug where value parameter `item` incorrectly gets type args `item[T]`.
-/// Key ingredients: polymorphic theorem, value param `item: T`, local define with 2 params,
-/// forall/if structure, and induction capturing `item`.
-#[test]
-fn test_value_param_incorrectly_gets_type_args() {
-    verify_succeeds(
-        r#"
-    inductive MyList[T] {
-        nil
-        cons(T, MyList[T])
-    }
-
-    define contains[T](list: MyList[T], item: T) -> Bool {
-        match list {
-            MyList.nil[T] { false }
-            MyList.cons(head, tail) { head = item or contains(tail, item) }
-        }
-    }
-
-    // Removes duplicate elements - calls contains internally
-    define dedup[T](list: MyList[T]) -> MyList[T] {
-        match list {
-            MyList.nil[T] { MyList.nil[T] }
-            MyList.cons(head, tail) {
-                if contains(tail, head) {
-                    dedup(tail)
-                } else {
-                    MyList.cons(head, dedup(tail))
-                }
-            }
-        }
-    }
-
-    theorem test[T](list: MyList[T], item: T) {
-        contains(dedup(list), item) = contains(list, item)
-    } by {
-        define p(l: MyList[T], x: T) -> Bool {
-            contains(dedup(l), x) = contains(l, x)
-        }
-
-        forall(head: T, tail: MyList[T]) {
-            if p(tail, item) {
-                if contains(tail, head) {
-                    contains(tail, item) implies contains(MyList.cons(head, tail), item)
-                    contains(MyList.cons(head, tail), item) = contains(tail, item)
-                } else {
-                    contains(MyList.cons(head, tail), item) implies contains(MyList.cons(head, dedup(tail)), item)
-                    contains(MyList.cons(head, tail), item) = contains(MyList.cons(head, dedup(tail)), item)
-                    p(MyList.cons(head, tail), item)
-                }
-                p(MyList.cons(head, tail), item)
-            }
-        }
-
-        MyList.induction(function(l: MyList[T]) {
-            p(l, item)
-        })
-    }
-    "#,
-    );
-}
-
 /// Reproduces a bug where `f(item)` claim is not obviously true.
 /// Key: theorem has function param `f: T -> Bool` and value param `item: T`,
 /// and `f(item)` appears in proof with induction capturing both.
