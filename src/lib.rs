@@ -15,6 +15,7 @@ pub mod module;
 pub mod ort_utils;
 pub mod processor;
 pub mod project;
+pub mod proof_display;
 pub mod prover;
 pub mod server;
 pub mod syntax;

@@ -22,7 +22,7 @@ pub struct Processor {
 }
 
 impl Processor {
-    fn bindings_with_type_params<'a>(
+    pub(crate) fn bindings_with_type_params<'a>(
         bindings: &'a BindingMap,
         type_params: &[TypeParam],
     ) -> Cow<'a, BindingMap> {

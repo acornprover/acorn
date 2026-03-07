@@ -920,6 +920,10 @@ impl CodeGenerator<'_> {
         self.value_to_code_with_names_and_initial_vars(value, &empty_names, initial_var_names)
     }
 
+    pub fn type_to_code_for_display(&self, acorn_type: &AcornType) -> Result<String> {
+        self.type_to_code(acorn_type)
+    }
+
     /// Like value_to_code, but with explicit synthetic naming for replaced/imported synthetics.
     pub fn value_to_code_with_synthetic_names(
         &mut self,

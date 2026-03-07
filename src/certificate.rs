@@ -41,6 +41,9 @@ use crate::syntax::token::TokenType;
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
 pub struct CertificateLine {
+    /// The structured clause value, after denormalization and synthetic replacement.
+    pub value: AcornValue,
+
     /// The statement from the certificate (the code line).
     pub statement: String,
 
@@ -48,15 +51,12 @@ pub struct CertificateLine {
     pub reason: StepReason,
 }
 
-fn clause_to_code(
-    clause: &crate::kernel::clause::Clause,
-    kernel_context: &KernelContext,
+fn value_to_code(
+    value: &AcornValue,
     bindings: &Cow<BindingMap>,
     synthetic_names: &HashMap<(ModuleId, AtomId), String>,
     code_line: Option<&str>,
 ) -> String {
-    let value = kernel_context.denormalize(clause, None, None, false);
-
     // First try normal code generation.
     let mut code_gen = CodeGenerator::new(bindings);
     if let Ok(code) = code_gen.value_to_code(&value) {
@@ -981,14 +981,17 @@ impl Certificate {
         Ok(checked_steps
             .into_iter()
             .map(|checked_step| {
-                let statement = clause_to_code(
-                    &checked_step.clause,
-                    kernel_context.as_ref(),
+                let value = kernel_context
+                    .denormalize(&checked_step.clause, None, None, false)
+                    .replace_synthetics(&synthetic_names);
+                let statement = value_to_code(
+                    &value,
                     &bindings,
                     &synthetic_names,
                     checked_step.code_line.as_deref(),
                 );
                 CertificateLine {
+                    value,
                     statement,
                     reason: checked_step.reason,
                 }

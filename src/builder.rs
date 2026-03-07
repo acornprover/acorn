@@ -18,9 +18,43 @@ use crate::elaborator::source::SourceType;
 use crate::module::{LoadState, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::project::Project;
+use crate::proof_display::display_certificate_lines;
 use crate::prover::{Outcome, ProverMode};
 
 static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
+
+fn print_displayed_proof(
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    lines: &[crate::certificate::CertificateLine],
+) {
+    let displayed = display_certificate_lines(bindings, lines);
+    println!("displayed proof:");
+    if displayed.is_empty() {
+        println!("  <no proof>");
+        return;
+    }
+    println!();
+
+    let max_statement_width = displayed
+        .iter()
+        .map(|line| line.statement.len())
+        .max()
+        .unwrap_or(20)
+        .max(20);
+    println!(
+        "  {:<width$}    Reason",
+        "Statement",
+        width = max_statement_width
+    );
+    for line in displayed {
+        println!(
+            "  {:<width$}    {}",
+            line.statement,
+            line.reason,
+            width = max_statement_width
+        );
+    }
+}
 
 /// Filter for which goals to verify.
 /// Line numbers are internal (0-based).
@@ -100,7 +134,7 @@ pub struct Builder<'a> {
     /// Line numbers are internal (0-based).
     pub goal_filter: Option<GoalFilter>,
 
-    /// Print the final proof and concrete certificate for successful searches.
+    /// Print the final proof and the checked, human-readable proof display for successful searches.
     /// Don't set it from within the language server.
     pub print_proof: bool,
 
@@ -792,71 +826,89 @@ impl<'a> Builder<'a> {
         if outcome == Outcome::Success {
             match processor.make_cert(&env.bindings, goal_kernel_context, self.print_proof) {
                 Ok(cert) => {
+                    let mut checked_cert_lines = None;
                     #[cfg(feature = "validate")]
                     {
                         // Validate the cert immediately after generation.
-                        if let Err(e) = processor.check_cert(
+                        match processor.check_cert(
                             &cert,
                             Some(normalized_goal),
                             goal_kernel_context,
                             self.project,
                             &env.bindings,
                         ) {
-                            let module_name = self
-                                .current_module
-                                .as_ref()
-                                .map(|m| m.to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let external_line = goal.first_line + 1;
-                            let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
-                                "<failed to serialize certificate>".to_string()
-                            });
-                            panic!(
-                                "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                 Repro command: acorn reprove {} --line {}\n\
-                                 Certificate JSON: {}",
-                                goal.name,
-                                module_name,
-                                external_line,
-                                e,
-                                module_name,
-                                external_line,
-                                cert_json
-                            );
+                            Ok(lines) => {
+                                if self.print_proof {
+                                    checked_cert_lines = Some(lines);
+                                }
+                            }
+                            Err(e) => {
+                                let module_name = self
+                                    .current_module
+                                    .as_ref()
+                                    .map(|m| m.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                let external_line = goal.first_line + 1;
+                                let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
+                                    "<failed to serialize certificate>".to_string()
+                                });
+                                panic!(
+                                    "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                     Repro command: acorn reprove {} --line {}\n\
+                                     Certificate JSON: {}",
+                                    goal.name,
+                                    module_name,
+                                    external_line,
+                                    e,
+                                    module_name,
+                                    external_line,
+                                    cert_json
+                                );
+                            }
                         }
                     }
                     #[cfg(not(feature = "validate"))]
                     if self.print_proof {
                         // Since we aren't performance-sensitive, check the cert.
-                        if let Err(e) = processor.check_cert(
+                        match processor.check_cert(
                             &cert,
                             Some(normalized_goal),
                             goal_kernel_context,
                             self.project,
                             &env.bindings,
                         ) {
-                            let module_name = self
-                                .current_module
-                                .as_ref()
-                                .map(|m| m.to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let external_line = goal.first_line + 1;
-                            let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
-                                "<failed to serialize certificate>".to_string()
-                            });
-                            panic!(
-                                "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                 Repro command: acorn reprove {} --line {}\n\
-                                 Certificate JSON: {}",
-                                goal.name,
-                                module_name,
-                                external_line,
-                                e,
-                                module_name,
-                                external_line,
-                                cert_json
-                            );
+                            Ok(lines) => checked_cert_lines = Some(lines),
+                            Err(e) => {
+                                let module_name = self
+                                    .current_module
+                                    .as_ref()
+                                    .map(|m| m.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                let external_line = goal.first_line + 1;
+                                let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
+                                    "<failed to serialize certificate>".to_string()
+                                });
+                                panic!(
+                                    "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                     Repro command: acorn reprove {} --line {}\n\
+                                     Certificate JSON: {}",
+                                    goal.name,
+                                    module_name,
+                                    external_line,
+                                    e,
+                                    module_name,
+                                    external_line,
+                                    cert_json
+                                );
+                            }
                         }
+                    }
+                    if let Some(lines) = checked_cert_lines.as_ref() {
+                        let display_bindings = Processor::bindings_with_type_params(
+                            &env.bindings,
+                            &goal.proposition.params,
+                        );
+                        print_displayed_proof(display_bindings.as_ref(), lines);
                     }
                     new_certs.push(cert);
                     self.metrics.certs_created += 1;

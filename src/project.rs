@@ -24,6 +24,7 @@ use crate::interfaces::{GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
+use crate::proof_display::display_certificate_lines;
 use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
 
@@ -1515,29 +1516,30 @@ impl Project {
         let (has_cached_proof, steps) = if let Some((_cert, certificate_steps)) =
             self.find_cert(goal, root_env, goal_env, cursor)
         {
-            // Convert certificate lines to interface::Step objects
-            let steps: Vec<Step> = certificate_steps
+            let displayed_steps = display_certificate_lines(&goal_env.bindings, &certificate_steps);
+            let steps: Vec<Step> = displayed_steps
                 .into_iter()
-                .map(|cert_step| {
-                    let location = match &cert_step.reason {
-                        StepReason::Assumption(source) | StepReason::Skolemization(source) => self
-                            .path_from_module_id(source.module_id)
-                            .and_then(|path| tower_lsp::lsp_types::Url::from_file_path(path).ok())
-                            .map(|uri| Location {
-                                uri,
-                                range: source.range,
-                            }),
-                        _ => None,
-                    };
-                    let reason = cert_step.reason.description();
-
-                    // Certificate::check already returns a display-ready statement.
-                    // Keep it as-is instead of reparsing/reformatting here.
-                    let statement = cert_step.statement;
+                .map(|displayed_step| {
+                    let location = displayed_step
+                        .source_index
+                        .and_then(|i| certificate_steps.get(i))
+                        .and_then(|cert_step| match &cert_step.reason {
+                            StepReason::Assumption(source) | StepReason::Skolemization(source) => {
+                                self.path_from_module_id(source.module_id)
+                                    .and_then(|path| {
+                                        tower_lsp::lsp_types::Url::from_file_path(path).ok()
+                                    })
+                                    .map(|uri| Location {
+                                        uri,
+                                        range: source.range,
+                                    })
+                            }
+                            _ => None,
+                        });
 
                     Step {
-                        statement,
-                        reason,
+                        statement: displayed_step.statement,
+                        reason: displayed_step.reason,
                         location,
                     }
                 })

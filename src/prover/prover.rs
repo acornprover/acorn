@@ -376,20 +376,7 @@ impl Prover {
             self.print_proof(&proof, cert_bindings.as_ref(), kernel_context);
         }
 
-        let cert = proof.make_cert(goal_name, cert_bindings.as_ref())?;
-        if print {
-            println!("concrete proof:");
-            if let Some(proof) = &cert.proof {
-                for line in proof {
-                    println!("  {}", line);
-                }
-            } else {
-                println!("  <no proof>");
-            }
-        }
-        // Check parameter removed - was always false
-
-        Ok(cert)
+        proof.make_cert(goal_name, cert_bindings.as_ref())
     }
 
     fn report_equality_graph_contradiction(
