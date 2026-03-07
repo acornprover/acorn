@@ -222,10 +222,6 @@ impl Prover {
             })
     }
 
-    fn is_shallow_step(step: &ProofStep) -> bool {
-        step.depth < 2 || step.clause.is_impossible()
-    }
-
     /// Prints every activated proof step in activation order.
     pub fn print_active_steps(&self, bindings: &BindingMap, kernel_context: &KernelContext) {
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
@@ -245,10 +241,9 @@ impl Prover {
             };
 
             println!(
-                "Clause {}, depth {}, shallow {}, truthiness {:?}, by {}:",
+                "Clause {}, depth {}, {:?}, by {}:",
                 id,
                 step.depth,
-                Self::is_shallow_step(step),
                 step.truthiness,
                 step.rule.name().to_lowercase()
             );
