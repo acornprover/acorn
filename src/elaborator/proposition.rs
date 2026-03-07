@@ -15,6 +15,10 @@ pub struct Proposition {
     /// The type parameters that this proposition can be instantiated with.
     pub params: Vec<TypeParam>,
 
+    /// The number of leading value arguments that came from statement syntax.
+    /// This does not include type parameters in `params`.
+    pub arg_count: usize,
+
     /// Where this proposition came from.
     pub source: Source,
 }
@@ -40,13 +44,25 @@ impl Proposition {
         Proposition {
             value,
             params,
+            arg_count: 0,
             source,
         }
     }
 
+    /// Records how many leading value arguments came from statement syntax.
+    pub fn with_arg_count(mut self, arg_count: usize) -> Proposition {
+        self.arg_count = arg_count;
+        self
+    }
+
     /// Just changes the value while keeping the other stuff intact
     pub fn with_value(self, value: AcornValue) -> Proposition {
-        Proposition::new(value, self.params, self.source)
+        Proposition {
+            value,
+            params: self.params,
+            arg_count: self.arg_count,
+            source: self.source,
+        }
     }
 
     /// Theorems have theorem names, and so do axioms because those work like theorems.

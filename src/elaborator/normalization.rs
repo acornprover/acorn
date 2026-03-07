@@ -343,7 +343,8 @@ impl KernelContext {
         let mut steps = vec![];
         if let Some(hypo) = hypo {
             // Preserve type parameters when creating hypothesis fact
-            let hypo_prop = Proposition::new(hypo, prop.params.clone(), prop.source.clone());
+            let hypo_prop = Proposition::new(hypo, prop.params.clone(), prop.source.clone())
+                .with_arg_count(prop.arg_count);
             let fact = Fact::Proposition(Arc::new(hypo_prop));
             steps.extend(self.normalize_fact(&fact)?.steps);
         }
@@ -352,7 +353,8 @@ impl KernelContext {
             counterfactual,
             prop.params.clone(),
             prop.source.as_negated_goal(),
-        );
+        )
+        .with_arg_count(prop.arg_count);
         let fact = Fact::Proposition(Arc::new(counterfactual_prop));
         steps.extend(self.normalize_fact(&fact)?.steps);
 

@@ -250,6 +250,10 @@ fn test_anonymous_theorem_env_with_args() {
             }
         "#,
     );
+    assert_eq!(
+        env.nodes.last().unwrap().proposition().unwrap().arg_count,
+        2
+    );
 }
 
 #[test]
@@ -350,6 +354,10 @@ fn test_environment_with_function_satisfy() {
                 a != b
             }
         "#,
+    );
+    assert_eq!(
+        env.nodes.last().unwrap().proposition().unwrap().arg_count,
+        1
     );
 }
 

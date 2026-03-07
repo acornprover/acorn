@@ -508,6 +508,7 @@ impl Environment {
         }
 
         // Externally we use the theorem in unnamed, "forall" form
+        let arg_count = arg_types.len();
         let external_claim = AcornValue::forall(arg_types.clone(), unbound_claim.clone());
         if let Err(message) = external_claim.validate() {
             return Err(ts.claim.error(&message));
@@ -564,7 +565,8 @@ impl Environment {
             self.depth,
             ts.name_token.as_ref().map(|t| t.text().to_string()),
         );
-        let prop = Proposition::new(external_claim, type_params.clone(), source);
+        let prop =
+            Proposition::new(external_claim, type_params.clone(), source).with_arg_count(arg_count);
 
         let node = if already_proven {
             Node::structural(project, self, prop)
@@ -869,6 +871,7 @@ impl Environment {
                 .collect(),
         );
         let return_bound = unbound_condition.bind_values(num_args, num_args, &[function_term]);
+        let arg_count = arg_types.len();
         let arb_condition = AcornValue::ForAll(arg_types, Box::new(return_bound));
 
         // Genericize for the external proposition (converts Arbitrary to Variable)
@@ -882,7 +885,8 @@ impl Environment {
             Arc::new(generic_constant),
             &defined_name.to_string(),
         );
-        let prop = Proposition::new(external_condition, all_type_params, source);
+        let prop =
+            Proposition::new(external_condition, all_type_params, source).with_arg_count(arg_count);
 
         let index = self.add_node(Node::block(project, self, block, Some(prop)));
         self.add_node_lines(index, &statement.range());
