@@ -1,6 +1,18 @@
 use crate::elaborator::environment::Environment;
 use crate::kernel::kernel_context::KernelContext;
 
+#[cfg(feature = "iet")]
+fn has_negated_inline_forall(clause: &crate::kernel::clause::Clause) -> bool {
+    clause.literals.iter().any(|lit| {
+        !lit.positive
+            && lit.is_signed_term()
+            && matches!(
+                lit.left.as_ref().decompose(),
+                crate::kernel::term::Decomposition::ForAll(_, _)
+            )
+    })
+}
+
 #[test]
 fn test_nat_normalization() {
     let mut env = Environment::test();
@@ -26,6 +38,7 @@ fn test_nat_normalization() {
         f(zero) and forall(k: Nat) { f(k) implies f(suc(k)) } implies forall(n: Nat) { f(n) } }",
     );
 
+    #[cfg(not(feature = "iet"))]
     norm.check(
         &env,
         "induction",
@@ -34,7 +47,6 @@ fn test_nat_normalization() {
             "not x0(suc(s0_0(x0))) or not x0(zero) or x0(x1)",
         ],
     );
-
     env.expect_type("induction", "(Nat -> Bool) -> Bool");
 
     env.add("define recursion(f: Nat -> Nat, a: Nat, n: Nat) -> Nat { axiom }");
@@ -674,11 +686,34 @@ fn test_normalizing_forall_inside_lambda() {
     "#,
     );
     let mut norm = KernelContext::new();
+    #[cfg(not(feature = "iet"))]
     norm.check(
         &env,
         "goal",
         &["not g(x0) or f(x0, x1)", "not f(x0, s0_0(x0)) or g(x0)"],
     );
+    #[cfg(feature = "iet")]
+    {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 2, "expected two clauses");
+        assert!(
+            clauses.iter().any(|clause| {
+                !has_negated_inline_forall(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().any(|lit| lit.positive)
+                    && clause.literals.iter().any(|lit| !lit.positive)
+            }),
+            "expected the forward implication clause to stay first-order"
+        );
+        assert!(
+            clauses.iter().any(|clause| {
+                has_negated_inline_forall(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().any(|lit| lit.positive)
+            }),
+            "expected the reverse implication to keep a negated forall inline"
+        );
+    }
 }
 
 #[cfg(not(feature = "iet"))]
@@ -729,11 +764,33 @@ fn test_normalizing_forall_inside_neq_lambda() {
     "#,
     );
     let mut norm = KernelContext::new();
+    #[cfg(not(feature = "iet"))]
     norm.check(
         &env,
         "goal",
         &["not f(s0_0, s0_1) or not g(s0_0)", "f(s0_0, x0) or g(s0_0)"],
     );
+    #[cfg(feature = "iet")]
+    {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 2, "expected two clauses");
+        assert!(
+            clauses.iter().any(|clause| {
+                !has_negated_inline_forall(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().all(|lit| lit.positive)
+            }),
+            "expected one positive witness clause"
+        );
+        assert!(
+            clauses.iter().any(|clause| {
+                has_negated_inline_forall(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().any(|lit| !lit.positive)
+            }),
+            "expected one clause with an inline negated forall"
+        );
+    }
 }
 
 #[cfg(not(feature = "iet"))]

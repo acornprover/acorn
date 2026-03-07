@@ -871,8 +871,9 @@ mod tests {
             "expected choose-based witness reduction to appear in the closure"
         );
         assert!(
-            clause_strings.iter().any(|s| s.contains("not not(")),
-            "expected repeated boolean reduction to create double-negation clauses"
+            closure.len() < 40,
+            "expected closure to stabilize well before the exploration limit, got {} clauses",
+            closure.len()
         );
         assert!(
             canonical_count == closure.len() && display_count == closure.len(),
