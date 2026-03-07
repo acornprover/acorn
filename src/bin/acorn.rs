@@ -91,6 +91,18 @@ fn parse_target_and_line(
     Ok((target, line))
 }
 
+fn validate_verbose_flag(
+    verbose: bool,
+    line_selection: &Option<LineSelection>,
+) -> Result<(), String> {
+    if verbose && !matches!(line_selection, Some(LineSelection::Single(_))) {
+        return Err(
+            "--verbose requires a single line selection via TARGET:LINE or --line LINE".to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -188,6 +200,13 @@ enum Command {
             value_name = "SECONDS"
         )]
         timeout: Option<f32>,
+
+        /// Print every activated proof step for a single selected goal
+        #[clap(
+            long,
+            help = "Print every activated proof step for a single selected goal."
+        )]
+        verbose: bool,
     },
 
     /// Check all goals, erroring if any goal requires a search
@@ -257,6 +276,13 @@ enum Command {
         /// Write results to the cache
         #[clap(long, help = "Write reproved results to the cache.")]
         write_cache: bool,
+
+        /// Print every activated proof step for a single selected goal
+        #[clap(
+            long,
+            help = "Print every activated proof step for a single selected goal."
+        )]
+        verbose: bool,
     },
 
     /// Display proof details for a specific line
@@ -349,6 +375,7 @@ async fn main() {
             fail_fast,
             strict,
             timeout,
+            verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -358,6 +385,11 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+
+            if let Err(e) = validate_verbose_flag(verbose, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
 
             // Verify command doesn't support line ranges
             let line_selection = match line_sel {
@@ -384,6 +416,7 @@ async fn main() {
             };
 
             verifier.builder.print_proof = line_selection.is_some();
+            verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false;
             verifier.builder.strict = strict;
@@ -484,6 +517,7 @@ async fn main() {
             fail_fast,
             timeout,
             write_cache,
+            verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -493,6 +527,11 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+
+            if let Err(e) = validate_verbose_flag(verbose, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
 
             // Convert to verifier's LineSelection type - reprove supports both single lines and ranges
             let line_selection = match line_sel {
@@ -526,6 +565,7 @@ async fn main() {
             };
 
             verifier.builder.print_proof = line_selection.is_some();
+            verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
@@ -782,5 +822,18 @@ async fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_verbose_flag, LineSelection};
+
+    #[test]
+    fn test_verbose_flag_requires_single_line() {
+        assert!(validate_verbose_flag(true, &None).is_err());
+        assert!(validate_verbose_flag(true, &Some(LineSelection::Range(10, 12))).is_err());
+        assert!(validate_verbose_flag(true, &Some(LineSelection::Single(10))).is_ok());
+        assert!(validate_verbose_flag(false, &None).is_ok());
     }
 }

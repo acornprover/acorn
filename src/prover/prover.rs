@@ -12,6 +12,7 @@ use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::goal::Goal;
 use crate::kernel::clause::Clause;
+use crate::kernel::display::DisplayClause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
@@ -201,6 +202,61 @@ impl Prover {
         self.passive_set.len()
     }
 
+    fn clause_text(
+        &self,
+        clause: &Clause,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) -> String {
+        let denormalized = kernel_context.denormalize(clause, None, None, false);
+        CodeGenerator::new(bindings)
+            .value_to_code(&denormalized)
+            .unwrap_or_else(|_| {
+                format!(
+                    "{}",
+                    DisplayClause {
+                        clause,
+                        context: kernel_context
+                    }
+                )
+            })
+    }
+
+    fn is_shallow_step(step: &ProofStep) -> bool {
+        step.depth < 2 || step.clause.is_impossible()
+    }
+
+    /// Prints every activated proof step in activation order.
+    pub fn print_active_steps(&self, bindings: &BindingMap, kernel_context: &KernelContext) {
+        let cert_bindings = self.bindings_with_goal_type_params(bindings);
+
+        println!(
+            "activated {} proof steps ({} passive remain):",
+            self.active_set.len(),
+            self.passive_set.len()
+        );
+        println!();
+
+        for (id, step) in self.iter_active_steps() {
+            let clause_text = if step.clause.is_impossible() {
+                "contradiction".to_string()
+            } else {
+                self.clause_text(&step.clause, cert_bindings.as_ref(), kernel_context)
+            };
+
+            println!(
+                "Clause {}, depth {}, shallow {}, truthiness {:?}, by {}:",
+                id,
+                step.depth,
+                Self::is_shallow_step(step),
+                step.truthiness,
+                step.rule.name().to_lowercase()
+            );
+            println!("    {}", clause_text);
+            println!();
+        }
+    }
+
     /// Prints the proof in a human-readable form.
     pub fn print_proof(
         &self,
@@ -225,10 +281,7 @@ impl Prover {
             if step.clause.is_impossible() {
                 println!("Contradiction, depth {}, {}.", step.depth, rule);
             } else {
-                let denormalized = kernel_context.denormalize(&step.clause, None, None, false);
-                let clause_text = CodeGenerator::new(bindings)
-                    .value_to_code(&denormalized)
-                    .unwrap_or_else(|_| format!("{:?}", step.clause));
+                let clause_text = self.clause_text(&step.clause, bindings, kernel_context);
 
                 match step_id.active_id() {
                     None => {
@@ -259,10 +312,7 @@ impl Prover {
                 let dep_text = if dep_clause.is_impossible() {
                     "contradiction".to_string()
                 } else {
-                    let denormalized = kernel_context.denormalize(&dep_clause, None, None, false);
-                    CodeGenerator::new(bindings)
-                        .value_to_code(&denormalized)
-                        .unwrap_or_else(|_| format!("{:?}", dep_clause))
+                    self.clause_text(dep_clause, bindings, kernel_context)
                 };
                 println!("    {}", dep_text);
             }

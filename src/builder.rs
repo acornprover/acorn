@@ -104,6 +104,10 @@ pub struct Builder<'a> {
     /// Don't set it from within the language server.
     pub print_proof: bool,
 
+    /// Print every activated clause in denormalized source syntax after a search.
+    /// Don't set it from within the language server.
+    pub verbose: bool,
+
     /// Cancellation token to stop the build.
     cancellation_token: CancellationToken,
 
@@ -326,6 +330,7 @@ impl<'a> Builder<'a> {
             used_cert_counts: HashMap::new(),
             goal_filter: None,
             print_proof: false,
+            verbose: false,
             cancellation_token,
             cert_override: None,
             operation_verb: "verified",
@@ -774,6 +779,11 @@ impl<'a> Builder<'a> {
             },
             goal_kernel_context,
         );
+        if self.verbose {
+            processor
+                .prover()
+                .print_active_steps(&env.bindings, goal_kernel_context);
+        }
         if outcome == Outcome::Success {
             match processor.make_cert(&env.bindings, goal_kernel_context, self.print_proof) {
                 Ok(cert) => {
