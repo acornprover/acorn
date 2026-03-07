@@ -166,6 +166,15 @@ fn test_iet_normalizes_quantifier_bodies_before_clausification() {
     assert_eq!(body, expected);
 }
 
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_top_level_negated_and_clausifies_to_disjunction() {
+    let mut env = Environment::test();
+    let mut norm = KernelContext::new();
+    env.add("theorem goal(a: Bool, b: Bool, c: Bool) { a and b implies c }");
+    norm.check(&env, "goal", &["not x0 or not x1 or x2"]);
+}
+
 #[test]
 fn test_boolean_equality() {
     let mut env = Environment::test();

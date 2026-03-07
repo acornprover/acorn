@@ -56,6 +56,10 @@ fn cancel_double_negation(term: &Term) -> Option<Term> {
 /// - cancels `not not`
 /// - recurses under quantifier bodies
 /// - preserves `not`, `and`, `or`, `forall`, and `exists` structure
+///
+/// Polarity-sensitive top-level decomposition still belongs in clausification,
+/// so theorem normalization can flatten shapes like `not (a and b)` into a clause
+/// without pushing `not` through connectives everywhere.
 pub fn normalize_boolean_subterms(term: &Term) -> Term {
     let normalized = normalize_term_children(term);
     cancel_double_negation(&normalized).unwrap_or(normalized)
