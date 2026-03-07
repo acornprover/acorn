@@ -13,6 +13,22 @@ fn has_negated_inline_forall(clause: &crate::kernel::clause::Clause) -> bool {
     })
 }
 
+#[cfg(feature = "iet")]
+fn get_negated_inline_forall_body(
+    clause: &crate::kernel::clause::Clause,
+) -> Option<crate::kernel::term::Term> {
+    clause.literals.iter().find_map(|lit| {
+        if !lit.positive && lit.is_signed_term() {
+            if let crate::kernel::term::Decomposition::ForAll(_, body) =
+                lit.left.as_ref().decompose()
+            {
+                return Some(body.to_owned());
+            }
+        }
+        None
+    })
+}
+
 #[test]
 fn test_nat_normalization() {
     let mut env = Environment::test();
@@ -118,6 +134,36 @@ fn test_second_order_binding() {
     );
     let mut norm = KernelContext::new();
     norm.check(&env, "goal", &["not always_true(specific_borf)"]);
+}
+
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_normalizes_quantifier_bodies_before_clausification() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        theorem goal {
+            not forall(x: Bool) {
+                not (x and not not x)
+            }
+        }
+    "#,
+    );
+
+    let mut norm = KernelContext::new();
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 1, "expected a single clause");
+    let clause = &clauses[0];
+    assert!(
+        has_negated_inline_forall(clause),
+        "expected a negated inline forall: {:?}",
+        clause
+    );
+    let body = get_negated_inline_forall_body(clause).expect("expected forall body");
+    let bound = crate::kernel::term::Term::atom(crate::kernel::atom::Atom::BoundVariable(0));
+    let expected =
+        crate::kernel::term::Term::not(crate::kernel::term::Term::and(bound.clone(), bound));
+    assert_eq!(body, expected);
 }
 
 #[test]

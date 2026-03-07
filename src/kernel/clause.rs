@@ -8,6 +8,8 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
+#[cfg(feature = "iet")]
+use crate::kernel::term_normalization::normalize_boolean_subterms;
 use crate::module::ModuleId;
 
 /// A Clause represents a disjunction (an "or") of literals.
@@ -890,6 +892,15 @@ impl Clause {
         context: LocalContext,
         pinned_old_var_count: usize,
     ) -> BooleanReductionResult {
+        #[cfg(feature = "iet")]
+        let literals: Vec<Literal> = literals
+            .into_iter()
+            .map(|literal| Literal {
+                positive: literal.positive,
+                left: normalize_boolean_subterms(&literal.left),
+                right: normalize_boolean_subterms(&literal.right),
+            })
+            .collect();
         let (_, default_var_ids) = Clause::normalize_with_var_ids(literals.clone(), &context);
         let pinned_old_vars: Vec<AtomId> = default_var_ids
             .iter()
@@ -1694,6 +1705,33 @@ mod tests {
             vec![Literal::positive(Term::exists(
                 Term::bool_type(),
                 Term::not(
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                ),
+            ))],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_negated_forall_normalizes_resulting_exists_body() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
+
+        let body = Term::not(Term::and(
+            Term::atom(Atom::BoundVariable(0)),
+            kctx.parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        ));
+        let forall_term = Term::forall(Term::bool_type(), body);
+        let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
+        let expected = Clause::new(
+            vec![Literal::positive(Term::exists(
+                Term::bool_type(),
+                Term::and(
+                    Term::atom(Atom::BoundVariable(0)),
                     kctx.parse_term("g0")
                         .apply(&[Term::atom(Atom::BoundVariable(0))]),
                 ),

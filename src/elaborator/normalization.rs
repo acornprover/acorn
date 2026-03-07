@@ -24,6 +24,8 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::synthetic::SyntheticDefinition;
 use crate::kernel::term::Term;
+#[cfg(feature = "iet")]
+use crate::kernel::term_normalization::normalize_boolean_subterms;
 use crate::module::ModuleId;
 use tracing::trace;
 
@@ -243,6 +245,8 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        #[cfg(feature = "iet")]
+        let term = normalize_boolean_subterms(&term);
         self.normalize_term(&term, ctype, source, type_var_map)
     }
 

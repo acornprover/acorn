@@ -382,18 +382,6 @@ fn test_conjunction_goal() {
     verify_succeeds(text);
 }
 
-// This currently fails due to lack of step completeness.
-// Unfortunately we normalize this in such a way that it is not obvious.
-// The normalized task is to derive a contradiction from:
-//
-// axiom:
-//   (a or c) and (b or c) and (a or d) and (b or d)
-//
-// negated goal:
-//   (not a or not b) and (not c or not d)
-//
-// It seems like some sort of monotonic-complexity-reducing reasoning might do it.
-//
 #[test]
 fn test_complex_boolean() {
     let text = r#"
