@@ -507,6 +507,86 @@ impl TestChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "iet")]
+    use crate::kernel::inference;
+    #[cfg(feature = "iet")]
+    use std::collections::{HashSet, VecDeque};
+
+    #[cfg(feature = "iet")]
+    fn problematic_negated_forall_clause() -> (KernelContext, Clause) {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["g0", "g1"], "Bool -> Bool");
+        let binder = Term::bool_type();
+        let bound = Term::atom(Atom::BoundVariable(0));
+        let g0_body =
+            Term::new_variable(0).apply(&[context.parse_term("g0").apply(&[bound.clone()])]);
+        let g1_body = Term::new_variable(0).apply(&[context.parse_term("g1").apply(&[bound])]);
+
+        let clause = Clause::new(
+            vec![
+                Literal::negative(Term::forall(binder.clone(), g0_body)),
+                Literal::negative(Term::forall(binder, g1_body)),
+                Literal::positive(Term::new_variable(0).apply(&[Term::new_variable(1)])),
+            ],
+            &LocalContext::from_types(vec![context.parse_type("Bool -> Bool"), Term::bool_type()]),
+        );
+        (context, clause)
+    }
+
+    #[cfg(feature = "iet")]
+    fn checker_style_clause_closure(
+        kernel_context: &KernelContext,
+        start: Clause,
+        limit: usize,
+    ) -> Vec<Clause> {
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut ordered = vec![];
+
+        seen.insert(start.clone());
+        queue.push_back(start);
+
+        while let Some(clause) = queue.pop_front() {
+            ordered.push(clause.clone());
+            if ordered.len() >= limit {
+                break;
+            }
+
+            for next in clause.boolean_reductions(kernel_context) {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+            for next in inference::equality_resolutions(&clause, kernel_context) {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+            for next in inference::equality_factorings(&clause, kernel_context) {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+            for next in clause.injectivities() {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+            if let Some(extensionality) = clause.find_extensionality(kernel_context) {
+                let next = Clause::new(extensionality, clause.get_local_context());
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        ordered
+    }
 
     #[test]
     fn test_checker_should_be_monovariant() {
@@ -746,5 +826,64 @@ mod tests {
             panic!("expected GeneratedBadCode");
         };
         assert!(msg.contains("witnesses are disabled"));
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_checker_problematic_negated_forall_clause_growth() {
+        let (context, clause) = problematic_negated_forall_clause();
+        let closure = checker_style_clause_closure(&context, clause, 40);
+
+        for (i, clause) in closure.iter().enumerate() {
+            println!("clause {i}: {clause}");
+        }
+
+        let canonical_count = closure
+            .iter()
+            .map(|clause| {
+                let mut canonical = clause.clone();
+                canonical.normalize();
+                canonical
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        let display_count = closure
+            .iter()
+            .map(|clause| clause.to_string())
+            .collect::<HashSet<_>>()
+            .len();
+
+        println!("raw clause count: {}", closure.len());
+        println!("canonical clause count: {}", canonical_count);
+        println!("display string count: {}", display_count);
+
+        let clause_strings: Vec<String> = closure.iter().map(|clause| clause.to_string()).collect();
+        assert!(
+            clause_strings
+                .iter()
+                .any(|s| s.matches("exists(Bool => not(").count() >= 2),
+            "expected boolean reduction to surface the negated foralls as positive exists literals"
+        );
+        assert!(
+            clause_strings
+                .iter()
+                .any(|s| s.contains("choose(Bool, lambda(Bool => not(")),
+            "expected choose-based witness reduction to appear in the closure"
+        );
+        assert!(
+            clause_strings.iter().any(|s| s.contains("not not(")),
+            "expected repeated boolean reduction to create double-negation clauses"
+        );
+        assert!(
+            clause_strings.iter().any(|s| s.contains("!=")),
+            "expected equality factoring to introduce inequality clauses"
+        );
+        assert!(
+            canonical_count == closure.len() && display_count == closure.len(),
+            "expected genuinely distinct clauses, got raw={}, canonical={}, display={}",
+            closure.len(),
+            canonical_count,
+            display_count
+        );
     }
 }
