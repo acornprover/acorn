@@ -383,7 +383,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.verbose = line_selection.is_some();
+            verifier.builder.print_proof = line_selection.is_some();
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false;
             verifier.builder.strict = strict;
@@ -445,7 +445,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.verbose = line_selection.is_some();
+            verifier.builder.print_proof = line_selection.is_some();
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = true;
             verifier.builder.check_hashes = false;
@@ -525,7 +525,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.verbose = line_selection.is_some();
+            verifier.builder.print_proof = line_selection.is_some();
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes

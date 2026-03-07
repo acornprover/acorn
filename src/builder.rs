@@ -100,9 +100,9 @@ pub struct Builder<'a> {
     /// Line numbers are internal (0-based).
     pub goal_filter: Option<GoalFilter>,
 
-    /// The verbose flag makes us print miscellaneous debug output.
+    /// Print the final proof and concrete certificate for successful searches.
     /// Don't set it from within the language server.
-    pub verbose: bool,
+    pub print_proof: bool,
 
     /// Cancellation token to stop the build.
     cancellation_token: CancellationToken,
@@ -325,7 +325,7 @@ impl<'a> Builder<'a> {
             build_cache: None,
             used_cert_counts: HashMap::new(),
             goal_filter: None,
-            verbose: false,
+            print_proof: false,
             cancellation_token,
             cert_override: None,
             operation_verb: "verified",
@@ -775,7 +775,7 @@ impl<'a> Builder<'a> {
             goal_kernel_context,
         );
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, goal_kernel_context, self.verbose) {
+            match processor.make_cert(&env.bindings, goal_kernel_context, self.print_proof) {
                 Ok(cert) => {
                     #[cfg(feature = "validate")]
                     {
@@ -811,7 +811,7 @@ impl<'a> Builder<'a> {
                         }
                     }
                     #[cfg(not(feature = "validate"))]
-                    if self.verbose {
+                    if self.print_proof {
                         // Since we aren't performance-sensitive, check the cert.
                         if let Err(e) = processor.check_cert(
                             &cert,
