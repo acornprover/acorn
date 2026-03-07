@@ -713,7 +713,25 @@ impl<'a> TermBridge<'a> {
                     return AcornValue::or(args.next().unwrap(), args.next().unwrap());
                 }
                 Symbol::Eq => {
-                    if type_args.len() > 1 || value_args.len() != 2 {
+                    if type_args.len() > 1 {
+                        panic!("malformed eq term during denormalization: {}", term);
+                    }
+                    if type_args.len() == 1 && value_args.len() < 2 {
+                        let eq_type = type_args.into_iter().next().unwrap();
+                        let mut args = value_args;
+                        let mut lambda_args = vec![];
+                        while args.len() < 2 {
+                            let arg_index = lambda_args.len() as AtomId;
+                            lambda_args.push(eq_type.clone());
+                            args.push(AcornValue::Variable(arg_index, eq_type.clone()));
+                        }
+                        let mut args = args.into_iter();
+                        return AcornValue::lambda(
+                            lambda_args,
+                            AcornValue::equals(args.next().unwrap(), args.next().unwrap()),
+                        );
+                    }
+                    if type_args.len() != 1 || value_args.len() != 2 {
                         panic!("malformed eq term during denormalization: {}", term);
                     }
                     let mut args = value_args.into_iter();
@@ -951,5 +969,46 @@ impl<'a> TermBridge<'a> {
 
     pub fn atom_str(&self, atom: &Atom) -> String {
         self.kernel_context.atom_str(atom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elaborator::acorn_type::AcornType;
+    use crate::kernel::kernel_context::KernelContext;
+
+    #[test]
+    fn test_denormalize_partial_eq_becomes_lambda() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("eq(Bool)");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool, AcornType::Bool],
+            AcornValue::equals(
+                AcornValue::Variable(0, AcornType::Bool),
+                AcornValue::Variable(1, AcornType::Bool),
+            ),
+        );
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_denormalize_partially_applied_eq_with_one_value_arg() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("eq(Bool, true)");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool],
+            AcornValue::equals(
+                AcornValue::Bool(true),
+                AcornValue::Variable(0, AcornType::Bool),
+            ),
+        );
+        assert_eq!(value, expected);
     }
 }

@@ -112,6 +112,68 @@ pub struct Certificate {
 }
 
 impl Certificate {
+    fn logical_symbol_arity(symbol: Symbol) -> Option<usize> {
+        match symbol {
+            Symbol::Not => Some(1),
+            Symbol::And | Symbol::Or => Some(2),
+            Symbol::Eq => Some(3),
+            Symbol::Ite => Some(4),
+            Symbol::Choose => Some(2),
+            _ => None,
+        }
+    }
+
+    fn contains_partial_logical_builtin(term: crate::kernel::term::TermRef<'_>) -> bool {
+        fn head_symbol_and_arg_count(
+            mut term: crate::kernel::term::TermRef<'_>,
+        ) -> Option<(Symbol, usize)> {
+            let mut arg_count = 0;
+            loop {
+                match term.decompose() {
+                    Decomposition::Application(func, _) => {
+                        arg_count += 1;
+                        term = func;
+                    }
+                    Decomposition::Atom(Atom::Symbol(symbol)) => return Some((*symbol, arg_count)),
+                    _ => return None,
+                }
+            }
+        }
+
+        if let Some((symbol, arg_count)) = head_symbol_and_arg_count(term) {
+            if let Some(arity) = Self::logical_symbol_arity(symbol) {
+                if arg_count < arity {
+                    return true;
+                }
+                for arg in term.iter_args() {
+                    if Self::contains_partial_logical_builtin(arg) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
+        match term.decompose() {
+            Decomposition::Atom(_) => false,
+            Decomposition::Application(_, _) => false,
+            Decomposition::Pi(func, arg)
+            | Decomposition::Lambda(func, arg)
+            | Decomposition::ForAll(func, arg)
+            | Decomposition::Exists(func, arg) => {
+                Self::contains_partial_logical_builtin(func)
+                    || Self::contains_partial_logical_builtin(arg)
+            }
+        }
+    }
+
+    fn claim_requires_specialized_serialization(claim: &Claim) -> bool {
+        claim
+            .var_map
+            .iter()
+            .any(|(_, term)| Self::contains_partial_logical_builtin(term.as_ref()))
+    }
+
     fn dequalify_synthetic_name_refs(
         code: String,
         synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
@@ -183,21 +245,16 @@ impl Certificate {
         let mut answer = Vec::new();
         for step in &ordered_steps {
             let line = match step {
-                CertificateStep::Claim(claim) => {
-                    if claim.clause.get_local_context().is_empty() {
-                        generator.certificate_step_to_code(
-                            &names,
-                            step,
-                            &generation_kernel_context,
-                        )?
-                    } else {
-                        Self::serialize_claim_with_names(
-                            claim,
-                            &generation_kernel_context,
-                            bindings,
-                            Some(&names.synthetic_names),
-                        )?
-                    }
+                CertificateStep::Claim(claim)
+                    if !claim.clause.get_local_context().is_empty()
+                        && !Self::claim_requires_specialized_serialization(claim) =>
+                {
+                    Self::serialize_claim_with_names(
+                        claim,
+                        &generation_kernel_context,
+                        bindings,
+                        Some(&names.synthetic_names),
+                    )?
                 }
                 _ => {
                     generator.certificate_step_to_code(&names, step, &generation_kernel_context)?
@@ -1812,6 +1869,38 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
+    }
+
+    #[test]
+    fn test_from_concrete_steps_falls_back_for_partial_logical_builtin_in_claim_map() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (_project, bindings, kernel_context) = setup_claim_codec_env(code);
+        let kernel = &kernel_context;
+        let generic = kernel.parse_clause("x1(x3, x2)", &["Type", "x0 -> x0 -> Bool", "x0", "x0"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::bool_type());
+        var_map.set(1, kernel.parse_term("eq(Bool)"));
+        var_map.set(2, Term::new_false());
+        var_map.set(3, Term::new_true());
+        let concrete_steps = vec![ConcreteStep {
+            generic,
+            var_maps: vec![(var_map, LocalContext::empty())],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &kernel_context,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof, vec!["false = true"]);
     }
 
     #[test]
