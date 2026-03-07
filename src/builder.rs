@@ -120,6 +120,9 @@ pub struct Builder<'a> {
 
     /// Timeout in seconds for proof search. Defaults to 5.0.
     pub timeout_secs: f32,
+
+    /// Maximum number of non-factual activations before returning `Constrained`.
+    pub activation_limit: i32,
 }
 
 /// Metrics collected during a build.
@@ -335,6 +338,7 @@ impl<'a> Builder<'a> {
             cert_override: None,
             operation_verb: "verified",
             timeout_secs: 5.0,
+            activation_limit: 2000,
         }
     }
 
@@ -776,6 +780,7 @@ impl<'a> Builder<'a> {
         let outcome = processor.search(
             ProverMode::Interactive {
                 timeout_secs: self.timeout_secs,
+                activation_limit: self.activation_limit,
             },
             goal_kernel_context,
         );

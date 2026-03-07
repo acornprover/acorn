@@ -103,6 +103,13 @@ fn validate_verbose_flag(
     Ok(())
 }
 
+fn validate_activations_flag(activations: Option<u32>) -> Result<(), String> {
+    if matches!(activations, Some(0)) {
+        return Err("--activations must be at least 1".to_string());
+    }
+    Ok(())
+}
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -201,6 +208,14 @@ enum Command {
         )]
         timeout: Option<f32>,
 
+        /// Maximum number of non-factual activations before stopping the search
+        #[clap(
+            long,
+            help = "Maximum number of non-factual activations before stopping the search.",
+            value_name = "COUNT"
+        )]
+        activations: Option<u32>,
+
         /// Print every activated proof step for a single selected goal
         #[clap(
             long,
@@ -272,6 +287,14 @@ enum Command {
             value_name = "SECONDS"
         )]
         timeout: Option<f32>,
+
+        /// Maximum number of non-factual activations before stopping the search
+        #[clap(
+            long,
+            help = "Maximum number of non-factual activations before stopping the search.",
+            value_name = "COUNT"
+        )]
+        activations: Option<u32>,
 
         /// Write results to the cache
         #[clap(long, help = "Write reproved results to the cache.")]
@@ -375,6 +398,7 @@ async fn main() {
             fail_fast,
             strict,
             timeout,
+            activations,
             verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
@@ -387,6 +411,10 @@ async fn main() {
             };
 
             if let Err(e) = validate_verbose_flag(verbose, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -424,6 +452,9 @@ async fn main() {
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
                 verifier.builder.timeout_secs = t;
+            }
+            if let Some(limit) = activations {
+                verifier.builder.activation_limit = limit as i32;
             }
 
             match verifier.run() {
@@ -516,6 +547,7 @@ async fn main() {
             line_flag,
             fail_fast,
             timeout,
+            activations,
             write_cache,
             verbose,
         }) => {
@@ -529,6 +561,10 @@ async fn main() {
             };
 
             if let Err(e) = validate_verbose_flag(verbose, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -573,6 +609,9 @@ async fn main() {
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
                 verifier.builder.timeout_secs = t;
+            }
+            if let Some(limit) = activations {
+                verifier.builder.activation_limit = limit as i32;
             }
 
             match verifier.run() {
@@ -827,7 +866,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_verbose_flag, LineSelection};
+    use super::{validate_activations_flag, validate_verbose_flag, LineSelection};
 
     #[test]
     fn test_verbose_flag_requires_single_line() {
@@ -835,5 +874,12 @@ mod tests {
         assert!(validate_verbose_flag(true, &Some(LineSelection::Range(10, 12))).is_err());
         assert!(validate_verbose_flag(true, &Some(LineSelection::Single(10))).is_ok());
         assert!(validate_verbose_flag(false, &None).is_ok());
+    }
+
+    #[test]
+    fn test_activations_flag_requires_positive_count() {
+        assert!(validate_activations_flag(Some(0)).is_err());
+        assert!(validate_activations_flag(Some(1)).is_ok());
+        assert!(validate_activations_flag(None).is_ok());
     }
 }

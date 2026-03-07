@@ -227,8 +227,9 @@ impl Prover {
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
 
         println!(
-            "activated {} proof steps ({} passive remain):",
+            "activated {} proof steps ({} non-factual, {} passive remain):",
             self.active_set.len(),
+            self.nonfactual_activations,
             self.passive_set.len()
         );
         println!();
@@ -668,7 +669,10 @@ impl Prover {
     pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
         // Convert mode to actual parameters
         let (activation_limit, seconds, shallow_only) = match mode {
-            ProverMode::Interactive { timeout_secs } => (2000, timeout_secs, false),
+            ProverMode::Interactive {
+                timeout_secs,
+                activation_limit,
+            } => (activation_limit, timeout_secs, false),
             ProverMode::Test => (500, 0.3, true),
         };
         // Special test behavior: if we're in test mode and trying to prove "test_hang",

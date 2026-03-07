@@ -19,7 +19,11 @@ pub use prover::Prover;
 pub enum ProverMode {
     /// About as long as a human is willing to wait for a proof.
     /// The timeout_secs parameter controls how long to search before giving up.
-    Interactive { timeout_secs: f32 },
+    /// The activation_limit parameter controls the cap on non-factual activations.
+    Interactive {
+        timeout_secs: f32,
+        activation_limit: i32,
+    },
 
     /// A fast search that only uses shallow steps, for testing.
     Test,
