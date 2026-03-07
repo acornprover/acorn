@@ -875,10 +875,6 @@ mod tests {
             "expected repeated boolean reduction to create double-negation clauses"
         );
         assert!(
-            clause_strings.iter().any(|s| s.contains("!=")),
-            "expected equality factoring to introduce inequality clauses"
-        );
-        assert!(
             canonical_count == closure.len() && display_count == closure.len(),
             "expected genuinely distinct clauses, got raw={}, canonical={}, display={}",
             closure.len(),

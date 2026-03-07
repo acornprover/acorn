@@ -9,6 +9,15 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::VariableMap;
 
+fn is_boolean_equality(
+    literal: &Literal,
+    context: &LocalContext,
+    kernel_context: &KernelContext,
+) -> bool {
+    literal.left.get_type_with_context(context, kernel_context)
+        == crate::kernel::term::Term::bool_type()
+}
+
 /// Finds all possible equality resolutions for a clause.
 ///
 /// Equality resolution applies when a clause contains a negative literal `s != t`
@@ -93,11 +102,17 @@ pub fn find_equality_factorings(
     }
 
     let st_literal = &clause.literals[0];
+    if is_boolean_equality(st_literal, clause.get_local_context(), kernel_context) {
+        return results;
+    }
 
     for (_, s, t) in st_literal.both_term_pairs() {
         for i in 1..clause.literals.len() {
             let uv_literal = &clause.literals[i];
             if !uv_literal.positive {
+                continue;
+            }
+            if is_boolean_equality(uv_literal, clause.get_local_context(), kernel_context) {
                 continue;
             }
 
@@ -157,4 +172,29 @@ pub fn equality_factorings(clause: &Clause, kernel_context: &KernelContext) -> V
         .map(|(literals, output_context, _)| Clause::new(literals, &output_context))
         .filter(|c| !c.is_tautology())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::kernel_context::KernelContext;
+
+    #[test]
+    fn test_equality_factoring_skips_boolean_literals() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+
+        let clause = context.parse_clause("c0 or c1", &[]);
+        assert!(equality_factorings(&clause, &context).is_empty());
+    }
+
+    #[test]
+    fn test_equality_factoring_still_works_on_non_boolean_equalities() {
+        let mut context = KernelContext::new();
+        context.parse_datatype("Foo");
+        context.parse_constants(&["c0", "c1", "c2"], "Foo");
+
+        let clause = context.parse_clause("c0 = c1 or c0 = c2", &[]);
+        assert!(!equality_factorings(&clause, &context).is_empty());
+    }
 }

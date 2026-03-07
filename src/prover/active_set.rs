@@ -1696,14 +1696,15 @@ mod tests {
     #[test]
     fn test_equality_factoring_basic() {
         let mut kctx = KernelContext::new();
-        kctx.parse_constant("c0", "Bool");
+        kctx.parse_datatype("Foo");
+        kctx.parse_constant("c0", "Foo");
 
         // x0 = c0 or x1 = c0
         // Equality factoring gives us c0 = x0
-        let clause = kctx.parse_clause("x0 = c0 or x1 = c0", &["Bool", "Bool"]);
+        let clause = kctx.parse_clause("x0 = c0 or x1 = c0", &["Foo", "Foo"]);
         let mock_step = ProofStep::mock_from_clause(clause);
         let proof_steps = ActiveSet::equality_factoring(0, &mock_step, &kctx);
-        let expected = kctx.parse_clause("c0 = x0", &["Bool"]);
+        let expected = kctx.parse_clause("c0 = x0", &["Foo"]);
         for ps in &proof_steps {
             if ps.clause == expected {
                 return;
@@ -1755,19 +1756,25 @@ mod tests {
     fn test_equality_factoring_variable_numbering() {
         // This is a bug we ran into
         let mut kctx = KernelContext::new();
-        kctx.parse_constant("g1", "(Bool, Bool) -> Bool");
+        kctx.parse_datatype("Foo");
+        kctx.parse_constant("g1", "(Foo, Foo) -> Foo");
+        kctx.parse_constant("c0", "Foo");
 
         let mut set = ActiveSet::new();
 
         // Nonreflexive rule of less-than
-        let clause1 = kctx.parse_clause("not g1(x0, x0)", &["Bool"]);
+        let clause1 = kctx.parse_clause("g1(x0, x0) != c0", &["Foo"]);
         set.activate(ProofStep::mock_from_clause(clause1), &kctx);
 
         // Trichotomy
-        let clause2 = kctx.parse_clause("g1(x0, x1) or g1(x1, x0) or x0 = x1", &["Bool", "Bool"]);
+        let clause2 = kctx.parse_clause(
+            "g1(x0, x1) = c0 or g1(x1, x0) = c0 or x0 = x1",
+            &["Foo", "Foo"],
+        );
         let mock_step = ProofStep::mock_from_clause(clause2);
         let output = ActiveSet::equality_factoring(0, &mock_step, &kctx);
-        assert_eq!(output[0].clause.to_string(), "g0_1(x0, x0) or x0 = x0");
+        let expected = kctx.parse_clause("g1(x0, x0) = c0 or x0 = x0", &["Foo"]);
+        assert!(output.iter().any(|ps| ps.clause == expected));
     }
 
     #[test]
@@ -2087,11 +2094,12 @@ mod tests {
     #[test]
     fn test_equality_factoring_preserves_uninhabited_type_variables() {
         let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Bar");
 
-        // g0: (T: Type) -> T -> T -> Bool
-        kctx.parse_polymorphic_constant("g0", "T: Type", "T -> T -> Bool");
-        kctx.parse_constant("c1", "Bool");
-        kctx.parse_constant("c2", "Bool");
+        // g0: (T: Type) -> T -> T -> Bar
+        kctx.parse_polymorphic_constant("g0", "T: Type", "T -> T -> Bar");
+        kctx.parse_constant("c1", "Bar");
+        kctx.parse_constant("c2", "Bar");
 
         // Clause: g0(x0, x1, x2) = c1 | g0(x0, x2, x1) = c2
         // Context: x0: Type, x1: x0, x2: x0
