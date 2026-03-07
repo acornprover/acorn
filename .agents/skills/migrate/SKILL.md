@@ -25,6 +25,14 @@ For any step that is expected to update `~/acornlib/build`:
 3. If no expected write evidence appears, treat it as a failed step (usually permissions) and rerun with escalated permissions.
 4. Do not advance state until write evidence is confirmed.
 
+## Preflight (Mandatory Before S0)
+Before running the migration state machine:
+- Confirm tests pass in default mode:
+  - `cargo test`
+- Confirm tests pass in feature mode:
+  - `cargo test --features <feature>`
+- If either test run fails, stop and fix that baseline issue before starting migration.
+
 ## Workflow (Strict State Machine)
 Treat migration as a state machine. Do not skip states. Do not run commands from later states early.
 
