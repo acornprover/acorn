@@ -895,11 +895,7 @@ impl Clause {
         #[cfg(feature = "iet")]
         let literals: Vec<Literal> = literals
             .into_iter()
-            .map(|literal| Literal {
-                positive: literal.positive,
-                left: normalize_boolean_subterms(&literal.left),
-                right: normalize_boolean_subterms(&literal.right),
-            })
+            .map(Self::normalize_boolean_literal)
             .collect();
         let (_, default_var_ids) = Clause::normalize_with_var_ids(literals.clone(), &context);
         let pinned_old_vars: Vec<AtomId> = default_var_ids
@@ -914,6 +910,23 @@ impl Clause {
             var_ids,
             pre_norm_context: context,
         }
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_boolean_literal(literal: Literal) -> Literal {
+        let mut positive = literal.positive;
+        let mut left = normalize_boolean_subterms(&literal.left);
+        let right = normalize_boolean_subterms(&literal.right);
+
+        if right.is_true() {
+            while let Some(args) = Self::split_symbol_application(&left, Symbol::Not, 1) {
+                left = args[0].clone();
+                positive = !positive;
+            }
+            return Literal::from_signed_term(left, positive);
+        }
+
+        Literal::new(positive, left, right)
     }
 
     fn with_replaced_literal_and_context(
@@ -1738,6 +1751,25 @@ mod tests {
             ))],
             &LocalContext::empty(),
         );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_negative_signed_not_becomes_positive_literal() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
+
+        let inner = kctx.parse_term("g0").apply(&[Term::new_variable(0)]);
+        let clause = Clause::new(
+            vec![Literal::negative(Term::not(inner.clone()))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let expected = Clause::new(
+            vec![Literal::positive(inner)],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
