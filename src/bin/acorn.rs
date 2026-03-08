@@ -3,6 +3,7 @@
 
 use acorn::cleaner::{ModuleCleaner, ProjectCleaner};
 use acorn::doc_generator::DocGenerator;
+use acorn::interfaces::GoalInfo;
 use acorn::module::ModuleDescriptor;
 use acorn::project::{Project, ProjectConfig};
 use acorn::server::{run_server, ServerArgs};
@@ -108,6 +109,36 @@ fn validate_activations_flag(activations: Option<u32>) -> Result<(), String> {
         return Err("--activations must be at least 1".to_string());
     }
     Ok(())
+}
+
+fn validate_goal_flag(goal: Option<usize>) -> Result<(), String> {
+    if matches!(goal, Some(0)) {
+        return Err("--goal must be at least 1".to_string());
+    }
+    Ok(())
+}
+
+fn filter_selected_goals(
+    goal_infos: Vec<GoalInfo>,
+    goal_index: Option<usize>,
+) -> Result<(Vec<GoalInfo>, Option<usize>), String> {
+    match goal_index {
+        None => Ok((goal_infos, None)),
+        Some(goal_number) => {
+            if goal_number > goal_infos.len() {
+                return Err(format!(
+                    "goal {} is out of range for this location (found {} goal{})",
+                    goal_number,
+                    goal_infos.len(),
+                    if goal_infos.len() == 1 { "" } else { "s" }
+                ));
+            }
+            Ok((
+                vec![goal_infos.into_iter().nth(goal_number - 1).unwrap()],
+                Some(goal_number),
+            ))
+        }
+    }
 }
 
 #[global_allocator]
@@ -321,6 +352,14 @@ enum Command {
         /// Line number to select
         #[clap(long = "line", help = "Line number to select.", value_name = "LINE")]
         line_flag: Option<u32>,
+
+        /// 1-based goal index when the selected line has multiple goals
+        #[clap(
+            long = "goal",
+            help = "1-based goal index when the selected line has multiple goals.",
+            value_name = "INDEX"
+        )]
+        goal: Option<usize>,
     },
 
     /// Remove redundant claims from a module or entire project
@@ -631,6 +670,7 @@ async fn main() {
             module,
             line_positional,
             line_flag,
+            goal,
         }) => {
             let (module, line_sel) =
                 match parse_target_and_line(Some(module), line_positional, line_flag) {
@@ -644,6 +684,10 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+            if let Err(e) = validate_goal_flag(goal) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
 
             // Select command doesn't support line ranges
             let line = match line_sel {
@@ -690,11 +734,21 @@ async fn main() {
 
             match project.handle_selection(&path, line - 1) {
                 Ok((goal_infos, _range)) => {
+                    let (goal_infos, selected_goal_number) =
+                        match filter_selected_goals(goal_infos, goal) {
+                            Ok(result) => result,
+                            Err(e) => {
+                                println!("Error: {}", e);
+                                std::process::exit(1);
+                            }
+                        };
                     if goal_infos.is_empty() {
                         println!("No goals found at this location.");
                     } else {
                         for (i, goal_info) in goal_infos.iter().enumerate() {
-                            if goal_infos.len() > 1 {
+                            if let Some(goal_number) = selected_goal_number {
+                                println!("Goal {}: {}", goal_number, goal_info.goal_name);
+                            } else if goal_infos.len() > 1 {
                                 println!("Goal {}: {}", i + 1, goal_info.goal_name);
                             } else {
                                 println!("{}", goal_info.goal_name);
@@ -866,7 +920,12 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_activations_flag, validate_verbose_flag, LineSelection};
+    use acorn::interfaces::GoalInfo;
+
+    use super::{
+        filter_selected_goals, validate_activations_flag, validate_goal_flag,
+        validate_verbose_flag, LineSelection,
+    };
 
     #[test]
     fn test_verbose_flag_requires_single_line() {
@@ -881,5 +940,45 @@ mod tests {
         assert!(validate_activations_flag(Some(0)).is_err());
         assert!(validate_activations_flag(Some(1)).is_ok());
         assert!(validate_activations_flag(None).is_ok());
+    }
+
+    #[test]
+    fn test_goal_flag_requires_positive_count() {
+        assert!(validate_goal_flag(Some(0)).is_err());
+        assert!(validate_goal_flag(Some(1)).is_ok());
+        assert!(validate_goal_flag(None).is_ok());
+    }
+
+    #[test]
+    fn test_filter_selected_goals_returns_requested_goal() {
+        let goals = vec![
+            GoalInfo {
+                goal_name: "g1".to_string(),
+                has_cached_proof: false,
+                steps: None,
+            },
+            GoalInfo {
+                goal_name: "g2".to_string(),
+                has_cached_proof: false,
+                steps: None,
+            },
+        ];
+
+        let (filtered, selected_goal) = filter_selected_goals(goals, Some(2)).unwrap();
+        assert_eq!(selected_goal, Some(2));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].goal_name, "g2");
+    }
+
+    #[test]
+    fn test_filter_selected_goals_rejects_out_of_range() {
+        let goals = vec![GoalInfo {
+            goal_name: "g1".to_string(),
+            has_cached_proof: false,
+            steps: None,
+        }];
+
+        let error = filter_selected_goals(goals, Some(2)).unwrap_err();
+        assert!(error.contains("out of range"));
     }
 }
