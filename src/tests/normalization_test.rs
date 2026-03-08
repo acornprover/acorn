@@ -1,5 +1,7 @@
 use crate::elaborator::environment::Environment;
 use crate::kernel::kernel_context::KernelContext;
+use crate::module::LoadState;
+use crate::project::Project;
 
 #[cfg(feature = "iet")]
 fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
@@ -110,6 +112,45 @@ fn test_tautology_elimination() {
 
     env.add("theorem two(n: Nat) { n = n or n != n }");
     norm.check(&env, "two", &[]);
+}
+
+#[test]
+fn test_forall_reflexive_goal_keeps_normalized_goal() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type MyType: axiom
+
+        theorem goal(x: MyType) {
+            x = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let cursor = env.get_node_by_goal_name("goal");
+    let normalized_goal = cursor
+        .normalized_goal()
+        .expect("reflexive forall goal should normalize");
+    assert!(
+        normalized_goal
+            .steps
+            .iter()
+            .any(|step| step.clause.is_impossible()),
+        "expected negated reflexive forall goal to normalize to contradiction, got {:?}",
+        normalized_goal
+            .steps
+            .iter()
+            .map(|step| step.clause.to_string())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[cfg(not(feature = "iet"))]

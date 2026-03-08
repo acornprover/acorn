@@ -1703,6 +1703,12 @@ impl<'a> Clausifier<'a> {
     ) -> bool {
         use std::collections::HashSet;
 
+        // If clausification already produced an impossible clause, the existential body is
+        // contradictory regardless of whether the witness type is inhabited.
+        if clauses.iter().any(Clause::is_impossible) {
+            return false;
+        }
+
         // Collect all synthetic atoms that appear in any clause
         let mut used_synthetics: HashSet<(ModuleId, AtomId)> = HashSet::new();
         for clause in clauses {
