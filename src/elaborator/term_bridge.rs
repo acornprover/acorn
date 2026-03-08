@@ -693,21 +693,56 @@ impl<'a> TermBridge<'a> {
         if let Some(symbol) = logical_head_symbol {
             match symbol {
                 Symbol::Not => {
-                    if !type_args.is_empty() || value_args.len() != 1 {
+                    if !type_args.is_empty() || value_args.len() > 1 {
                         panic!("malformed not term during denormalization: {}", term);
+                    }
+                    if value_args.is_empty() {
+                        let arg_type = AcornType::Bool;
+                        return AcornValue::lambda(
+                            vec![arg_type.clone()],
+                            AcornValue::Not(Box::new(AcornValue::Variable(0, arg_type))),
+                        );
                     }
                     return AcornValue::Not(Box::new(value_args.into_iter().next().unwrap()));
                 }
                 Symbol::And => {
-                    if !type_args.is_empty() || value_args.len() != 2 {
+                    if !type_args.is_empty() || value_args.len() > 2 {
                         panic!("malformed and term during denormalization: {}", term);
+                    }
+                    if value_args.len() < 2 {
+                        let mut args = value_args;
+                        let mut lambda_args = vec![];
+                        while args.len() < 2 {
+                            let arg_index = lambda_args.len() as AtomId;
+                            lambda_args.push(AcornType::Bool);
+                            args.push(AcornValue::Variable(arg_index, AcornType::Bool));
+                        }
+                        let mut args = args.into_iter();
+                        return AcornValue::lambda(
+                            lambda_args,
+                            AcornValue::and(args.next().unwrap(), args.next().unwrap()),
+                        );
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::and(args.next().unwrap(), args.next().unwrap());
                 }
                 Symbol::Or => {
-                    if !type_args.is_empty() || value_args.len() != 2 {
+                    if !type_args.is_empty() || value_args.len() > 2 {
                         panic!("malformed or term during denormalization: {}", term);
+                    }
+                    if value_args.len() < 2 {
+                        let mut args = value_args;
+                        let mut lambda_args = vec![];
+                        while args.len() < 2 {
+                            let arg_index = lambda_args.len() as AtomId;
+                            lambda_args.push(AcornType::Bool);
+                            args.push(AcornValue::Variable(arg_index, AcornType::Bool));
+                        }
+                        let mut args = args.into_iter();
+                        return AcornValue::lambda(
+                            lambda_args,
+                            AcornValue::or(args.next().unwrap(), args.next().unwrap()),
+                        );
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::or(args.next().unwrap(), args.next().unwrap());
@@ -1007,6 +1042,71 @@ mod tests {
             AcornValue::equals(
                 AcornValue::Bool(true),
                 AcornValue::Variable(0, AcornType::Bool),
+            ),
+        );
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_denormalize_partial_not_becomes_lambda() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("not");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool],
+            AcornValue::Not(Box::new(AcornValue::Variable(0, AcornType::Bool))),
+        );
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_denormalize_partial_and_becomes_lambda() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("and");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool, AcornType::Bool],
+            AcornValue::and(
+                AcornValue::Variable(0, AcornType::Bool),
+                AcornValue::Variable(1, AcornType::Bool),
+            ),
+        );
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_denormalize_partial_and_with_one_value_arg_becomes_lambda() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("and(true)");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool],
+            AcornValue::and(
+                AcornValue::Bool(true),
+                AcornValue::Variable(0, AcornType::Bool),
+            ),
+        );
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_denormalize_partial_or_becomes_lambda() {
+        let kernel_context = KernelContext::new();
+        let bridge = TermBridge::new(&kernel_context);
+        let term = kernel_context.parse_term("or");
+        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+
+        let expected = AcornValue::lambda(
+            vec![AcornType::Bool, AcornType::Bool],
+            AcornValue::or(
+                AcornValue::Variable(0, AcornType::Bool),
+                AcornValue::Variable(1, AcornType::Bool),
             ),
         );
         assert_eq!(value, expected);
