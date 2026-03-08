@@ -113,9 +113,9 @@ pub struct Checker {
     /// For deductions among concrete clauses.
     term_graph: EqualityGraph,
 
-    /// Variable clauses are matched by exact canonical equality only.
+    /// Clauses are matched by exact canonical equality only.
     /// The `usize` value is the `step_id` (index into `self.reasons`) for that clause.
-    exact_variable_clauses: ImHashMap<Clause, usize>,
+    exact_clauses: ImHashMap<Clause, usize>,
 
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
@@ -132,7 +132,7 @@ impl Checker {
     pub fn new() -> Checker {
         Checker {
             term_graph: EqualityGraph::new(),
-            exact_variable_clauses: ImHashMap::new(),
+            exact_clauses: ImHashMap::new(),
             direct_contradiction: false,
             past_boolean_reductions: ImHashSet::new(),
             reasons: ImVector::new(),
@@ -156,15 +156,13 @@ impl Checker {
         let step_id = self.reasons.len();
         self.reasons.push_back(reason.clone());
 
-        if clause.has_any_variable() {
-            // Normalize before exact matching so we do not depend on literal ordering
-            // or variable numbering conventions at insertion sites.
-            let mut canonical_clause = clause.clone();
-            canonical_clause.normalize();
-            self.exact_variable_clauses
-                .entry(canonical_clause)
-                .or_insert(step_id);
+        // Normalize before exact matching so we do not depend on literal ordering
+        // or variable numbering conventions at insertion sites.
+        self.exact_clauses
+            .entry(clause.exact_match_key())
+            .or_insert(step_id);
 
+        if clause.has_any_variable() {
             if let Some(reduced_clause) =
                 self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
             {
@@ -244,27 +242,25 @@ impl Checker {
             return Some(StepReason::EqualityGraph);
         }
 
-        let mut canonical_clause = clause.clone();
-        canonical_clause.normalize();
-        if let Some(step_id) = self.exact_variable_clauses.get(&canonical_clause) {
+        let canonical_clause = clause.exact_match_key();
+        if let Some(step_id) = self.exact_clauses.get(&canonical_clause) {
             trace!(
                 clause = %clause,
-                result = "exact_variable_clause",
+                result = "exact_clause",
                 "checking clause"
             );
             return Some(self.reasons[*step_id].clone());
         }
 
         if clause.has_any_variable() {
-            let candidates: Vec<Clause> = self.exact_variable_clauses.keys().cloned().collect();
+            let candidates: Vec<Clause> = self.exact_clauses.keys().cloned().collect();
             for candidate in &candidates {
-                let Some(mut reduced_clause) =
+                let Some(reduced_clause) =
                     self.simplify_variable_clause_with_concrete_facts(candidate, kernel_context)
                 else {
                     continue;
                 };
-                reduced_clause.normalize();
-                if reduced_clause == canonical_clause {
+                if reduced_clause.exact_match_key() == canonical_clause {
                     trace!(
                         clause = %clause,
                         result = "simplified_variable_clause",
@@ -675,6 +671,63 @@ mod tests {
 
         let reduced = context.parse_clause("not g0(x0, c0)", &["Bool"]);
         assert!(checker.check_clause(&reduced, &context).is_some());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_checker_matches_identical_boolean_formula_literal_clause() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["g0", "g1", "g2", "g3"], "Bool -> Bool");
+
+        let x0 = Term::new_variable(0);
+        let g0 = context.parse_term("g0").apply(std::slice::from_ref(&x0));
+        let g1 = context.parse_term("g1").apply(std::slice::from_ref(&x0));
+        let g2 = context.parse_term("g2").apply(std::slice::from_ref(&x0));
+        let g3 = context.parse_term("g3").apply(std::slice::from_ref(&x0));
+        let term = Term::or(Term::and(g0, Term::or(Term::not(g1), Term::not(g2))), g3);
+
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(term)],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&clause, StepReason::Testing, &context);
+
+        let canonical = clause.exact_match_key();
+        assert!(
+            checker.exact_clauses.contains_key(&canonical),
+            "expected canonical clause {} to be stored for exact matching",
+            canonical
+        );
+        assert!(checker.check_clause(&clause, &context).is_some());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_checker_matches_identical_concrete_boolean_formula_literal_clause() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::and(Term::not(c0), Term::not(c1)))],
+            &LocalContext::empty(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&clause, StepReason::Testing, &context);
+
+        assert!(checker.check_clause(&clause, &context).is_some());
     }
 
     #[test]

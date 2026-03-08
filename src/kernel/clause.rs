@@ -8,8 +8,6 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
-#[cfg(feature = "iet")]
-use crate::kernel::term_normalization::normalize_boolean_subterms;
 use crate::module::ModuleId;
 
 /// A Clause represents a disjunction (an "or") of literals.
@@ -36,6 +34,7 @@ impl Clause {
         // Pair each literal with its initial index, filtering out impossible literals.
         let mut indexed_literals: Vec<(Literal, usize)> = literals
             .into_iter()
+            .flat_map(Self::normalize_literals_for_clause)
             .enumerate()
             .filter_map(|(i, lit)| {
                 if lit.is_impossible() {
@@ -125,6 +124,11 @@ impl Clause {
     /// Normalizes the clause, keeping the first `pinned` variables at their
     /// original positions (x0, x1, ..., x_{pinned-1}).
     pub fn normalize_with_pinned(&mut self, pinned: usize) {
+        self.literals = self
+            .literals
+            .drain(..)
+            .flat_map(Self::normalize_literals_for_clause)
+            .collect();
         self.literals.retain(|lit| !lit.is_impossible());
         self.literals.sort();
         self.literals.dedup();
@@ -151,6 +155,243 @@ impl Clause {
             literal.normalize_var_ids_with_context(&mut var_ids, &input_context);
         }
         self.context = input_context.remap(&var_ids);
+    }
+
+    pub(crate) fn exact_match_key(&self) -> Clause {
+        #[cfg(not(feature = "iet"))]
+        {
+            let mut clause = self.clone();
+            clause.normalize();
+            clause
+        }
+
+        #[cfg(feature = "iet")]
+        {
+            let mut clause = Clause {
+                literals: self
+                    .literals
+                    .clone()
+                    .into_iter()
+                    .flat_map(Self::normalize_literals_for_matching)
+                    .collect(),
+                context: self.context.clone(),
+            };
+            clause.literals.retain(|lit| !lit.is_impossible());
+            clause.literals.sort();
+            clause.literals.dedup();
+            clause.normalize_var_ids();
+            clause
+        }
+    }
+
+    #[cfg(not(feature = "iet"))]
+    fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
+        vec![literal]
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
+        let right = Self::normalize_boolean_term(&literal.right);
+        if right.is_true() {
+            let (left, positive) =
+                Self::normalize_signed_boolean_term(&literal.left, literal.positive);
+            return vec![Literal::from_signed_term(left, positive)];
+        }
+
+        vec![Literal::new(
+            literal.positive,
+            Self::normalize_boolean_term(&literal.left),
+            right,
+        )]
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_signed_boolean_term(term: &Term, positive: bool) -> (Term, bool) {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            return Self::normalize_signed_boolean_term(&args[0], !positive);
+        }
+
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
+            let left = Self::normalize_boolean_term_with_polarity(&args[0], false);
+            let right = Self::normalize_boolean_term_with_polarity(&args[1], false);
+            return (Term::and(left, right), !positive);
+        }
+
+        if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
+            let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
+            let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), false);
+            return (Term::exists(binder_type, body), !positive);
+        }
+
+        (Self::normalize_boolean_term(term), positive)
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_literals_for_matching(literal: Literal) -> Vec<Literal> {
+        let right = Self::normalize_boolean_term(&literal.right);
+        if right.is_true() {
+            return Self::normalize_signed_boolean_term_to_literals(
+                &literal.left,
+                literal.positive,
+            );
+        }
+
+        vec![Literal::new(
+            literal.positive,
+            Self::normalize_boolean_term(&literal.left),
+            right,
+        )]
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_signed_boolean_term_to_literals(term: &Term, positive: bool) -> Vec<Literal> {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            return Self::normalize_signed_boolean_term_to_literals(&args[0], !positive);
+        }
+
+        if positive {
+            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
+                let mut literals =
+                    Self::normalize_signed_boolean_term_to_literals(&args[0], positive);
+                literals.extend(Self::normalize_signed_boolean_term_to_literals(
+                    &args[1], positive,
+                ));
+                return literals;
+            }
+        } else if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
+            let mut literals = Self::normalize_signed_boolean_term_to_literals(&args[0], positive);
+            literals.extend(Self::normalize_signed_boolean_term_to_literals(
+                &args[1], positive,
+            ));
+            return literals;
+        }
+
+        if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
+            let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
+            let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), false);
+            return vec![Literal::from_signed_term(
+                Term::exists(binder_type, body),
+                !positive,
+            )];
+        }
+
+        if !positive {
+            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
+                let left = Self::normalize_boolean_term_with_polarity(&args[0], false);
+                let right = Self::normalize_boolean_term_with_polarity(&args[1], false);
+                return vec![Literal::positive(Term::and(left, right))];
+            }
+        }
+
+        vec![Literal::from_signed_term(
+            Self::normalize_boolean_term(term),
+            positive,
+        )]
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_boolean_term(term: &Term) -> Term {
+        Self::normalize_boolean_term_with_polarity(term, true)
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_boolean_term_with_polarity(term: &Term, positive: bool) -> Term {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            return Self::normalize_boolean_term_with_polarity(&args[0], !positive);
+        }
+
+        if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
+            let left = Self::normalize_boolean_term_with_polarity(&args[0], positive);
+            let right = Self::normalize_boolean_term_with_polarity(&args[1], positive);
+            return if positive {
+                Term::and(left, right)
+            } else {
+                Term::or(left, right)
+            };
+        }
+
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
+            let left = Self::normalize_boolean_term_with_polarity(&args[0], positive);
+            let right = Self::normalize_boolean_term_with_polarity(&args[1], positive);
+            return if positive {
+                Term::or(left, right)
+            } else {
+                Term::and(left, right)
+            };
+        }
+
+        match term.as_ref().decompose() {
+            Decomposition::ForAll(binder_type, body) => {
+                let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
+                let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), positive);
+                if positive {
+                    Term::forall(binder_type, body)
+                } else {
+                    Term::exists(binder_type, body)
+                }
+            }
+            Decomposition::Exists(binder_type, body) => {
+                let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
+                let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), positive);
+                if positive {
+                    Term::exists(binder_type, body)
+                } else {
+                    Term::forall(binder_type, body)
+                }
+            }
+            Decomposition::Atom(_) => {
+                if positive {
+                    term.clone()
+                } else {
+                    Term::not(term.clone())
+                }
+            }
+            Decomposition::Application(function, argument) => {
+                let function = Self::normalize_boolean_term(&function.to_owned());
+                let argument = Self::normalize_boolean_term(&argument.to_owned());
+                let rebuilt = Self::normalize_boolean_eq(function.apply(&[argument]));
+                if positive {
+                    rebuilt
+                } else {
+                    Term::not(rebuilt)
+                }
+            }
+            Decomposition::Pi(input, output) => {
+                let input = Self::normalize_boolean_term(&input.to_owned());
+                let output = Self::normalize_boolean_term(&output.to_owned());
+                let rebuilt = Term::pi(input, output);
+                if positive {
+                    rebuilt
+                } else {
+                    Term::not(rebuilt)
+                }
+            }
+            Decomposition::Lambda(input, body) => {
+                let input = Self::normalize_boolean_term(&input.to_owned());
+                let body = Self::normalize_boolean_term(&body.to_owned());
+                let rebuilt = Term::lambda(input, body);
+                if positive {
+                    rebuilt
+                } else {
+                    Term::not(rebuilt)
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "iet")]
+    fn normalize_boolean_eq(term: Term) -> Term {
+        let Some(args) = Self::split_symbol_application(&term, Symbol::Eq, 3) else {
+            return term;
+        };
+        let eq_type = args[0].clone();
+        let left = args[1].clone();
+        let right = args[2].clone();
+        if left <= right {
+            term
+        } else {
+            Term::eq(eq_type, right, left)
+        }
     }
 
     /// Create an impossible clause (empty clause, represents false).
@@ -892,11 +1133,6 @@ impl Clause {
         context: LocalContext,
         pinned_old_var_count: usize,
     ) -> BooleanReductionResult {
-        #[cfg(feature = "iet")]
-        let literals: Vec<Literal> = literals
-            .into_iter()
-            .map(Self::normalize_boolean_literal)
-            .collect();
         let (_, default_var_ids) = Clause::normalize_with_var_ids(literals.clone(), &context);
         let pinned_old_vars: Vec<AtomId> = default_var_ids
             .iter()
@@ -910,23 +1146,6 @@ impl Clause {
             var_ids,
             pre_norm_context: context,
         }
-    }
-
-    #[cfg(feature = "iet")]
-    fn normalize_boolean_literal(literal: Literal) -> Literal {
-        let mut positive = literal.positive;
-        let mut left = normalize_boolean_subterms(&literal.left);
-        let right = normalize_boolean_subterms(&literal.right);
-
-        if right.is_true() {
-            while let Some(args) = Self::split_symbol_application(&left, Symbol::Not, 1) {
-                left = args[0].clone();
-                positive = !positive;
-            }
-            return Literal::from_signed_term(left, positive);
-        }
-
-        Literal::new(positive, left, right)
     }
 
     fn with_replaced_literal_and_context(
@@ -1571,7 +1790,13 @@ mod tests {
         let reductions = clause.boolean_reductions(&kctx);
 
         let expected = Clause::new(vec![Literal::negative(a)], &LocalContext::empty());
+        #[cfg(not(feature = "iet"))]
         assert_eq!(reductions, vec![expected]);
+        #[cfg(feature = "iet")]
+        {
+            assert_eq!(clause, expected);
+            assert!(reductions.is_empty());
+        }
     }
 
     #[test]
@@ -1720,12 +1945,11 @@ mod tests {
             &LocalContext::empty(),
         );
 
-        let first = clause.boolean_reductions(&kctx);
         let expected = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
-        assert_eq!(first, vec![expected.clone()]);
+        assert_eq!(clause, expected);
 
-        let second = expected.boolean_reductions(&kctx);
-        assert_eq!(second, vec![Clause::impossible()]);
+        let first = clause.boolean_reductions(&kctx);
+        assert_eq!(first, vec![Clause::impossible()]);
         assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
     }
 
@@ -1741,7 +1965,7 @@ mod tests {
                 .apply(&[Term::atom(Atom::BoundVariable(0))]),
         );
         let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
-        let expected = Clause::new(
+        let expected_clause = Clause::new(
             vec![Literal::positive(Term::exists(
                 Term::bool_type(),
                 Term::not(
@@ -1751,7 +1975,23 @@ mod tests {
             ))],
             &LocalContext::empty(),
         );
-        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+        assert_eq!(clause, expected_clause);
+
+        let choose = Term::choose(
+            Term::bool_type(),
+            Term::lambda(
+                Term::bool_type(),
+                Term::not(
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                ),
+            ),
+        );
+        let expected_reduction = Clause::new(
+            vec![Literal::negative(kctx.parse_term("g0").apply(&[choose]))],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
     }
 
     #[cfg(feature = "iet")]
@@ -1767,7 +2007,7 @@ mod tests {
         ));
         let forall_term = Term::forall(Term::bool_type(), body);
         let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
-        let expected = Clause::new(
+        let expected_clause = Clause::new(
             vec![Literal::positive(Term::exists(
                 Term::bool_type(),
                 Term::and(
@@ -1778,7 +2018,27 @@ mod tests {
             ))],
             &LocalContext::empty(),
         );
-        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+        assert_eq!(clause, expected_clause);
+
+        let choose = Term::choose(
+            Term::bool_type(),
+            Term::lambda(
+                Term::bool_type(),
+                Term::and(
+                    Term::atom(Atom::BoundVariable(0)),
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                ),
+            ),
+        );
+        let expected_reduction = Clause::new(
+            vec![Literal::positive(Term::and(
+                choose.clone(),
+                kctx.parse_term("g0").apply(&[choose]),
+            ))],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
     }
 
     #[cfg(feature = "iet")]
@@ -1797,7 +2057,8 @@ mod tests {
             &LocalContext::from_types(vec![Term::bool_type()]),
         );
 
-        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+        assert_eq!(clause, expected);
+        assert!(clause.boolean_reductions(&kctx).is_empty());
     }
 
     #[cfg(feature = "iet")]

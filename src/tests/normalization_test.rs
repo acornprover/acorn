@@ -2,24 +2,23 @@ use crate::elaborator::environment::Environment;
 use crate::kernel::kernel_context::KernelContext;
 
 #[cfg(feature = "iet")]
-fn has_negated_inline_forall(clause: &crate::kernel::clause::Clause) -> bool {
+fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
     clause.literals.iter().any(|lit| {
-        !lit.positive
-            && lit.is_signed_term()
+        lit.is_signed_term()
             && matches!(
                 lit.left.as_ref().decompose(),
-                crate::kernel::term::Decomposition::ForAll(_, _)
+                crate::kernel::term::Decomposition::Exists(_, _)
             )
     })
 }
 
 #[cfg(feature = "iet")]
-fn get_negated_inline_forall_body(
+fn get_inline_exists_body(
     clause: &crate::kernel::clause::Clause,
 ) -> Option<crate::kernel::term::Term> {
     clause.literals.iter().find_map(|lit| {
-        if !lit.positive && lit.is_signed_term() {
-            if let crate::kernel::term::Decomposition::ForAll(_, body) =
+        if lit.is_signed_term() {
+            if let crate::kernel::term::Decomposition::Exists(_, body) =
                 lit.left.as_ref().decompose()
             {
                 return Some(body.to_owned());
@@ -92,7 +91,14 @@ fn test_bool_formulas() {
     norm.check(&env, "one", &["not x0 or x0"]);
 
     env.add("theorem two(a: Bool) { a implies a and (a and a) }");
+    #[cfg(not(feature = "iet"))]
     norm.check(&env, "two", &["or(not(x0), and(x0, and(x0, x0)))"]);
+    #[cfg(feature = "iet")]
+    norm.check(
+        &env,
+        "two",
+        &["not and(x0, or(not(x0), or(not(x0), not(x0))))"],
+    );
 }
 
 #[test]
@@ -155,14 +161,13 @@ fn test_iet_normalizes_quantifier_bodies_before_clausification() {
     assert_eq!(clauses.len(), 1, "expected a single clause");
     let clause = &clauses[0];
     assert!(
-        has_negated_inline_forall(clause),
-        "expected a negated inline forall: {:?}",
+        has_inline_exists(clause),
+        "expected an inline exists: {:?}",
         clause
     );
-    let body = get_negated_inline_forall_body(clause).expect("expected forall body");
+    let body = get_inline_exists_body(clause).expect("expected exists body");
     let bound = crate::kernel::term::Term::atom(crate::kernel::atom::Atom::BoundVariable(0));
-    let expected =
-        crate::kernel::term::Term::not(crate::kernel::term::Term::and(bound.clone(), bound));
+    let expected = crate::kernel::term::Term::and(bound.clone(), bound);
     assert_eq!(body, expected);
 }
 
@@ -753,7 +758,7 @@ fn test_normalizing_forall_inside_lambda() {
         assert_eq!(clauses.len(), 2, "expected two clauses");
         assert!(
             clauses.iter().any(|clause| {
-                !has_negated_inline_forall(clause)
+                !has_inline_exists(clause)
                     && clause.literals.len() == 2
                     && clause.literals.iter().any(|lit| lit.positive)
                     && clause.literals.iter().any(|lit| !lit.positive)
@@ -761,12 +766,10 @@ fn test_normalizing_forall_inside_lambda() {
             "expected the forward implication clause to stay first-order"
         );
         assert!(
-            clauses.iter().any(|clause| {
-                has_negated_inline_forall(clause)
-                    && clause.literals.len() == 2
-                    && clause.literals.iter().any(|lit| lit.positive)
-            }),
-            "expected the reverse implication to keep a negated forall inline"
+            clauses
+                .iter()
+                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+            "expected the reverse implication to keep an inline exists"
         );
     }
 }
@@ -831,19 +834,17 @@ fn test_normalizing_forall_inside_neq_lambda() {
         assert_eq!(clauses.len(), 2, "expected two clauses");
         assert!(
             clauses.iter().any(|clause| {
-                !has_negated_inline_forall(clause)
+                !has_inline_exists(clause)
                     && clause.literals.len() == 2
                     && clause.literals.iter().all(|lit| lit.positive)
             }),
             "expected one positive witness clause"
         );
         assert!(
-            clauses.iter().any(|clause| {
-                has_negated_inline_forall(clause)
-                    && clause.literals.len() == 2
-                    && clause.literals.iter().any(|lit| !lit.positive)
-            }),
-            "expected one clause with an inline negated forall"
+            clauses
+                .iter()
+                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+            "expected one clause with an inline exists"
         );
     }
 }
@@ -978,7 +979,10 @@ fn test_preserves_or_over_and_shape() {
     );
 
     let mut norm = KernelContext::new();
+    #[cfg(not(feature = "iet"))]
     norm.check(&env, "goal", &["or(and(a, b), c)"]);
+    #[cfg(feature = "iet")]
+    norm.check(&env, "goal", &["not and(or(not(a), not(b)), not(c))"]);
 }
 
 #[test]

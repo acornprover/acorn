@@ -197,7 +197,9 @@ impl<'a> Proof<'a> {
             }
         }
 
-        // Skip clauses from concrete assumptions
+        // Skip direct concrete assumptions because the checker already has them.
+        // Do not skip simplified outputs of assumptions: those are derived clauses,
+        // and later certificate steps may depend on them as prerequisites.
         let mut skip_clauses: HashSet<Clause> = HashSet::new();
         for (ps_id, step) in &self.steps {
             let concrete_id = ConcreteStepId::ProofStep(*ps_id);
@@ -207,10 +209,12 @@ impl<'a> Proof<'a> {
                 .get_var_types()
                 .iter()
                 .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
-            if step.rule.is_underlying_assumption()
-                && !step.clause.has_any_variable()
-                && !has_type_params
-            {
+            #[cfg(not(feature = "iet"))]
+            let should_skip = step.rule.is_underlying_assumption();
+            #[cfg(feature = "iet")]
+            let should_skip = step.rule.is_assumption();
+
+            if should_skip && !step.clause.has_any_variable() && !has_type_params {
                 let Some(cs) = concrete_steps.remove(&concrete_id) else {
                     continue;
                 };
@@ -418,6 +422,8 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
     use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
+    #[cfg(feature = "iet")]
+    use crate::kernel::proof_step::{SimplificationInfo, SingleSourceInfo};
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
     use crate::prover::active_set::ActiveSet;
@@ -604,6 +610,75 @@ mod tests {
         assert!(
             has_mid_specialization,
             "expected to keep Active(1)'s generic clause with specialization x0 -> c1"
+        );
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_collect_concrete_steps_keeps_simplified_concrete_assumption_output() {
+        use crate::kernel::literal::Literal;
+
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1", "c2"], "Bool");
+
+        let not_b_step = ProofStep::mock_from_clause(kctx.parse_clause("not c1", &[]));
+
+        let and_term = Term::and(kctx.parse_term("c0"), kctx.parse_term("c2"));
+        let original_step = ProofStep::mock_from_clause(Clause::new(
+            vec![
+                Literal::positive(and_term.clone()),
+                Literal::positive(kctx.parse_term("c1")),
+            ],
+            &LocalContext::empty(),
+        ));
+
+        let simplified_clause =
+            Clause::new(vec![Literal::positive(and_term)], &LocalContext::empty());
+        let simplified_step = ProofStep {
+            clause: simplified_clause.clone(),
+            truthiness: original_step.truthiness,
+            rule: Rule::Simplification(SimplificationInfo {
+                original: Box::new(original_step),
+                simplifying_ids: vec![0],
+            }),
+            proof_size: 1,
+            depth: 0,
+            premise_map: PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        };
+
+        let reduced_clause = simplified_clause
+            .boolean_reductions(&kctx)
+            .into_iter()
+            .next()
+            .expect("expected conjunction to boolean-reduce");
+        let final_step = ProofStep::direct(
+            &simplified_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduced_clause,
+            PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &not_b_step);
+        proof.add_step(ProofStepId::Active(1), &simplified_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let concrete_clauses: Vec<_> = proof
+            .collect_concrete_steps()
+            .expect("concrete step reconstruction should succeed")
+            .into_iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+
+        assert!(
+            concrete_clauses.contains(&simplified_clause),
+            "expected reconstructed clauses to keep simplified assumption output {}\nactual clauses:\n{}",
+            simplified_clause,
+            concrete_clauses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

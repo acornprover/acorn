@@ -907,28 +907,28 @@ impl Certificate {
             if let Some(clause) =
                 Self::try_deserialize_single_literal_clause(&generic_term, &type_param_kinds)
             {
-                let mut term_kernel_context = kernel_context.clone();
-                let mut var_map = VariableMap::new();
-                for (var_id, acorn_type) in type_args.iter().enumerate() {
-                    let type_term = kernel_context
-                        .type_store
-                        .to_type_term_with_vars(acorn_type, None);
-                    var_map.set(var_id as AtomId, type_term);
-                }
-                let value_offset = var_map.len();
-                for (var_id, arg) in args.iter().enumerate() {
-                    let term =
-                        elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
-                    let mut term_view =
-                        Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
-                    let term = term_view.clausify_term_for_claim_arg(&term)?;
-                    var_map.set((value_offset + var_id) as AtomId, term);
-                }
+                let var_map = Self::build_claim_var_map(
+                    type_args.as_slice(),
+                    args.as_slice(),
+                    bindings,
+                    kernel_context,
+                )?;
+                return Ok(Some(Claim { clause, var_map }));
+            }
+            if let Some(clause) =
+                Self::try_deserialize_single_formula_clause(&generic_term, &type_param_kinds)
+            {
+                let var_map = Self::build_claim_var_map(
+                    type_args.as_slice(),
+                    args.as_slice(),
+                    bindings,
+                    kernel_context,
+                )?;
                 return Ok(Some(Claim { clause, var_map }));
             }
             // This lambda form only round-trips to `Claim { clause, var_map }` when
-            // the body clausifies to a single clause. If it doesn't, let callers
-            // fall back to plain claim parsing.
+            // the body can be represented as a single inline clause. If it doesn't,
+            // let callers fall back to plain claim parsing.
             return Ok(None);
         }
         let clause = clauses
@@ -936,6 +936,22 @@ impl Certificate {
             .next()
             .expect("clauses has exactly one element");
 
+        let var_map = Self::build_claim_var_map(
+            type_args.as_slice(),
+            args.as_slice(),
+            bindings,
+            kernel_context,
+        )?;
+
+        Ok(Some(Claim { clause, var_map }))
+    }
+
+    fn build_claim_var_map(
+        type_args: &[AcornType],
+        args: &[AcornValue],
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) -> Result<VariableMap, CodeGenError> {
         let mut term_kernel_context = kernel_context.clone();
         let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
@@ -952,8 +968,7 @@ impl Certificate {
             let term = term_view.clausify_term_for_claim_arg(&term)?;
             var_map.set((value_offset + var_id) as AtomId, term);
         }
-
-        Ok(Some(Claim { clause, var_map }))
+        Ok(var_map)
     }
 
     fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
@@ -1011,6 +1026,29 @@ impl Certificate {
         let literal = Self::try_term_to_single_denormalized_literal(&body)?;
         Some(Clause::from_literals_unnormalized(
             vec![literal],
+            &local_context,
+        ))
+    }
+
+    fn try_deserialize_single_formula_clause(
+        generic_term: &Term,
+        type_param_kinds: &[Term],
+    ) -> Option<Clause> {
+        let mut local_context = LocalContext::empty();
+        for kind in type_param_kinds {
+            local_context.push_type(kind.clone());
+        }
+
+        let mut body = generic_term.clone();
+        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
+            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
+            body = binder_body
+                .to_owned()
+                .substitute_bound(0, &Term::new_variable(fresh_var))
+                .shift_bound(0, -1);
+        }
+        Some(Clause::from_literals_unnormalized(
+            vec![Literal::positive(body)],
             &local_context,
         ))
     }
@@ -1630,6 +1668,88 @@ mod tests {
             CertificateStep::Claim(roundtrip_claim) => assert_eq!(roundtrip_claim, claim),
             _ => panic!("expected claim step"),
         }
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_parsed_claim_matches_definition_clause_under_iet() {
+        use crate::kernel::checker::{Checker, StepReason};
+        use crate::kernel::proof_step::Rule;
+
+        let code = r#"
+            type Nat: axiom
+            let a: Nat = axiom
+            let f: Nat -> Bool = axiom
+            let g: Nat -> Bool = axiom
+            let h: Nat -> Bool = axiom
+            define fimp(x: Nat) -> Bool { f(x) implies (g(x) and h(x)) }
+
+            theorem goal {
+                true
+            }
+        "#;
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", code);
+
+        let module_id = project
+            .load_module_by_name("main")
+            .expect("module should load");
+        let env = match project.get_module_by_id(module_id) {
+            LoadState::Ok(env) => env,
+            LoadState::Error(e) => panic!("module loading error: {}", e),
+            _ => panic!("unexpected module load state"),
+        };
+        let cursor = env.get_node_by_goal_name("goal");
+        let normalized_facts = cursor
+            .visible_normalized_facts()
+            .expect("normalized facts should be available");
+        let bindings = cursor
+            .goal_env()
+            .expect("goal env should be available")
+            .bindings
+            .clone();
+        let kernel_context = env
+            .kernel_context
+            .clone()
+            .expect("environment should have a kernel context");
+
+        let mut checker = Checker::new();
+        for normalized in normalized_facts {
+            for step in &normalized.steps {
+                let Rule::Assumption(info) = &step.rule else {
+                    panic!("expected normalized fact assumptions");
+                };
+                checker.insert_clause(
+                    &step.clause,
+                    StepReason::Assumption(info.source.clone()),
+                    &normalized.kernel_context,
+                );
+            }
+        }
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let step = Certificate::parse_code_line(
+            "function(x0: Nat) { f(x0) and (not g(x0) or not h(x0)) or fimp(x0) }(a)",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("claim-with-args parsing should succeed");
+
+        let CertificateStep::Claim(claim) = step else {
+            panic!("expected claim step");
+        };
+        let specialized = claim
+            .var_map
+            .specialize_clause(&claim.clause, kernel_context_cow.as_ref());
+        assert!(
+            checker
+                .check_clause(&claim.clause, kernel_context_cow.as_ref())
+                .or_else(|| checker.check_clause(&specialized, kernel_context_cow.as_ref()))
+                .is_some(),
+            "parsed claim should match one of the normalized definition clauses"
+        );
     }
 
     #[test]

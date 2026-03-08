@@ -967,7 +967,13 @@ fn test_proving_rewrite_only() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo) != f(Foo.bar)"]);
+    #[cfg(feature = "iet")]
+    assert_eq!(
+        c.proof.unwrap(),
+        vec!["not goal", "f(Foo.foo) != f(Foo.bar)"]
+    );
 }
 
 #[test]
@@ -999,7 +1005,10 @@ fn test_proving_modus_ponens_only() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
+    #[cfg(feature = "iet")]
+    assert_eq!(c.proof.unwrap(), vec!["not f(Foo.bar)", "not f(Foo.foo)"]);
 }
 
 #[test]
@@ -1059,7 +1068,10 @@ fn test_proving_exact_clause_match() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
+    #[cfg(feature = "iet")]
+    assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo)"]);
 }
 
 #[test]
@@ -1091,7 +1103,10 @@ fn test_proving_an_or() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
+    #[cfg(feature = "iet")]
+    assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo)"]);
 }
 
 #[test]
@@ -1480,9 +1495,20 @@ fn test_proving_with_injectivity() {
     );
 
     let c = prove(&mut p, "main", "goal");
+    #[cfg(not(feature = "iet"))]
     assert_eq!(
         c.proof.unwrap(),
         vec![
+            "g(Foo.foo) != g(Foo.bar)",
+            "g(Foo.baz) != g(Foo.foo)",
+            "g(Foo.baz) = g(Foo.foo)"
+        ]
+    );
+    #[cfg(feature = "iet")]
+    assert_eq!(
+        c.proof.unwrap(),
+        vec![
+            "g(Foo.baz) = g(Foo.foo) or g(Foo.foo) = g(Foo.bar)",
             "g(Foo.foo) != g(Foo.bar)",
             "g(Foo.baz) != g(Foo.foo)",
             "g(Foo.baz) = g(Foo.foo)"
@@ -1600,9 +1626,19 @@ fn test_proving_multiple_simplifying() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
+            "function(x0: Foo) { f(x0) }(Foo.foo)",
+            "function(x0: Foo) { f(x0) }(Foo.bar)",
+        ],
+    );
+    #[cfg(feature = "iet")]
+    assert_proof_lines(
+        proof,
+        &[
+            "not f(Foo.foo) or not f(Foo.bar)",
             "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { f(x0) }(Foo.bar)",
         ],
