@@ -178,53 +178,106 @@ impl KernelContext {
     ) -> Result<Vec<Clause>, String> {
         term.validate();
 
-        let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
-            let mut skolem_ids = vec![];
-            let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-            let clauses = view.clausify_term(term, &mut skolem_ids)?;
-            (clauses, skolem_ids)
-        };
-
-        // For any of the created ids that have not been defined yet, the output
-        // clauses will be their definition.
-        let mut output = vec![];
-        let mut undefined_ids = vec![];
-        for id in &skolem_ids {
-            if let Some(def) = self.synthetic_registry.get(id) {
-                for clause in &def.clauses {
-                    output.push(clause.clone());
+        #[cfg(feature = "iet")]
+        {
+            let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
+                let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+                if source.should_clausify_shallowly() {
+                    view.shallow_clausify_term(term)?
+                } else {
+                    view.preserve_term_as_clause(term)?
                 }
-            } else {
-                undefined_ids.push(*id);
-            }
-        }
-
-        if !undefined_ids.is_empty() {
-            // We have to define the skolem atoms that were declared during skolemization.
-            let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
-                let mut entries: Vec<_> = tvm.values().collect();
-                entries.sort_by_key(|(id, _)| *id);
-                entries.iter().map(|(_, kind)| kind.clone()).collect()
-            } else {
-                vec![]
             };
 
-            let synthetic_types: Vec<Term> = undefined_ids
-                .iter()
-                .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
-                .collect();
+            let mut output = vec![];
+            let mut undefined_ids = vec![];
+            for id in &skolem_ids {
+                if let Some(def) = self.synthetic_registry.get(id) {
+                    for clause in &def.clauses {
+                        output.push(clause.clone());
+                    }
+                } else {
+                    undefined_ids.push(*id);
+                }
+            }
 
-            self.define_synthetic_atoms(
-                undefined_ids,
-                type_vars,
-                synthetic_types,
-                clauses.clone(),
-                Some(source.clone()),
-            )?;
+            if !undefined_ids.is_empty() {
+                let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
+                    let mut entries: Vec<_> = tvm.values().collect();
+                    entries.sort_by_key(|(id, _)| *id);
+                    entries.iter().map(|(_, kind)| kind.clone()).collect()
+                } else {
+                    vec![]
+                };
+
+                let synthetic_types: Vec<Term> = undefined_ids
+                    .iter()
+                    .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
+                    .collect();
+
+                self.define_synthetic_atoms(
+                    undefined_ids,
+                    type_vars,
+                    synthetic_types,
+                    clauses.clone(),
+                    Some(source.clone()),
+                )?;
+            }
+
+            output.extend(clauses.into_iter());
+            return Ok(output);
         }
 
-        output.extend(clauses.into_iter());
-        Ok(output)
+        #[cfg(not(feature = "iet"))]
+        {
+            let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
+                let mut skolem_ids = vec![];
+                let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+                let clauses = view.clausify_term(term, &mut skolem_ids)?;
+                (clauses, skolem_ids)
+            };
+
+            // For any of the created ids that have not been defined yet, the output
+            // clauses will be their definition.
+            let mut output = vec![];
+            let mut undefined_ids = vec![];
+            for id in &skolem_ids {
+                if let Some(def) = self.synthetic_registry.get(id) {
+                    for clause in &def.clauses {
+                        output.push(clause.clone());
+                    }
+                } else {
+                    undefined_ids.push(*id);
+                }
+            }
+
+            if !undefined_ids.is_empty() {
+                // We have to define the skolem atoms that were declared during skolemization.
+                let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
+                    let mut entries: Vec<_> = tvm.values().collect();
+                    entries.sort_by_key(|(id, _)| *id);
+                    entries.iter().map(|(_, kind)| kind.clone()).collect()
+                } else {
+                    vec![]
+                };
+
+                let synthetic_types: Vec<Term> = undefined_ids
+                    .iter()
+                    .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
+                    .collect();
+
+                self.define_synthetic_atoms(
+                    undefined_ids,
+                    type_vars,
+                    synthetic_types,
+                    clauses.clone(),
+                    Some(source.clone()),
+                )?;
+            }
+
+            output.extend(clauses.into_iter());
+            Ok(output)
+        }
     }
 
     /// Converts a value proposition to CNF clauses via:
@@ -463,7 +516,12 @@ impl KernelContext {
             panic!("denormalized clause should validate: {:?}", e);
         }
         let renormalized = self
-            .normalize_value(&denormalized, NewConstantType::Local, &Source::mock(), None)
+            .normalize_value(
+                &denormalized,
+                NewConstantType::Local,
+                &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
+                None,
+            )
             .unwrap();
         if renormalized.len() != 1 {
             // For functional equalities, we know this check doesn't work.
@@ -564,7 +622,12 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .normalize_value(value, NewConstantType::Local, &Source::mock(), None)
+            .normalize_value(
+                value,
+                NewConstantType::Local,
+                &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
+                None,
+            )
             .unwrap();
         if actual.len() != expected.len() {
             panic!(

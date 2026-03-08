@@ -88,17 +88,16 @@ fn test_bool_formulas() {
     let mut env = Environment::test();
     let mut norm = KernelContext::new();
     env.add("theorem one(a: Bool) { a implies a or (a or a) }");
+    #[cfg(not(feature = "iet"))]
     norm.check(&env, "one", &["not x0 or x0"]);
+    #[cfg(feature = "iet")]
+    norm.check(&env, "one", &[]);
 
     env.add("theorem two(a: Bool) { a implies a and (a and a) }");
     #[cfg(not(feature = "iet"))]
     norm.check(&env, "two", &["or(not(x0), and(x0, and(x0, x0)))"]);
     #[cfg(feature = "iet")]
-    norm.check(
-        &env,
-        "two",
-        &["not and(x0, or(not(x0), or(not(x0), not(x0))))"],
-    );
+    norm.check(&env, "two", &["not x0 or and(x0, and(x0, x0))"]);
 }
 
 #[test]
@@ -441,7 +440,10 @@ fn test_if_then_else_in_boolean_disjunction() {
         "#,
     );
     let mut norm = KernelContext::new();
+    #[cfg(not(feature = "iet"))]
     norm.check(&env, "goal", &["not a or d or b", "d or c or a"]);
+    #[cfg(feature = "iet")]
+    norm.check(&env, "goal", &["ite(Bool, a, b, c) or d"]);
 }
 
 #[test]
@@ -982,7 +984,7 @@ fn test_preserves_or_over_and_shape() {
     #[cfg(not(feature = "iet"))]
     norm.check(&env, "goal", &["or(and(a, b), c)"]);
     #[cfg(feature = "iet")]
-    norm.check(&env, "goal", &["not and(or(not(a), not(b)), not(c))"]);
+    norm.check(&env, "goal", &["and(a, b) or c"]);
 }
 
 #[test]

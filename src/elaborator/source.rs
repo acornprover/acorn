@@ -245,6 +245,17 @@ impl Source {
         matches!(self.source_type, SourceType::Axiom(_))
     }
 
+    #[cfg(feature = "iet")]
+    pub fn should_clausify_shallowly(&self) -> bool {
+        matches!(
+            self.source_type,
+            SourceType::Axiom(_)
+                | SourceType::Theorem(_)
+                | SourceType::TypeDefinition(_, _)
+                | SourceType::ConstantDefinition(_, _)
+        )
+    }
+
     /// The name is an identifier for this source that is somewhat resilient to common edits.
     /// We use the line number as the name if there is no other identifier.
     /// This can be a duplicate in some cases, like type definitions.

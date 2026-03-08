@@ -153,6 +153,282 @@ impl<'a> Clausifier<'a> {
 
         Ok(clauses)
     }
+
+    #[cfg(feature = "iet")]
+    fn initial_clause_context(&self) -> (LocalContext, AtomId, usize) {
+        let mut context = LocalContext::empty();
+        let pinned = if let Some(type_var_map) = self.type_var_map() {
+            let mut entries: Vec<_> = type_var_map.values().collect();
+            entries.sort_by_key(|(id, _)| *id);
+            for (_, var_type) in entries {
+                context.push_type(var_type.clone());
+            }
+            type_var_map.len()
+        } else {
+            0
+        };
+        (context, pinned as AtomId, pinned)
+    }
+
+    #[cfg(feature = "iet")]
+    fn open_leading_foralls_as_free_vars(
+        &self,
+        term: &Term,
+        context: &mut LocalContext,
+        next_var_id: &mut AtomId,
+    ) -> Term {
+        let mut body = term.clone();
+        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
+            let var_id = *next_var_id;
+            *next_var_id += 1;
+            context.push_type(binder_type.to_owned());
+            body = self.open_binder_body(&binder_body.to_owned(), &Term::new_variable(var_id));
+        }
+        body
+    }
+
+    #[cfg(feature = "iet")]
+    fn literal_from_shallow_term(
+        &mut self,
+        term: &Term,
+        positive: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Literal, String> {
+        let cnf = self.term_to_cnf(term, !positive, stack, next_var_id, synthesized, context)?;
+        if let Some(literal) = cnf.to_literal() {
+            return Ok(literal);
+        }
+
+        let term = self.term_to_simple_term(term, stack, next_var_id, synthesized, context)?;
+        Ok(Literal::from_signed_term(term, positive))
+    }
+
+    #[cfg(feature = "iet")]
+    fn shallow_term_to_disjunctive_literals(
+        &mut self,
+        term: &Term,
+        positive: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+    ) -> Result<Vec<Literal>, String> {
+        if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
+            return self.shallow_term_to_disjunctive_literals(
+                &args[0],
+                !positive,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+            );
+        }
+
+        if positive {
+            if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
+                let mut left = self.shallow_term_to_disjunctive_literals(
+                    &args[0],
+                    true,
+                    stack,
+                    next_var_id,
+                    synthesized,
+                    context,
+                )?;
+                left.extend(self.shallow_term_to_disjunctive_literals(
+                    &args[1],
+                    true,
+                    stack,
+                    next_var_id,
+                    synthesized,
+                    context,
+                )?);
+                return Ok(left);
+            }
+        } else if let Some(args) = self.split_symbol_application(term, Symbol::And, 2) {
+            let mut left = self.shallow_term_to_disjunctive_literals(
+                &args[0],
+                false,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+            )?;
+            left.extend(self.shallow_term_to_disjunctive_literals(
+                &args[1],
+                false,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+            )?);
+            return Ok(left);
+        }
+
+        Ok(vec![self.literal_from_shallow_term(
+            term,
+            positive,
+            stack,
+            next_var_id,
+            synthesized,
+            context,
+        )?])
+    }
+
+    #[cfg(feature = "iet")]
+    fn shallow_term_to_clauses(
+        &mut self,
+        term: &Term,
+        positive: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        synthesized: &mut Vec<(ModuleId, AtomId)>,
+        context: &mut LocalContext,
+        pinned: usize,
+    ) -> Result<Vec<Clause>, String> {
+        if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
+            return self.shallow_term_to_clauses(
+                &args[0],
+                !positive,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+                pinned,
+            );
+        }
+
+        if positive {
+            if let Some(args) = self.split_symbol_application(term, Symbol::And, 2) {
+                let mut left = self.shallow_term_to_clauses(
+                    &args[0],
+                    true,
+                    stack,
+                    next_var_id,
+                    synthesized,
+                    context,
+                    pinned,
+                )?;
+                left.extend(self.shallow_term_to_clauses(
+                    &args[1],
+                    true,
+                    stack,
+                    next_var_id,
+                    synthesized,
+                    context,
+                    pinned,
+                )?);
+                return Ok(left);
+            }
+            if self.split_symbol_application(term, Symbol::Or, 2).is_some() {
+                let literals = self.shallow_term_to_disjunctive_literals(
+                    term,
+                    true,
+                    stack,
+                    next_var_id,
+                    synthesized,
+                    context,
+                )?;
+                let clause = Clause::new_with_pinned_vars(literals, context, pinned);
+                return if clause.is_tautology() {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![clause])
+                };
+            }
+        } else if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
+            let mut left = self.shallow_term_to_clauses(
+                &args[0],
+                false,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+                pinned,
+            )?;
+            left.extend(self.shallow_term_to_clauses(
+                &args[1],
+                false,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+                pinned,
+            )?);
+            return Ok(left);
+        } else if self
+            .split_symbol_application(term, Symbol::And, 2)
+            .is_some()
+        {
+            let literals = self.shallow_term_to_disjunctive_literals(
+                term,
+                false,
+                stack,
+                next_var_id,
+                synthesized,
+                context,
+            )?;
+            let clause = Clause::new_with_pinned_vars(literals, context, pinned);
+            return if clause.is_tautology() {
+                Ok(vec![])
+            } else {
+                Ok(vec![clause])
+            };
+        }
+
+        Ok(self
+            .term_to_cnf(term, !positive, stack, next_var_id, synthesized, context)?
+            .into_clauses_with_pinned(context, pinned))
+    }
+
+    #[cfg(feature = "iet")]
+    pub fn shallow_clausify_term(
+        &mut self,
+        term: &Term,
+    ) -> Result<(Vec<Clause>, Vec<(ModuleId, AtomId)>), String> {
+        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
+        let mut stack = vec![];
+        let mut synthesized = vec![];
+        let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
+        let clauses = self.shallow_term_to_clauses(
+            &opened,
+            true,
+            &mut stack,
+            &mut next_var_id,
+            &mut synthesized,
+            &mut context,
+            pinned,
+        )?;
+        Ok((clauses, synthesized))
+    }
+
+    #[cfg(feature = "iet")]
+    pub fn preserve_term_as_clause(
+        &mut self,
+        term: &Term,
+    ) -> Result<(Vec<Clause>, Vec<(ModuleId, AtomId)>), String> {
+        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
+        let mut stack = vec![];
+        let mut synthesized = vec![];
+        let literal = self.literal_from_shallow_term(
+            term,
+            true,
+            &mut stack,
+            &mut next_var_id,
+            &mut synthesized,
+            &mut context,
+        )?;
+        let clause = Clause::new_with_pinned_vars(vec![literal], &context, pinned);
+        let clauses = if clause.is_tautology() {
+            vec![]
+        } else {
+            vec![clause]
+        };
+        Ok((clauses, synthesized))
+    }
+
     /// If `term` is exactly `symbol(arg1, ..., argN)`, return those arguments.
     ///
     /// We require full application so callers can rely on fixed arity for builtins.

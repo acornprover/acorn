@@ -1037,9 +1037,19 @@ fn test_proving_with_active_resolution() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &["function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)"],
+    );
+    #[cfg(feature = "iet")]
+    assert_proof_lines(
+        proof,
+        &[
+            "g(y)",
+            "f(y)",
+            "function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)",
+        ],
     );
 }
 
@@ -1071,7 +1081,17 @@ fn test_proving_exact_clause_match() {
     #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
     #[cfg(feature = "iet")]
-    assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo)"]);
+    assert_eq!(
+        c.proof.unwrap(),
+        vec![
+            "not h(Foo.foo)",
+            "g(Foo.foo) or f(Foo.foo)",
+            "not f(Foo.foo) and not g(Foo.foo)",
+            "not g(Foo.foo)",
+            "not f(Foo.foo)",
+            "f(Foo.foo)",
+        ]
+    );
 }
 
 #[test]
@@ -1106,7 +1126,15 @@ fn test_proving_an_or() {
     #[cfg(not(feature = "iet"))]
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
     #[cfg(feature = "iet")]
-    assert_eq!(c.proof.unwrap(), vec!["f(Foo.foo)"]);
+    assert_eq!(
+        c.proof.unwrap(),
+        vec![
+            "not h(Foo.foo)",
+            "g(Foo.foo) or f(Foo.foo)",
+            "not g(Foo.foo)",
+            "f(Foo.foo)",
+        ]
+    );
 }
 
 #[test]
@@ -1323,9 +1351,22 @@ fn test_proving_random_bug() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
+            "g(y) != f(y)",
+            "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
+        ],
+    );
+    #[cfg(feature = "iet")]
+    assert_proof_lines(
+        proof,
+        &[
+            "not f(y) = z",
+            "f(y) != z",
+            "not f(y) = h(y)",
+            "h(y) != f(y)",
             "g(y) != f(y)",
             "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
         ],
@@ -1363,11 +1404,23 @@ fn test_proving_with_equality_factoring_basic() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
             "h(y) != g(y) or g(y) = f(y)",
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x0: Foo) { h(x0) != f(x0) }(y)",
+        ],
+    );
+    #[cfg(feature = "iet")]
+    assert_proof_lines(
+        proof,
+        &[
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "not (not f(y) = g(y) and not f(y) = g(y))",
+            "f(y) = g(y)",
             "g(y) = f(y)",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
         ],
@@ -1407,11 +1460,23 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
+    #[cfg(not(feature = "iet"))]
     assert_proof_lines(
         proof,
         &[
             "h(y) != g(y) or g(y) = f(y)",
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "g(y) = f(y)",
+            "function(x0: Foo) { h(x0) != f(x0) }(y)",
+        ],
+    );
+    #[cfg(feature = "iet")]
+    assert_proof_lines(
+        proof,
+        &[
+            "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "not (not f(y) = g(y) and not f(y) = g(y))",
+            "f(y) = g(y)",
             "g(y) = f(y)",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
         ],
