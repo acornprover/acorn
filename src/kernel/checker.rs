@@ -865,10 +865,8 @@ mod tests {
             "expected boolean reduction to surface the negated foralls as positive exists literals"
         );
         assert!(
-            clause_strings
-                .iter()
-                .any(|s| s.contains("choose(Bool, lambda(Bool => not(")),
-            "expected choose-based witness reduction to appear in the closure"
+            clause_strings.iter().all(|s| !s.contains("choose(")),
+            "expected disjunctive positive exists to stay inline rather than opening a choose witness"
         );
         assert!(
             closure.len() < 40,

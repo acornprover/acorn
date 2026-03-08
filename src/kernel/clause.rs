@@ -1089,6 +1089,12 @@ impl Clause {
                 }
 
                 #[cfg(feature = "iet")]
+                if self.literals.len() > 1 && literal.positive && literal.left.as_ref().is_exists()
+                {
+                    continue;
+                }
+
+                #[cfg(feature = "iet")]
                 {
                     if literal.positive {
                         if let Some((_witness, reduced)) =
@@ -1659,6 +1665,27 @@ mod tests {
         assert!(
             has_non_exists_reduction,
             "expected at least one reduction to eliminate the exists term"
+        );
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_boolean_reduction_positive_exists_in_disjunction_stays_inline() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "g0"], "Bool");
+
+        let exists_term = Term::exists(Term::bool_type(), kctx.parse_term("g0"));
+        let clause = Clause::new(
+            vec![
+                Literal::positive(kctx.parse_term("c0")),
+                Literal::positive(exists_term),
+            ],
+            &LocalContext::empty(),
+        );
+
+        assert!(
+            clause.boolean_reductions(&kctx).is_empty(),
+            "positive exists should not reduce when it is only one disjunct among others"
         );
     }
 

@@ -50,10 +50,22 @@ fn cancel_double_negation(term: &Term) -> Option<Term> {
     Some(inner_args[0].clone())
 }
 
+fn normalize_fully_applied_eq(term: &Term) -> Option<Term> {
+    let args = split_symbol_application(term, Symbol::Eq, 3)?;
+    let eq_type = args[0].clone();
+    let left = args[1].clone();
+    let right = args[2].clone();
+    if left <= right {
+        return None;
+    }
+    Some(Term::eq(eq_type, right, left))
+}
+
 /// Recursively normalizes boolean-valued subterms within an arbitrary term.
 ///
 /// This:
 /// - cancels `not not`
+/// - orders fully applied equality terms
 /// - recurses under quantifier bodies
 /// - preserves `not`, `and`, `or`, `forall`, and `exists` structure
 ///
@@ -62,7 +74,8 @@ fn cancel_double_negation(term: &Term) -> Option<Term> {
 /// without pushing `not` through connectives everywhere.
 pub fn normalize_boolean_subterms(term: &Term) -> Term {
     let normalized = normalize_term_children(term);
-    cancel_double_negation(&normalized).unwrap_or(normalized)
+    let normalized = cancel_double_negation(&normalized).unwrap_or(normalized);
+    normalize_fully_applied_eq(&normalized).unwrap_or(normalized)
 }
 
 #[cfg(test)]
@@ -134,6 +147,13 @@ mod tests {
             Term::and(Term::parse("c0"), Term::parse("c1")),
             Term::parse("c2"),
         ]);
+        assert_eq!(normalize_boolean_subterms(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_orders_fully_applied_eq() {
+        let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
+        let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
         assert_eq!(normalize_boolean_subterms(&term), expected);
     }
 }
