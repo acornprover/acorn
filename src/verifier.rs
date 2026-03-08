@@ -54,6 +54,9 @@ pub struct Verifier {
     /// If this is set, target must be as well.
     pub line_selection: Option<LineSelection>,
 
+    /// Optional 1-based goal index for a single selected line.
+    pub goal_index: Option<usize>,
+
     /// When this flag is set, verification exits immediately upon encountering any warning.
     /// This is useful for operations like the cleaner where any warning means the change
     /// should be reverted, so there's no point continuing verification.
@@ -118,6 +121,7 @@ impl Verifier {
             project_ptr,
             target: target.clone(),
             line_selection: None,
+            goal_index: None,
             exit_on_warning: false,
             events,
             builder,
@@ -135,7 +139,10 @@ impl Verifier {
             // line values are external line numbers (1-based)
             match line_sel {
                 LineSelection::Single(line) => {
-                    if let Err(e) = self.builder.set_single_goal(target, *line) {
+                    if let Err(e) =
+                        self.builder
+                            .set_single_goal_with_index(target, *line, self.goal_index)
+                    {
                         return Err(format!("Failed to set single goal: {}", e));
                     }
                 }
@@ -152,6 +159,7 @@ impl Verifier {
 
         // Build
         self.builder.build();
+        self.builder.validate_goal_filter()?;
         self.builder.metrics.print(self.builder.status);
 
         // Create the output
@@ -316,6 +324,68 @@ mod tests {
         assert_eq!(output3.metrics.certs_unused, 0);
         // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_single_line_goal_index_selects_specific_goal() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"type Nat: axiom
+typeclass T: Two {
+    first(x: T) { true }
+    second(x: T) { true }
+}
+instance Nat: Two
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("test".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(6));
+        verifier.goal_index = Some(2);
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.goals_total, 2);
+        assert_eq!(output.metrics.goals_success, 1);
+    }
+
+    #[test]
+    fn test_single_line_goal_index_out_of_range_is_error() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"type Nat: axiom
+typeclass T: Two {
+    first(x: T) { true }
+    second(x: T) { true }
+}
+instance Nat: Two
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("test".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(6));
+        verifier.goal_index = Some(3);
+
+        let error = verifier.run().unwrap_err();
+        assert!(error.contains("out of range"));
     }
 
     #[cfg(all(feature = "iet", feature = "validate"))]

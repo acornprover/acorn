@@ -118,6 +118,18 @@ fn validate_goal_flag(goal: Option<usize>) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_goal_requires_single_line(
+    goal: Option<usize>,
+    line_selection: &Option<LineSelection>,
+) -> Result<(), String> {
+    if goal.is_some() && !matches!(line_selection, Some(LineSelection::Single(_))) {
+        return Err(
+            "--goal requires a single line selection via TARGET:LINE or --line LINE".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn filter_selected_goals(
     goal_infos: Vec<GoalInfo>,
     goal_index: Option<usize>,
@@ -306,6 +318,14 @@ enum Command {
             value_name = "LINE"
         )]
         line_flag: Option<u32>,
+
+        /// 1-based goal index when the selected line has multiple goals
+        #[clap(
+            long = "goal",
+            help = "1-based goal index when the selected line has multiple goals.",
+            value_name = "INDEX"
+        )]
+        goal: Option<usize>,
 
         /// Exit immediately on the first verification failure
         #[clap(long, help = "Exit immediately on the first verification failure.")]
@@ -584,6 +604,7 @@ async fn main() {
             target,
             line_positional,
             line_flag,
+            goal,
             fail_fast,
             timeout,
             activations,
@@ -604,6 +625,14 @@ async fn main() {
                 std::process::exit(1);
             }
             if let Err(e) = validate_activations_flag(activations) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_goal_flag(goal) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_goal_requires_single_line(goal, &line_sel) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -642,6 +671,7 @@ async fn main() {
             verifier.builder.print_proof = line_selection.is_some();
             verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
+            verifier.goal_index = goal;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
             verifier.builder.operation_verb = "reproved";
@@ -924,7 +954,7 @@ mod tests {
 
     use super::{
         filter_selected_goals, validate_activations_flag, validate_goal_flag,
-        validate_verbose_flag, LineSelection,
+        validate_goal_requires_single_line, validate_verbose_flag, LineSelection,
     };
 
     #[test]
@@ -947,6 +977,19 @@ mod tests {
         assert!(validate_goal_flag(Some(0)).is_err());
         assert!(validate_goal_flag(Some(1)).is_ok());
         assert!(validate_goal_flag(None).is_ok());
+    }
+
+    #[test]
+    fn test_goal_requires_single_line() {
+        assert!(validate_goal_requires_single_line(Some(1), &None).is_err());
+        assert!(
+            validate_goal_requires_single_line(Some(1), &Some(LineSelection::Range(10, 12)))
+                .is_err()
+        );
+        assert!(
+            validate_goal_requires_single_line(Some(1), &Some(LineSelection::Single(10))).is_ok()
+        );
+        assert!(validate_goal_requires_single_line(None, &None).is_ok());
     }
 
     #[test]

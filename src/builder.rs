@@ -100,7 +100,11 @@ fn print_displayed_proof(
 #[derive(Clone, Debug)]
 pub enum GoalFilter {
     /// Verify only the goal at this exact line.
-    SingleLine { module: ModuleDescriptor, line: u32 },
+    SingleLine {
+        module: ModuleDescriptor,
+        line: u32,
+        goal_index: Option<usize>,
+    },
     /// Verify goals whose first_line falls within [start, end] (inclusive).
     LineRange {
         module: ModuleDescriptor,
@@ -157,6 +161,9 @@ pub struct Builder<'a> {
 
     /// The current module we are proving.
     current_module: Option<ModuleDescriptor>,
+
+    /// Number of goals encountered so far on the selected line for a single-line goal filter.
+    single_line_goal_count: usize,
 
     /// Whether the current module has neither errors nor warnings.
     /// I guess if there is no current module, it's vacuously good.
@@ -401,6 +408,7 @@ impl<'a> Builder<'a> {
             strict: false,
             exit_on_warning: false,
             current_module: None,
+            single_line_goal_count: 0,
             current_module_good: true,
             build_cache: None,
             used_cert_counts: HashMap::new(),
@@ -660,6 +668,17 @@ impl<'a> Builder<'a> {
         target: &str,
         external_line_number: u32,
     ) -> Result<(), String> {
+        self.set_single_goal_with_index(target, external_line_number, None)
+    }
+
+    /// Sets the builder to only build a single goal at a single line, optionally selecting a
+    /// 1-based goal index among all goals that start on that line.
+    pub fn set_single_goal_with_index(
+        &mut self,
+        target: &str,
+        external_line_number: u32,
+        goal_index: Option<usize>,
+    ) -> Result<(), String> {
         // Convert from 1-based (external) to 0-based (internal) line number
         let internal_line_number = external_line_number - 1;
 
@@ -677,7 +696,9 @@ impl<'a> Builder<'a> {
         self.goal_filter = Some(GoalFilter::SingleLine {
             module: module_descriptor,
             line: internal_line_number,
+            goal_index,
         });
+        self.single_line_goal_count = 0;
         Ok(())
     }
 
@@ -711,6 +732,31 @@ impl<'a> Builder<'a> {
             start: internal_start,
             end: internal_end,
         });
+        self.single_line_goal_count = 0;
+        Ok(())
+    }
+
+    pub fn validate_goal_filter(&self) -> Result<(), String> {
+        if let Some(GoalFilter::SingleLine {
+            line,
+            goal_index: Some(goal_index),
+            ..
+        }) = &self.goal_filter
+        {
+            if self.single_line_goal_count < *goal_index {
+                return Err(format!(
+                    "goal {} is out of range for selected line {} (found {} goal{})",
+                    goal_index,
+                    line + 1,
+                    self.single_line_goal_count,
+                    if self.single_line_goal_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1003,7 +1049,19 @@ impl<'a> Builder<'a> {
         let normalized_goal = cursor.normalized_goal();
         if let Some(ref filter) = self.goal_filter {
             let matches = match filter {
-                GoalFilter::SingleLine { line, .. } => goal.first_line == *line,
+                GoalFilter::SingleLine {
+                    line, goal_index, ..
+                } => {
+                    if goal.first_line != *line {
+                        false
+                    } else {
+                        self.single_line_goal_count += 1;
+                        match goal_index {
+                            Some(index) => self.single_line_goal_count == *index,
+                            None => true,
+                        }
+                    }
+                }
                 GoalFilter::LineRange { start, end, .. } => {
                     goal.first_line >= *start && goal.first_line <= *end
                 }
