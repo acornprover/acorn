@@ -192,22 +192,7 @@ impl SymbolTable {
         // ground type constructor is inhabited for any type arguments.
         self.record_inhabited_type_constructor(&var_type, symbol);
 
-        if matches!(symbol, Symbol::Synthetic(_, _) | Symbol::ScopedConstant(_)) {
-            return;
-        }
-
-        match self.type_to_element.get(&var_type).copied() {
-            None => {
-                self.type_to_element.insert(var_type, symbol);
-            }
-            Some(existing_symbol)
-                if matches!(existing_symbol, Symbol::Synthetic(_, _))
-                    && !matches!(symbol, Symbol::Synthetic(_, _)) =>
-            {
-                self.type_to_element.insert(var_type, symbol);
-            }
-            Some(_) => {}
-        }
+        self.type_to_element.entry(var_type).or_insert(symbol);
     }
 
     /// Returns the ground type inhabited by a polymorphic provider, if the provider can
@@ -1029,17 +1014,8 @@ impl SymbolTable {
             self.match_eliminator_info.insert(k.clone(), v.clone());
         }
         for (k, v) in other.type_to_element.iter() {
-            let replace = match self.type_to_element.get(k).copied() {
-                None => true,
-                Some(existing_symbol)
-                    if matches!(existing_symbol, Symbol::Synthetic(_, _))
-                        && !matches!(v, Symbol::Synthetic(_, _)) =>
-                {
-                    true
-                }
-                Some(_) => false,
-            };
-            if replace {
+            // Only insert if not already present (first registered wins)
+            if !self.type_to_element.contains_key(k) {
                 self.type_to_element.insert(k.clone(), *v);
             }
         }
@@ -1096,17 +1072,7 @@ impl SymbolTable {
             self.match_eliminator_info.insert(k.clone(), v.clone());
         }
         for (k, v) in other.type_to_element.iter() {
-            let replace = match self.type_to_element.get(k).copied() {
-                None => true,
-                Some(existing_symbol)
-                    if matches!(existing_symbol, Symbol::Synthetic(_, _))
-                        && !matches!(v, Symbol::Synthetic(_, _)) =>
-                {
-                    true
-                }
-                Some(_) => false,
-            };
-            if replace {
+            if !self.type_to_element.contains_key(k) {
                 self.type_to_element.insert(k.clone(), *v);
             }
         }
@@ -1140,16 +1106,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_type_element_ignores_synthetics() {
+    fn exact_type_element_tracks_synthetics() {
         let mut table = SymbolTable::new();
         let bool_type = Term::bool_type();
 
         let synthetic = table.declare_synthetic(ModuleId(0), bool_type.clone());
-        assert_eq!(table.get_element_of_type(&bool_type), None);
-        assert!(matches!(synthetic, Symbol::Synthetic(_, _)));
-
-        let concrete = table.add_global_constant(bool_type.clone());
-        assert_eq!(table.get_element_of_type(&bool_type), Some(concrete));
+        assert_eq!(table.get_element_of_type(&bool_type), Some(synthetic));
     }
 }
 
