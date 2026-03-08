@@ -46,6 +46,30 @@ pub struct Unifier<'a> {
     output_context: LocalContext,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TypeConstraintKind {
+    Type0,
+    Typeclass(crate::kernel::types::TypeclassId),
+    Other,
+}
+
+fn resolve_type_constraint_kind(
+    type_term: TermRef,
+    local_context: &LocalContext,
+) -> TypeConstraintKind {
+    match type_term.decompose() {
+        Decomposition::Atom(Atom::Symbol(Symbol::Type0)) => TypeConstraintKind::Type0,
+        Decomposition::Atom(Atom::Symbol(Symbol::Typeclass(tc_id))) => {
+            TypeConstraintKind::Typeclass(*tc_id)
+        }
+        Decomposition::Atom(Atom::FreeVariable(var_id)) => local_context
+            .get_var_type(*var_id as usize)
+            .map(|var_type| resolve_type_constraint_kind(var_type.as_ref(), local_context))
+            .unwrap_or(TypeConstraintKind::Other),
+        _ => TypeConstraintKind::Other,
+    }
+}
+
 impl<'a> Unifier<'a> {
     /// Creates a new unifier with the given number of scopes.
     pub fn new(num_scopes: usize, kernel_context: &'a KernelContext) -> Unifier<'a> {
@@ -75,6 +99,80 @@ impl<'a> Unifier<'a> {
     /// Returns a reference to the output context.
     pub fn output_context(&self) -> &LocalContext {
         &self.output_context
+    }
+
+    fn enforce_typeclass_constraint_on_type_expr(
+        &mut self,
+        required_type: TermRef,
+        required_tc: crate::kernel::types::TypeclassId,
+        type_expr: TermRef,
+    ) -> bool {
+        if type_expr.is_type0() {
+            return false;
+        }
+        if matches!(
+            type_expr.decompose(),
+            Decomposition::Pi(_, _) | Decomposition::Lambda(_, _)
+        ) {
+            return false;
+        }
+        if matches!(
+            type_expr.decompose(),
+            Decomposition::Atom(Atom::Symbol(Symbol::Bool))
+        ) {
+            return false;
+        }
+        if let Some(ground_id) = type_expr.as_type_atom() {
+            return self
+                .kernel_context
+                .type_store
+                .is_instance_of(ground_id, required_tc);
+        }
+
+        let Some(out_var_id) = type_expr.atomic_variable() else {
+            // Reject non-ground concrete type expressions like List[T].
+            return false;
+        };
+        let Some(var_type) = self
+            .output_context
+            .get_var_type(out_var_id as usize)
+            .cloned()
+        else {
+            return false;
+        };
+
+        match resolve_type_constraint_kind(var_type.as_ref(), &self.output_context) {
+            TypeConstraintKind::Typeclass(actual_tc) => {
+                if actual_tc == required_tc {
+                    return true;
+                }
+
+                let actual_extends_required = self
+                    .kernel_context
+                    .type_store
+                    .typeclass_extends(actual_tc, required_tc);
+                let required_extends_actual = self
+                    .kernel_context
+                    .type_store
+                    .typeclass_extends(required_tc, actual_tc);
+
+                if !actual_extends_required && !required_extends_actual {
+                    return false;
+                }
+
+                if required_extends_actual && !actual_extends_required {
+                    self.output_context
+                        .set_type(out_var_id as usize, required_type.to_owned());
+                }
+                true
+            }
+            TypeConstraintKind::Type0 => {
+                self.output_context
+                    .set_type(out_var_id as usize, required_type.to_owned());
+                true
+            }
+            TypeConstraintKind::Other => false,
+        }
     }
 
     /// Consumes the unifier and returns the output context.
@@ -452,104 +550,19 @@ impl<'a> Unifier<'a> {
         // If its type is a typeclass (e.g., Bar), the term must be a TYPE that
         // is an instance of that typeclass.
         if let Some(typeclass_id) = var_type.as_ref().as_typeclass() {
-            // The variable represents a TYPE that must implement the typeclass.
-            // First, reject TypeSort itself - it's not a type, it's a kind.
-            if term.as_ref().is_type0() {
-                return false;
-            }
-            // Reject Pi types (function kinds like Type -> Type).
-            // These are higher kinds, not types that can implement typeclasses.
-            if matches!(
-                term.as_ref().decompose(),
-                Decomposition::Pi(_, _) | Decomposition::Lambda(_, _)
+            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
+            let type_expr =
+                if term_type.as_ref().is_type0() || term_type.as_ref().as_typeclass().is_some() {
+                    term.as_ref()
+                } else {
+                    term_type.as_ref()
+                };
+            if !self.enforce_typeclass_constraint_on_type_expr(
+                var_type.as_ref(),
+                typeclass_id,
+                type_expr,
             ) {
                 return false;
-            }
-            // Check if the term itself is a ground type symbol (like MyType)
-            if let Some(ground_id) = term.as_ref().as_type_atom() {
-                // term IS a type (like MyType) - check if it implements the typeclass
-                if !self
-                    .kernel_context
-                    .type_store
-                    .is_instance_of(ground_id, typeclass_id)
-                {
-                    return false; // Type doesn't implement the required typeclass
-                }
-            } else if let Some(out_var_id) = term.as_ref().atomic_variable() {
-                // term is a type variable - check if we need to propagate constraints
-                let term_type =
-                    term.get_type_with_context(&self.output_context, self.kernel_context);
-                if let Some(other_tc) = term_type.as_ref().as_typeclass() {
-                    // Output variable also has a typeclass constraint - check compatibility
-                    if typeclass_id != other_tc {
-                        let other_extends_var = self
-                            .kernel_context
-                            .type_store
-                            .typeclass_extends(other_tc, typeclass_id);
-                        let var_extends_other = self
-                            .kernel_context
-                            .type_store
-                            .typeclass_extends(typeclass_id, other_tc);
-
-                        if !other_extends_var && !var_extends_other {
-                            // Incompatible typeclasses
-                            return false;
-                        }
-
-                        // If var's typeclass is more specific (extends other), update
-                        // the output variable's type to use the more specific constraint.
-                        if var_extends_other && !other_extends_var {
-                            self.output_context
-                                .set_type(out_var_id as usize, var_type.clone());
-                        }
-                    }
-                }
-                // If term_type is TypeSort or something else, allow it (constraint
-                // propagation would be needed for full checking)
-            } else if matches!(
-                term.as_ref().decompose(),
-                Decomposition::Atom(Atom::Symbol(Symbol::Bool))
-            ) {
-                // Built-in type Bool doesn't implement any typeclasses
-                return false;
-            } else {
-                // term is not a simple type - check its type
-                let term_type =
-                    term.get_type_with_context(&self.output_context, self.kernel_context);
-                if let Some(other_tc) = term_type.as_ref().as_typeclass() {
-                    // term has a typeclass type - check compatibility
-                    // Either other_tc extends typeclass_id (term is more specific), or
-                    // typeclass_id extends other_tc (var is more specific).
-                    if typeclass_id != other_tc {
-                        let other_extends_var = self
-                            .kernel_context
-                            .type_store
-                            .typeclass_extends(other_tc, typeclass_id);
-                        let var_extends_other = self
-                            .kernel_context
-                            .type_store
-                            .typeclass_extends(typeclass_id, other_tc);
-
-                        if !other_extends_var && !var_extends_other {
-                            // Incompatible typeclasses
-                            return false;
-                        }
-
-                        // If var's typeclass is more specific (extends other), update
-                        // the output variable's type to use the more specific constraint.
-                        if var_extends_other && !other_extends_var {
-                            if let Some(out_var_id) = term.atomic_variable() {
-                                self.output_context
-                                    .set_type(out_var_id as usize, var_type.clone());
-                            }
-                        }
-                    }
-                } else if !term_type.as_ref().is_type0() {
-                    // term's type is not TypeSort or a typeclass - reject
-                    return false;
-                }
-                // If term_type is TypeSort, we can't verify the constraint statically
-                // (would need to check at runtime or add constraint propagation)
             }
         } else {
             // Normal type unification (no typeclass constraint)
@@ -2249,6 +2262,32 @@ mod tests {
         assert!(
             !result,
             "Variable with typeclass constraint should NOT unify with Pi type (Type -> Type)"
+        );
+    }
+
+    #[test]
+    fn test_typeclass_rejects_parameterized_type() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("MyClass");
+        kctx.parse_type_constructor("List", 1);
+
+        let left_local = kctx.parse_local(&["MyClass"]);
+        let right_local = kctx.parse_local(&["Type"]);
+        let list_id = kctx.type_store.get_ground_id_by_name("List").unwrap();
+        let list_t = Term::new(
+            Atom::Symbol(Symbol::Type(list_id)),
+            vec![Term::atom(Atom::FreeVariable(0))],
+        );
+
+        let mut u = Unifier::new(3, &kctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_local)));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_local)));
+
+        let x0 = Term::atom(Atom::FreeVariable(0));
+        let result = u.unify(Scope::LEFT, &x0, Scope::RIGHT, &list_t);
+        assert!(
+            !result,
+            "Variable with typeclass constraint should NOT unify with parameterized type List[T]"
         );
     }
 

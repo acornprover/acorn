@@ -207,6 +207,68 @@ fn resolve_typeclass_constraint(
     None
 }
 
+fn typeclass_binding_is_compatible(
+    actual_tc_id: crate::kernel::types::TypeclassId,
+    required_tc_id: crate::kernel::types::TypeclassId,
+    kernel_context: &KernelContext,
+) -> bool {
+    actual_tc_id == required_tc_id
+        || kernel_context
+            .type_store
+            .typeclass_extends(actual_tc_id, required_tc_id)
+}
+
+fn type_term_satisfies_typeclass_constraint(
+    type_term: TermRef,
+    query_context: &LocalContext,
+    kernel_context: &KernelContext,
+    required_tc_id: crate::kernel::types::TypeclassId,
+) -> bool {
+    if let Some(ground_id) = type_term.as_type_atom() {
+        return kernel_context
+            .type_store
+            .is_instance_of(ground_id, required_tc_id);
+    }
+
+    if let Some(var_id) = type_term.atomic_variable() {
+        let Some(var_type) = query_context.get_var_type(var_id as usize) else {
+            return false;
+        };
+        let Some(actual_tc_id) = resolve_typeclass_constraint(var_type.as_ref(), query_context)
+        else {
+            return false;
+        };
+        return typeclass_binding_is_compatible(actual_tc_id, required_tc_id, kernel_context);
+    }
+
+    false
+}
+
+fn term_satisfies_typeclass_constraint(
+    term: TermRef,
+    query_context: &LocalContext,
+    kernel_context: &KernelContext,
+    required_tc_id: crate::kernel::types::TypeclassId,
+) -> bool {
+    let term_type = term.get_type_with_context(query_context, kernel_context);
+
+    if term_type.as_ref().is_type0() || term_type.as_ref().as_typeclass().is_some() {
+        return type_term_satisfies_typeclass_constraint(
+            term,
+            query_context,
+            kernel_context,
+            required_tc_id,
+        );
+    }
+
+    type_term_satisfies_typeclass_constraint(
+        term_type.as_ref(),
+        query_context,
+        kernel_context,
+        required_tc_id,
+    )
+}
+
 fn build_bindings(
     structural_replacements: &[TermRef],
     pattern_context: &LocalContext,
@@ -223,25 +285,18 @@ fn build_bindings(
     // Infer type variable bindings from the types of matched terms
     for (i, replacement) in structural_replacements.iter().enumerate() {
         if let Some(var_type) = pattern_context.get_var_type(i) {
-            // Check typeclass constraints: if the pattern variable has a typeclass constraint
-            // (e.g., F: Field) and the replacement is a ground type (e.g., Rat), verify that
-            // the ground type is an instance of the typeclass.
-            // Also handle indirect constraints: x1 has type x0 where x0: Field.
+            // Check typeclass constraints before inferring any dependent bindings.
+            // This rejects parameterized type terms like List[T] for constraints such as
+            // F: Add, while still allowing query-side type variables that already carry
+            // a compatible typeclass constraint.
             if let Some(tc_id) = resolve_typeclass_constraint(var_type.as_ref(), pattern_context) {
-                // For type variables (replacement is a ground type), check instance directly
-                if let Some(ground_id) = replacement.as_type_atom() {
-                    if !kernel_context.type_store.is_instance_of(ground_id, tc_id) {
-                        return None;
-                    }
-                } else {
-                    // For value variables whose type has a constraint, check the replacement's type
-                    let replacement_type =
-                        replacement.get_type_with_context(query_context, kernel_context);
-                    if let Some(ground_id) = replacement_type.as_ref().as_type_atom() {
-                        if !kernel_context.type_store.is_instance_of(ground_id, tc_id) {
-                            return None;
-                        }
-                    }
+                if !term_satisfies_typeclass_constraint(
+                    *replacement,
+                    query_context,
+                    kernel_context,
+                    tc_id,
+                ) {
+                    return None;
                 }
             }
 
@@ -1129,6 +1184,66 @@ mod tests {
         let unified = unifier.unify_literals(Scope::LEFT, pattern_lit, Scope::RIGHT, &lit, flipped);
 
         assert!(unified, "Unifier should validate the Rat rewrite as valid");
+    }
+
+    #[test]
+    fn test_rewrite_tree_typeclass_constraint_accepts_constrained_type_var() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Add");
+        kctx.parse_polymorphic_constant("g0", "A: Add", "A -> A");
+
+        let mut tree = RewriteTree::new();
+        let pattern_clause = kctx.parse_clause("g0(x0, x1) = x1", &["Add", "x0"]);
+        tree.insert_literal(
+            0,
+            &pattern_clause.literals[0],
+            pattern_clause.get_local_context(),
+        );
+
+        // Query-side type variable x0 is already constrained by Add, so the backwards
+        // rewrite should remain available.
+        let query_lctx = kctx.parse_local(&["Add", "x0"]);
+        let query_term = Term::parse("x1");
+        let rewrites = tree.get_rewrites(&query_term, 2, &query_lctx, &kctx);
+        let backward_rewrites: Vec<_> = rewrites.iter().filter(|r| !r.forwards).collect();
+
+        assert_eq!(
+            backward_rewrites.len(),
+            1,
+            "Backwards rewrite should be allowed when the query type variable already \
+             satisfies the required typeclass constraint."
+        );
+        assert_eq!(backward_rewrites[0].term, Term::parse("g0(x0, x1)"));
+    }
+
+    #[test]
+    fn test_rewrite_tree_typeclass_constraint_rejects_parameterized_type_var() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Add");
+        kctx.parse_type_constructor("List", 1);
+        kctx.parse_polymorphic_constant("g0", "A: Add", "A -> A");
+
+        let mut tree = RewriteTree::new();
+        let pattern_clause = kctx.parse_clause("g0(x0, x1) = x1", &["Add", "x0"]);
+        tree.insert_literal(
+            0,
+            &pattern_clause.literals[0],
+            pattern_clause.get_local_context(),
+        );
+
+        // Query-side value x1 has type List[T]. Even though List[T] is a type term,
+        // it does not witness the Add constraint required by the rewrite rule.
+        let query_lctx = kctx.parse_local(&["Type", "List[x0]"]);
+        let query_term = Term::parse("x1");
+        let rewrites = tree.get_rewrites(&query_term, 2, &query_lctx, &kctx);
+        let backward_rewrites: Vec<_> = rewrites.iter().filter(|r| !r.forwards).collect();
+
+        assert!(
+            backward_rewrites.is_empty(),
+            "Backwards rewrite should be rejected for parameterized type bindings like List[T] \
+             that do not satisfy the required typeclass constraint. Got {} backward rewrites.",
+            backward_rewrites.len()
+        );
     }
 
     #[test]
