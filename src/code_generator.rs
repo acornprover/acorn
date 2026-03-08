@@ -2028,6 +2028,24 @@ impl CodeGenerator<'_> {
                             );
                             return Ok(applied);
                         }
+                    } else if let AcornValue::Constant(c) = fa.function.as_ref() {
+                        if let ConstantName::TypeclassAttribute(_, typeclass, attr_name) = &c.name {
+                            if let AcornType::Data(datatype, _) = &receiver_type {
+                                let receiver_matches_explicit_param = c.params.is_empty()
+                                    || matches!(
+                                        c.params.as_slice(),
+                                        [AcornType::Data(param_datatype, _)] if param_datatype == datatype
+                                    );
+                                if receiver_matches_explicit_param
+                                    && !self.bindings.is_instance_of(datatype, typeclass)
+                                {
+                                    return Err(Error::GeneratedBadCode(format!(
+                                        "typeclass attribute '{}.{}' for concrete receiver '{}' is not available in the current scope",
+                                        typeclass.name, attr_name, datatype.name
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2361,7 +2379,15 @@ impl From<String> for Error {
 #[cfg(test)]
 mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
+    #[cfg(feature = "iet")]
+    use crate::elaborator::evaluator::Evaluator;
+    #[cfg(feature = "iet")]
+    use crate::elaborator::node::NodeCursor;
+    #[cfg(feature = "iet")]
+    use crate::module::LoadState;
     use crate::project::Project;
+    #[cfg(feature = "iet")]
+    use crate::syntax::expression::Expression;
 
     #[cfg(not(feature = "iet"))]
     #[test]
@@ -3140,6 +3166,78 @@ mod tests {
             "#,
         );
         p.check_goal_code("main", "goal", "x + -x = B.zero + B.zero");
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_codegen_rejects_future_instance_out_of_selected_scope() {
+        let code = "\
+typeclass A: Mul {
+    mul: (A, A) -> A
+}
+inductive Foo {
+    foo
+}
+let foo_zero: Foo = axiom
+theorem goal {
+    true
+}
+instance Foo: Mul {
+    define mul(self, other: Foo) -> Foo {
+        foo_zero
+    }
+}
+";
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", code);
+
+        let module_id = project
+            .load_module_by_name("main")
+            .expect("module should load");
+        let (full_bindings, goal_bindings) = {
+            let env = match project.get_module_by_id(module_id) {
+                LoadState::Ok(env) => env,
+                LoadState::Error(e) => panic!("module loading error: {}", e),
+                _ => panic!("unexpected module load state"),
+            };
+            let node_path = env
+                .path_for_line(8)
+                .expect("the selected theorem body line should resolve to a goal");
+            let cursor = NodeCursor::from_path(env, &node_path);
+            (
+                env.bindings.clone(),
+                cursor
+                    .goal_env()
+                    .expect("selected line should have goal bindings")
+                    .bindings
+                    .clone(),
+            )
+        };
+
+        let expr =
+            Expression::parse_value_string("foo_zero * foo_zero").expect("expression should parse");
+        let mut evaluator = Evaluator::new_with_allow_choose(&project, &full_bindings, None, true);
+        let value = evaluator
+            .evaluate_value(&expr, None)
+            .expect("full-module bindings should resolve the later instance");
+
+        let mut full_generator = CodeGenerator::new(&full_bindings);
+        assert_eq!(
+            full_generator
+                .value_to_code(&value)
+                .expect("value should render when the instance is in scope"),
+            "foo_zero * foo_zero"
+        );
+
+        let mut goal_generator = CodeGenerator::new(&goal_bindings);
+        let err = goal_generator
+            .value_to_code(&value)
+            .expect_err("selected goal bindings should reject future-instance calls");
+        assert!(
+            err.to_string().contains("current scope"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
