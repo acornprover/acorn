@@ -298,6 +298,12 @@ impl KernelContext {
             if input_type.as_ref().is_type_param_kind() {
                 return None;
             }
+            // Don't synthesize inhabitants via recursive self-type providers like
+            // `mul: T -> T -> T`; they require an inhabitant of the target type
+            // before they can produce one.
+            if input_type == *target_type {
+                return None;
+            }
             let arg = self.find_inhabitant_with_seen(&input_type, local_context, seen)?;
             witness = witness.apply(std::slice::from_ref(&arg));
             witness_type = witness_type.type_apply_with_arg(&arg)?;
@@ -1554,4 +1560,5 @@ mod tests {
         assert_eq!(witness.get_type_with_context(&local_ctx, &ctx), subgroup_g);
         assert!(ctx.provably_inhabited(&subgroup_g, Some(&local_ctx)));
     }
+
 }

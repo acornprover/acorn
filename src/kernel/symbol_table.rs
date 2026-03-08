@@ -192,7 +192,65 @@ impl SymbolTable {
         // ground type constructor is inhabited for any type arguments.
         self.record_inhabited_type_constructor(&var_type, symbol);
 
-        self.type_to_element.entry(var_type).or_insert(symbol);
+        if matches!(symbol, Symbol::Synthetic(_, _) | Symbol::ScopedConstant(_)) {
+            return;
+        }
+
+        match self.type_to_element.get(&var_type).copied() {
+            None => {
+                self.type_to_element.insert(var_type, symbol);
+            }
+            Some(existing_symbol)
+                if matches!(existing_symbol, Symbol::Synthetic(_, _))
+                    && !matches!(symbol, Symbol::Synthetic(_, _)) =>
+            {
+                self.type_to_element.insert(var_type, symbol);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Returns the ground type inhabited by a polymorphic provider, if the provider can
+    /// produce that type without requiring the type itself as a direct value argument.
+    fn admissible_inhabited_provider(var_type: &Term) -> Option<GroundTypeId> {
+        let mut current = var_type.as_ref();
+        let mut depth = 0;
+
+        loop {
+            if let Some((input, output)) = current.split_pi() {
+                match input.get_head_atom() {
+                    Atom::Symbol(Symbol::Type0) | Atom::Symbol(Symbol::Typeclass(_)) => {
+                        current = output;
+                        depth += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            break;
+        }
+
+        let mut result = current;
+        while let Some((_input, output)) = result.split_pi() {
+            result = output;
+        }
+        if depth == 0 || !matches!(result.get_head_atom(), Atom::Symbol(Symbol::Type(_))) {
+            return None;
+        }
+
+        let Atom::Symbol(Symbol::Type(ground_id)) = result.get_head_atom() else {
+            unreachable!()
+        };
+
+        let mut scan = current;
+        while let Some((input, output)) = scan.split_pi() {
+            if input == result {
+                return None;
+            }
+            scan = output;
+        }
+
+        Some(*ground_id)
     }
 
     /// If the type is a polymorphic type (Pi with Type/Typeclass inputs),
@@ -242,43 +300,22 @@ impl SymbolTable {
             break;
         }
 
-        // Prefer providers that can produce a value without additional value-level arguments.
-        // If `current` is still a Pi here, the symbol requires value arguments.
-        let has_value_args = current.split_pi().is_some();
-
-        // Track the eventual codomain after all remaining (value-level) Pi binders.
-        // This lets us use constructor-like symbols with value arguments as inhabitant providers,
-        // e.g. `Subgroup.new : (G -> Bool) -> Subgroup[G]`.
-        let mut result = current;
-        while let Some((_input, output)) = result.split_pi() {
-            result = output;
-        }
-        if depth > 0 && matches!(result.get_head_atom(), Atom::Symbol(Symbol::Type(_))) {
-            let Atom::Symbol(Symbol::Type(ground_id)) = result.get_head_atom() else {
-                unreachable!()
-            };
-            self.inhabited_type_constructors.insert(*ground_id);
+        if let Some(ground_id) = Self::admissible_inhabited_provider(var_type) {
+            self.inhabited_type_constructors.insert(ground_id);
             let existing = self
                 .inhabited_type_constructor_witnesses
-                .get(ground_id)
+                .get(&ground_id)
                 .copied();
             let replace = match existing {
                 None => true,
                 Some(existing_symbol) => {
-                    if matches!(symbol, Symbol::Synthetic(_, _))
-                        && !matches!(existing_symbol, Symbol::Synthetic(_, _))
-                    {
-                        // Don't let provisional synthetics replace a concrete provider.
-                        false
-                    } else {
-                        // Prefer providers that don't require value-level arguments.
-                        !has_value_args
-                    }
+                    matches!(existing_symbol, Symbol::Synthetic(_, _))
+                        && !matches!(symbol, Symbol::Synthetic(_, _))
                 }
             };
             if replace {
                 self.inhabited_type_constructor_witnesses
-                    .insert(*ground_id, symbol);
+                    .insert(ground_id, symbol);
             }
         }
     }
@@ -992,8 +1029,17 @@ impl SymbolTable {
             self.match_eliminator_info.insert(k.clone(), v.clone());
         }
         for (k, v) in other.type_to_element.iter() {
-            // Only insert if not already present (first registered wins)
-            if !self.type_to_element.contains_key(k) {
+            let replace = match self.type_to_element.get(k).copied() {
+                None => true,
+                Some(existing_symbol)
+                    if matches!(existing_symbol, Symbol::Synthetic(_, _))
+                        && !matches!(v, Symbol::Synthetic(_, _)) =>
+                {
+                    true
+                }
+                Some(_) => false,
+            };
+            if replace {
                 self.type_to_element.insert(k.clone(), *v);
             }
         }
@@ -1050,7 +1096,17 @@ impl SymbolTable {
             self.match_eliminator_info.insert(k.clone(), v.clone());
         }
         for (k, v) in other.type_to_element.iter() {
-            if !self.type_to_element.contains_key(k) {
+            let replace = match self.type_to_element.get(k).copied() {
+                None => true,
+                Some(existing_symbol)
+                    if matches!(existing_symbol, Symbol::Synthetic(_, _))
+                        && !matches!(v, Symbol::Synthetic(_, _)) =>
+                {
+                    true
+                }
+                Some(_) => false,
+            };
+            if replace {
                 self.type_to_element.insert(k.clone(), *v);
             }
         }
@@ -1076,6 +1132,24 @@ impl SymbolTable {
                 self.inhabited_typeclass_witnesses.insert(*tc_id, *symbol);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_type_element_ignores_synthetics() {
+        let mut table = SymbolTable::new();
+        let bool_type = Term::bool_type();
+
+        let synthetic = table.declare_synthetic(ModuleId(0), bool_type.clone());
+        assert_eq!(table.get_element_of_type(&bool_type), None);
+        assert!(matches!(synthetic, Symbol::Synthetic(_, _)));
+
+        let concrete = table.add_global_constant(bool_type.clone());
+        assert_eq!(table.get_element_of_type(&bool_type), Some(concrete));
     }
 }
 
