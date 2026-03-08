@@ -1560,5 +1560,4 @@ mod tests {
         assert_eq!(witness.get_type_with_context(&local_ctx, &ctx), subgroup_g);
         assert!(ctx.provably_inhabited(&subgroup_g, Some(&local_ctx)));
     }
-
 }

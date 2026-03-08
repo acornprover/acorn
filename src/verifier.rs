@@ -1043,7 +1043,7 @@ instance Nat: Two
 
     #[test]
     fn test_manifest_preserved_when_reproving_single_module() {
-        // This test mimics the `reprove <module> --write-cache` command behavior.
+        // This test mimics the `reprove <module> --save-results` command behavior.
         // The key difference from verify is: read_cache: false, write_cache: true
         let (acornlib, src, build) = setup();
 
@@ -1093,7 +1093,7 @@ instance Nat: Two
         );
 
         // Phase 2: Reprove only module_a with reprove-style config (read_cache: false, write_cache: true)
-        // This is what `reprove module_a --write-cache` does
+        // This is what `reprove module_a --save-results` does
         let reprove_config = ProjectConfig {
             use_filesystem: true,
             read_cache: false,

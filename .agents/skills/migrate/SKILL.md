@@ -80,7 +80,7 @@ Purpose:
 - Ensure newly generated feature-mode certs are immediately checkable.
 
 Required command:
-- `cargo run --profile release --features <feature>,validate -- verify --no-cache-skip --no-write-cache --fail-fast`
+- `cargo run --profile release --features <feature>,validate -- verify --ignore-hash --read-only --fail-fast`
 
 Outcomes:
 - If success: go to `S4` (ready for review, then flag flip).
@@ -97,8 +97,8 @@ Purpose:
 Actions:
 - Extract failing module/theorem/line from the failing output.
 - Reproduce quickly with no-write checks:
-  - `cargo run --profile release -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
-  - `cargo run --profile release --features <feature>,validate -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+  - `cargo run --profile release -- verify <module> --ignore-hash --read-only --fail-fast`
+  - `cargo run --profile release --features <feature>,validate -- verify <module> --ignore-hash --read-only --fail-fast`
 
 Outcomes:
 - If failure is reproduced in feature mode: go to `S3_edit`.
@@ -131,13 +131,13 @@ Purpose:
 
 Required commands:
 - Default mode module check (no-write):
-  - `cargo run --profile release -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+  - `cargo run --profile release -- verify <module> --ignore-hash --read-only --fail-fast`
 - Feature mode module check (no-write):
-  - `cargo run --profile release --features <feature>,validate -- verify <module> --no-cache-skip --no-write-cache --fail-fast`
+  - `cargo run --profile release --features <feature>,validate -- verify <module> --ignore-hash --read-only --fail-fast`
 
 Conditional command:
 - If and only if this iteration included explicit edits under `~/acornlib/src` for this module:
-  - `cargo run --profile release -- verify <module> --no-cache-skip --fail-fast`
+  - `cargo run --profile release -- verify <module> --ignore-hash --fail-fast`
   - then confirm write evidence with `git -C ~/acornlib status --short`.
 
 Permission note:
@@ -155,7 +155,7 @@ Purpose:
 - Decide whether to continue module loop or exit to review.
 
 Required command:
-- `cargo run --profile release --features <feature>,validate -- verify --no-cache-skip --no-write-cache --fail-fast`
+- `cargo run --profile release --features <feature>,validate -- verify --ignore-hash --read-only --fail-fast`
 
 Outcomes:
 - If success: go to `S4`.
@@ -187,7 +187,7 @@ Entry conditions:
 Required:
 - Stop and hand off for human review before any default flip.
 - Confirm default-mode whole-project verifiability (without writing cache):
-  - `cargo run --profile release -- verify --no-cache-skip --no-write-cache --fail-fast`
+  - `cargo run --profile release -- verify --ignore-hash --read-only --fail-fast`
 - If there are `~/acornlib/src` proof changes, human reviews them and then merges/pushes upstream first.
 - Human handles all commit/push/upstream communication.
 - In the S4 report, state explicitly:
@@ -207,7 +207,7 @@ Actions:
 - Adopt feature behavior as default in `acorn`.
 - Remove obsolete feature-flag code paths for this migration.
 - Regenerate certs in new format:
-  - `cargo run --profile release -- verify --no-cache-skip`
+  - `cargo run --profile release -- verify --ignore-hash`
 - Final validation:
   - `cargo run --profile release --features validate -- check`
 

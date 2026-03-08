@@ -211,17 +211,22 @@ enum Command {
         #[clap(value_name = "LINE")]
         line_positional: Option<u32>,
 
-        /// Don't skip unchanged modules based on manifest hash checks
+        /// Ignore manifest hash checks and reprocess unchanged modules
         #[clap(
-            long = "no-cache-skip",
+            long = "ignore-hash",
+            alias = "no-cache-skip",
             alias = "nohash",
-            help = "Don't skip unchanged modules based on manifest hash checks."
+            help = "Ignore manifest hash checks and reprocess unchanged modules."
         )]
-        no_cache_skip: bool,
+        ignore_hash: bool,
 
-        /// Don't write verification results to the cache
-        #[clap(long, help = "Don't write verification results to the cache.")]
-        no_write_cache: bool,
+        /// Verify without writing results to the cache
+        #[clap(
+            long = "read-only",
+            alias = "no-write-cache",
+            help = "Verify without writing results to the cache."
+        )]
+        read_only: bool,
 
         /// Search for a proof at a specific line number (requires target)
         #[clap(
@@ -347,9 +352,13 @@ enum Command {
         )]
         activations: Option<u32>,
 
-        /// Write results to the cache
-        #[clap(long, help = "Write reproved results to the cache.")]
-        write_cache: bool,
+        /// Save reproved results to the cache
+        #[clap(
+            long = "save-results",
+            alias = "write-cache",
+            help = "Save reproved results to the cache."
+        )]
+        save_results: bool,
 
         /// Print every activated proof step for a single selected goal
         #[clap(
@@ -451,8 +460,8 @@ async fn main() {
         Some(Command::Verify {
             target,
             line_positional,
-            no_cache_skip,
-            no_write_cache,
+            ignore_hash,
+            read_only,
             line_flag,
             fail_fast,
             strict,
@@ -491,7 +500,7 @@ async fn main() {
             let config = ProjectConfig {
                 use_filesystem: true,
                 read_cache: true,
-                write_cache: !no_write_cache,
+                write_cache: !read_only,
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -507,7 +516,7 @@ async fn main() {
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false;
             verifier.builder.strict = strict;
-            verifier.builder.check_hashes = !no_cache_skip && !strict;
+            verifier.builder.check_hashes = !ignore_hash && !strict;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
                 verifier.builder.timeout_secs = t;
@@ -608,7 +617,7 @@ async fn main() {
             fail_fast,
             timeout,
             activations,
-            write_cache,
+            save_results,
             verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
@@ -646,18 +655,18 @@ async fn main() {
                 None => None,
             };
 
-            // --write-cache with a line selection doesn't make sense:
+            // --save-results with a line selection doesn't make sense:
             // it would overwrite the full module cache with only the selected lines.
-            if write_cache && line_selection.is_some() {
-                println!("Error: --write-cache cannot be used with a line number selection");
+            if save_results && line_selection.is_some() {
+                println!("Error: --save-results cannot be used with a line number selection");
                 std::process::exit(1);
             }
 
-            // Reprove doesn't read from cache; optionally writes with --write-cache
+            // Reprove doesn't read from cache; optionally writes with --save-results
             let config = ProjectConfig {
                 use_filesystem: true,
                 read_cache: false,
-                write_cache,
+                write_cache: save_results,
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -951,10 +960,11 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use acorn::interfaces::GoalInfo;
+    use clap::Parser;
 
     use super::{
         filter_selected_goals, validate_activations_flag, validate_goal_flag,
-        validate_goal_requires_single_line, validate_verbose_flag, LineSelection,
+        validate_goal_requires_single_line, validate_verbose_flag, Args, Command, LineSelection,
     };
 
     #[test]
@@ -1023,5 +1033,58 @@ mod tests {
 
         let error = filter_selected_goals(goals, Some(2)).unwrap_err();
         assert!(error.contains("out of range"));
+    }
+
+    #[test]
+    fn test_verify_accepts_renamed_flags() {
+        let args = Args::try_parse_from(["acorn", "verify", "--ignore-hash", "--read-only"])
+            .expect("verify flags should parse");
+
+        match args.command {
+            Some(Command::Verify {
+                ignore_hash,
+                read_only,
+                ..
+            }) => {
+                assert!(ignore_hash);
+                assert!(read_only);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_verify_keeps_legacy_flag_aliases() {
+        let args = Args::try_parse_from(["acorn", "verify", "--no-cache-skip", "--no-write-cache"])
+            .expect("legacy verify flag aliases should parse");
+
+        match args.command {
+            Some(Command::Verify {
+                ignore_hash,
+                read_only,
+                ..
+            }) => {
+                assert!(ignore_hash);
+                assert!(read_only);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_reprove_accepts_renamed_and_legacy_save_flag() {
+        let new_args = Args::try_parse_from(["acorn", "reprove", "--save-results"])
+            .expect("renamed reprove flag should parse");
+        match new_args.command {
+            Some(Command::Reprove { save_results, .. }) => assert!(save_results),
+            _ => panic!("unexpected command"),
+        }
+
+        let legacy_args = Args::try_parse_from(["acorn", "reprove", "--write-cache"])
+            .expect("legacy reprove flag alias should parse");
+        match legacy_args.command {
+            Some(Command::Reprove { save_results, .. }) => assert!(save_results),
+            _ => panic!("unexpected command"),
+        }
     }
 }
