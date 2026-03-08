@@ -12,6 +12,7 @@
 // - After finding the match, we verify that the type bindings are compatible
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use qp_trie::{Entry, SubTrie, Trie};
 
@@ -25,6 +26,19 @@ use super::term::Term;
 use super::term::{Decomposition, TermRef};
 use super::unifier::{Scope, Unifier};
 use crate::module::ModuleId;
+
+const MAX_STACK_LIMIT_WARNINGS: usize = 20;
+static STACK_LIMIT_WARNING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn stack_limit_warning_message(warning_index: usize) -> Option<&'static str> {
+    if warning_index < MAX_STACK_LIMIT_WARNINGS {
+        Some("WARNING: PDT stack_limit exhausted - consider increasing the limit")
+    } else if warning_index == MAX_STACK_LIMIT_WARNINGS {
+        Some("WARNING: PDT stack_limit exhausted - subsequent warnings silenced")
+    } else {
+        None
+    }
+}
 
 /// Atoms are the leaf nodes in the PDT.
 /// Types are NOT represented - only symbols and variables.
@@ -777,7 +791,10 @@ where
     }
 
     if stack_limit == 0 {
-        eprintln!("WARNING: PDT stack_limit exhausted - consider increasing the limit");
+        let warning_index = STACK_LIMIT_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+        if let Some(message) = stack_limit_warning_message(warning_index) {
+            eprintln!("{}", message);
+        }
         return false;
     }
 
@@ -1333,6 +1350,26 @@ pub fn compute_unbound_var_remap(
 mod tests {
     use super::*;
     use crate::kernel::atom::Atom as KernelAtom;
+
+    #[test]
+    fn test_stack_limit_warning_message_is_capped() {
+        assert_eq!(
+            stack_limit_warning_message(0),
+            Some("WARNING: PDT stack_limit exhausted - consider increasing the limit")
+        );
+        assert_eq!(
+            stack_limit_warning_message(MAX_STACK_LIMIT_WARNINGS - 1),
+            Some("WARNING: PDT stack_limit exhausted - consider increasing the limit")
+        );
+        assert_eq!(
+            stack_limit_warning_message(MAX_STACK_LIMIT_WARNINGS),
+            Some("WARNING: PDT stack_limit exhausted - subsequent warnings silenced")
+        );
+        assert_eq!(
+            stack_limit_warning_message(MAX_STACK_LIMIT_WARNINGS + 1),
+            None
+        );
+    }
 
     #[test]
     fn test_edge_roundtrip() {

@@ -22,6 +22,45 @@ use crate::proof_display::display_certificate_lines;
 use crate::prover::{Outcome, ProverMode};
 
 static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
+const MAX_CHECK_CERT_ERROR_CHARS: usize = 600;
+const CHECK_CERT_ERROR_PREFIX_CHARS: usize = 320;
+const CHECK_CERT_ERROR_SUFFIX_CHARS: usize = 140;
+
+fn truncate_middle(
+    text: &str,
+    max_chars: usize,
+    prefix_chars: usize,
+    suffix_chars: usize,
+) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+
+    let prefix_len = prefix_chars.min(char_count);
+    let suffix_len = suffix_chars.min(char_count.saturating_sub(prefix_len));
+    let prefix: String = text.chars().take(prefix_len).collect();
+    let suffix: String = text
+        .chars()
+        .skip(char_count.saturating_sub(suffix_len))
+        .collect();
+    let omitted = char_count.saturating_sub(prefix_len + suffix_len);
+    format!("{} ... [{} chars omitted] ... {}", prefix, omitted, suffix)
+}
+
+fn compact_check_cert_error(error: &str) -> String {
+    let marker = "(generic debug:";
+    let trimmed = match error.find(marker) {
+        Some(index) => error[..index].trim_end(),
+        None => error.trim_end(),
+    };
+    truncate_middle(
+        trimmed,
+        MAX_CHECK_CERT_ERROR_CHARS,
+        CHECK_CERT_ERROR_PREFIX_CHARS,
+        CHECK_CERT_ERROR_SUFFIX_CHARS,
+    )
+}
 
 fn print_displayed_proof(
     bindings: &crate::elaborator::binding_map::BindingMap,
@@ -824,7 +863,7 @@ impl<'a> Builder<'a> {
                 .print_active_steps(&env.bindings, goal_kernel_context);
         }
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, goal_kernel_context, self.print_proof) {
+            match processor.make_cert(&env.bindings, goal_kernel_context, false) {
                 Ok(cert) => {
                     let mut checked_cert_lines = None;
                     #[cfg(feature = "validate")]
@@ -849,20 +888,16 @@ impl<'a> Builder<'a> {
                                     .map(|m| m.to_string())
                                     .unwrap_or_else(|| "unknown".to_string());
                                 let external_line = goal.first_line + 1;
-                                let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
-                                    "<failed to serialize certificate>".to_string()
-                                });
+                                let compact_error = compact_check_cert_error(&e.to_string());
                                 panic!(
                                     "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                     Repro command: acorn reprove {} --line {}\n\
-                                     Certificate JSON: {}",
+                                     Repro command: acorn reprove {} --line {}",
                                     goal.name,
                                     module_name,
                                     external_line,
-                                    e,
+                                    compact_error,
                                     module_name,
-                                    external_line,
-                                    cert_json
+                                    external_line
                                 );
                             }
                         }
@@ -885,20 +920,16 @@ impl<'a> Builder<'a> {
                                     .map(|m| m.to_string())
                                     .unwrap_or_else(|| "unknown".to_string());
                                 let external_line = goal.first_line + 1;
-                                let cert_json = serde_json::to_string(&cert).unwrap_or_else(|_| {
-                                    "<failed to serialize certificate>".to_string()
-                                });
+                                let compact_error = compact_check_cert_error(&e.to_string());
                                 panic!(
                                     "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                     Repro command: acorn reprove {} --line {}\n\
-                                     Certificate JSON: {}",
+                                     Repro command: acorn reprove {} --line {}",
                                     goal.name,
                                     module_name,
                                     external_line,
-                                    e,
+                                    compact_error,
                                     module_name,
-                                    external_line,
-                                    cert_json
+                                    external_line
                                 );
                             }
                         }
@@ -1318,5 +1349,26 @@ impl<'a> Builder<'a> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_check_cert_error;
+
+    #[test]
+    fn test_compact_check_cert_error_strips_generic_debug() {
+        let error = "Claim failed\n(generic debug: huge blob)";
+        assert_eq!(compact_check_cert_error(error), "Claim failed");
+    }
+
+    #[test]
+    fn test_compact_check_cert_error_truncates_middle() {
+        let error = format!("prefix {} suffix", "x".repeat(1000));
+        let compact = compact_check_cert_error(&error);
+        assert!(compact.contains("["));
+        assert!(compact.contains("chars omitted"));
+        assert!(compact.starts_with("prefix "));
+        assert!(compact.ends_with(" suffix"));
     }
 }

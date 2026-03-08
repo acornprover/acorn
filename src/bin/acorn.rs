@@ -509,7 +509,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.print_proof = line_selection.is_some();
+            verifier.builder.print_proof = false;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = true;
             verifier.builder.check_hashes = false;

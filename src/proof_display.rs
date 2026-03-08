@@ -6,6 +6,8 @@ use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase,
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::AtomId;
 
+const MAX_DISPLAY_STATEMENT_CHARS: usize = 200;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DisplayedProofLine {
     pub statement: String,
@@ -218,6 +220,20 @@ fn render_value_with_aliases(
     }
 }
 
+fn truncate_statement(statement: String) -> String {
+    let chars: Vec<char> = statement.chars().collect();
+    if chars.len() <= MAX_DISPLAY_STATEMENT_CHARS {
+        return statement;
+    }
+
+    let head_len = 120;
+    let tail_len = 60;
+    let omitted = chars.len() - head_len - tail_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head} ... [{omitted} chars omitted] ... {tail}")
+}
+
 fn render_alias_declaration(
     bindings: &BindingMap,
     alias: &ChooseAlias,
@@ -256,7 +272,7 @@ pub fn display_certificate_lines(
             .iter()
             .enumerate()
             .map(|(i, line)| DisplayedProofLine {
-                statement: line.statement.clone(),
+                statement: truncate_statement(line.statement.clone()),
                 reason: line.reason.description(),
                 source_index: Some(i),
             })
@@ -277,13 +293,13 @@ pub fn display_certificate_lines(
             && aliases[visible_alias_count].first_source_index == source_index
         {
             displayed.push(DisplayedProofLine {
-                statement: render_alias_declaration(
+                statement: truncate_statement(render_alias_declaration(
                     bindings,
                     &aliases[visible_alias_count],
                     visible_alias_count,
                     &alias_indices,
                     &alias_names,
-                ),
+                )),
                 reason: "display alias".to_string(),
                 source_index: None,
             });
@@ -291,13 +307,13 @@ pub fn display_certificate_lines(
         }
 
         displayed.push(DisplayedProofLine {
-            statement: render_value_with_aliases(
+            statement: truncate_statement(render_value_with_aliases(
                 bindings,
                 &line.value,
                 &line.statement,
                 &alias_indices,
                 &alias_names[..visible_alias_count],
-            ),
+            )),
             reason: line.reason.description(),
             source_index: Some(source_index),
         });
@@ -308,7 +324,7 @@ pub fn display_certificate_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::display_certificate_lines;
+    use super::{display_certificate_lines, MAX_DISPLAY_STATEMENT_CHARS};
     use crate::certificate::CertificateLine;
     use crate::elaborator::acorn_type::AcornType;
     use crate::elaborator::acorn_value::AcornValue;
@@ -345,5 +361,25 @@ mod tests {
         assert_eq!(displayed[1].reason, "previous claim");
         assert_eq!(displayed[2].statement, "not e1");
         assert_eq!(displayed[2].reason, "boolean reduction");
+    }
+
+    #[test]
+    fn test_display_certificate_lines_truncates_long_statements() {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", "theorem goal { true }\n");
+        let module_id = project.expect_ok("main");
+        let env = project.get_env_by_id(module_id).unwrap();
+
+        let long_statement = "x".repeat(MAX_DISPLAY_STATEMENT_CHARS + 25);
+        let lines = vec![CertificateLine {
+            statement: long_statement.clone(),
+            reason: StepReason::PreviousClaim,
+            value: AcornValue::Bool(true),
+        }];
+
+        let displayed = display_certificate_lines(&env.bindings, &lines);
+        assert_eq!(displayed.len(), 1);
+        assert!(displayed[0].statement.len() < long_statement.len());
+        assert!(displayed[0].statement.contains("[45 chars omitted]"));
     }
 }
