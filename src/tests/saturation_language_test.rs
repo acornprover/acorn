@@ -2256,3 +2256,87 @@ fn test_subgroup_identity_existence_cert_generation() {
         "#,
     );
 }
+
+#[cfg(not(feature = "iet"))]
+#[test]
+fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_args() {
+    let text = r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        typeclass G: Group {
+            1: G
+        }
+
+        define subgroup_constraint[G: Group](contains: G -> Bool) -> Bool {
+            contains(G.1)
+        }
+
+        define is_identity[G: Group](g: G) -> Bool {
+            g = G.1
+        }
+
+        theorem identity_subgroup_constraint[G: Group] {
+            subgroup_constraint(is_identity[G])
+        }
+
+        structure Subgroup[G: Group] {
+            contains: G -> Bool
+        } constraint {
+            subgroup_constraint(contains)
+        }
+
+        let identity_subgroup[G: Group]: Subgroup[G] satisfy {
+            Subgroup.new_option(is_identity[G]) = Option.some(identity_subgroup)
+        }
+    "#;
+
+    let mut project = Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(env) => env,
+        crate::module::LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+    let cursor = env
+        .iter_goals()
+        .find(|cursor| {
+            cursor
+                .goal()
+                .map(|goal| goal.name.starts_with("exists(k0: Subgroup["))
+                .unwrap_or(false)
+        })
+        .expect("expected subgroup existence goal");
+    let goal_env = cursor.goal_env().unwrap();
+
+    let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
+    processor.add_module_facts(&cursor).unwrap();
+    let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
+    processor.set_normalized_goal(normalized_goal);
+    let goal_kernel_context = &normalized_goal.kernel_context;
+
+    let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
+    assert_eq!(outcome, Outcome::Success);
+
+    let cert = processor
+        .prover()
+        .make_cert(&goal_env.bindings, goal_kernel_context, false)
+        .expect("make_cert failed");
+    let proof = cert.proof.expect("proof should exist");
+
+    assert!(
+        proof
+            .iter()
+            .any(|line| line.contains("}[G](s0(is_identity[G]))")),
+        "expected claim-with-args line to keep the outer goal type argument: {proof:?}"
+    );
+    assert!(
+        !proof
+            .iter()
+            .any(|line| line.contains("s0(is_identity[Bool])")),
+        "claim-with-args line should not instantiate the goal type to Bool: {proof:?}"
+    );
+}

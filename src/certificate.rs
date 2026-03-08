@@ -11,13 +11,16 @@ use std::borrow::Cow;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError, SyntheticNameSet};
 use crate::elaborator::acorn_type::AcornType;
 use crate::elaborator::acorn_type::PotentialType;
+use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::elaborate_value_to_term_existing;
+#[cfg(feature = "iet")]
+use crate::elaborator::to_term::elaborate_value_to_term;
+use crate::elaborator::to_term::{elaborate_value_to_term_existing, TypeVarMap};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
@@ -29,6 +32,8 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
+#[cfg(feature = "iet")]
+use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::{ModuleDescriptor, ModuleId};
@@ -112,6 +117,18 @@ pub struct Certificate {
 }
 
 impl Certificate {
+    fn claim_with_args_roundtrip_error() -> &'static str {
+        "claim-with-args serialization did not roundtrip"
+    }
+
+    fn is_nonroundtrip_claim_with_args_error(err: &CodeGenError) -> bool {
+        matches!(
+            err,
+            CodeGenError::GeneratedBadCode(message)
+                if message == Self::claim_with_args_roundtrip_error()
+        )
+    }
+
     fn logical_symbol_arity(symbol: Symbol) -> Option<usize> {
         match symbol {
             Symbol::Not => Some(1),
@@ -167,11 +184,117 @@ impl Certificate {
         }
     }
 
-    fn claim_requires_specialized_serialization(claim: &Claim) -> bool {
-        claim
-            .var_map
-            .iter()
-            .any(|(_, term)| Self::contains_partial_logical_builtin(term.as_ref()))
+    fn references_value_local(
+        term: crate::kernel::term::TermRef<'_>,
+        local_context: &LocalContext,
+    ) -> bool {
+        (0..local_context.len()).any(|var_id| {
+            local_context
+                .get_var_type(var_id)
+                .is_some_and(|var_type| !var_type.as_ref().is_type_param_kind())
+                && term.has_variable(var_id as AtomId)
+        })
+    }
+
+    #[cfg(feature = "iet")]
+    fn clause_references_local_vars(clause: &Clause) -> bool {
+        (0..clause.context.len()).any(|var_id| {
+            clause.literals.iter().any(|literal| {
+                literal.left.has_variable(var_id as AtomId)
+                    || literal.right.has_variable(var_id as AtomId)
+            })
+        })
+    }
+
+    fn claim_requires_specialized_serialization(
+        claim: &Claim,
+        _kernel_context: &KernelContext,
+    ) -> bool {
+        let local_context = claim.clause.get_local_context();
+        claim.var_map.iter().any(|(_, term)| {
+            Self::contains_partial_logical_builtin(term.as_ref())
+                || Self::references_value_local(term.as_ref(), local_context)
+        })
+    }
+
+    #[cfg(feature = "iet")]
+    fn rebase_value_to_standalone(
+        value: &AcornValue,
+        scope_len: AtomId,
+    ) -> Result<AcornValue, CodeGenError> {
+        Ok(match value {
+            AcornValue::Variable(var_id, var_type) => {
+                if *var_id < scope_len {
+                    return Err(CodeGenError::GeneratedBadCode(
+                        "claim argument unexpectedly referenced an outer local".to_string(),
+                    ));
+                }
+                AcornValue::Variable(var_id - scope_len, var_type.clone())
+            }
+            AcornValue::Constant(constant) => AcornValue::Constant(constant.clone()),
+            AcornValue::Application(app) => AcornValue::apply(
+                Self::rebase_value_to_standalone(&app.function, scope_len)?,
+                app.args
+                    .iter()
+                    .map(|arg| Self::rebase_value_to_standalone(arg, scope_len))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            AcornValue::TypeApplication(app) => AcornValue::type_apply(
+                Self::rebase_value_to_standalone(&app.function, scope_len)?,
+                app.type_param_names.clone(),
+                app.type_param_constraints.clone(),
+                app.type_args.clone(),
+            ),
+            AcornValue::Lambda(arg_types, body) => AcornValue::lambda(
+                arg_types.clone(),
+                Self::rebase_value_to_standalone(body, scope_len)?,
+            ),
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                *op,
+                Box::new(Self::rebase_value_to_standalone(left, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(right, scope_len)?),
+            ),
+            AcornValue::Not(value) => AcornValue::Not(Box::new(Self::rebase_value_to_standalone(
+                value, scope_len,
+            )?)),
+            AcornValue::Try(value, unwrapped_type) => AcornValue::Try(
+                Box::new(Self::rebase_value_to_standalone(value, scope_len)?),
+                unwrapped_type.clone(),
+            ),
+            AcornValue::ForAll(arg_types, body) => AcornValue::forall(
+                arg_types.clone(),
+                Self::rebase_value_to_standalone(body, scope_len)?,
+            ),
+            AcornValue::Exists(arg_types, body) => AcornValue::exists(
+                arg_types.clone(),
+                Self::rebase_value_to_standalone(body, scope_len)?,
+            ),
+            AcornValue::Choose(choice_type, body) => AcornValue::choose(
+                choice_type.clone(),
+                Self::rebase_value_to_standalone(body, scope_len)?,
+            ),
+            AcornValue::Bool(value) => AcornValue::Bool(*value),
+            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(Self::rebase_value_to_standalone(cond, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(if_value, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(else_value, scope_len)?),
+            ),
+            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                Box::new(Self::rebase_value_to_standalone(scrutinee, scope_len)?),
+                cases
+                    .iter()
+                    .map(|case| {
+                        Ok(crate::elaborator::acorn_value::MatchCase {
+                            new_vars: case.new_vars.clone(),
+                            pattern: Self::rebase_value_to_standalone(&case.pattern, scope_len)?,
+                            result: Self::rebase_value_to_standalone(&case.result, scope_len)?,
+                            constructor_index: case.constructor_index,
+                            constructor_total: case.constructor_total,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, CodeGenError>>()?,
+            ),
+        })
     }
 
     fn dequalify_synthetic_name_refs(
@@ -247,14 +370,22 @@ impl Certificate {
             let line = match step {
                 CertificateStep::Claim(claim)
                     if !claim.clause.get_local_context().is_empty()
-                        && !Self::claim_requires_specialized_serialization(claim) =>
+                        && !Self::claim_requires_specialized_serialization(
+                            claim,
+                            &generation_kernel_context,
+                        ) =>
                 {
-                    Self::serialize_claim_with_names(
+                    match Self::serialize_claim_with_names(
                         claim,
                         &generation_kernel_context,
                         bindings,
                         Some(&names.synthetic_names),
-                    )?
+                    ) {
+                        Ok(line) => line,
+                        Err(err) if Self::is_nonroundtrip_claim_with_args_error(&err) => generator
+                            .certificate_step_to_code(&names, step, &generation_kernel_context)?,
+                        Err(err) => return Err(err),
+                    }
                 }
                 _ => {
                     generator.certificate_step_to_code(&names, step, &generation_kernel_context)?
@@ -331,7 +462,7 @@ impl Certificate {
                 if let Some(claim) = Self::try_deserialize_claim_with_args_value(
                     value.clone(),
                     bindings.as_ref(),
-                    kernel_context.as_ref(),
+                    kernel_context.to_mut(),
                 )? {
                     return Ok(CertificateStep::Claim(claim));
                 }
@@ -352,11 +483,27 @@ impl Certificate {
                         var_map: VariableMap::new(),
                     }));
                 }
+                let clause = clauses
+                    .into_iter()
+                    .next()
+                    .expect("clauses has exactly one element");
+                #[cfg(feature = "iet")]
+                if !clause.get_local_context().is_empty()
+                    && !Self::clause_references_local_vars(&clause)
+                {
+                    let simple_term = view.clausify_term_to_simple_term(&term)?;
+                    let literal = Self::try_term_to_single_denormalized_literal(&simple_term)
+                        .unwrap_or_else(|| Literal::positive(simple_term));
+                    return Ok(CertificateStep::Claim(Claim {
+                        clause: crate::kernel::clause::Clause::from_literals_unnormalized(
+                            vec![literal],
+                            &LocalContext::empty(),
+                        ),
+                        var_map: VariableMap::new(),
+                    }));
+                }
                 Ok(CertificateStep::Claim(Claim {
-                    clause: clauses
-                        .into_iter()
-                        .next()
-                        .expect("clauses has exactly one element"),
+                    clause,
                     var_map: VariableMap::new(),
                 }))
             };
@@ -560,6 +707,27 @@ impl Certificate {
         candidates.into_iter().next().map(|(_, ty)| ty)
     }
 
+    fn expected_roundtrip_claim(claim: &Claim, type_var_map: &VariableMap) -> Claim {
+        let local_context = claim.clause.get_local_context();
+        let mut expected_var_map = VariableMap::new();
+
+        for var_id in 0..local_context.len() {
+            let var_id = var_id as AtomId;
+            if let Some(term) = claim.var_map.get_mapping(var_id) {
+                expected_var_map.set(var_id, apply_to_term(term.as_ref(), type_var_map));
+                continue;
+            }
+            if let Some(type_term) = type_var_map.get_mapping(var_id) {
+                expected_var_map.set(var_id, type_term.clone());
+            }
+        }
+
+        Claim {
+            clause: claim.clause.clone(),
+            var_map: expected_var_map,
+        }
+    }
+
     fn serialize_claim_with_names(
         claim: &Claim,
         kernel_context: &KernelContext,
@@ -607,9 +775,16 @@ impl Certificate {
 
         let mut type_param_decl_codes: Vec<String> = vec![];
         let mut type_arg_codes: Vec<String> = vec![];
+        let mut roundtrip_type_param_names: Vec<String> = vec![];
+        let mut roundtrip_type_param_constraints: Vec<
+            Option<crate::elaborator::acorn_type::Typeclass>,
+        > = vec![];
+        let mut roundtrip_type_args: Vec<AcornType> = vec![];
         let mut resolved_type_var_map = VariableMap::new();
         let mut value_decl_codes: Vec<String> = vec![];
         let mut value_arg_codes: Vec<String> = vec![];
+        let mut value_lambda_arg_types: Vec<AcornType> = vec![];
+        let mut value_arg_values: Vec<AcornValue> = vec![];
         // Keep declaration names aligned with CodeGenerator's own naming strategy so the
         // lambda body and argument declarations use the same identifiers, even when
         // lower indices (e.g. x0, x1) are already occupied in bindings.
@@ -645,6 +820,16 @@ impl Certificate {
                 let type_param_name = format!("T{}", var_id);
                 let kind =
                     kernel_context.denormalize_type_with_context(var_type, local_context, false);
+                let roundtrip_constraint = match &kind {
+                    AcornType::Type0 => None,
+                    AcornType::TypeclassConstraint(typeclass) => Some(typeclass.clone()),
+                    _ => {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "invalid type-parameter kind for x{}",
+                            var_id
+                        )));
+                    }
+                };
                 let decl_code = match kind {
                     AcornType::Type0 => type_param_name.clone(),
                     AcornType::TypeclassConstraint(_) => {
@@ -659,6 +844,8 @@ impl Certificate {
                     }
                 };
                 type_param_decl_codes.push(decl_code);
+                roundtrip_type_param_names.push(type_param_name.clone());
+                roundtrip_type_param_constraints.push(roundtrip_constraint.clone());
 
                 let mapped_type = arg_term.map(|term| {
                     kernel_context.denormalize_type_with_context(term.clone(), local_context, false)
@@ -688,6 +875,12 @@ impl Certificate {
                         .type_store
                         .to_type_term_with_vars(&selected_type, None);
                     resolved_type_var_map.set(var_id as AtomId, selected_term);
+                    roundtrip_type_args.push(selected_type);
+                } else {
+                    roundtrip_type_args.push(AcornType::Variable(TypeParam {
+                        name: type_param_name.clone(),
+                        typeclass: roundtrip_constraint,
+                    }));
                 }
                 type_arg_codes.push(type_arg_code);
                 continue;
@@ -706,10 +899,20 @@ impl Certificate {
                 .clone();
             let acorn_type =
                 kernel_context.denormalize_type_with_context(var_type, local_context, false);
+            value_lambda_arg_types.push(acorn_type.clone());
             let type_code = generator.type_to_expr(&acorn_type)?.to_string();
             value_decl_codes.push(format!("{}: {}", var_name, type_code));
 
             let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
+            let arg_value = kernel_context.denormalize_term_with_context(
+                &substituted_arg_term,
+                local_context,
+                false,
+            );
+            #[cfg(feature = "iet")]
+            let arg_value =
+                Self::rebase_value_to_standalone(&arg_value, local_context.len() as AtomId)?;
+            value_arg_values.push(arg_value.clone());
             if let Decomposition::Atom(Atom::FreeVariable(mapped_var_id)) =
                 substituted_arg_term.as_ref().decompose()
             {
@@ -719,11 +922,13 @@ impl Certificate {
                     continue;
                 }
             }
-            let arg_value = kernel_context.denormalize_term_with_context(
-                &substituted_arg_term,
-                local_context,
-                false,
-            );
+            #[cfg(feature = "iet")]
+            let arg_code = if let Some(synthetic_names) = synthetic_names {
+                generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
+            } else {
+                generator.value_to_code(&arg_value)?
+            };
+            #[cfg(not(feature = "iet"))]
             let initial_var_names: Vec<String> = (0..local_context.len())
                 .map(|i| {
                     value_decl_name_by_var
@@ -733,6 +938,7 @@ impl Certificate {
                         .unwrap_or_else(|| format!("x{}", i))
                 })
                 .collect();
+            #[cfg(not(feature = "iet"))]
             let arg_code = if let Some(synthetic_names) = synthetic_names {
                 generator.value_to_code_with_initial_vars_and_synthetic_names(
                     &arg_value,
@@ -764,6 +970,7 @@ impl Certificate {
                     generator.value_to_code(&specialized_value)
                 };
             }
+
             return Ok(format!(
                 "function[{}] {{ {} }}[{}]",
                 type_param_decl_codes.join(", "),
@@ -778,6 +985,33 @@ impl Certificate {
                 value_decl_codes.join(", "),
                 body_code,
                 value_arg_codes.join(", ")
+            ));
+        }
+
+        let lambda_body_value = match &generic_value {
+            AcornValue::ForAll(_, body) => body.as_ref().clone(),
+            _ => generic_value.clone(),
+        };
+        let roundtrip_function = AcornValue::type_apply(
+            AcornValue::lambda(value_lambda_arg_types, lambda_body_value),
+            roundtrip_type_param_names,
+            roundtrip_type_param_constraints,
+            roundtrip_type_args,
+        );
+        let roundtrip_value = AcornValue::apply(roundtrip_function, value_arg_values);
+        let mut roundtrip_kernel_context = kernel_context.clone();
+        let expected_roundtrip_claim =
+            Self::expected_roundtrip_claim(claim, &resolved_type_var_map);
+        if Self::try_deserialize_claim_with_args_value(
+            roundtrip_value,
+            bindings,
+            &mut roundtrip_kernel_context,
+        )?
+        .as_ref()
+            != Some(&expected_roundtrip_claim)
+        {
+            return Err(CodeGenError::GeneratedBadCode(
+                Self::claim_with_args_roundtrip_error().to_string(),
             ));
         }
 
@@ -810,7 +1044,8 @@ impl Certificate {
 
         let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
         let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
-        Self::try_deserialize_claim_with_args_value(evaluated, bindings, kernel_context)?
+        let mut kernel_context_clone = kernel_context.clone();
+        Self::try_deserialize_claim_with_args_value(evaluated, bindings, &mut kernel_context_clone)?
             .ok_or_else(|| {
                 CodeGenError::GeneratedBadCode(
                     "expected a function(...) { ... }(...) claim shape".to_string(),
@@ -821,7 +1056,7 @@ impl Certificate {
     fn try_deserialize_claim_with_args_value(
         value: AcornValue,
         bindings: &BindingMap,
-        kernel_context: &KernelContext,
+        kernel_context: &mut KernelContext,
     ) -> Result<Option<Claim>, CodeGenError> {
         let mut type_param_names: Vec<String> = vec![];
         let mut type_param_constraints = vec![];
@@ -897,6 +1132,19 @@ impl Certificate {
             &generic_value,
             type_var_map.as_ref(),
         )?;
+        #[cfg(feature = "iet")]
+        if Self::term_has_inline_clause_shape(&generic_term, true) {
+            let clause = Self::try_deserialize_inline_clause(&generic_term, &type_param_kinds)
+                .expect("inline clause shape should deserialize");
+            let var_map = Self::build_claim_var_map(
+                type_args.as_slice(),
+                args.as_slice(),
+                bindings,
+                kernel_context,
+            )?;
+            return Ok(Some(Claim { clause, var_map }));
+        }
+
         let mut view = Clausifier::new_mut(
             &mut kernel_context_clone,
             type_var_map,
@@ -950,22 +1198,58 @@ impl Certificate {
         type_args: &[AcornType],
         args: &[AcornValue],
         bindings: &BindingMap,
-        kernel_context: &KernelContext,
+        kernel_context: &mut KernelContext,
     ) -> Result<VariableMap, CodeGenError> {
+        #[cfg(not(feature = "iet"))]
         let mut term_kernel_context = kernel_context.clone();
         let mut var_map = VariableMap::new();
+        let mut type_var_map = TypeVarMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
-            let type_term = kernel_context
-                .type_store
-                .to_type_term_with_vars(acorn_type, None);
+            let type_term = match acorn_type {
+                AcornType::Variable(type_param) => {
+                    let kind_term = if let Some(typeclass) = &type_param.typeclass {
+                        let typeclass_id = kernel_context.type_store.add_typeclass(typeclass);
+                        Term::typeclass(typeclass_id)
+                    } else {
+                        Term::type_sort()
+                    };
+                    type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
+                    Term::atom(Atom::FreeVariable(var_id as AtomId))
+                }
+                _ => kernel_context
+                    .type_store
+                    .to_type_term_with_vars(acorn_type, None),
+            };
             var_map.set(var_id as AtomId, type_term);
         }
+        let type_var_map = (!type_var_map.is_empty()).then_some(type_var_map);
         let value_offset = var_map.len();
         for (var_id, arg) in args.iter().enumerate() {
-            let term = elaborate_value_to_term_existing(&mut term_kernel_context, arg, None)?;
-            let mut term_view =
-                Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
-            let term = term_view.clausify_term_for_claim_arg(&term)?;
+            #[cfg(feature = "iet")]
+            let term = {
+                // In iet, supported claim arguments can still mention selected-goal locals such
+                // as `d` or `k`. Elaborate against the live context so those proof-scope locals
+                // are interned before clausifying the argument term.
+                let term = elaborate_value_to_term(
+                    kernel_context,
+                    arg,
+                    NewConstantType::Local,
+                    type_var_map.as_ref(),
+                )?;
+                let mut term_view = Clausifier::new_mut(kernel_context, None, bindings.module_id());
+                term_view.clausify_term_for_claim_arg(&term)?
+            };
+            #[cfg(not(feature = "iet"))]
+            let term = {
+                let term = elaborate_value_to_term_existing(
+                    &mut term_kernel_context,
+                    arg,
+                    type_var_map.as_ref(),
+                )?;
+                let mut term_view =
+                    Clausifier::new_mut(&mut term_kernel_context, None, bindings.module_id());
+                term_view.clausify_term_for_claim_arg(&term)?
+            };
             var_map.set((value_offset + var_id) as AtomId, term);
         }
         Ok(var_map)
@@ -1051,6 +1335,82 @@ impl Certificate {
             vec![Literal::positive(body)],
             &local_context,
         ))
+    }
+
+    #[cfg(feature = "iet")]
+    fn try_deserialize_inline_clause(
+        generic_term: &Term,
+        type_param_kinds: &[Term],
+    ) -> Option<Clause> {
+        let mut local_context = LocalContext::empty();
+        for kind in type_param_kinds {
+            local_context.push_type(kind.clone());
+        }
+
+        let mut body = generic_term.clone();
+        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
+            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
+            body = binder_body
+                .to_owned()
+                .substitute_bound(0, &Term::new_variable(fresh_var))
+                .shift_bound(0, -1);
+        }
+
+        let literals = Self::try_term_to_inline_clause_literals(&body, true)?;
+        Some(Clause::from_literals_unnormalized(literals, &local_context))
+    }
+
+    #[cfg(feature = "iet")]
+    fn term_has_inline_clause_shape(term: &Term, positive: bool) -> bool {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            return Self::term_has_inline_clause_shape(&args[0], !positive);
+        }
+
+        if positive {
+            if Self::split_symbol_application(term, Symbol::Or, 2).is_some() {
+                return true;
+            }
+        } else if Self::split_symbol_application(term, Symbol::And, 2).is_some() {
+            return true;
+        }
+
+        if let Some((_binder_type, body)) = term.as_ref().split_forall() {
+            return Self::term_has_inline_clause_shape(&body.to_owned(), positive);
+        }
+
+        false
+    }
+
+    #[cfg(feature = "iet")]
+    fn try_term_to_inline_clause_literals(term: &Term, positive: bool) -> Option<Vec<Literal>> {
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
+            return Self::try_term_to_inline_clause_literals(&args[0], !positive);
+        }
+
+        if positive {
+            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
+                let mut literals = Self::try_term_to_inline_clause_literals(&args[0], true)?;
+                literals.extend(Self::try_term_to_inline_clause_literals(&args[1], true)?);
+                return Some(literals);
+            }
+        } else if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
+            let mut literals = Self::try_term_to_inline_clause_literals(&args[0], false)?;
+            literals.extend(Self::try_term_to_inline_clause_literals(&args[1], false)?);
+            return Some(literals);
+        }
+
+        if positive {
+            if let Some(literal) = Self::try_term_to_single_denormalized_literal(term) {
+                return Some(vec![literal]);
+            }
+            return Some(vec![Literal::positive(term.clone())]);
+        }
+
+        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
+            return Some(vec![Literal::not_equals(args[1].clone(), args[2].clone())]);
+        }
+
+        Some(vec![Literal::negative(term.clone())])
     }
 
     /// Check this certificate. It is expected that it has a proof.
@@ -1353,6 +1713,37 @@ mod tests {
                 .clone()
                 .expect("environment should have a kernel context");
             (env.bindings.clone(), kernel_context)
+        };
+
+        (project, bindings, kernel_context)
+    }
+
+    #[cfg(feature = "iet")]
+    fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, KernelContext) {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", code);
+
+        let module_id = project
+            .load_module_by_name("main")
+            .expect("module should load");
+        let (bindings, kernel_context) = {
+            let env = match project.get_module_by_id(module_id) {
+                LoadState::Ok(env) => env,
+                LoadState::Error(e) => panic!("module loading error: {}", e),
+                _ => panic!("unexpected module load state"),
+            };
+            let node_path = env
+                .path_for_line(line - 1)
+                .expect("selected line should resolve to a node path");
+            let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
+            let goal_env = cursor.goal_env().expect("selected line should be a goal");
+            let normalized_goal = cursor
+                .normalized_goal()
+                .expect("selected line should have a normalized goal");
+            (
+                goal_env.bindings.clone(),
+                normalized_goal.kernel_context.clone(),
+            )
         };
 
         (project, bindings, kernel_context)
@@ -1804,6 +2195,35 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_parse_code_line_keeps_closed_binder_claims_specialized() {
+        let code = r#"
+            let identity: Bool -> Bool = axiom
+
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let step = Certificate::parse_code_line(
+            "identity(choose(k0: Bool) { forall(x0: Bool) { not identity(x0) = k0 } }) = choose(k1: Bool) { forall(x1: Bool) { not identity(x1) = k1 } }",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("closed binder-heavy claim should parse");
+
+        let CertificateStep::Claim(claim) = step else {
+            panic!("expected claim step");
+        };
+        assert_eq!(claim.var_map.len(), 0);
+        assert!(claim.clause.get_local_context().is_empty());
+    }
+
     #[test]
     fn test_checker_rejects_unjustified_choose_claim() {
         let code = r#"
@@ -1891,6 +2311,45 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
+    }
+
+    #[test]
+    fn test_from_concrete_steps_serializes_binder_claim_args() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (_project, bindings, kernel_context) = setup_claim_codec_env(code);
+        let kernel = &kernel_context;
+        let generic = kernel.parse_clause("x0", &["Bool"]);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(
+            0,
+            Term::choose(
+                Term::bool_type(),
+                Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0))),
+            ),
+        );
+        let concrete_steps = vec![ConcreteStep {
+            generic: generic.clone(),
+            var_maps: vec![(var_map, generic.get_local_context().clone())],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &kernel_context,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert_eq!(
+            proof[0],
+            "function(x0: Bool) { x0 }(choose(k0: Bool) { k0 })"
+        );
     }
 
     #[test]
@@ -2021,6 +2480,55 @@ mod tests {
         .expect("certificate generation should succeed");
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof, vec!["false = true"]);
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_claim_with_args_roundtrip_with_selected_goal_locals() {
+        let code = "let f: Bool -> Bool = axiom\n\
+let a: Bool = axiom\n\
+\n\
+theorem goal(k: Bool) {\n\
+    k = k\n\
+} by {\n\
+    let (d: Bool) satisfy { d = d }\n\
+    false\n\
+}\n";
+        let (project, bindings, kernel_context) = setup_selected_goal_env(code, 8);
+        let line = "function(x0: Bool, x1: Bool) { f(x0) != f(x1) or (a = x1 and a = x0) }(d, k)";
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Owned(kernel_context);
+        let parsed = match Certificate::parse_code_line(
+            line,
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("claim-with-args line should parse in a goal with local bindings")
+        {
+            CertificateStep::Claim(claim) => claim,
+            _ => panic!("expected claim step"),
+        };
+        assert_eq!(parsed.var_map.len(), 2);
+
+        let serialized =
+            Certificate::serialize_claim_with_args(&parsed, kernel_context_cow.as_ref(), &bindings)
+                .expect("parsed claim should serialize again");
+        assert_eq!(serialized, line);
+
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &parsed.clause,
+            StepReason::Testing,
+            kernel_context_cow.as_ref(),
+        );
+        assert!(
+            checker
+                .check_clause(&parsed.clause, kernel_context_cow.as_ref())
+                .is_some(),
+            "generic claim should be accepted once inserted"
+        );
     }
 
     #[test]

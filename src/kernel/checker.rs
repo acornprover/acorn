@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use im::HashMap as ImHashMap;
 use im::HashSet as ImHashSet;
@@ -226,7 +226,7 @@ impl Checker {
 
     /// Checks if a clause is known to be true, and returns the reason if so.
     /// Returns None if the clause cannot be proven.
-    pub fn check_clause(
+    fn check_clause_direct(
         &mut self,
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -273,6 +273,51 @@ impl Checker {
 
         trace!(clause = %clause, result = "failed", "checking clause");
         None
+    }
+
+    fn check_clause_via_boolean_reductions(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<StepReason> {
+        if clause.has_any_variable() {
+            return None;
+        }
+
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        for next in clause.boolean_reductions(kernel_context) {
+            queue.push_back(next);
+        }
+
+        while let Some(candidate) = queue.pop_front() {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+
+            if let Some(reason) = self.check_clause_direct(&candidate, kernel_context) {
+                return Some(reason);
+            }
+
+            for next in candidate.boolean_reductions(kernel_context) {
+                if !seen.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Checks if a clause is known to be true, and returns the reason if so.
+    /// Returns None if the clause cannot be proven.
+    pub fn check_clause(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<StepReason> {
+        self.check_clause_direct(clause, kernel_context)
+            .or_else(|| self.check_clause_via_boolean_reductions(clause, kernel_context))
     }
 
     fn simplify_variable_clause_with_concrete_facts(
@@ -728,6 +773,32 @@ mod tests {
         checker.insert_clause(&clause, StepReason::Testing, &context);
 
         assert!(checker.check_clause(&clause, &context).is_some());
+    }
+
+    #[cfg(feature = "iet")]
+    #[test]
+    fn test_checker_reduces_concrete_boolean_formula_clause_before_checking() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+        let c0 = context.parse_term("c0");
+
+        let reduced = Clause::from_literals_unnormalized(
+            vec![Literal::positive(c0.clone())],
+            &LocalContext::empty(),
+        );
+        let query = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::not(Term::not(c0)))],
+            &LocalContext::empty(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&reduced, StepReason::Testing, &context);
+
+        assert!(checker.check_clause(&query, &context).is_some());
     }
 
     #[test]
