@@ -1142,6 +1142,15 @@ impl<'a> Clausifier<'a> {
         }
 
         if !fn_arg_types.is_empty() {
+            if negate && cfg!(feature = "direct_fn_neq") {
+                let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
+                let right =
+                    self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
+                let left = self.extended_term_to_term(left, context, synth)?;
+                let right = self.extended_term_to_term(right, context, synth)?;
+                return Ok(Cnf::from_literal(Literal::new(false, left, right)));
+            }
+
             if result_type == Term::bool_type() {
                 if negate {
                     // f != g for Bool-valued functions:

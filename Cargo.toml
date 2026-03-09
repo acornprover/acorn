@@ -46,6 +46,9 @@ default = []
 validate = []
 # Keep existential quantifiers inline in clausification instead of skolemizing.
 iet = []
+# Keep negative function equalities as direct literals instead of introducing
+# synthetic counterexample witnesses during normalization.
+direct_fn_neq = []
 
 [lib]
 doctest = false

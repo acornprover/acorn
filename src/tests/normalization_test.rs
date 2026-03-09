@@ -28,6 +28,10 @@ fn get_inline_exists_body(
     })
 }
 
+fn direct_fn_neq_enabled() -> bool {
+    cfg!(feature = "direct_fn_neq")
+}
+
 #[test]
 fn test_nat_normalization() {
     let mut env = Environment::test();
@@ -552,7 +556,14 @@ fn test_normalizing_function_inequality() {
     "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["g(a, s0_0) != f(s0_0)"]);
+    if direct_fn_neq_enabled() {
+        norm.check(&env, "goal", &["g(a) != f"]);
+    } else {
+        norm.check(&env, "goal", &["g(a, s0_0) != f(s0_0)"]);
+    }
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 1, "expected one clause");
+    assert_eq!(clauses[0].has_synthetic(), !direct_fn_neq_enabled());
 }
 
 #[test]
@@ -575,14 +586,28 @@ fn test_normalizing_func_eq_inside_lambda() {
     );
     let mut norm = KernelContext::new();
     // Functional equality inside lambda gets expanded with free variables
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not f(x0) or h(x0, x1) = g(x0, x1)",
-            "h(x0, s0_0(x0)) != g(x0, s0_0(x0)) or f(x0)",
-        ],
-    );
+    if direct_fn_neq_enabled() {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not f(x0) or h(x0, x1) = g(x0, x1)",
+                "h(x0) != g(x0) or f(x0)",
+            ],
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not f(x0) or h(x0, x1) = g(x0, x1)",
+                "h(x0, s0_0(x0)) != g(x0, s0_0(x0)) or f(x0)",
+            ],
+        );
+    }
+    let clauses = norm.get_all_clauses(&env);
+    let has_synthetic = clauses.iter().any(|clause| clause.has_synthetic());
+    assert_eq!(has_synthetic, !direct_fn_neq_enabled());
 }
 
 #[test]
@@ -644,22 +669,61 @@ fn test_normalizing_forall_inside_neq_lambda() {
     "#,
     );
     let mut norm = KernelContext::new();
-    let clauses = norm.get_all_clauses(&env);
-    assert_eq!(clauses.len(), 2, "expected two clauses");
-    assert!(
-        clauses.iter().any(|clause| {
-            !has_inline_exists(clause)
-                && clause.literals.len() == 2
-                && clause.literals.iter().all(|lit| lit.positive)
-        }),
-        "expected one positive witness clause"
-    );
-    assert!(
-        clauses
-            .iter()
-            .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
-        "expected one clause with an inline exists"
-    );
+    if direct_fn_neq_enabled() {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 1, "expected one direct inequality clause");
+        assert_eq!(clauses[0].literals.len(), 1, "expected one literal");
+        assert!(
+            !clauses[0].literals[0].positive,
+            "expected direct function inequality, got {}",
+            clauses[0]
+        );
+        let left = &clauses[0].literals[0].left;
+        let right = &clauses[0].literals[0].right;
+        assert!(
+            left.as_ref().is_lambda() || right.as_ref().is_lambda(),
+            "expected one side to stay as a lambda-valued function, got {}",
+            clauses[0]
+        );
+        let lambda_side = if left.as_ref().is_lambda() {
+            left
+        } else {
+            right
+        };
+        let (_input, body) = lambda_side
+            .as_ref()
+            .split_lambda()
+            .expect("expected lambda-valued side");
+        assert!(
+            matches!(
+                body.to_owned().as_ref().decompose(),
+                crate::kernel::term::Decomposition::ForAll(_, _)
+            ),
+            "expected direct function inequality to preserve the lambda body, got {}",
+            lambda_side
+        );
+        assert!(
+            !clauses[0].has_synthetic(),
+            "direct function inequality should not synthesize a witness"
+        );
+    } else {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 2, "expected two clauses");
+        assert!(
+            clauses.iter().any(|clause| {
+                !has_inline_exists(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().all(|lit| lit.positive)
+            }),
+            "expected one positive witness clause"
+        );
+        assert!(
+            clauses
+                .iter()
+                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+            "expected one clause with an inline exists"
+        );
+    }
 }
 
 #[test]
@@ -696,7 +760,14 @@ fn test_normalizing_boolean_function_inequality() {
     "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["g(s0_0) != f(s0_0)"]);
+    if direct_fn_neq_enabled() {
+        norm.check(&env, "goal", &["g != f"]);
+    } else {
+        norm.check(&env, "goal", &["g(s0_0) != f(s0_0)"]);
+    }
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 1, "expected one clause");
+    assert_eq!(clauses[0].has_synthetic(), !direct_fn_neq_enabled());
 }
 
 #[test]
