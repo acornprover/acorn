@@ -57,6 +57,9 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the build format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build.
+#[cfg(feature = "direct_fn_neq")]
+const MANIFEST_VERSION: u32 = 11;
+#[cfg(not(feature = "direct_fn_neq"))]
 const MANIFEST_VERSION: u32 = 10;
 
 /// A newtype wrapper for module names, created by joining parts with "."
