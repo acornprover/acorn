@@ -2032,23 +2032,28 @@ impl BindingMap {
             .validate()
             .unwrap_or_else(|e| panic!("invalid claim: {} ({})", proposition.value, e));
 
-        let value = proposition.value.replace_constants(0, &|c| {
-            let bindings = self.get_bindings(c.name.module_id(), project);
-            if bindings.is_theorem(&c.name) {
-                match bindings.get_definition_and_params(&c.name) {
-                    Some((def, params)) => {
-                        let mut pairs = vec![];
-                        for (param, t) in params.iter().zip(c.params.iter()) {
-                            pairs.push((param.name.clone(), t.clone()));
+        let value = proposition
+            .value
+            .replace_constants(0, &|c| {
+                let bindings = self.get_bindings(c.name.module_id(), project);
+                if bindings.is_theorem(&c.name) {
+                    match bindings.get_definition_and_params(&c.name) {
+                        Some((def, params)) => {
+                            let mut pairs = vec![];
+                            for (param, t) in params.iter().zip(c.params.iter()) {
+                                pairs.push((param.name.clone(), t.clone()));
+                            }
+                            Some(def.instantiate(&pairs))
                         }
-                        Some(def.instantiate(&pairs))
+                        None => None,
                     }
-                    None => None,
+                } else {
+                    None
                 }
-            } else {
-                None
-            }
-        });
+            })
+            .expand_lambdas(0)
+            .flatten_applications()
+            .reduce_eta(0);
         proposition.with_value(value)
     }
 

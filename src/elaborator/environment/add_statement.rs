@@ -2728,6 +2728,7 @@ impl Environment {
 
         if self.bindings.is_citation(&claim, project) {
             // We already know this is true, so we don't need to prove it
+            let claim = claim.expand_lambdas(0);
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);
             let prop = Proposition::new(claim, vec![], source);
             self.add_node(Node::structural(project, self, prop));

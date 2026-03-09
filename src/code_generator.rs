@@ -2040,8 +2040,11 @@ impl CodeGenerator<'_> {
                                     && !self.bindings.is_instance_of(datatype, typeclass)
                                 {
                                     return Err(Error::GeneratedBadCode(format!(
-                                        "typeclass attribute '{}.{}' for concrete receiver '{}' is not available in the current scope",
-                                        typeclass.name, attr_name, datatype.name
+                                        "typeclass attribute '{}.{}' for concrete receiver '{}' is not available in the current scope while rendering '{}'",
+                                        typeclass.name,
+                                        attr_name,
+                                        datatype.name,
+                                        AcornValue::Application(fa.clone())
                                     )));
                                 }
                             }

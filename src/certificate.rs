@@ -121,14 +121,6 @@ impl Certificate {
         "claim-with-args serialization did not roundtrip"
     }
 
-    fn is_nonroundtrip_claim_with_args_error(err: &CodeGenError) -> bool {
-        matches!(
-            err,
-            CodeGenError::GeneratedBadCode(message)
-                if message == Self::claim_with_args_roundtrip_error()
-        )
-    }
-
     fn logical_symbol_arity(symbol: Symbol) -> Option<usize> {
         match symbol {
             Symbol::Not => Some(1),
@@ -353,11 +345,18 @@ impl Certificate {
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
 
         for step in concrete_steps {
-            let cert_steps = generator.concrete_step_to_certificate_steps(
-                &mut names,
-                step,
-                &mut generation_kernel_context,
-            )?;
+            let cert_steps = generator
+                .concrete_step_to_certificate_steps(
+                    &mut names,
+                    step,
+                    &mut generation_kernel_context,
+                )
+                .map_err(|err| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "{} [while converting concrete clause {}]",
+                        err, step.generic
+                    ))
+                })?;
             for cert_step in cert_steps {
                 if !ordered_steps.contains(&cert_step) {
                     ordered_steps.push(cert_step);
@@ -375,6 +374,9 @@ impl Certificate {
                             &generation_kernel_context,
                         ) =>
                 {
+                    let specialized_clause = claim
+                        .var_map
+                        .specialize_clause(&claim.clause, &generation_kernel_context);
                     match Self::serialize_claim_with_names(
                         claim,
                         &generation_kernel_context,
@@ -382,16 +384,30 @@ impl Certificate {
                         Some(&names.synthetic_names),
                     ) {
                         Ok(line) => line,
-                        Err(err) if Self::is_nonroundtrip_claim_with_args_error(&err) => generator
-                            .certificate_step_to_code(&names, step, &generation_kernel_context)?,
-                        Err(err) => return Err(err),
+                        Err(_) => match generator.certificate_step_to_code(
+                            &names,
+                            step,
+                            &generation_kernel_context,
+                        ) {
+                            Ok(line) => line,
+                            Err(inner) => {
+                                return Err(CodeGenError::GeneratedBadCode(format!(
+                                    "{} [while serializing certificate claim step {}]",
+                                    inner, specialized_clause
+                                )));
+                            }
+                        },
                     }
                 }
-                _ => {
-                    generator.certificate_step_to_code(&names, step, &generation_kernel_context)?
-                }
+                _ => generator
+                    .certificate_step_to_code(&names, step, &generation_kernel_context)
+                    .map_err(|err| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "{} [while serializing certificate step]",
+                            err
+                        ))
+                    })?,
             };
-
             answer.push(line);
         }
 

@@ -565,3 +565,176 @@ fn test_compose_with_higher_order_result() {
     "#;
     verify_succeeds(text);
 }
+
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_partial_application_theorem_instantiation() {
+    let text = r#"
+    type Nat: axiom
+
+    theorem helper(a: Nat -> Nat, m: Nat, n: Nat) {
+        m = n implies a(m) = a(n)
+    }
+
+    theorem goal(f: (Nat, Nat) -> Nat, i: Nat, m: Nat, n: Nat) {
+        m = n implies f(i, m) = f(i, n)
+    } by {
+        if m = n {
+            helper(f(i), m, n)
+            f(i, m) = f(i, n)
+        }
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_cross_module_eta_bridge_for_partial_application_fact() {
+    let mut project = crate::project::Project::new_mock();
+    project.mock(
+        "/mock/helper.ac",
+        r#"
+        type Nat: axiom
+        type Val: axiom
+
+        define good(a: Nat -> Val) -> Bool {
+            true
+        }
+
+        define good2(f: (Nat, Nat) -> Val) -> Bool {
+            true
+        }
+
+        theorem right(f: (Nat, Nat) -> Val, i: Nat) {
+            good2(f) implies good(function(j: Nat) { f(i, j) })
+        }
+
+        theorem distant(a: Nat -> Val, m: Nat, n: Nat) {
+            good(a) and m = n implies a(m) = a(n)
+        }
+        "#,
+    );
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        from helper import Nat, Val, good, good2, right, distant
+
+        theorem goal(f: (Nat, Nat) -> Val, i: Nat, m: Nat, n: Nat) {
+            good2(f) and m = n implies f(i, m) = f(i, n)
+        } by {
+            if good2(f) and m = n {
+                right(f, i)
+                good(f(i))
+                distant(f(i), m, n)
+                f(i, m) = f(i, n)
+            }
+        }
+        "#,
+    );
+    prove(&mut project, "main", "goal");
+}
+
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_verify_partial_application_theorem_citation() {
+    verify_succeeds(
+        r#"
+        type Ix: axiom
+        type Val: axiom
+
+        attributes Ix {
+            define lte(self, other: Ix) -> Bool { axiom }
+        }
+
+        attributes Val {
+            define lte(self, other: Val) -> Bool { axiom }
+        }
+
+        define good(a: Ix -> Val) -> Bool {
+            true
+        }
+
+        axiom base_distant(a: Ix -> Val, m: Ix, n: Ix) {
+            m <= n implies a(m) <= a(n)
+        }
+
+        theorem distant(a: Ix -> Val, m: Ix, n: Ix) {
+            good(a) and m <= n implies a(m) <= a(n)
+        } by {
+            if good(a) and m <= n {
+                base_distant(a, m, n)
+                a(m) <= a(n)
+            }
+        }
+
+        theorem goal(f: (Ix, Ix) -> Val, i: Ix, m: Ix, n: Ix) {
+            m <= n implies f(i, m) <= f(i, n)
+        } by {
+            if m <= n {
+                good(f(i))
+                distant(f(i), m, n)
+                f(i, m) <= f(i, n)
+            }
+        }
+        "#,
+    );
+}
+
+#[cfg(feature = "iet")]
+#[test]
+fn test_iet_citation_line_expands_to_instantiated_implication() {
+    let text = r#"
+        type Ix: axiom
+        type Val: axiom
+
+        let rel: (Val, Val) -> Bool = axiom
+
+        define good(a: Ix -> Val) -> Bool {
+            true
+        }
+
+        theorem distant(a: Ix -> Val, m: Ix, n: Ix) {
+            good(a) implies rel(a(m), a(n))
+        }
+
+        theorem goal(f: (Ix, Ix) -> Val, i: Ix, m: Ix, n: Ix) {
+            rel(f(i, m), f(i, n))
+        } by {
+            good(f(i))
+            distant(f(i), m, n)
+            rel(f(i, m), f(i, n))
+        }
+        "#;
+
+    let mut project = crate::project::Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(env) => env,
+        crate::module::LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    fn collect_props(env: &crate::elaborator::environment::Environment, out: &mut Vec<String>) {
+        for node in &env.nodes {
+            if let Some(crate::elaborator::fact::Fact::Proposition(prop)) = node.get_fact() {
+                out.push(prop.value.to_string());
+            }
+            if let Some(block) = node.get_block() {
+                collect_props(&block.env, out);
+            }
+        }
+    }
+
+    let mut proposition_values = vec![];
+    collect_props(env, &mut proposition_values);
+
+    assert!(
+        proposition_values
+            .iter()
+            .any(|value| value == "(good(f(i)) implies rel(f(i, m), f(i, n)))"),
+        "expected instantiated citation fact, got {:?}",
+        proposition_values
+    );
+}
