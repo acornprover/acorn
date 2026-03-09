@@ -61,7 +61,7 @@ All commands are run from `~/acorn`.
 
    ```
    # Delete the old tag
-   TAG=...
+   TAG=v...
    git tag -d $TAG
    git push --delete upstream $TAG
 
