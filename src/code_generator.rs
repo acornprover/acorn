@@ -2402,99 +2402,11 @@ impl From<String> for Error {
 #[cfg(test)]
 mod tests {
     use super::{CodeGenerator, SyntheticNameSet};
-    #[cfg(feature = "iet")]
     use crate::elaborator::evaluator::Evaluator;
-    #[cfg(feature = "iet")]
     use crate::elaborator::node::NodeCursor;
-    #[cfg(feature = "iet")]
     use crate::module::LoadState;
     use crate::project::Project;
-    #[cfg(feature = "iet")]
     use crate::syntax::expression::Expression;
-
-    #[cfg(not(feature = "iet"))]
-    #[test]
-    fn test_polymorphic_synthetic_declaration() {
-        use crate::processor::Processor;
-
-        let (processor, bindings, normalized_goal) = Processor::test_goal(
-            r#"
-            let foo[T]: T -> Bool = axiom
-            theorem goal[T] { exists(t: T) { foo(t) } }
-            "#,
-        );
-
-        let kernel_context = normalized_goal.kernel_context.clone();
-        let synthetic_ids = kernel_context.get_synthetic_ids();
-
-        let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
-        let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(
-            &bindings,
-            synthetic_ids,
-            &kernel_context,
-            &mut synthetic_steps,
-        );
-        let mut codes = vec![];
-        for step in synthetic_steps {
-            codes.push(
-                generator
-                    .certificate_step_to_code(&names, &step, &kernel_context)
-                    .unwrap(),
-            );
-        }
-
-        let expected = "let s0[T0]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
-        assert_eq!(codes[0], expected);
-
-        processor.test_parse_code(&codes[0], &bindings, &kernel_context);
-    }
-
-    #[cfg(not(feature = "iet"))]
-    #[test]
-    fn test_polymorphic_synthetic_with_typeclass() {
-        use crate::processor::Processor;
-
-        // Similar to test_polymorphic_synthetic_declaration but with a typeclass constraint
-        let (processor, bindings, normalized_goal) = Processor::test_goal(
-            r#"
-            typeclass M: Magma {
-                mul: (M, M) -> M
-            }
-            let foo[T: Magma]: T -> Bool = axiom
-            theorem goal[T: Magma] { exists(t: T) { foo(t) } }
-            "#,
-        );
-
-        let kernel_context = normalized_goal.kernel_context.clone();
-        let synthetic_ids = kernel_context.get_synthetic_ids();
-
-        let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
-        let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(
-            &bindings,
-            synthetic_ids,
-            &kernel_context,
-            &mut synthetic_steps,
-        );
-        let mut codes = vec![];
-        for step in synthetic_steps {
-            codes.push(
-                generator
-                    .certificate_step_to_code(&names, &step, &kernel_context)
-                    .unwrap(),
-            );
-        }
-
-        // The synthetic uses T0 with typeclass constraint
-        // foo[T0](s0) needs explicit type params since s0's type is Variable(T0)
-        let expected = "let s0[T0: Magma]: T0 satisfy { not goal[T0] or foo[T0](s0) and forall(x0: T0) { not foo[T0](x0) or goal[T0] } }";
-        assert_eq!(codes[0], expected);
-
-        processor.test_parse_code(&codes[0], &bindings, &kernel_context);
-    }
 
     #[test]
     fn test_polymorphic_synthetic_with_multi_arg_function() {
@@ -2504,7 +2416,7 @@ mod tests {
         // The is_reflexive pattern has forall inside, which when negated becomes
         // exists(t: T) { not f(t, t) } where t depends on f, giving synthetic type
         // ((T, T) -> Bool) -> T
-        let (processor, bindings, normalized_goal) = Processor::test_goal(
+        let (_processor, bindings, normalized_goal) = Processor::test_goal(
             r#"
             define is_reflexive[T](f: (T, T) -> Bool) -> Bool {
                 forall(t: T) { f(t, t) }
@@ -2534,24 +2446,10 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "iet")]
-        {
-            let _ = &processor;
-            assert!(
-                codes.is_empty(),
-                "iet keeps the negated forall inline here, so no witness synthetics should be generated"
-            );
-            return;
-        }
-
-        #[cfg(not(feature = "iet"))]
-        // The synthetic uses T0 with type ((T0, T0) -> Bool) -> T0
-        {
-            let expected = "let s0[T0]: ((T0, T0) -> Bool) -> T0 satisfy { forall(x0: (T0, T0) -> Bool, x1: T0) { not is_reflexive[T0](x0) or x0(x1, x1) } and forall(x2: (T0, T0) -> Bool) { not x2(s0(x2), s0(x2)) or is_reflexive[T0](x2) } }";
-            assert_eq!(codes[0], expected);
-
-            processor.test_parse_code(&codes[0], &bindings, &kernel_context);
-        }
+        assert!(
+            codes.is_empty(),
+            "negated forall stays inline here, so no witness synthetics should be generated"
+        );
     }
 
     #[test]
@@ -3191,7 +3089,6 @@ mod tests {
         p.check_goal_code("main", "goal", "x + -x = B.zero + B.zero");
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_codegen_rejects_future_instance_out_of_selected_scope() {
         let code = "\

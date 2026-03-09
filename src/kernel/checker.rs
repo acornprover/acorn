@@ -548,12 +548,9 @@ impl TestChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "iet")]
     use crate::kernel::inference;
-    #[cfg(feature = "iet")]
     use std::collections::{HashSet, VecDeque};
 
-    #[cfg(feature = "iet")]
     fn problematic_negated_forall_clause() -> (KernelContext, Clause) {
         use crate::kernel::atom::Atom;
         use crate::kernel::literal::Literal;
@@ -579,7 +576,6 @@ mod tests {
         (context, clause)
     }
 
-    #[cfg(feature = "iet")]
     fn checker_style_clause_closure(
         kernel_context: &KernelContext,
         start: Clause,
@@ -718,7 +714,6 @@ mod tests {
         assert!(checker.check_clause(&reduced, &context).is_some());
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_checker_matches_identical_boolean_formula_literal_clause() {
         use crate::kernel::literal::Literal;
@@ -752,7 +747,6 @@ mod tests {
         assert!(checker.check_clause(&clause, &context).is_some());
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_checker_matches_identical_concrete_boolean_formula_literal_clause() {
         use crate::kernel::literal::Literal;
@@ -775,7 +769,6 @@ mod tests {
         assert!(checker.check_clause(&clause, &context).is_some());
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_checker_reduces_concrete_boolean_formula_clause_before_checking() {
         use crate::kernel::literal::Literal;
@@ -952,7 +945,6 @@ mod tests {
         assert!(msg.contains("witnesses are disabled"));
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_checker_problematic_negated_forall_clause_growth() {
         let (context, clause) = problematic_negated_forall_clause();

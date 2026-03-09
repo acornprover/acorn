@@ -154,7 +154,6 @@ impl<'a> Clausifier<'a> {
         Ok(clauses)
     }
 
-    #[cfg(feature = "iet")]
     fn initial_clause_context(&self) -> (LocalContext, AtomId, usize) {
         let mut context = LocalContext::empty();
         let pinned = if let Some(type_var_map) = self.type_var_map() {
@@ -170,7 +169,6 @@ impl<'a> Clausifier<'a> {
         (context, pinned as AtomId, pinned)
     }
 
-    #[cfg(feature = "iet")]
     fn open_leading_foralls_as_free_vars(
         &self,
         term: &Term,
@@ -187,7 +185,6 @@ impl<'a> Clausifier<'a> {
         body
     }
 
-    #[cfg(feature = "iet")]
     fn literal_from_shallow_term(
         &mut self,
         term: &Term,
@@ -206,7 +203,6 @@ impl<'a> Clausifier<'a> {
         Ok(Literal::from_signed_term(term, positive))
     }
 
-    #[cfg(feature = "iet")]
     fn shallow_term_to_disjunctive_literals(
         &mut self,
         term: &Term,
@@ -277,7 +273,6 @@ impl<'a> Clausifier<'a> {
         )?])
     }
 
-    #[cfg(feature = "iet")]
     fn shallow_term_to_clauses(
         &mut self,
         term: &Term,
@@ -383,7 +378,6 @@ impl<'a> Clausifier<'a> {
             .into_clauses_with_pinned(context, pinned))
     }
 
-    #[cfg(feature = "iet")]
     pub fn shallow_clausify_term(
         &mut self,
         term: &Term,
@@ -404,7 +398,6 @@ impl<'a> Clausifier<'a> {
         Ok((clauses, synthesized))
     }
 
-    #[cfg(feature = "iet")]
     pub fn preserve_term_as_clause(
         &mut self,
         term: &Term,
@@ -619,62 +612,23 @@ impl<'a> Clausifier<'a> {
                         context,
                     )
                 } else {
-                    #[cfg(feature = "iet")]
-                    {
-                        // Keep negated universals inline under iet so later boolean
-                        // reductions can open them via exists/choose without skolemizing.
-                        let literal = Literal::from_signed_term(term.clone(), false);
-                        return Ok(Cnf::from_literal(literal));
-                    }
-
-                    #[cfg(not(feature = "iet"))]
-                    self.exists_term_to_cnf(
-                        &binder_type.to_owned(),
-                        &body.to_owned(),
-                        true,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )
+                    // Keep negated universals inline so later boolean reductions can
+                    // open them via exists/choose without skolemizing.
+                    let literal = Literal::from_signed_term(term.clone(), false);
+                    Ok(Cnf::from_literal(literal))
                 }
             }
-            crate::kernel::term::Decomposition::Exists(_binder_type, _body) => {
-                #[cfg(feature = "iet")]
-                {
-                    if !negate {
-                        // Keep positive existential formulas inline as signed terms.
-                        // This avoids introducing skolem witnesses during clausification.
-                        let literal = Literal::from_signed_term(term.clone(), true);
-                        return Ok(Cnf::from_literal(literal));
-                    }
+            crate::kernel::term::Decomposition::Exists(_, _) => {
+                if !negate {
+                    // Keep positive existential formulas inline as signed terms.
+                    // This avoids introducing skolem witnesses during clausification.
+                    let literal = Literal::from_signed_term(term.clone(), true);
+                    Ok(Cnf::from_literal(literal))
+                } else {
                     // Preserve negated existentials inline so they can meet positive
                     // existential conclusions in the indexed resolution path.
                     let literal = Literal::from_signed_term(term.clone(), false);
-                    return Ok(Cnf::from_literal(literal));
-                }
-
-                #[cfg(not(feature = "iet"))]
-                if !negate {
-                    self.exists_term_to_cnf(
-                        &_binder_type.to_owned(),
-                        &_body.to_owned(),
-                        false,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )
-                } else {
-                    self.forall_term_to_cnf(
-                        &_binder_type.to_owned(),
-                        &_body.to_owned(),
-                        true,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )
+                    Ok(Cnf::from_literal(literal))
                 }
             }
             _ => {
@@ -834,38 +788,6 @@ impl<'a> Clausifier<'a> {
         let var = Term::new_variable(var_id);
         stack.push(TermBinding::Free(var.clone()));
         let opened_body = self.open_binder_body(body, &var);
-        let result = self.term_to_cnf(
-            &opened_body,
-            negate,
-            stack,
-            next_var_id,
-            synthesized,
-            context,
-        )?;
-        stack.pop();
-        Ok(result)
-    }
-
-    #[cfg(not(feature = "iet"))]
-    fn exists_term_to_cnf(
-        &mut self,
-        binder_type: &Term,
-        body: &Term,
-        negate: bool,
-        stack: &mut Vec<TermBinding>,
-        next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
-        context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
-        let skolem_terms = self.make_skolem_terms_from_type_terms(
-            std::slice::from_ref(binder_type),
-            stack,
-            synthesized,
-            context,
-        )?;
-        let skolem_term = skolem_terms.into_iter().next().unwrap();
-        stack.push(TermBinding::Bound(skolem_term.clone()));
-        let opened_body = self.open_binder_body(body, &skolem_term);
         let result = self.term_to_cnf(
             &opened_body,
             negate,
@@ -1921,7 +1843,7 @@ impl<'a> Clausifier<'a> {
     }
 }
 
-#[cfg(all(test, feature = "iet"))]
+#[cfg(test)]
 mod tests {
     use super::Clausifier;
     use crate::kernel::atom::Atom;

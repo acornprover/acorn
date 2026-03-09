@@ -245,7 +245,6 @@ impl Source {
         matches!(self.source_type, SourceType::Axiom(_))
     }
 
-    #[cfg(feature = "iet")]
     pub fn should_clausify_shallowly(&self) -> bool {
         matches!(
             self.source_type,

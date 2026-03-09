@@ -566,7 +566,6 @@ fn test_compose_with_higher_order_result() {
     verify_succeeds(text);
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_partial_application_theorem_instantiation() {
     let text = r#"
@@ -588,7 +587,6 @@ fn test_iet_partial_application_theorem_instantiation() {
     verify_succeeds(text);
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_cross_module_eta_bridge_for_partial_application_fact() {
     let mut project = crate::project::Project::new_mock();
@@ -635,7 +633,6 @@ fn test_iet_cross_module_eta_bridge_for_partial_application_fact() {
     prove(&mut project, "main", "goal");
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_verify_partial_application_theorem_citation() {
     verify_succeeds(
@@ -681,7 +678,6 @@ fn test_iet_verify_partial_application_theorem_citation() {
     );
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_citation_line_expands_to_instantiated_implication() {
     let text = r#"

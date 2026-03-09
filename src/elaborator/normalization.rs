@@ -24,7 +24,6 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::synthetic::SyntheticDefinition;
 use crate::kernel::term::Term;
-#[cfg(feature = "iet")]
 use crate::kernel::term_normalization::normalize_boolean_subterms;
 use crate::module::ModuleId;
 use tracing::trace;
@@ -178,106 +177,52 @@ impl KernelContext {
     ) -> Result<Vec<Clause>, String> {
         term.validate();
 
-        #[cfg(feature = "iet")]
-        {
-            let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
-                let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                if source.should_clausify_shallowly() {
-                    view.shallow_clausify_term(term)?
-                } else {
-                    view.preserve_term_as_clause(term)?
-                }
-            };
-
-            let mut output = vec![];
-            let mut undefined_ids = vec![];
-            for id in &skolem_ids {
-                if let Some(def) = self.synthetic_registry.get(id) {
-                    for clause in &def.clauses {
-                        output.push(clause.clone());
-                    }
-                } else {
-                    undefined_ids.push(*id);
-                }
+        let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
+            let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+            if source.should_clausify_shallowly() {
+                view.shallow_clausify_term(term)?
+            } else {
+                view.preserve_term_as_clause(term)?
             }
+        };
 
-            if !undefined_ids.is_empty() {
-                let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
-                    let mut entries: Vec<_> = tvm.values().collect();
-                    entries.sort_by_key(|(id, _)| *id);
-                    entries.iter().map(|(_, kind)| kind.clone()).collect()
-                } else {
-                    vec![]
-                };
-
-                let synthetic_types: Vec<Term> = undefined_ids
-                    .iter()
-                    .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
-                    .collect();
-
-                self.define_synthetic_atoms(
-                    undefined_ids,
-                    type_vars,
-                    synthetic_types,
-                    clauses.clone(),
-                    Some(source.clone()),
-                )?;
+        let mut output = vec![];
+        let mut undefined_ids = vec![];
+        for id in &skolem_ids {
+            if let Some(def) = self.synthetic_registry.get(id) {
+                for clause in &def.clauses {
+                    output.push(clause.clone());
+                }
+            } else {
+                undefined_ids.push(*id);
             }
-
-            output.extend(clauses.into_iter());
-            return Ok(output);
         }
 
-        #[cfg(not(feature = "iet"))]
-        {
-            let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
-                let mut skolem_ids = vec![];
-                let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
-                let clauses = view.clausify_term(term, &mut skolem_ids)?;
-                (clauses, skolem_ids)
+        if !undefined_ids.is_empty() {
+            let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
+                let mut entries: Vec<_> = tvm.values().collect();
+                entries.sort_by_key(|(id, _)| *id);
+                entries.iter().map(|(_, kind)| kind.clone()).collect()
+            } else {
+                vec![]
             };
 
-            // For any of the created ids that have not been defined yet, the output
-            // clauses will be their definition.
-            let mut output = vec![];
-            let mut undefined_ids = vec![];
-            for id in &skolem_ids {
-                if let Some(def) = self.synthetic_registry.get(id) {
-                    for clause in &def.clauses {
-                        output.push(clause.clone());
-                    }
-                } else {
-                    undefined_ids.push(*id);
-                }
-            }
+            let synthetic_types: Vec<Term> = undefined_ids
+                .iter()
+                .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
+                .collect();
 
-            if !undefined_ids.is_empty() {
-                // We have to define the skolem atoms that were declared during skolemization.
-                let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
-                    let mut entries: Vec<_> = tvm.values().collect();
-                    entries.sort_by_key(|(id, _)| *id);
-                    entries.iter().map(|(_, kind)| kind.clone()).collect()
-                } else {
-                    vec![]
-                };
-
-                let synthetic_types: Vec<Term> = undefined_ids
-                    .iter()
-                    .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
-                    .collect();
-
-                self.define_synthetic_atoms(
-                    undefined_ids,
-                    type_vars,
-                    synthetic_types,
-                    clauses.clone(),
-                    Some(source.clone()),
-                )?;
-            }
-
-            output.extend(clauses.into_iter());
-            Ok(output)
+            self.define_synthetic_atoms(
+                undefined_ids,
+                type_vars,
+                synthetic_types,
+                clauses.clone(),
+                Some(source.clone()),
+            )?;
         }
+
+        output.extend(clauses.into_iter());
+        Ok(output)
     }
 
     /// Converts a value proposition to CNF clauses via:
@@ -298,7 +243,6 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
-        #[cfg(feature = "iet")]
         let term = normalize_boolean_subterms(&term);
         self.normalize_term(&term, ctype, source, type_var_map)
     }

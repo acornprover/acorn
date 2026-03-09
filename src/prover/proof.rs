@@ -209,9 +209,6 @@ impl<'a> Proof<'a> {
                 .get_var_types()
                 .iter()
                 .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
-            #[cfg(not(feature = "iet"))]
-            let should_skip = step.rule.is_underlying_assumption();
-            #[cfg(feature = "iet")]
             let should_skip = step.rule.is_assumption();
 
             if should_skip && !step.clause.has_any_variable() && !has_type_params {
@@ -422,7 +419,6 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
     use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
-    #[cfg(feature = "iet")]
     use crate::kernel::proof_step::{SimplificationInfo, SingleSourceInfo};
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
@@ -613,7 +609,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_collect_concrete_steps_keeps_simplified_concrete_assumption_output() {
         use crate::kernel::literal::Literal;
@@ -908,7 +903,6 @@ mod tests {
         assert_eq!(steps.len(), 1, "expected one claim step");
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_iet_exists_conjunction_reconstruction_preserves_concrete_simplifying_instantiation() {
         use crate::kernel::literal::Literal;

@@ -3,7 +3,6 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::module::LoadState;
 use crate::project::Project;
 
-#[cfg(feature = "iet")]
 fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
     clause.literals.iter().any(|lit| {
         lit.is_signed_term()
@@ -14,7 +13,6 @@ fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
     })
 }
 
-#[cfg(feature = "iet")]
 fn get_inline_exists_body(
     clause: &crate::kernel::clause::Clause,
 ) -> Option<crate::kernel::term::Term> {
@@ -55,15 +53,6 @@ fn test_nat_normalization() {
         f(zero) and forall(k: Nat) { f(k) implies f(suc(k)) } implies forall(n: Nat) { f(n) } }",
     );
 
-    #[cfg(not(feature = "iet"))]
-    norm.check(
-        &env,
-        "induction",
-        &[
-            "not x0(zero) or x0(s0_0(x0)) or x0(x1)",
-            "not x0(suc(s0_0(x0))) or not x0(zero) or x0(x1)",
-        ],
-    );
     env.expect_type("induction", "(Nat -> Bool) -> Bool");
 
     env.add("define recursion(f: Nat -> Nat, a: Nat, n: Nat) -> Nat { axiom }");
@@ -90,15 +79,9 @@ fn test_bool_formulas() {
     let mut env = Environment::test();
     let mut norm = KernelContext::new();
     env.add("theorem one(a: Bool) { a implies a or (a or a) }");
-    #[cfg(not(feature = "iet"))]
-    norm.check(&env, "one", &["not x0 or x0"]);
-    #[cfg(feature = "iet")]
     norm.check(&env, "one", &[]);
 
     env.add("theorem two(a: Bool) { a implies a and (a and a) }");
-    #[cfg(not(feature = "iet"))]
-    norm.check(&env, "two", &["or(not(x0), and(x0, and(x0, x0)))"]);
-    #[cfg(feature = "iet")]
     norm.check(&env, "two", &["not x0 or and(x0, and(x0, x0))"]);
 }
 
@@ -153,16 +136,6 @@ fn test_forall_reflexive_goal_keeps_normalized_goal() {
     );
 }
 
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_nested_skolemization() {
-    let mut env = Environment::test();
-    let mut norm = KernelContext::new();
-    env.add("type Nat: axiom");
-    env.add("theorem exists_eq(x: Nat) { exists(y: Nat) { x = y } }");
-    norm.check(&env, "exists_eq", &["s0_0(x0) = x0"]);
-}
-
 #[test]
 fn test_second_order_binding() {
     let mut env = Environment::test();
@@ -182,7 +155,6 @@ fn test_second_order_binding() {
     norm.check(&env, "goal", &["not always_true(specific_borf)"]);
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_normalizes_quantifier_bodies_before_clausification() {
     let mut env = Environment::test();
@@ -211,7 +183,6 @@ fn test_iet_normalizes_quantifier_bodies_before_clausification() {
     assert_eq!(body, expected);
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_iet_top_level_negated_and_clausifies_to_disjunction() {
     let mut env = Environment::test();
@@ -293,24 +264,6 @@ fn test_functional_equality() {
     norm.check(&env, "goal", &["zerof(x0, x1) = zerof(x2, x1)"]);
 }
 
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_exists() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-        let zero: Nat = axiom
-        let one: Nat = axiom
-        let addx: (Nat, Nat) -> Nat = axiom
-        theorem goal { exists(x: Nat) { addx(x, zero) = one } }
-        "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["addx(s0_0, zero) = one"]);
-}
-
-#[cfg(feature = "iet")]
 #[test]
 fn test_normalizing_exists_inline_with_iet() {
     use crate::kernel::term::Decomposition;
@@ -365,41 +318,6 @@ fn test_denormalizing_disjunction() {
         &env,
         "foo",
         &["addx(addx(x0, zero), x1) != zero or ltx(x1, zero)"],
-    );
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_functional_skolemization() {
-    // This matches a pattern that failed in finite_constraint proving
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Elem: axiom
-        type List: axiom
-        let contains: (List, Elem) -> Bool = axiom
-        define finite_constraint(p: Elem -> Bool) -> Bool {
-            exists(lst: List) {
-                forall(x: Elem) {
-                    p(x) implies contains(lst, x)
-                }
-            }
-        }
-        theorem test_finite(p: Elem -> Bool) {
-            not finite_constraint(p) or
-            exists(lst: List) {
-                forall(x: Elem) {
-                    p(x) implies contains(lst, x)
-                }
-            }
-        }
-        "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "test_finite",
-        &["not finite_constraint(x0) or not x0(x1) or contains(s0_0(x0), x1)"],
     );
 }
 
@@ -481,9 +399,6 @@ fn test_if_then_else_in_boolean_disjunction() {
         "#,
     );
     let mut norm = KernelContext::new();
-    #[cfg(not(feature = "iet"))]
-    norm.check(&env, "goal", &["not a or d or b", "d or c or a"]);
-    #[cfg(feature = "iet")]
     norm.check(&env, "goal", &["ite(Bool, a, b, c) or d"]);
 }
 
@@ -567,77 +482,6 @@ fn test_normalizing_functional_or() {
             "not h(x0) or dis(x0)",
         ],
     );
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_equals_exists() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let b: Bool = axiom
-        let f: Nat -> Bool = axiom
-
-        theorem goal {
-            b = exists(x: Nat) {
-                f(x)
-            }
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["not b or f(s0_0)", "not f(x0) or b"]);
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_not_or_exists() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let f: Nat -> Bool = axiom
-        let g: Nat -> Bool = axiom
-
-        theorem goal {
-            not (exists(x: Nat) {
-                f(x)
-            } or exists(y: Nat) {
-                g(y)
-            })
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["not f(x0)", "not g(x0)"]);
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_exists_inside_if() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let b: Bool = axiom
-        let f: Nat -> Bool = axiom
-        let g: Nat -> Bool = axiom
-
-        theorem goal {
-            if b {
-                exists(x: Nat) { f(x) }
-            } else {
-                exists(y: Nat) { g(y) }
-            }
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(&env, "goal", &["not b or f(s0_0)", "g(s0_1) or b"]);
 }
 
 #[test]
@@ -741,34 +585,6 @@ fn test_normalizing_func_eq_inside_lambda() {
     );
 }
 
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_exists_inside_lambda() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let f: (Nat, Nat) -> Bool = axiom
-        let g: Nat -> Bool = axiom
-
-        theorem goal {
-            g = function(x: Nat) {
-                    exists(y: Nat) {
-                        f(x, y)
-                    }
-                }
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["not g(x0) or f(x0, s0_0(x0))", "not f(x0, x1) or g(x0)"],
-    );
-}
-
 #[test]
 fn test_normalizing_forall_inside_lambda() {
     let mut env = Environment::test();
@@ -789,59 +605,22 @@ fn test_normalizing_forall_inside_lambda() {
     "#,
     );
     let mut norm = KernelContext::new();
-    #[cfg(not(feature = "iet"))]
-    norm.check(
-        &env,
-        "goal",
-        &["not g(x0) or f(x0, x1)", "not f(x0, s0_0(x0)) or g(x0)"],
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 2, "expected two clauses");
+    assert!(
+        clauses.iter().any(|clause| {
+            !has_inline_exists(clause)
+                && clause.literals.len() == 2
+                && clause.literals.iter().any(|lit| lit.positive)
+                && clause.literals.iter().any(|lit| !lit.positive)
+        }),
+        "expected the forward implication clause to stay first-order"
     );
-    #[cfg(feature = "iet")]
-    {
-        let clauses = norm.get_all_clauses(&env);
-        assert_eq!(clauses.len(), 2, "expected two clauses");
-        assert!(
-            clauses.iter().any(|clause| {
-                !has_inline_exists(clause)
-                    && clause.literals.len() == 2
-                    && clause.literals.iter().any(|lit| lit.positive)
-                    && clause.literals.iter().any(|lit| !lit.positive)
-            }),
-            "expected the forward implication clause to stay first-order"
-        );
-        assert!(
-            clauses
-                .iter()
-                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
-            "expected the reverse implication to keep an inline exists"
-        );
-    }
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_exists_inside_neq_lambda() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let f: (Nat, Nat) -> Bool = axiom
-        let g: Nat -> Bool = axiom
-
-        theorem goal {
-            g != function(x: Nat) {
-                    exists(y: Nat) {
-                        f(x, y)
-                    }
-                }
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["not f(s0_0, x0) or not g(s0_0)", "f(s0_0, s0_1) or g(s0_0)"],
+    assert!(
+        clauses
+            .iter()
+            .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+        "expected the reverse implication to keep an inline exists"
     );
 }
 
@@ -865,58 +644,21 @@ fn test_normalizing_forall_inside_neq_lambda() {
     "#,
     );
     let mut norm = KernelContext::new();
-    #[cfg(not(feature = "iet"))]
-    norm.check(
-        &env,
-        "goal",
-        &["not f(s0_0, s0_1) or not g(s0_0)", "f(s0_0, x0) or g(s0_0)"],
+    let clauses = norm.get_all_clauses(&env);
+    assert_eq!(clauses.len(), 2, "expected two clauses");
+    assert!(
+        clauses.iter().any(|clause| {
+            !has_inline_exists(clause)
+                && clause.literals.len() == 2
+                && clause.literals.iter().all(|lit| lit.positive)
+        }),
+        "expected one positive witness clause"
     );
-    #[cfg(feature = "iet")]
-    {
-        let clauses = norm.get_all_clauses(&env);
-        assert_eq!(clauses.len(), 2, "expected two clauses");
-        assert!(
-            clauses.iter().any(|clause| {
-                !has_inline_exists(clause)
-                    && clause.literals.len() == 2
-                    && clause.literals.iter().all(|lit| lit.positive)
-            }),
-            "expected one positive witness clause"
-        );
-        assert!(
-            clauses
-                .iter()
-                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
-            "expected one clause with an inline exists"
-        );
-    }
-}
-
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_normalizing_pre_expanded_exists_inside_lambda() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        type Nat: axiom
-
-        let f: (Nat, Nat) -> Bool = axiom
-        let g: Nat -> Bool = axiom
-
-        theorem goal(a: Nat) {
-            g(a) = function(x: Nat) {
-                        exists(y: Nat) {
-                            f(x, y)
-                        }
-                    }(a)
-        }
-    "#,
-    );
-    let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["not g(x0) or f(x0, s0_0(x0))", "not f(x0, x1) or g(x0)"],
+    assert!(
+        clauses
+            .iter()
+            .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+        "expected one clause with an inline exists"
     );
 }
 
@@ -1022,9 +764,6 @@ fn test_preserves_or_over_and_shape() {
     );
 
     let mut norm = KernelContext::new();
-    #[cfg(not(feature = "iet"))]
-    norm.check(&env, "goal", &["or(and(a, b), c)"]);
-    #[cfg(feature = "iet")]
     norm.check(&env, "goal", &["and(a, b) or c"]);
 }
 

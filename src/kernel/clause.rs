@@ -158,38 +158,22 @@ impl Clause {
     }
 
     pub(crate) fn exact_match_key(&self) -> Clause {
-        #[cfg(not(feature = "iet"))]
-        {
-            let mut clause = self.clone();
-            clause.normalize();
-            clause
-        }
-
-        #[cfg(feature = "iet")]
-        {
-            let mut clause = Clause {
-                literals: self
-                    .literals
-                    .clone()
-                    .into_iter()
-                    .flat_map(Self::normalize_literals_for_matching)
-                    .collect(),
-                context: self.context.clone(),
-            };
-            clause.literals.retain(|lit| !lit.is_impossible());
-            clause.literals.sort();
-            clause.literals.dedup();
-            clause.normalize_var_ids();
-            clause
-        }
+        let mut clause = Clause {
+            literals: self
+                .literals
+                .clone()
+                .into_iter()
+                .flat_map(Self::normalize_literals_for_matching)
+                .collect(),
+            context: self.context.clone(),
+        };
+        clause.literals.retain(|lit| !lit.is_impossible());
+        clause.literals.sort();
+        clause.literals.dedup();
+        clause.normalize_var_ids();
+        clause
     }
 
-    #[cfg(not(feature = "iet"))]
-    fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
-        vec![literal]
-    }
-
-    #[cfg(feature = "iet")]
     fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
         let right = Self::normalize_boolean_term(&literal.right);
         if right.is_true() {
@@ -205,7 +189,6 @@ impl Clause {
         )]
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_signed_boolean_term(term: &Term, positive: bool) -> (Term, bool) {
         if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
             return Self::normalize_signed_boolean_term(&args[0], !positive);
@@ -226,7 +209,6 @@ impl Clause {
         (Self::normalize_boolean_term(term), positive)
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_literals_for_matching(literal: Literal) -> Vec<Literal> {
         let right = Self::normalize_boolean_term(&literal.right);
         if right.is_true() {
@@ -243,7 +225,6 @@ impl Clause {
         )]
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_signed_boolean_term_to_literals(term: &Term, positive: bool) -> Vec<Literal> {
         if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
             return Self::normalize_signed_boolean_term_to_literals(&args[0], !positive);
@@ -289,12 +270,10 @@ impl Clause {
         )]
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_boolean_term(term: &Term) -> Term {
         Self::normalize_boolean_term_with_polarity(term, true)
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_boolean_term_with_polarity(term: &Term, positive: bool) -> Term {
         if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
             return Self::normalize_boolean_term_with_polarity(&args[0], !positive);
@@ -379,7 +358,6 @@ impl Clause {
         }
     }
 
-    #[cfg(feature = "iet")]
     fn normalize_boolean_eq(term: Term) -> Term {
         let Some(args) = Self::split_symbol_application(&term, Symbol::Eq, 3) else {
             return term;
@@ -959,7 +937,6 @@ impl Clause {
     ///
     /// This captures the obvious existential-introduction case in `iet` mode
     /// without introducing synthetic skolems.
-    #[cfg(feature = "iet")]
     fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
         let (_binder_type, body) = term.as_ref().split_exists()?;
         let body = body.to_owned();
@@ -982,7 +959,6 @@ impl Clause {
     /// Reduce `exists(T => body)` to `body[choose(T, function(x:T){body})/x]`.
     ///
     /// This is the generic existential-activation path for `iet` mode.
-    #[cfg(feature = "iet")]
     fn reduce_exists_with_choose(term: &Term) -> Option<Term> {
         let (binder_type, body) = term.as_ref().split_exists()?;
         let binder_type = binder_type.to_owned();
@@ -993,7 +969,6 @@ impl Clause {
     }
 
     /// Reduce `not forall(T => body)` to `exists(T => not body)`.
-    #[cfg(feature = "iet")]
     fn reduce_negated_forall(term: &Term) -> Option<Term> {
         let (binder_type, body) = term.as_ref().split_forall()?;
         Some(Term::exists(
@@ -1162,7 +1137,6 @@ impl Clause {
             .collect()
     }
 
-    #[cfg(feature = "iet")]
     fn reduce_negated_exists(term: &Term, context: &LocalContext) -> Option<(Term, LocalContext)> {
         let (binder_type, body) = term.as_ref().split_exists()?;
         let mut output_context = context.clone();
@@ -1307,50 +1281,46 @@ impl Clause {
                     continue;
                 }
 
-                #[cfg(feature = "iet")]
                 if self.literals.len() > 1 && literal.positive && literal.left.as_ref().is_exists()
                 {
                     continue;
                 }
 
-                #[cfg(feature = "iet")]
-                {
-                    if literal.positive {
-                        if let Some((_witness, reduced)) =
-                            Self::reduce_exists_with_obvious_witness(&literal.left)
-                        {
-                            answer.extend(self.with_replaced_literal_and_context(
-                                i,
-                                vec![vec![Literal::positive(reduced)]],
-                                &self.context,
-                            ));
-                            continue;
-                        }
-                        if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
-                            answer.extend(self.with_replaced_literal_and_context(
-                                i,
-                                vec![vec![Literal::positive(reduced)]],
-                                &self.context,
-                            ));
-                            continue;
-                        }
-                    } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
+                if literal.positive {
+                    if let Some((_witness, reduced)) =
+                        Self::reduce_exists_with_obvious_witness(&literal.left)
+                    {
                         answer.extend(self.with_replaced_literal_and_context(
                             i,
                             vec![vec![Literal::positive(reduced)]],
                             &self.context,
                         ));
                         continue;
-                    } else if let Some((reduced, output_context)) =
-                        Self::reduce_negated_exists(&literal.left, &self.context)
-                    {
+                    }
+                    if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
                         answer.extend(self.with_replaced_literal_and_context(
                             i,
-                            vec![vec![Literal::negative(reduced)]],
-                            &output_context,
+                            vec![vec![Literal::positive(reduced)]],
+                            &self.context,
                         ));
                         continue;
                     }
+                } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![Literal::positive(reduced)]],
+                        &self.context,
+                    ));
+                    continue;
+                } else if let Some((reduced, output_context)) =
+                    Self::reduce_negated_exists(&literal.left, &self.context)
+                {
+                    answer.extend(self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![Literal::negative(reduced)]],
+                        &output_context,
+                    ));
+                    continue;
                 }
 
                 if let Some(args) = Self::split_symbol_application(&literal.left, Symbol::And, 2) {
@@ -1790,13 +1760,8 @@ mod tests {
         let reductions = clause.boolean_reductions(&kctx);
 
         let expected = Clause::new(vec![Literal::negative(a)], &LocalContext::empty());
-        #[cfg(not(feature = "iet"))]
-        assert_eq!(reductions, vec![expected]);
-        #[cfg(feature = "iet")]
-        {
-            assert_eq!(clause, expected);
-            assert!(reductions.is_empty());
-        }
+        assert_eq!(clause, expected);
+        assert!(reductions.is_empty());
     }
 
     #[test]
@@ -1836,7 +1801,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_exists_eq_self_witness() {
         let mut kctx = KernelContext::new();
@@ -1864,7 +1828,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_exists_eq_var_witness() {
         let mut kctx = KernelContext::new();
@@ -1893,7 +1856,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_positive_exists_in_disjunction_stays_inline() {
         let mut kctx = KernelContext::new();
@@ -1914,7 +1876,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_negated_exists_opens_to_free_variable() {
         let mut kctx = KernelContext::new();
@@ -1935,7 +1896,6 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_not_exists_reduces_once_then_stops() {
         let kctx = KernelContext::new();
@@ -1953,7 +1913,6 @@ mod tests {
         assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_negated_forall_becomes_exists_negated_body() {
         let mut kctx = KernelContext::new();
@@ -1994,7 +1953,6 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_negated_forall_normalizes_resulting_exists_body() {
         let mut kctx = KernelContext::new();
@@ -2041,7 +1999,6 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_negative_signed_not_becomes_positive_literal() {
         let mut kctx = KernelContext::new();
@@ -2061,7 +2018,6 @@ mod tests {
         assert!(clause.boolean_reductions(&kctx).is_empty());
     }
 
-    #[cfg(feature = "iet")]
     #[test]
     fn test_boolean_reduction_negated_exists_surfaces_to_clause_level() {
         let mut kctx = KernelContext::new();

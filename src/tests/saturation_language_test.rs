@@ -3,63 +3,6 @@ use crate::{project::Project, prover::Outcome};
 
 // This file tests that the various language features work correctly in the prover.
 
-#[cfg(not(feature = "iet"))]
-fn generated_synthetic_code_line(
-    bindings: &crate::elaborator::binding_map::BindingMap,
-    kernel_context: &crate::kernel::kernel_context::KernelContext,
-    needle: &str,
-) -> (String, String) {
-    use crate::code_generator::{CodeGenerator, SyntheticNameSet};
-    use crate::kernel::certificate_step::CertificateStep;
-
-    let synthetic_ids = kernel_context.get_synthetic_ids();
-    assert!(
-        !synthetic_ids.is_empty(),
-        "expected at least one synthetic definition"
-    );
-
-    let infos = kernel_context.find_covering_synthetic_info(&synthetic_ids);
-    let mut names = SyntheticNameSet::new();
-    for info in &infos {
-        for atom in &info.atoms {
-            if names.synthetic_names.contains_key(atom) {
-                continue;
-            }
-            let name = format!("s{}", names.next_s);
-            names.next_s += 1;
-            names.synthetic_names.insert(*atom, name);
-        }
-    }
-
-    let mut generator = CodeGenerator::new(bindings);
-    let mut codes = vec![];
-    for info in infos {
-        let step = CertificateStep::DefineSynthetic {
-            atoms: info.atoms.clone(),
-            type_vars: info.type_vars.clone(),
-            clauses: info.clauses.clone(),
-        };
-        codes.push(
-            generator
-                .certificate_step_to_code(&names, &step, kernel_context)
-                .expect("synthetic code should generate"),
-        );
-    }
-
-    let line = codes
-        .iter()
-        .find(|code| code.contains(needle))
-        .cloned()
-        .or_else(|| codes.first().cloned())
-        .expect("expected at least one generated synthetic line");
-    let name = line
-        .strip_prefix("let ")
-        .and_then(|rest| rest.split(['[', ':', ' ']).next())
-        .expect("synthetic line should start with a declaration name")
-        .to_string();
-    (line, name)
-}
-
 #[test]
 fn test_proof_inside_theorem_block() {
     let text = r#"
@@ -1549,10 +1492,9 @@ fn test_cannot_inhabit_arbitrary_type() {
     verify_fails(text);
 }
 
-#[cfg(feature = "iet")]
 #[test]
 fn test_negated_exists_axiom_does_not_imply_false() {
-    // Regression test for negated-existential handling in IET mode:
+    // Regression test for negated-existential handling:
     // from "not exists(x: T) { true }" we must NOT be able to conclude false
     // for arbitrary T.
     let text = r#"
@@ -1760,17 +1702,7 @@ fn test_inhabited_const() {
         true
     }
     "#;
-    #[cfg(feature = "iet")]
-    {
-        verify_succeeds(text);
-    }
-    #[cfg(not(feature = "iet"))]
-    {
-        // This definition should fail to normalize because it involves an exists
-        // over a potentially uninhabited type T.
-        let result = verify(text);
-        assert!(result.is_err(), "expected an error, got {:?}", result);
-    }
+    verify_succeeds(text);
 }
 
 /// Regression test: when a certificate uses a typeclass constraint from a function
@@ -2071,152 +2003,6 @@ fn test_polymorphic_axiom_chain_needs_arbitrary_type() {
     verify_succeeds(text);
 }
 
-// Reproduces a bug with dependently typed synthetics in polymorphic let...satisfy.
-// The synthetic s0 has type T0 where T0 is a type parameter.
-//
-// The code is valid as regular Acorn code (module loads fine), but the certificate
-// checker fails with "value s0 has unresolved type".
-//
-// The original bug: cargo run --profile release --features polymorphic,validate -- reprove ordered_group
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_dependently_typed_synthetic() {
-    use crate::processor::Processor;
-
-    let (processor, bindings, normalized_goal) = Processor::test_goal(
-        r#"
-        typeclass T: Grp {
-            1: T
-        }
-
-        define has_finite_order[T: Grp](x: T) -> Bool { axiom }
-
-        let is_torsion_free[T: Grp] = forall(x: T) { not has_finite_order(x) or x = T.1 }
-
-        theorem goal[G: Grp] { is_torsion_free[G] }
-        "#,
-    );
-
-    let (cert_line, _synthetic_name) = generated_synthetic_code_line(
-        &bindings,
-        &normalized_goal.kernel_context,
-        "is_torsion_free",
-    );
-
-    processor.test_parse_code(&cert_line, &bindings, &normalized_goal.kernel_context);
-}
-
-// Reproduces a bug where a polymorphic synthetic causes
-// "BoundVariable(0) in PDT search - should have been substituted".
-//
-// Based on the certificate from ordered_group for ordered_imp_torsion_free.
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_polymorphic_synthetic_claim() {
-    use crate::certificate::Certificate;
-    use crate::processor::Processor;
-    use crate::project::Project;
-    use std::borrow::Cow;
-
-    let (_processor, bindings, normalized_goal) = Processor::test_goal(
-        r#"
-        typeclass T: Grp {
-            1: T
-        }
-
-        define has_finite_order[T: Grp](x: T) -> Bool { axiom }
-
-        let is_torsion_free[T: Grp] = forall(x: T) { not has_finite_order(x) or x = T.1 }
-
-        theorem goal[G: Grp] { is_torsion_free[G] }
-        "#,
-    );
-
-    let project = Project::new_mock();
-    let kernel_context = normalized_goal.kernel_context.clone();
-    let mut kernel_context_cow: Cow<crate::kernel::kernel_context::KernelContext> =
-        Cow::Owned(kernel_context);
-    let mut bindings_cow = Cow::Borrowed(&bindings);
-
-    let (cert_line, synthetic_name) =
-        generated_synthetic_code_line(&bindings, &kernel_context_cow, "is_torsion_free");
-
-    // Parse the polymorphic synthetic
-    Certificate::parse_code_line(
-        &cert_line,
-        &project,
-        &mut bindings_cow,
-        &mut kernel_context_cow,
-    )
-    .expect("let-satisfy should parse");
-
-    // Parse the claim - this triggers the bug when s0's type is looked up.
-    // s0 has type Variable(T0) outside the let...satisfy block, so we need
-    // explicit type params. Using G from the theorem's scope.
-    Certificate::parse_code_line(
-        &format!(
-            "has_finite_order[G]({}[G]) or is_torsion_free[G]",
-            synthetic_name
-        ),
-        &project,
-        &mut bindings_cow,
-        &mut kernel_context_cow,
-    )
-    .expect("claim should parse");
-}
-
-// Certificate type parameters are scoped to a single line.
-// Re-using the same type parameter name in a later line should work.
-#[cfg(not(feature = "iet"))]
-#[test]
-fn test_certificate_type_params_are_step_local() {
-    use crate::certificate::Certificate;
-    use crate::processor::Processor;
-    use crate::project::Project;
-    use std::borrow::Cow;
-
-    let (_processor, bindings, normalized_goal) = Processor::test_goal(
-        r#"
-        typeclass T: Grp {
-            1: T
-        }
-
-        define has_finite_order[T: Grp](x: T) -> Bool { axiom }
-
-        let is_torsion_free[T: Grp] = forall(x: T) { not has_finite_order(x) or x = T.1 }
-
-        theorem goal[G: Grp] { is_torsion_free[G] }
-        "#,
-    );
-
-    let project = Project::new_mock();
-    let kernel_context = normalized_goal.kernel_context.clone();
-    let mut kernel_context_cow: Cow<crate::kernel::kernel_context::KernelContext> =
-        Cow::Owned(kernel_context);
-    let mut bindings_cow = Cow::Borrowed(&bindings);
-
-    let (first_line, synthetic_name) =
-        generated_synthetic_code_line(&bindings, &kernel_context_cow, "is_torsion_free");
-
-    Certificate::parse_code_line(
-        &first_line,
-        &project,
-        &mut bindings_cow,
-        &mut kernel_context_cow,
-    )
-    .expect("first line should parse");
-
-    // This currently fails because T0 remains bound globally after the first line.
-    let second_line = first_line.replace(&synthetic_name, "s99");
-    Certificate::parse_code_line(
-        &second_line,
-        &project,
-        &mut bindings_cow,
-        &mut kernel_context_cow,
-    )
-    .expect("second line should parse");
-}
-
 // Regression: certificates generated while proving a polymorphic structure
 // constructor definition must check with the goal's type parameters in scope.
 #[test]
@@ -2257,7 +2043,6 @@ fn test_subgroup_identity_existence_cert_generation() {
     );
 }
 
-#[cfg(not(feature = "iet"))]
 #[test]
 fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_args() {
     let text = r#"
@@ -2330,13 +2115,11 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
     assert!(
         proof
             .iter()
-            .any(|line| line.contains("}[G](s0(is_identity[G]))")),
+            .any(|line| line.contains("}[G](is_identity[G])")),
         "expected claim-with-args line to keep the outer goal type argument: {proof:?}"
     );
     assert!(
-        !proof
-            .iter()
-            .any(|line| line.contains("s0(is_identity[Bool])")),
+        !proof.iter().any(|line| line.contains("is_identity[Bool]")),
         "claim-with-args line should not instantiate the goal type to Bool: {proof:?}"
     );
 }
