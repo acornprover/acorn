@@ -214,7 +214,6 @@ enum Command {
         /// Ignore manifest hash checks and reprocess unchanged modules
         #[clap(
             long = "ignore-hash",
-            alias = "no-cache-skip",
             alias = "nohash",
             help = "Ignore manifest hash checks and reprocess unchanged modules."
         )]
@@ -223,7 +222,6 @@ enum Command {
         /// Verify without writing results to the cache
         #[clap(
             long = "read-only",
-            alias = "no-write-cache",
             help = "Verify without writing results to the cache."
         )]
         read_only: bool,
@@ -353,11 +351,7 @@ enum Command {
         activations: Option<u32>,
 
         /// Save reproved results to the cache
-        #[clap(
-            long = "save-results",
-            alias = "write-cache",
-            help = "Save reproved results to the cache."
-        )]
+        #[clap(long = "save-results", help = "Save reproved results to the cache.")]
         save_results: bool,
 
         /// Print every activated proof step for a single selected goal
@@ -960,7 +954,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use acorn::interfaces::GoalInfo;
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
 
     use super::{
         filter_selected_goals, validate_activations_flag, validate_goal_flag,
@@ -1054,37 +1048,27 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_keeps_legacy_flag_aliases() {
-        let args = Args::try_parse_from(["acorn", "verify", "--no-cache-skip", "--no-write-cache"])
-            .expect("legacy verify flag aliases should parse");
+    fn test_verify_rejects_legacy_flag_aliases() {
+        let error = Args::try_parse_from(["acorn", "verify", "--no-cache-skip"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 
+        let error = Args::try_parse_from(["acorn", "verify", "--no-write-cache"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn test_reprove_accepts_renamed_save_flag() {
+        let args = Args::try_parse_from(["acorn", "reprove", "--save-results"])
+            .expect("renamed reprove flag should parse");
         match args.command {
-            Some(Command::Verify {
-                ignore_hash,
-                read_only,
-                ..
-            }) => {
-                assert!(ignore_hash);
-                assert!(read_only);
-            }
+            Some(Command::Reprove { save_results, .. }) => assert!(save_results),
             _ => panic!("unexpected command"),
         }
     }
 
     #[test]
-    fn test_reprove_accepts_renamed_and_legacy_save_flag() {
-        let new_args = Args::try_parse_from(["acorn", "reprove", "--save-results"])
-            .expect("renamed reprove flag should parse");
-        match new_args.command {
-            Some(Command::Reprove { save_results, .. }) => assert!(save_results),
-            _ => panic!("unexpected command"),
-        }
-
-        let legacy_args = Args::try_parse_from(["acorn", "reprove", "--write-cache"])
-            .expect("legacy reprove flag alias should parse");
-        match legacy_args.command {
-            Some(Command::Reprove { save_results, .. }) => assert!(save_results),
-            _ => panic!("unexpected command"),
-        }
+    fn test_reprove_rejects_legacy_save_flag() {
+        let error = Args::try_parse_from(["acorn", "reprove", "--write-cache"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 }
