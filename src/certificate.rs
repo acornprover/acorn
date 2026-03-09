@@ -63,13 +63,13 @@ fn value_to_code(
     code_line: Option<&str>,
 ) -> String {
     // First try normal code generation.
-    let mut code_gen = CodeGenerator::new(bindings);
+    let mut code_gen = CodeGenerator::new_for_certificate(bindings);
     if let Ok(code) = code_gen.value_to_code(&value) {
         return code;
     }
 
     if !synthetic_names.is_empty() {
-        let mut code_gen = CodeGenerator::new(bindings);
+        let mut code_gen = CodeGenerator::new_for_certificate(bindings);
         if let Ok(code) = code_gen.value_to_code_with_synthetic_names(&value, synthetic_names) {
             return code;
         }
@@ -339,7 +339,7 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<Certificate, CodeGenError> {
-        let mut generator = CodeGenerator::new(bindings);
+        let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
         let mut names = SyntheticNameSet::new();
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
@@ -758,7 +758,7 @@ impl Certificate {
             ));
         }
 
-        let mut generator = CodeGenerator::new(bindings);
+        let mut generator = CodeGenerator::new_for_certificate(bindings);
         let generic_value = kernel_context.denormalize(&claim.clause, None, None, false);
         let generic_code = if let Some(synthetic_names) = synthetic_names {
             generator.value_to_code_with_synthetic_names(&generic_value, synthetic_names)?

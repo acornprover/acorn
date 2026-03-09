@@ -405,6 +405,11 @@ pub struct CodeGenerator<'a> {
     /// Bindings for the module we are generating code in.
     bindings: &'a BindingMap,
 
+    /// Whether to allow explicit typeclass-attribute calls even when receiver syntax would
+    /// be out of scope at the current source location. Certificate serialization needs this
+    /// so proofs can cite generic definitions with concrete type arguments.
+    allow_out_of_scope_typeclass_calls: bool,
+
     /// We use variables named x0, x1, x2, etc for universal variables.
     next_x: u32,
 
@@ -737,10 +742,22 @@ impl CodeGenerator<'_> {
     pub fn new(bindings: &BindingMap) -> CodeGenerator<'_> {
         CodeGenerator {
             bindings,
+            allow_out_of_scope_typeclass_calls: false,
             next_x: 0,
             next_k: 0,
             next_t: 0,
             var_names: vec![],
+        }
+    }
+
+    /// Creates a code generator for certificate serialization.
+    ///
+    /// Certificates may need to mention explicit `Typeclass.attr[Type](...)` applications even
+    /// when receiver syntax would be out of scope at the selected goal location.
+    pub fn new_for_certificate(bindings: &BindingMap) -> CodeGenerator<'_> {
+        CodeGenerator {
+            allow_out_of_scope_typeclass_calls: true,
+            ..Self::new(bindings)
         }
     }
 
@@ -2037,6 +2054,7 @@ impl CodeGenerator<'_> {
                                         [AcornType::Data(param_datatype, _)] if param_datatype == datatype
                                     );
                                 if receiver_matches_explicit_param
+                                    && !self.allow_out_of_scope_typeclass_calls
                                     && !self.bindings.is_instance_of(datatype, typeclass)
                                 {
                                     return Err(Error::GeneratedBadCode(format!(
@@ -2077,6 +2095,8 @@ impl CodeGenerator<'_> {
                                 if self.bindings.is_instance_of(datatype, typeclass) {
                                     // If the datatype has its own attribute, don't infer parameters
                                     !self.bindings.has_type_attr(datatype, attr_name)
+                                } else if self.allow_out_of_scope_typeclass_calls {
+                                    false
                                 } else {
                                     true
                                 }
@@ -3241,6 +3261,21 @@ instance Foo: Mul {
             "unexpected error: {}",
             err
         );
+
+        let mut cert_generator = CodeGenerator::new_for_certificate(&goal_bindings);
+        let rendered = cert_generator
+            .value_to_code(&value)
+            .expect("certificate mode should allow explicit future-instance calls");
+        assert_eq!(rendered, "Mul.mul[Foo](foo_zero, foo_zero)");
+
+        let explicit_expr =
+            Expression::parse_value_string(&rendered).expect("rendered expression should parse");
+        let mut goal_evaluator =
+            Evaluator::new_with_allow_choose(&project, &goal_bindings, None, true);
+        let roundtrip = goal_evaluator
+            .evaluate_value(&explicit_expr, None)
+            .expect("explicit typeclass call should evaluate in goal bindings");
+        assert_eq!(roundtrip, value);
     }
 
     #[test]
