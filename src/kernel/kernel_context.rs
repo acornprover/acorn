@@ -7,8 +7,6 @@ use crate::kernel::synthetic::SyntheticRegistry;
 use crate::kernel::term::Term;
 use crate::kernel::type_store::TypeStore;
 use crate::kernel::types::TypeclassId;
-#[cfg(test)]
-use crate::module::ModuleId;
 
 /// KernelContext combines the kernel stores needed for typing and normalization.
 #[derive(Clone)]
@@ -343,9 +341,8 @@ impl KernelContext {
         ctx
     }
 
-    /// Creates a test KernelContext with pre-populated scoped constants, global constants,
-    /// and synthetics. All types will be Bool.
-    /// For use in tests that parse terms like "c0", "g0", "s0".
+    /// Creates a test KernelContext with pre-populated scoped constants and global constants.
+    /// All types will be Bool.
     #[cfg(test)]
     pub fn test_with_constants(num_scoped: usize, num_global: usize) -> KernelContext {
         let mut ctx = KernelContext::new();
@@ -354,33 +351,6 @@ impl KernelContext {
         }
         for _ in 0..num_global {
             ctx.symbol_table.add_global_constant(Term::bool_type());
-        }
-        // Also add synthetics for tests that use "s0_0", "s0_1", etc.
-        for _ in 0..10 {
-            ctx.symbol_table
-                .declare_synthetic(ModuleId(0), Term::bool_type());
-        }
-        ctx
-    }
-
-    /// Creates a test KernelContext with all symbol types populated with specified types.
-    /// Arrays are indexed by atom id, e.g., synthetic_types[2] gives type for Synthetic(2).
-    #[cfg(test)]
-    pub fn test_with_all_types(
-        scoped_types: &[Term],
-        global_types: &[Term],
-        synthetic_types: &[Term],
-    ) -> KernelContext {
-        let mut ctx = KernelContext::new();
-        for type_term in scoped_types {
-            ctx.symbol_table.add_scoped_constant(type_term.clone());
-        }
-        for type_term in global_types {
-            ctx.symbol_table.add_global_constant(type_term.clone());
-        }
-        for type_term in synthetic_types {
-            ctx.symbol_table
-                .declare_synthetic(ModuleId(0), type_term.clone());
         }
         ctx
     }
@@ -505,12 +475,6 @@ impl KernelContext {
             .add_scoped_constant(type_bool2_to_bool_alt.clone()); // c4
         for _ in 5..10 {
             ctx.symbol_table.add_scoped_constant(Term::bool_type());
-        }
-
-        // Add synthetics with BOOL type
-        for _ in 0..10 {
-            ctx.symbol_table
-                .declare_synthetic(ModuleId(0), Term::bool_type());
         }
 
         ctx
@@ -883,7 +847,7 @@ impl KernelContext {
     }
 
     /// Add a constant with a given name and type string for testing.
-    /// The name should be like "c0", "g0", or "s0".
+    /// The name should be like "c0" or "g0".
     /// Returns self for chaining.
     ///
     /// Example: `ctx.parse_constant("c0", "Int").parse_constant("g0", "Int -> Bool")`
@@ -905,13 +869,6 @@ impl KernelContext {
                     self.symbol_table.add_global_constant(Term::bool_type());
                 }
                 self.symbol_table.set_global_constant_type(id, type_term);
-            }
-            's' => {
-                while self.symbol_table.num_synthetics() <= id {
-                    self.symbol_table
-                        .declare_synthetic(ModuleId(0), Term::bool_type());
-                }
-                self.symbol_table.set_synthetic_type(id, type_term);
             }
             _ => panic!("Unknown constant prefix: {}", first_char),
         }

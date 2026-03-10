@@ -731,8 +731,8 @@ mod tests {
         kctx.parse_datatype("A")
             // g0 takes A and returns a binary Bool function (like lte_from with type param)
             .parse_constant("g0", "A -> (Bool, Bool) -> Bool")
-            // s0 is a selector: given a binary function, returns a Bool (like Synthetic)
-            .parse_constant("s0", "((Bool, Bool) -> Bool) -> Bool")
+            // g1 is a selector: given a binary function, returns a Bool
+            .parse_constant("g1", "((Bool, Bool) -> Bool) -> Bool")
             // c0 is a predicate on binary functions (like is_reflexive)
             .parse_constant("c0", "((Bool, Bool) -> Bool) -> Bool")
             // c1 is a constant of type A (like the type argument)
@@ -740,18 +740,18 @@ mod tests {
 
         let mut clause_set = GeneralizationSet::new();
 
-        // Pattern: not f(s0(f), s0(f)) or c0(f)
+        // Pattern: not f(g1(f), g1(f)) or c0(f)
         // where f: (Bool, Bool) -> Bool (variable x0)
         let pattern = kctx.parse_clause(
-            "not x0(s0(x0), s0(x0)) or c0(x0)",
+            "not x0(g1(x0), g1(x0)) or c0(x0)",
             &["(Bool, Bool) -> Bool"],
         );
         clause_set.insert(pattern.clone(), 99, &kctx);
 
-        // Build query manually: not g0(c1)(s0(g0(c1)), s0(g0(c1))) or c0(g0(c1))
-        // Symbols: g0 = GlobalConstant(0), s0 = Synthetic(0), c0 = ScopedConstant(0), c1 = ScopedConstant(1)
+        // Build query manually: not g0(c1)(g1(g0(c1)), g1(g0(c1))) or c0(g0(c1))
+        // Symbols: g0 = GlobalConstant(0), g1 = GlobalConstant(1), c0 = ScopedConstant(0), c1 = ScopedConstant(1)
         let g0_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0));
-        let s0_atom = Atom::Symbol(Symbol::Synthetic(ModuleId(0), 0));
+        let g1_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 1));
         let c0_atom = Atom::Symbol(Symbol::ScopedConstant(0));
         let c1_atom = Atom::Symbol(Symbol::ScopedConstant(1));
         let c1_term = Term::atom(c1_atom);
@@ -759,24 +759,24 @@ mod tests {
         // g0(c1) - a function (Bool, Bool) -> Bool
         let g0_c1 = Term::new(g0_atom, vec![c1_term.clone()]);
 
-        // s0(g0(c1)) - a Bool
-        let s0_g0_c1 = Term::new(s0_atom, vec![g0_c1.clone()]);
+        // g1(g0(c1)) - a Bool
+        let g1_g0_c1 = Term::new(g1_atom, vec![g0_c1.clone()]);
 
-        // g0(c1)(s0(g0(c1)), s0(g0(c1))) = g0(c1, s0(g0(c1)), s0(g0(c1))) in curried form
-        // This is g0 applied to c1, then to s0(g0(c1)), then to s0(g0(c1))
-        let g0_c1_s0_s0 = Term::new(
+        // g0(c1)(g1(g0(c1)), g1(g0(c1))) = g0(c1, g1(g0(c1)), g1(g0(c1))) in curried form
+        // This is g0 applied to c1, then to g1(g0(c1)), then to g1(g0(c1))
+        let g0_c1_g1_g1 = Term::new(
             g0_atom,
-            vec![c1_term.clone(), s0_g0_c1.clone(), s0_g0_c1.clone()],
+            vec![c1_term.clone(), g1_g0_c1.clone(), g1_g0_c1.clone()],
         );
 
         // c0(g0(c1))
         let c0_g0_c1 = Term::new(c0_atom, vec![g0_c1.clone()]);
 
         // Build the literals:
-        // Literal 1: not g0(c1, s0(g0(c1)), s0(g0(c1))) = true
+        // Literal 1: not g0(c1, g1(g0(c1)), g1(g0(c1))) = true
         let lit1 = Literal {
             positive: false,
-            left: g0_c1_s0_s0,
+            left: g0_c1_g1_g1,
             right: Term::new_true(),
         };
 
@@ -800,8 +800,8 @@ mod tests {
     /// Similar to the above test, but now the function takes TWO curried applications
     /// before becoming a binary function. lte_from(Type)(lt) has two applications.
     ///
-    /// Pattern: not f(s0(f), s0(f)) or c0(f)
-    /// Query: not g0(Type)(c1)(s0(g0(Type)(c1)), s0(g0(Type)(c1))) or c0(g0(Type)(c1))
+    /// Pattern: not f(g1(f), g1(f)) or c0(f)
+    /// Query: not g0(Type)(c1)(g1(g0(Type)(c1)), g1(g0(Type)(c1))) or c0(g0(Type)(c1))
     ///
     /// Where Type is an actual Type symbol.
     #[test]
@@ -817,8 +817,8 @@ mod tests {
             // g0 takes a Type, then another arg of that type, and returns (T, T) -> Bool
             // This simulates: forall T. A -> (T, T) -> Bool
             .parse_constant("g0", "T -> T -> (T, T) -> Bool")
-            // s0 is a selector: given a binary function, returns a T
-            .parse_constant("s0", "((T, T) -> Bool) -> T")
+            // g1 is a selector: given a binary function, returns a T
+            .parse_constant("g1", "((T, T) -> Bool) -> T")
             // c0 is a predicate on binary functions (like is_reflexive)
             .parse_constant("c0", "((T, T) -> Bool) -> Bool")
             // c1 is a constant of type T
@@ -826,16 +826,16 @@ mod tests {
 
         let mut clause_set = GeneralizationSet::new();
 
-        // Pattern: not f(s0(f), s0(f)) or c0(f)
+        // Pattern: not f(g1(f), g1(f)) or c0(f)
         // where f: (T, T) -> Bool (variable x0)
-        let pattern = kctx.parse_clause("not x0(s0(x0), s0(x0)) or c0(x0)", &["(T, T) -> Bool"]);
+        let pattern = kctx.parse_clause("not x0(g1(x0), g1(x0)) or c0(x0)", &["(T, T) -> Bool"]);
         clause_set.insert(pattern.clone(), 99, &kctx);
 
-        // Build query: not g0(Type)(c1)(s0(...), s0(...)) or c0(g0(Type)(c1))
-        // g0 = GlobalConstant(0), s0 = Synthetic(0), c0 = ScopedConstant(0), c1 = ScopedConstant(1)
+        // Build query: not g0(Type)(c1)(g1(...), g1(...)) or c0(g0(Type)(c1))
+        // g0 = GlobalConstant(0), g1 = GlobalConstant(1), c0 = ScopedConstant(0), c1 = ScopedConstant(1)
         // Type = Type(GroundTypeId(0)) which is the type T
         let g0_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0));
-        let s0_atom = Atom::Symbol(Symbol::Synthetic(ModuleId(0), 0));
+        let g1_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 1));
         let c0_atom = Atom::Symbol(Symbol::ScopedConstant(0));
         let c1_atom = Atom::Symbol(Symbol::ScopedConstant(1));
         let type_atom = Atom::Symbol(Symbol::Type(GroundTypeId::test(0))); // T as a type symbol
@@ -847,17 +847,17 @@ mod tests {
         // This mirrors lte_from(Type)(lt)
         let g0_type_c1 = Term::new(g0_atom, vec![type_term.clone(), c1_term.clone()]);
 
-        // s0(g0(Type)(c1)) - a T
-        let s0_g0_type_c1 = Term::new(s0_atom, vec![g0_type_c1.clone()]);
+        // g1(g0(Type)(c1)) - a T
+        let g1_g0_type_c1 = Term::new(g1_atom, vec![g0_type_c1.clone()]);
 
-        // g0(Type)(c1)(s0(...), s0(...)) = g0(Type, c1, s0(...), s0(...))
-        let g0_type_c1_s0_s0 = Term::new(
+        // g0(Type)(c1)(g1(...), g1(...)) = g0(Type, c1, g1(...), g1(...))
+        let g0_type_c1_g1_g1 = Term::new(
             g0_atom,
             vec![
                 type_term.clone(),
                 c1_term.clone(),
-                s0_g0_type_c1.clone(),
-                s0_g0_type_c1.clone(),
+                g1_g0_type_c1.clone(),
+                g1_g0_type_c1.clone(),
             ],
         );
 
@@ -867,7 +867,7 @@ mod tests {
         // Build the literals:
         let lit1 = Literal {
             positive: false,
-            left: g0_type_c1_s0_s0,
+            left: g0_type_c1_g1_g1,
             right: Term::new_true(),
         };
 
@@ -889,8 +889,8 @@ mod tests {
 
     /// This test matches a scenario with type arguments:
     /// - The predicate (is_reflexive) takes a Type argument as well
-    /// - Pattern: not f(s0(f), s0(f)) or g1(Type)(f)
-    /// - Query: not g0(Type)(c1)(s0(...), s0(...)) or g1(Type)(g0(Type)(c1))
+    /// - Pattern: not f(g2(f), g2(f)) or g1(Type)(f)
+    /// - Query: not g0(Type)(c1)(g2(...), g2(...)) or g1(Type)(g0(Type)(c1))
     #[test]
     fn test_clause_set_predicate_with_type_arg() {
         use crate::kernel::atom::Atom;
@@ -905,29 +905,29 @@ mod tests {
             .parse_constant("g0", "T -> T -> (T, T) -> Bool")
             // g1 (is_reflexive): Type -> ((T, T) -> Bool) -> Bool
             .parse_constant("g1", "T -> ((T, T) -> Bool) -> Bool")
-            // s0: ((T, T) -> Bool) -> T
-            .parse_constant("s0", "((T, T) -> Bool) -> T")
+            // g2: ((T, T) -> Bool) -> T
+            .parse_constant("g2", "((T, T) -> Bool) -> T")
             // c1 is lt: T -> T -> Bool (after type application, it's (T, T) -> Bool)
             .parse_constant("c1", "T -> T -> Bool");
 
         let mut clause_set = GeneralizationSet::new();
 
-        // Pattern: not f(s0(f), s0(f)) or g1(Type)(f)
+        // Pattern: not f(g2(f), g2(f)) or g1(Type)(f)
         // where f: (T, T) -> Bool (variable x0)
         // But we need the pattern to be g1(Type)(x0), not just g1(x0)
         // We'll need to construct this manually
         let type_atom = Atom::Symbol(Symbol::Type(GroundTypeId::test(0)));
         let type_term = Term::atom(type_atom);
         let g1_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 1));
-        let s0_atom = Atom::Symbol(Symbol::Synthetic(ModuleId(0), 0));
+        let g2_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 2));
         let x0_term = Term::new_variable(0);
 
-        // First literal: not x0(s0(x0), s0(x0))
-        let s0_x0 = Term::new(s0_atom, vec![x0_term.clone()]);
-        let x0_s0_s0 = x0_term.apply(&[s0_x0.clone(), s0_x0.clone()]);
+        // First literal: not x0(g2(x0), g2(x0))
+        let g2_x0 = Term::new(g2_atom, vec![x0_term.clone()]);
+        let x0_g2_g2 = x0_term.apply(&[g2_x0.clone(), g2_x0.clone()]);
         let lit1_pattern = Literal {
             positive: false,
-            left: x0_s0_s0,
+            left: x0_g2_g2,
             right: Term::new_true(),
         };
 
@@ -946,7 +946,7 @@ mod tests {
             Clause::from_literals_unnormalized(vec![lit1_pattern, lit2_pattern], &pattern_context);
         clause_set.insert(pattern.clone(), 99, &kctx);
 
-        // Build query: not g0(Type)(c1)(s0(...), s0(...)) or g1(Type)(g0(Type)(c1))
+        // Build query: not g0(Type)(c1)(g2(...), g2(...)) or g1(Type)(g0(Type)(c1))
         let g0_atom = Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0));
         let c1_atom = Atom::Symbol(Symbol::ScopedConstant(1));
         let c1_term = Term::atom(c1_atom);
@@ -954,17 +954,17 @@ mod tests {
         // g0(Type)(c1) = g0(Type, c1)
         let g0_type_c1 = Term::new(g0_atom, vec![type_term.clone(), c1_term.clone()]);
 
-        // s0(g0(Type)(c1))
-        let s0_g0 = Term::new(s0_atom, vec![g0_type_c1.clone()]);
+        // g2(g0(Type)(c1))
+        let g2_g0 = Term::new(g2_atom, vec![g0_type_c1.clone()]);
 
-        // g0(Type, c1, s0(...), s0(...))
-        let g0_type_c1_s0_s0 = Term::new(
+        // g0(Type, c1, g2(...), g2(...))
+        let g0_type_c1_g2_g2 = Term::new(
             g0_atom,
             vec![
                 type_term.clone(),
                 c1_term.clone(),
-                s0_g0.clone(),
-                s0_g0.clone(),
+                g2_g0.clone(),
+                g2_g0.clone(),
             ],
         );
 
@@ -973,7 +973,7 @@ mod tests {
 
         let lit1_query = Literal {
             positive: false,
-            left: g0_type_c1_s0_s0,
+            left: g0_type_c1_g2_g2,
             right: Term::new_true(),
         };
 

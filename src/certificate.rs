@@ -2655,46 +2655,6 @@ theorem goal(k: Bool) {\n\
     }
 
     #[test]
-    fn test_serialize_claim_with_names_uses_local_name_for_replaced_synthetic_args() {
-        use crate::kernel::atom::Atom;
-        use crate::module::ModuleId;
-
-        let code = r#"
-            theorem goal {
-                true
-            }
-        "#;
-        let (_project, bindings, mut kernel_context) = setup_claim_codec_env(code);
-        let kernel = &kernel_context;
-        let clause = kernel.parse_clause("x0", &["Bool"]);
-
-        let synthetic_symbol = kernel_context
-            .symbol_table
-            .declare_synthetic(ModuleId(7), Term::bool_type());
-        let synthetic_term = Term::atom(Atom::Symbol(synthetic_symbol));
-
-        let mut var_map = VariableMap::new();
-        var_map.set(0, synthetic_term);
-        let claim = Claim { clause, var_map };
-
-        let mut synthetic_names = HashMap::new();
-        synthetic_names.insert((ModuleId(7), 0), "s0".to_string());
-
-        let serialized = Certificate::serialize_claim_with_names(
-            &claim,
-            &kernel_context,
-            &bindings,
-            Some(&synthetic_names),
-        )
-        .expect("serialization should succeed");
-
-        assert_eq!(serialized, "function(x0: Bool) { x0 }(s0)");
-
-        // Ensure the replacement name itself does not need to resolve through lib(module).
-        assert!(!serialized.contains("lib("));
-    }
-
-    #[test]
     fn test_dequalify_synthetic_name_refs_rewrites_module_qualified_calls() {
         use crate::module::ModuleId;
 

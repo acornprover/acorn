@@ -424,51 +424,6 @@ impl SymbolTable {
         }
     }
 
-    /// Get the number of synthetics.
-    #[cfg(test)]
-    pub fn num_synthetics(&self) -> u32 {
-        self.synthetic_types.front().map(|v| v.len()).unwrap_or(0) as u32
-    }
-
-    /// Set the type for a synthetic at a given index in module 0 (for tests).
-    #[cfg(test)]
-    pub fn set_synthetic_type(&mut self, id: u32, var_type: Term) {
-        #[cfg(any(test, feature = "validate"))]
-        if var_type.has_free_variable() {
-            panic!(
-                "Symbol type contains free variable: {}. \
-                 Symbol types should use BoundVariable for parameters bound by Pi.",
-                var_type
-            );
-        }
-        self.ensure_module_exists(ModuleId(0));
-        self.synthetic_types[0][id as usize] = var_type;
-    }
-
-    /// Declare a new synthetic atom with the given type.
-    /// The module_id identifies which module's normalization is creating this synthetic.
-    pub fn declare_synthetic(&mut self, module_id: ModuleId, var_type: Term) -> Symbol {
-        // Symbol types should be closed - no free variables allowed.
-        // Free variables in a type like Π(T, x0) indicate a bug where BoundVariable
-        // should have been used instead.
-        #[cfg(any(test, feature = "validate"))]
-        if var_type.has_free_variable() {
-            panic!(
-                "Symbol type contains free variable: {}. \
-                 Symbol types should use BoundVariable for parameters bound by Pi.",
-                var_type
-            );
-        }
-
-        self.ensure_module_exists(module_id);
-        let idx = module_id.get() as usize;
-        let atom_id = self.synthetic_types[idx].len() as AtomId;
-        let symbol = Symbol::Synthetic(module_id, atom_id);
-        self.record_element(var_type.clone(), symbol);
-        self.synthetic_types[idx].push_back(var_type);
-        symbol
-    }
-
     /// Add a scoped constant with the given type, without a name.
     /// Returns the Symbol for the new constant.
     /// Primarily for testing with parsed terms like "c0", "c1".
@@ -1084,12 +1039,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_type_element_tracks_synthetics() {
+    fn exact_type_element_tracks_globals() {
         let mut table = SymbolTable::new();
         let bool_type = Term::bool_type();
 
-        let synthetic = table.declare_synthetic(ModuleId(0), bool_type.clone());
-        assert_eq!(table.get_element_of_type(&bool_type), Some(synthetic));
+        let global = table.add_global_constant(bool_type.clone());
+        assert_eq!(table.get_element_of_type(&bool_type), Some(global));
     }
 }
 

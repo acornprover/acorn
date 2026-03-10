@@ -1835,20 +1835,20 @@ mod tests {
         // (takes two functions and returns a value)
         kctx.parse_constant("g162", "(Real -> Real) -> (Real -> Real) -> Real");
 
-        // s204: (Real -> Real) -> (Real -> Real) -> Real
+        // g204: (Real -> Real) -> (Real -> Real) -> Real
         // (similar to g162)
-        kctx.parse_constant("s204", "(Real -> Real) -> (Real -> Real) -> Real");
+        kctx.parse_constant("g204", "(Real -> Real) -> (Real -> Real) -> Real");
 
         // g223: (Real -> Real) -> Bool (predicate on functions)
         kctx.parse_constant("g223", "(Real -> Real) -> Bool");
 
         let mut set = ActiveSet::new();
 
-        // Long clause: x0(g162(s204(x0, x1))) != x1(g162(s204(x0, x1))) or
+        // Long clause: x0(g162(g204(x0, x1))) != x1(g162(g204(x0, x1))) or
         //              not g223(x0) or not g223(x1) or x0(x2) = x1(x2)
         // Context: x0: Real -> Real, x1: Real -> Real, x2: Real
         let long_clause = kctx.parse_clause(
-            "x0(g162(s204(x0, x1))) != x1(g162(s204(x0, x1))) or not g223(x0) or not g223(x1) or x0(x2) = x1(x2)",
+            "x0(g162(g204(x0, x1))) != x1(g162(g204(x0, x1))) or not g223(x0) or not g223(x1) or x0(x2) = x1(x2)",
             &["Real -> Real", "Real -> Real", "Real"],
         );
         let mut long_step = ProofStep::mock_from_clause(long_clause);

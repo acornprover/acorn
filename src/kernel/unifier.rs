@@ -1429,14 +1429,13 @@ mod tests {
         // Test initializing a unifier with pre-existing variable mappings
         let ctx = test_ctx();
 
-        // Create a term for the initial mapping using only atomic synthetics
-        // Use g2(x0, x1, s4) instead of s0(x0, x1, s4) since g2 has proper function type
+        // Create a term for the initial mapping using only atomic constants.
         let x0 = Term::atom(Atom::FreeVariable(0));
         let x1 = Term::atom(Atom::FreeVariable(1));
-        let s4 = Term::atom(Atom::Symbol(Symbol::Synthetic(ModuleId(0), 4))); // BOOL type
+        let c5 = Term::atom(Atom::Symbol(Symbol::ScopedConstant(5))); // BOOL type
         let g2_term = Term::new(
             Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 2)),
-            vec![x0.clone(), x1.clone(), s4.clone()],
+            vec![x0.clone(), x1.clone(), c5.clone()],
         );
 
         let mut initial_map = VariableMap::new();
@@ -1463,17 +1462,17 @@ mod tests {
         );
         assert!(unifier.unify(scope2, &g0_x0_x1, scope3, &g0_c5_x0));
 
-        // Unify g0(x2, x1) with g0(s4, x0)
+        // Unify g0(x2, x1) with g0(c5, x0)
         let x2 = Term::atom(Atom::FreeVariable(2));
         let g0_x2_x1 = Term::new(
             Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)),
             vec![x2.clone(), x1.clone()],
         );
-        let g0_s4_x0 = Term::new(
+        let g0_c5_x0 = Term::new(
             Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)),
-            vec![s4.clone(), x0.clone()],
+            vec![c5.clone(), x0.clone()],
         );
-        assert!(unifier.unify(scope2, &g0_x2_x1, scope1, &g0_s4_x0));
+        assert!(unifier.unify(scope2, &g0_x2_x1, scope1, &g0_c5_x0));
     }
 
     #[test]
