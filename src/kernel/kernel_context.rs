@@ -1,8 +1,5 @@
-use crate::elaborator::source::Source;
 use crate::kernel::atom::Atom;
 use crate::kernel::atom::AtomId;
-use crate::kernel::atom::INVALID_SYNTHETIC_MODULE;
-use crate::kernel::clause::Clause;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::SymbolTable;
@@ -10,8 +7,8 @@ use crate::kernel::synthetic::SyntheticRegistry;
 use crate::kernel::term::Term;
 use crate::kernel::type_store::TypeStore;
 use crate::kernel::types::TypeclassId;
+#[cfg(test)]
 use crate::module::ModuleId;
-use tracing::trace;
 
 /// KernelContext combines the kernel stores needed for typing and normalization.
 #[derive(Clone)]
@@ -28,48 +25,6 @@ impl KernelContext {
             symbol_table: SymbolTable::new(),
             synthetic_registry: SyntheticRegistry::new(),
         }
-    }
-
-    /// Declare a synthetic atom with a type already in kernel `Term` form.
-    pub(crate) fn declare_synthetic_atom_with_type_term(
-        &mut self,
-        module_id: ModuleId,
-        type_term: Term,
-    ) -> Result<(ModuleId, AtomId), String> {
-        let symbol = self.symbol_table.declare_synthetic(module_id, type_term);
-        let (m, id) = match symbol {
-            Symbol::Synthetic(m, id) => (m, id),
-            _ => panic!("declare_synthetic should return a Synthetic symbol"),
-        };
-        if m == INVALID_SYNTHETIC_MODULE {
-            return Err("synthetic atom created with invalid module".to_string());
-        }
-        Ok((m, id))
-    }
-
-    /// Add the definition for synthetic atoms.
-    pub(crate) fn define_synthetic_atoms(
-        &mut self,
-        atoms: Vec<(ModuleId, AtomId)>,
-        type_vars: Vec<Term>,
-        synthetic_types: Vec<Term>,
-        clauses: Vec<Clause>,
-        source: Option<Source>,
-    ) -> Result<(), String> {
-        for (i, atom) in atoms.iter().enumerate() {
-            trace!(
-                atom_id = ?atom,
-                source = ?source,
-                clause_index = i,
-                "defining synthetic atom"
-            );
-        }
-        for clause in &clauses {
-            trace!(clause = %clause, "synthetic definition clause");
-        }
-
-        self.synthetic_registry
-            .define(atoms, type_vars, synthetic_types, clauses, source)
     }
 
     /// Returns a human-readable string representation of an atom.

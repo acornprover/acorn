@@ -516,7 +516,6 @@ impl Certificate {
                 )? {
                     return Ok(CertificateStep::Claim(claim));
                 }
-                let module_id = bindings.module_id();
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
                 if Self::should_preserve_single_literal_claim(&term) {
                     if let Some(clause) = Self::try_deserialize_single_literal_clause(&term, &[]) {
@@ -526,7 +525,7 @@ impl Certificate {
                         }));
                     }
                 }
-                let mut view = Clausifier::new_mut(kernel_context.to_mut(), None, module_id);
+                let mut view = Clausifier::new_mut(kernel_context.to_mut(), None);
                 let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
                 if clauses.len() != 1 {
                     // A claim line may intentionally keep a boolean connective inline
@@ -1091,7 +1090,7 @@ impl Certificate {
 
     fn try_deserialize_claim_with_args_value(
         value: AcornValue,
-        bindings: &BindingMap,
+        _bindings: &BindingMap,
         kernel_context: &mut KernelContext,
     ) -> Result<Option<Claim>, CodeGenError> {
         let mut type_param_names: Vec<String> = vec![];
@@ -1171,12 +1170,8 @@ impl Certificate {
         if Self::term_has_inline_clause_shape(&generic_term, true) {
             let clause = Self::try_deserialize_inline_clause(&generic_term, &type_param_kinds)
                 .expect("inline clause shape should deserialize");
-            let var_map = Self::build_claim_var_map(
-                type_args.as_slice(),
-                args.as_slice(),
-                bindings,
-                kernel_context,
-            )?;
+            let var_map =
+                Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
             return Ok(Some(Claim { clause, var_map }));
         }
         if Self::should_preserve_single_literal_claim(&generic_term) {
@@ -1186,18 +1181,13 @@ impl Certificate {
                 let var_map = Self::build_claim_var_map(
                     type_args.as_slice(),
                     args.as_slice(),
-                    bindings,
                     kernel_context,
                 )?;
                 return Ok(Some(Claim { clause, var_map }));
             }
         }
 
-        let mut view = Clausifier::new_mut(
-            &mut kernel_context_clone,
-            type_var_map,
-            bindings.module_id(),
-        );
+        let mut view = Clausifier::new_mut(&mut kernel_context_clone, type_var_map);
         let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
         if clauses.len() != 1 {
             if let Some(clause) =
@@ -1206,7 +1196,6 @@ impl Certificate {
                 let var_map = Self::build_claim_var_map(
                     type_args.as_slice(),
                     args.as_slice(),
-                    bindings,
                     kernel_context,
                 )?;
                 return Ok(Some(Claim { clause, var_map }));
@@ -1217,7 +1206,6 @@ impl Certificate {
                 let var_map = Self::build_claim_var_map(
                     type_args.as_slice(),
                     args.as_slice(),
-                    bindings,
                     kernel_context,
                 )?;
                 return Ok(Some(Claim { clause, var_map }));
@@ -1232,12 +1220,8 @@ impl Certificate {
             .next()
             .expect("clauses has exactly one element");
 
-        let var_map = Self::build_claim_var_map(
-            type_args.as_slice(),
-            args.as_slice(),
-            bindings,
-            kernel_context,
-        )?;
+        let var_map =
+            Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
 
         Ok(Some(Claim { clause, var_map }))
     }
@@ -1245,7 +1229,6 @@ impl Certificate {
     fn build_claim_var_map(
         type_args: &[AcornType],
         args: &[AcornValue],
-        bindings: &BindingMap,
         kernel_context: &mut KernelContext,
     ) -> Result<VariableMap, CodeGenError> {
         let mut var_map = VariableMap::new();
@@ -1281,7 +1264,7 @@ impl Certificate {
                     NewConstantType::Local,
                     type_var_map.as_ref(),
                 )?;
-                let mut term_view = Clausifier::new_mut(kernel_context, None, bindings.module_id());
+                let mut term_view = Clausifier::new_mut(kernel_context, None);
                 term_view.clausify_term_for_claim_arg(&term)?
             };
             var_map.set((value_offset + var_id) as AtomId, term);

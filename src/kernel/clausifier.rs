@@ -9,22 +9,12 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
-use crate::module::ModuleId;
 
 // Represents a binding for a variable on the stack during normalization.
 // Each binding corresponds to a variable in the output clause.
 enum TermBinding {
-    Bound(Term),
-    Free(Term),
-}
-
-impl TermBinding {
-    /// Get the underlying term regardless of binding type
-    fn term(&self) -> &Term {
-        match self {
-            TermBinding::Bound(t) | TermBinding::Free(t) => t,
-        }
-    }
+    Bound,
+    Free,
 }
 
 /// Inner enum for Clausifier to support both ref and mut access to kernel state.
@@ -44,15 +34,10 @@ pub struct Clausifier<'a> {
     /// Maps type parameter names to (variable id, kind).
     /// This is set for the duration of normalizing a single polymorphic fact/goal.
     type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-
-    /// The module ID for which we're normalizing. Synthetics created during
-    /// normalization will be scoped to this module.
-    module_id: ModuleId,
 }
 
 impl<'a> Clausifier<'a> {
     /// Create a new Clausifier with immutable access.
-    /// Uses ModuleId(0) as a placeholder since immutable contexts don't create synthetics.
     pub fn new_ref(
         kernel_context: &'a KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
@@ -60,21 +45,17 @@ impl<'a> Clausifier<'a> {
         Clausifier {
             inner: ClausifierContext::Ref(kernel_context),
             type_var_map,
-            module_id: ModuleId(0),
         }
     }
 
     /// Create a new Clausifier with mutable access.
-    /// The module_id determines which module synthetics will be scoped to.
     pub fn new_mut(
         kernel_context: &'a mut KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-        module_id: ModuleId,
     ) -> Self {
         Clausifier {
             inner: ClausifierContext::Mut(kernel_context),
             type_var_map,
-            module_id,
         }
     }
 
@@ -83,17 +64,6 @@ impl<'a> Clausifier<'a> {
             ClausifierContext::Ref(kernel_context) => kernel_context,
             ClausifierContext::Mut(kernel_context) => kernel_context,
         }
-    }
-
-    fn as_mut(&mut self) -> Result<&mut KernelContext, String> {
-        match &mut self.inner {
-            ClausifierContext::Ref(_) => Err("Cannot mutate a Clausifier::Ref".to_string()),
-            ClausifierContext::Mut(kernel_context) => Ok(kernel_context),
-        }
-    }
-
-    fn module_id(&self) -> ModuleId {
-        self.module_id
     }
 
     fn symbol_table(&self) -> &crate::kernel::symbol_table::SymbolTable {
@@ -114,11 +84,7 @@ impl<'a> Clausifier<'a> {
     /// Term-native normalization path.
     ///
     /// This normalizes an elaborated kernel `Term` directly to clauses.
-    pub fn clausify_term(
-        &mut self,
-        term: &Term,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
-    ) -> Result<Vec<Clause>, String> {
+    pub fn clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let mut stack = vec![];
         let mut local_context = LocalContext::empty();
 
@@ -138,14 +104,9 @@ impl<'a> Clausifier<'a> {
             false,
             &mut stack,
             &mut next_var_id,
-            synthesized,
             &mut local_context,
         )?;
         let clauses = cnf.into_clauses_with_pinned(&local_context, num_type_params);
-
-        if self.has_uninhabited_existential_witness(synthesized, &clauses) {
-            return Err("exists over a potentially uninhabited type".to_string());
-        }
 
         if self.has_uninhabited_dropped_variable(&local_context, &clauses, num_type_params) {
             return Ok(vec![]);
@@ -191,15 +152,14 @@ impl<'a> Clausifier<'a> {
         positive: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Literal, String> {
-        let cnf = self.term_to_cnf(term, !positive, stack, next_var_id, synthesized, context)?;
+        let cnf = self.term_to_cnf(term, !positive, stack, next_var_id, context)?;
         if let Some(literal) = cnf.to_literal() {
             return Ok(literal);
         }
 
-        let term = self.term_to_simple_term(term, stack, next_var_id, synthesized, context)?;
+        let term = self.term_to_simple_term(term, stack, next_var_id, context)?;
         Ok(Literal::from_signed_term(term, positive))
     }
 
@@ -209,7 +169,6 @@ impl<'a> Clausifier<'a> {
         positive: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Vec<Literal>, String> {
         if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
@@ -218,7 +177,6 @@ impl<'a> Clausifier<'a> {
                 !positive,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
             );
         }
@@ -230,7 +188,6 @@ impl<'a> Clausifier<'a> {
                     true,
                     stack,
                     next_var_id,
-                    synthesized,
                     context,
                 )?;
                 left.extend(self.shallow_term_to_disjunctive_literals(
@@ -238,7 +195,6 @@ impl<'a> Clausifier<'a> {
                     true,
                     stack,
                     next_var_id,
-                    synthesized,
                     context,
                 )?);
                 return Ok(left);
@@ -249,7 +205,6 @@ impl<'a> Clausifier<'a> {
                 false,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
             )?;
             left.extend(self.shallow_term_to_disjunctive_literals(
@@ -257,7 +212,6 @@ impl<'a> Clausifier<'a> {
                 false,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
             )?);
             return Ok(left);
@@ -268,7 +222,6 @@ impl<'a> Clausifier<'a> {
             positive,
             stack,
             next_var_id,
-            synthesized,
             context,
         )?])
     }
@@ -279,7 +232,6 @@ impl<'a> Clausifier<'a> {
         positive: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
         pinned: usize,
     ) -> Result<Vec<Clause>, String> {
@@ -289,7 +241,6 @@ impl<'a> Clausifier<'a> {
                 !positive,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
                 pinned,
             );
@@ -302,7 +253,6 @@ impl<'a> Clausifier<'a> {
                     true,
                     stack,
                     next_var_id,
-                    synthesized,
                     context,
                     pinned,
                 )?;
@@ -311,7 +261,6 @@ impl<'a> Clausifier<'a> {
                     true,
                     stack,
                     next_var_id,
-                    synthesized,
                     context,
                     pinned,
                 )?);
@@ -323,7 +272,6 @@ impl<'a> Clausifier<'a> {
                     true,
                     stack,
                     next_var_id,
-                    synthesized,
                     context,
                 )?;
                 let clause = Clause::new_with_pinned_vars(literals, context, pinned);
@@ -334,21 +282,13 @@ impl<'a> Clausifier<'a> {
                 };
             }
         } else if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
-            let mut left = self.shallow_term_to_clauses(
-                &args[0],
-                false,
-                stack,
-                next_var_id,
-                synthesized,
-                context,
-                pinned,
-            )?;
+            let mut left =
+                self.shallow_term_to_clauses(&args[0], false, stack, next_var_id, context, pinned)?;
             left.extend(self.shallow_term_to_clauses(
                 &args[1],
                 false,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
                 pinned,
             )?);
@@ -362,7 +302,6 @@ impl<'a> Clausifier<'a> {
                 false,
                 stack,
                 next_var_id,
-                synthesized,
                 context,
             )?;
             let clause = Clause::new_with_pinned_vars(literals, context, pinned);
@@ -374,52 +313,36 @@ impl<'a> Clausifier<'a> {
         }
 
         Ok(self
-            .term_to_cnf(term, !positive, stack, next_var_id, synthesized, context)?
+            .term_to_cnf(term, !positive, stack, next_var_id, context)?
             .into_clauses_with_pinned(context, pinned))
     }
 
-    pub fn shallow_clausify_term(
-        &mut self,
-        term: &Term,
-    ) -> Result<(Vec<Clause>, Vec<(ModuleId, AtomId)>), String> {
+    pub fn shallow_clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
-        let mut synthesized = vec![];
         let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
-        let clauses = self.shallow_term_to_clauses(
+        self.shallow_term_to_clauses(
             &opened,
             true,
             &mut stack,
             &mut next_var_id,
-            &mut synthesized,
             &mut context,
             pinned,
-        )?;
-        Ok((clauses, synthesized))
+        )
     }
 
-    pub fn preserve_term_as_clause(
-        &mut self,
-        term: &Term,
-    ) -> Result<(Vec<Clause>, Vec<(ModuleId, AtomId)>), String> {
+    pub fn preserve_term_as_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
-        let mut synthesized = vec![];
-        let literal = self.literal_from_shallow_term(
-            term,
-            true,
-            &mut stack,
-            &mut next_var_id,
-            &mut synthesized,
-            &mut context,
-        )?;
+        let literal =
+            self.literal_from_shallow_term(term, true, &mut stack, &mut next_var_id, &mut context)?;
         let clause = Clause::new_with_pinned_vars(vec![literal], &context, pinned);
         let clauses = if clause.is_tautology() {
             vec![]
         } else {
             vec![clause]
         };
-        Ok((clauses, synthesized))
+        Ok(clauses)
     }
 
     /// If `term` is exactly `symbol(arg1, ..., argN)`, return those arguments.
@@ -589,14 +512,13 @@ impl<'a> Clausifier<'a> {
     ///
     /// The `stack` plays the same role as in value normalization:
     /// `TermBinding::Free` tracks forall-introduced variables and
-    /// `TermBinding::Bound` tracks existential/skolem substitutions.
+    /// `TermBinding::Bound` tracks instantiated binder arguments.
     fn term_to_cnf(
         &mut self,
         term: &Term,
         negate: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
         match term.as_ref().decompose() {
@@ -608,7 +530,6 @@ impl<'a> Clausifier<'a> {
                         false,
                         stack,
                         next_var_id,
-                        synth,
                         context,
                     )
                 } else {
@@ -634,7 +555,7 @@ impl<'a> Clausifier<'a> {
             _ => {
                 // Builtin logical atoms are recognized by head symbol + arity.
                 if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
-                    return self.term_to_cnf(&args[0], !negate, stack, next_var_id, synth, context);
+                    return self.term_to_cnf(&args[0], !negate, stack, next_var_id, context);
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::And, 2) {
                     if !negate {
@@ -645,7 +566,6 @@ impl<'a> Clausifier<'a> {
                             false,
                             stack,
                             next_var_id,
-                            synth,
                             context,
                         );
                     }
@@ -656,7 +576,6 @@ impl<'a> Clausifier<'a> {
                         true,
                         stack,
                         next_var_id,
-                        synth,
                         context,
                     );
                 }
@@ -671,7 +590,7 @@ impl<'a> Clausifier<'a> {
                         .is_some();
                     if left_is_and || right_is_and {
                         let simple_term =
-                            self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
+                            self.term_to_simple_term(term, stack, next_var_id, context)?;
                         let literal = Literal::from_signed_term(simple_term, !negate);
                         return Ok(Cnf::from_literal(literal));
                     }
@@ -684,7 +603,6 @@ impl<'a> Clausifier<'a> {
                             false,
                             stack,
                             next_var_id,
-                            synth,
                             context,
                         );
                     }
@@ -695,7 +613,6 @@ impl<'a> Clausifier<'a> {
                         true,
                         stack,
                         next_var_id,
-                        synth,
                         context,
                     );
                 }
@@ -706,20 +623,19 @@ impl<'a> Clausifier<'a> {
                         negate,
                         stack,
                         next_var_id,
-                        synth,
                         context,
                     );
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
                     let cond_cnf =
-                        self.term_to_cnf(&args[1], false, stack, next_var_id, synth, context)?;
+                        self.term_to_cnf(&args[1], false, stack, next_var_id, context)?;
                     let Some(cond_lit) = cond_cnf.to_literal() else {
                         return Err("term 'ite' condition is too complicated".to_string());
                     };
                     let then_cnf =
-                        self.term_to_cnf(&args[2], negate, stack, next_var_id, synth, context)?;
+                        self.term_to_cnf(&args[2], negate, stack, next_var_id, context)?;
                     let else_cnf =
-                        self.term_to_cnf(&args[3], negate, stack, next_var_id, synth, context)?;
+                        self.term_to_cnf(&args[3], negate, stack, next_var_id, context)?;
                     return Ok(Cnf::cnf_if(cond_lit, then_cnf, else_cnf));
                 }
 
@@ -730,17 +646,11 @@ impl<'a> Clausifier<'a> {
                         | crate::kernel::term::Decomposition::Exists(_, _) => {
                             let (applied, consumed) =
                                 self.instantiate_binder_prefix(&function.to_owned(), &args);
-                            for arg in args.iter().take(consumed) {
-                                stack.push(TermBinding::Bound(arg.clone()));
+                            for _ in args.iter().take(consumed) {
+                                stack.push(TermBinding::Bound);
                             }
-                            let answer = self.term_to_cnf(
-                                &applied,
-                                negate,
-                                stack,
-                                next_var_id,
-                                synth,
-                                context,
-                            );
+                            let answer =
+                                self.term_to_cnf(&applied, negate, stack, next_var_id, context);
                             stack.truncate(stack.len().saturating_sub(consumed));
                             return answer;
                         }
@@ -764,8 +674,7 @@ impl<'a> Clausifier<'a> {
                 }
 
                 // Everything else must normalize to a single signed literal.
-                let simple_term =
-                    self.term_to_simple_term(term, stack, next_var_id, synth, context)?;
+                let simple_term = self.term_to_simple_term(term, stack, next_var_id, context)?;
                 let literal = Literal::from_signed_term(simple_term, !negate);
                 Ok(Cnf::from_literal(literal))
             }
@@ -779,96 +688,17 @@ impl<'a> Clausifier<'a> {
         negate: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
         let var_id = *next_var_id;
         *next_var_id += 1;
         context.push_type(binder_type.clone());
         let var = Term::new_variable(var_id);
-        stack.push(TermBinding::Free(var.clone()));
+        stack.push(TermBinding::Free);
         let opened_body = self.open_binder_body(body, &var);
-        let result = self.term_to_cnf(
-            &opened_body,
-            negate,
-            stack,
-            next_var_id,
-            synthesized,
-            context,
-        )?;
+        let result = self.term_to_cnf(&opened_body, negate, stack, next_var_id, context)?;
         stack.pop();
         Ok(result)
-    }
-
-    fn make_skolem_terms_from_type_terms(
-        &mut self,
-        skolem_type_terms: &[Term],
-        stack: &Vec<TermBinding>,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
-        context: &LocalContext,
-    ) -> Result<Vec<Term>, String> {
-        let mut args = vec![];
-        let mut arg_type_terms: Vec<Term> = vec![];
-        let mut seen_vars = std::collections::HashSet::new();
-
-        if let Some(type_var_map) = self.type_var_map() {
-            let mut entries: Vec<_> = type_var_map.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            for (var_id, var_type) in entries {
-                let var_term = Term::new_variable(*var_id);
-                args.push(var_term);
-                arg_type_terms.push(var_type.clone());
-                seen_vars.insert(*var_id);
-            }
-        }
-
-        for binding in stack.iter() {
-            for (var_id, closed_type) in binding.term().collect_vars(context) {
-                if seen_vars.insert(var_id) {
-                    let var_term = Term::new_variable(var_id);
-                    args.push(var_term);
-                    arg_type_terms.push(closed_type);
-                }
-            }
-        }
-
-        let num_type_params = self.type_var_map().map_or(0, |m| m.len()) as u16;
-        let mut non_type_param_index = 0u16;
-        let arg_type_terms: Vec<Term> = arg_type_terms
-            .into_iter()
-            .map(|t| {
-                if t.as_ref().is_type_param_kind() {
-                    t
-                } else {
-                    let depth = non_type_param_index;
-                    non_type_param_index += 1;
-                    t.convert_free_to_bound_with_depth(num_type_params, depth)
-                }
-            })
-            .collect();
-
-        let mut output = vec![];
-        for t in skolem_type_terms {
-            let non_type_param_args = arg_type_terms.len() - num_type_params as usize;
-            let result_type_term =
-                t.convert_free_to_bound_with_depth(num_type_params, non_type_param_args as u16);
-
-            let mut skolem_type_term = result_type_term;
-            for arg_type in arg_type_terms.iter().rev() {
-                skolem_type_term = Term::pi(arg_type.clone(), skolem_type_term);
-            }
-
-            let module_id = self.module_id();
-            let skolem_id = self
-                .as_mut()?
-                .declare_synthetic_atom_with_type_term(module_id, skolem_type_term)?;
-            synthesized.push(skolem_id);
-            let (m, i) = skolem_id;
-            let skolem_atom = Atom::Symbol(Symbol::Synthetic(m, i));
-            let skolem_term = Term::new(skolem_atom, args.clone());
-            output.push(skolem_term);
-        }
-        Ok(output)
     }
 
     fn term_and_to_cnf(
@@ -879,18 +709,10 @@ impl<'a> Clausifier<'a> {
         negate_right: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
-        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, synthesized, context)?;
-        let right = self.term_to_cnf(
-            right,
-            negate_right,
-            stack,
-            next_var_id,
-            synthesized,
-            context,
-        )?;
+        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
+        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
         Ok(left.and(right))
     }
 
@@ -902,18 +724,10 @@ impl<'a> Clausifier<'a> {
         negate_right: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
-        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, synthesized, context)?;
-        let right = self.term_to_cnf(
-            right,
-            negate_right,
-            stack,
-            next_var_id,
-            synthesized,
-            context,
-        )?;
+        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
+        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
         Ok(left.or(right))
     }
 
@@ -987,7 +801,6 @@ impl<'a> Clausifier<'a> {
         negate: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synthesized: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
         match function.as_ref().decompose() {
@@ -996,28 +809,21 @@ impl<'a> Clausifier<'a> {
             | crate::kernel::term::Decomposition::Exists(_, _) => {
                 let mut arg_terms = Vec::with_capacity(args.len());
                 for arg in args {
-                    arg_terms.push(self.extended_term_to_term(arg, context, synthesized)?);
+                    arg_terms.push(self.extended_term_to_term(arg, context)?);
                 }
                 let (applied, consumed) = self.instantiate_binder_prefix(function, &arg_terms);
-                for arg in arg_terms.iter().take(consumed) {
-                    stack.push(TermBinding::Bound(arg.clone()));
+                for _ in arg_terms.iter().take(consumed) {
+                    stack.push(TermBinding::Bound);
                 }
-                let answer =
-                    self.term_to_cnf(&applied, negate, stack, next_var_id, synthesized, context);
+                let answer = self.term_to_cnf(&applied, negate, stack, next_var_id, context);
                 stack.truncate(stack.len().saturating_sub(consumed));
                 return answer;
             }
             _ => {}
         }
 
-        let extended = self.apply_term_to_extended_term(
-            function,
-            args,
-            stack,
-            next_var_id,
-            synthesized,
-            context,
-        )?;
+        let extended =
+            self.apply_term_to_extended_term(function, args, stack, next_var_id, context)?;
         match extended {
             ExtendedTerm::Term(term) => {
                 let literal = Literal::from_signed_term(term, !negate);
@@ -1030,8 +836,8 @@ impl<'a> Clausifier<'a> {
     /// Convert `left = right` (or `!=` when `negate`) to CNF.
     ///
     /// For function-typed terms, this performs extensional reasoning by applying
-    /// either fresh variables (`forall`-style) or skolems (`exists`-style) to both
-    /// sides, then reducing to equality on results.
+    /// fresh variables to both sides, then reducing to equality on results.
+    /// Negated higher-order equalities stay as direct literals.
     fn term_eq_to_cnf(
         &mut self,
         left: &Term,
@@ -1039,7 +845,6 @@ impl<'a> Clausifier<'a> {
         negate: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
         if let Some((type_args, scrutinee, cases)) = self.split_match_eliminator_application(right)
@@ -1058,29 +863,15 @@ impl<'a> Clausifier<'a> {
                     context.push_type(input_type.clone());
                     let var = Term::new_variable(var_id);
                     constructor_args.push(var.clone());
-                    stack.push(TermBinding::Free(var.clone()));
+                    stack.push(TermBinding::Free);
                     case_value = self.open_binder_body(&body.to_owned(), &var);
                 }
 
                 let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
-                let condition = self.term_eq_to_cnf(
-                    &scrutinee,
-                    &pattern,
-                    false,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                let conclusion = self.term_eq_to_cnf(
-                    left,
-                    &case_value,
-                    negate,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
+                let condition =
+                    self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
+                let conclusion =
+                    self.term_eq_to_cnf(left, &case_value, negate, stack, next_var_id, context)?;
                 answer = answer.and(condition.negate().or(conclusion));
 
                 stack.truncate(stack_len);
@@ -1103,29 +894,15 @@ impl<'a> Clausifier<'a> {
                     context.push_type(input_type.clone());
                     let var = Term::new_variable(var_id);
                     constructor_args.push(var.clone());
-                    stack.push(TermBinding::Free(var.clone()));
+                    stack.push(TermBinding::Free);
                     case_value = self.open_binder_body(&body.to_owned(), &var);
                 }
 
                 let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
-                let condition = self.term_eq_to_cnf(
-                    &scrutinee,
-                    &pattern,
-                    false,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                let conclusion = self.term_eq_to_cnf(
-                    right,
-                    &case_value,
-                    negate,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
+                let condition =
+                    self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
+                let conclusion =
+                    self.term_eq_to_cnf(right, &case_value, negate, stack, next_var_id, context)?;
                 answer = answer.and(condition.negate().or(conclusion));
 
                 stack.truncate(stack_len);
@@ -1143,11 +920,10 @@ impl<'a> Clausifier<'a> {
 
         if !fn_arg_types.is_empty() {
             if negate {
-                let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
-                let right =
-                    self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
-                let left = self.extended_term_to_term(left, context, synth)?;
-                let right = self.extended_term_to_term(right, context, synth)?;
+                let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
+                let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
+                let left = self.extended_term_to_term(left, context)?;
+                let right = self.extended_term_to_term(right, context)?;
                 return Ok(Cnf::from_literal(Literal::new(false, left, right)));
             }
 
@@ -1161,35 +937,20 @@ impl<'a> Clausifier<'a> {
                     context.push_type(arg_type_term.clone());
                     args.push(ExtendedTerm::Term(Term::new_variable(var_id)));
                 }
-                let left_pos = self.apply_term_to_cnf(
-                    left,
-                    args.clone(),
-                    false,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                let left_neg = self.apply_term_to_cnf(
-                    left,
-                    args.clone(),
-                    true,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
+                let left_pos =
+                    self.apply_term_to_cnf(left, args.clone(), false, stack, next_var_id, context)?;
+                let left_neg =
+                    self.apply_term_to_cnf(left, args.clone(), true, stack, next_var_id, context)?;
                 let right_pos = self.apply_term_to_cnf(
                     right,
                     args.clone(),
                     false,
                     stack,
                     next_var_id,
-                    synth,
                     context,
                 )?;
                 let right_neg =
-                    self.apply_term_to_cnf(right, args, true, stack, next_var_id, synth, context)?;
+                    self.apply_term_to_cnf(right, args, true, stack, next_var_id, context)?;
 
                 let result = if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg)
                 {
@@ -1210,13 +971,8 @@ impl<'a> Clausifier<'a> {
                 return Ok(result);
             }
 
-            let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
-            let right = self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
-            if negate {
-                let args =
-                    self.make_skolem_terms_from_type_terms(&fn_arg_types, stack, synth, context)?;
-                return left.apply(&args).eq_to_cnf(right.apply(&args), true);
-            }
+            let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
+            let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
 
             let mut args = vec![];
             for arg_type_term in &fn_arg_types {
@@ -1240,38 +996,22 @@ impl<'a> Clausifier<'a> {
             }
 
             if negate {
-                let some = self.term_or_to_cnf(
-                    left,
-                    right,
-                    true,
-                    true,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
-                let not_both = self.term_or_to_cnf(
-                    left,
-                    right,
-                    false,
-                    false,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?;
+                let some =
+                    self.term_or_to_cnf(left, right, true, true, stack, next_var_id, context)?;
+                let not_both =
+                    self.term_or_to_cnf(left, right, false, false, stack, next_var_id, context)?;
                 return Ok(some.and(not_both));
             }
 
             let l_imp_r =
-                self.term_or_to_cnf(left, right, true, false, stack, next_var_id, synth, context)?;
+                self.term_or_to_cnf(left, right, true, false, stack, next_var_id, context)?;
             let r_imp_l =
-                self.term_or_to_cnf(left, right, false, true, stack, next_var_id, synth, context)?;
+                self.term_or_to_cnf(left, right, false, true, stack, next_var_id, context)?;
             return Ok(l_imp_r.and(r_imp_l));
         }
 
-        let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
-        let right = self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
+        let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
+        let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
         left.eq_to_cnf(right, negate)
     }
 
@@ -1280,22 +1020,20 @@ impl<'a> Clausifier<'a> {
         term: &Term,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if term.as_ref().is_lambda() {
-            return self.term_to_extended_term(term, stack, next_var_id, synth, context);
+            return self.term_to_extended_term(term, stack, next_var_id, context);
         }
 
-        // For boolean arguments, synthesize non-simple formulas
-        // (and/or/eq/not/forall/exists/match/etc) into atoms.
+        // Keep complex boolean arguments inline instead of forcing atomization.
         let term_type = self.term_type_for_normalization(term, context);
         if term_type == Term::bool_type() && self.try_simple_term_to_term(term)?.is_none() {
             // Keep complex booleans inline as terms.
             return Ok(ExtendedTerm::Term(term.clone()));
         }
 
-        self.term_to_extended_term(term, stack, next_var_id, synth, context)
+        self.term_to_extended_term(term, stack, next_var_id, context)
     }
 
     /// Apply `function` to `args`, pushing a single conditional outward when possible.
@@ -1308,15 +1046,13 @@ impl<'a> Clausifier<'a> {
         args: Vec<ExtendedTerm>,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if function.as_ref().is_lambda() {
-            let func_ext =
-                self.term_to_extended_term(function, stack, next_var_id, synth, context)?;
+            let func_ext = self.term_to_extended_term(function, stack, next_var_id, context)?;
             let mut arg_terms = vec![];
             for arg in args {
-                arg_terms.push(self.extended_term_to_term(arg, context, synth)?);
+                arg_terms.push(self.extended_term_to_term(arg, context)?);
             }
             return Ok(func_ext.apply(&arg_terms));
         }
@@ -1325,7 +1061,7 @@ impl<'a> Clausifier<'a> {
         let mut spine1 = vec![];
         let mut spine2 = vec![];
 
-        match self.term_to_extended_term(function, stack, next_var_id, synth, context)? {
+        match self.term_to_extended_term(function, stack, next_var_id, context)? {
             ExtendedTerm::Term(t) => {
                 spine1.push(t);
             }
@@ -1335,7 +1071,7 @@ impl<'a> Clausifier<'a> {
                 spine2.push(sub_else);
             }
             lambda @ ExtendedTerm::Lambda(_, _) => {
-                let lambda_term = self.extended_term_to_term(lambda, context, synth)?;
+                let lambda_term = self.extended_term_to_term(lambda, context)?;
                 spine1.push(lambda_term);
             }
         }
@@ -1358,7 +1094,7 @@ impl<'a> Clausifier<'a> {
                     spine2.push(sub_else);
                 }
                 lambda @ ExtendedTerm::Lambda(_, _) => {
-                    let lambda_term = self.extended_term_to_term(lambda, context, synth)?;
+                    let lambda_term = self.extended_term_to_term(lambda, context)?;
                     if !spine2.is_empty() {
                         spine2.push(lambda_term.clone());
                     }
@@ -1381,25 +1117,22 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    /// Convert a term into `ExtendedTerm`, introducing synthetic atoms as needed.
+    /// Convert a term into `ExtendedTerm`, preserving conditionals and lambdas.
     ///
     /// `ExtendedTerm::If` is used as an intermediate form to avoid losing branching
-    /// structure before we synthesize a simple term.
+    /// structure before we rebuild a kernel term.
     fn term_to_extended_term(
         &mut self,
         term: &Term,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<ExtendedTerm, String> {
         if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
-            let then_ext =
-                self.term_to_extended_term(&args[2], stack, next_var_id, synth, context)?;
-            let then_branch = self.extended_term_to_term(then_ext, context, synth)?;
-            let else_ext =
-                self.term_to_extended_term(&args[3], stack, next_var_id, synth, context)?;
-            let else_branch = self.extended_term_to_term(else_ext, context, synth)?;
+            let then_ext = self.term_to_extended_term(&args[2], stack, next_var_id, context)?;
+            let then_branch = self.extended_term_to_term(then_ext, context)?;
+            let else_ext = self.term_to_extended_term(&args[3], stack, next_var_id, context)?;
+            let else_branch = self.extended_term_to_term(else_ext, context)?;
             let result_type = self.term_type_for_normalization(&then_branch, context);
             let ite_term = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
                 result_type,
@@ -1413,20 +1146,13 @@ impl<'a> Clausifier<'a> {
         if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
             let mut arg_exts = vec![];
             for arg in arg_terms {
-                arg_exts.push(self.arg_term_to_extended(
-                    &arg,
-                    stack,
-                    next_var_id,
-                    synth,
-                    context,
-                )?);
+                arg_exts.push(self.arg_term_to_extended(&arg, stack, next_var_id, context)?);
             }
             return self.apply_term_to_extended_term(
                 &function,
                 arg_exts,
                 stack,
                 next_var_id,
-                synth,
                 context,
             );
         }
@@ -1442,13 +1168,12 @@ impl<'a> Clausifier<'a> {
                     context.push_type(input_type.clone());
                     let var = Term::new_variable(var_id);
                     args.push((var_id, input_type));
-                    stack.push(TermBinding::Free(var.clone()));
+                    stack.push(TermBinding::Free);
                     current = self.open_binder_body(&body.to_owned(), &var);
                 }
 
-                let body_ext =
-                    self.term_to_extended_term(&current, stack, next_var_id, synth, context)?;
-                let body_term = self.extended_term_to_term(body_ext, context, synth)?;
+                let body_ext = self.term_to_extended_term(&current, stack, next_var_id, context)?;
+                let body_term = self.extended_term_to_term(body_ext, context)?;
 
                 for _ in 0..args.len() {
                     stack.pop();
@@ -1489,14 +1214,13 @@ impl<'a> Clausifier<'a> {
         term: &Term,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
-        synth: &mut Vec<(ModuleId, AtomId)>,
         context: &mut LocalContext,
     ) -> Result<Term, String> {
         if let Some(simple) = self.try_simple_term_to_term(term)? {
             return Ok(simple);
         }
-        let ext = self.term_to_extended_term(term, stack, next_var_id, synth, context)?;
-        self.extended_term_to_term(ext, context, synth)
+        let ext = self.term_to_extended_term(term, stack, next_var_id, context)?;
+        self.extended_term_to_term(ext, context)
     }
 
     /// Checks if any forall variables dropped during normalization have uninhabited types.
@@ -1551,105 +1275,6 @@ impl<'a> Clausifier<'a> {
         false
     }
 
-    /// Checks if any existential witnesses were created for uninhabited types.
-    /// This prevents unsound definitions where we assert existence over empty types.
-    /// For example: `let inhabited[T]: Bool = exists(x: T) { true }` would create a witness
-    /// for type T, but T might be empty, making the exists claim invalid.
-    ///
-    /// This function only checks witnesses that don't appear in any clause. The rationale is:
-    /// - If a witness IS used in clauses (like `exists(x: T) { P(x) }`), then the clause P(x)
-    ///   provides some constraint on the witness, and we allow it.
-    /// - If a witness is NOT used (like `exists(x: T) { true }`), we're purely asserting
-    ///   inhabitedness of T with no justification, which is unsound if T is empty.
-    ///
-    /// Note: The `synthesized` list includes all synthetics (existential witnesses, Tseitin
-    /// abbreviations, etc.), but the "unused" filter effectively isolates the problematic
-    /// existential cases since definition-style synthetics are always used in their defining clauses.
-    fn has_uninhabited_existential_witness(
-        &self,
-        synthesized: &[(ModuleId, AtomId)],
-        clauses: &[Clause],
-    ) -> bool {
-        use std::collections::HashSet;
-
-        // If clausification already produced an impossible clause, the existential body is
-        // contradictory regardless of whether the witness type is inhabited.
-        if clauses.iter().any(Clause::is_impossible) {
-            return false;
-        }
-
-        // Collect all synthetic atoms that appear in any clause
-        let mut used_synthetics: HashSet<(ModuleId, AtomId)> = HashSet::new();
-        for clause in clauses {
-            for lit in &clause.literals {
-                for atom in lit.left.iter_atoms() {
-                    if let &Atom::Symbol(Symbol::Synthetic(m, id)) = atom {
-                        used_synthetics.insert((m, id));
-                    }
-                }
-                for atom in lit.right.iter_atoms() {
-                    if let &Atom::Symbol(Symbol::Synthetic(m, id)) = atom {
-                        used_synthetics.insert((m, id));
-                    }
-                }
-            }
-        }
-
-        // Check each synthesized atom
-        for &(module_id, local_id) in synthesized {
-            // If this synthetic appears in clauses, it's constrained by something, so skip
-            if used_synthetics.contains(&(module_id, local_id)) {
-                continue;
-            }
-
-            // Get the synthetic's type
-            let synth_type = self
-                .kernel_context()
-                .symbol_table
-                .get_type(Symbol::Synthetic(module_id, local_id));
-
-            // Get the result type by stripping off type parameter Pis only.
-            // Type parameter Pis have TypeSort (or Typeclass) as the input type.
-            // For example, a witness with type Pi(Type, b0) represents
-            // "for any type T, return a value of type T".
-            // We DON'T strip function type Pis like Pi(Nat, Bool) because those
-            // represent function types, not type parameters.
-            let mut result_type = synth_type.as_ref();
-            let mut stripped_types = Vec::new();
-            while let Some((input_type, body)) = result_type.split_pi() {
-                // Only strip if this is a type parameter (input is Type/TypeSort or Typeclass)
-                if !input_type.is_type_param_kind() {
-                    break;
-                }
-                stripped_types.push(input_type.to_owned());
-                result_type = body;
-            }
-
-            // Build context with types in reverse order (innermost first) to match de Bruijn indices
-            let mut type_param_context = LocalContext::empty();
-            for t in stripped_types.into_iter().rev() {
-                type_param_context.push_type(t);
-            }
-
-            // Convert stripped type-parameter binders from de Bruijn bound variables
-            // into free variables aligned with `type_param_context`.
-            let mut result_term = result_type.to_owned();
-            for i in (0..type_param_context.len()).rev() {
-                result_term =
-                    result_term.substitute_bound(i as u16, &Term::new_variable(i as AtomId));
-            }
-
-            let is_inhabited = self
-                .kernel_context()
-                .provably_inhabited(&result_term, Some(&type_param_context));
-            if !is_inhabited {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// This returns clauses that are denormalized in the sense that they sort literals,
     /// but don't filter out redundant or tautological literals.
     /// This is the format that the Checker uses.
@@ -1675,14 +1300,7 @@ impl<'a> Clausifier<'a> {
             0
         };
 
-        let cnf = self.term_to_cnf(
-            term,
-            false,
-            &mut vec![],
-            &mut next_var_id,
-            &mut vec![],
-            &mut context,
-        )?;
+        let cnf = self.term_to_cnf(term, false, &mut vec![], &mut next_var_id, &mut context)?;
         for mut literals in cnf.into_iter() {
             literals.sort();
             output.push(Clause::from_literals_unnormalized(literals, &context));
@@ -1735,9 +1353,7 @@ impl<'a> Clausifier<'a> {
         &mut self,
         ext_term: ExtendedTerm,
         local_context: &LocalContext,
-        synth: &mut Vec<(ModuleId, AtomId)>,
     ) -> Result<Term, String> {
-        let _ = synth;
         match ext_term {
             ExtendedTerm::Term(t) => Ok(t),
             ExtendedTerm::If(cond_lit, then_term, else_term) => {
@@ -1796,7 +1412,6 @@ mod tests {
     use crate::kernel::atom::Atom;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::term::{Decomposition, Term};
-    use crate::module::ModuleId;
 
     #[test]
     fn test_iet_negated_forall_clausification_stays_inline_without_synthetics() {
@@ -1810,7 +1425,7 @@ mod tests {
                 .apply(&[Term::atom(Atom::BoundVariable(0))]),
         );
         let clauses = {
-            let mut view = Clausifier::new_mut(&mut kernel_context, None, ModuleId(0));
+            let mut view = Clausifier::new_mut(&mut kernel_context, None);
             view.clausify_term_to_denormalized_clauses(&Term::not(forall_term))
                 .expect("negated forall should clausify")
         };

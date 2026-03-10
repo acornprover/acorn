@@ -103,8 +103,8 @@ impl KernelContext {
         // Skip the type variables when replacing existentials
         let num_type_vars = type_var_map.map_or(0, |m| m.len());
 
-        // Convert quantifier types to type terms, including polymorphic wrapper if applicable
-        // Get type variable kinds in sorted order (same as make_skolem_terms)
+        // Convert quantifier types to type terms, including polymorphic wrapper if applicable.
+        // Keep type variable kinds in sorted order so the lookup key is stable.
         let type_var_kinds: Vec<Term> = if let Some(tvm) = type_var_map {
             let mut entries: Vec<_> = tvm.values().collect();
             entries.sort_by_key(|(id, _)| *id);
@@ -119,7 +119,7 @@ impl KernelContext {
             .map(|t| {
                 // First convert the base type
                 let mut type_term = self.type_store.to_type_term_with_vars(t, type_var_map);
-                // Convert FreeVariables to BoundVariables (same as make_skolem_terms)
+                // Convert free variables to bound variables using the normalized type-var prefix.
                 type_term = type_term.convert_free_to_bound(num_type_params);
                 // Wrap with Pi types for each type variable
                 for kind in type_var_kinds.iter().rev() {
@@ -136,7 +136,7 @@ impl KernelContext {
             _ => value.clone(),
         };
         let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
-        let mut view = Clausifier::new_mut(self, type_var_map.cloned(), ModuleId(0));
+        let mut view = Clausifier::new_mut(self, type_var_map.cloned());
         let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
             return None;
         };
@@ -177,52 +177,15 @@ impl KernelContext {
     ) -> Result<Vec<Clause>, String> {
         term.validate();
 
-        let (clauses, skolem_ids): (Vec<Clause>, Vec<(ModuleId, AtomId)>) = {
-            let mut view = Clausifier::new_mut(self, type_var_map.clone(), source.module_id);
+        let clauses = {
+            let mut view = Clausifier::new_mut(self, type_var_map.clone());
             if source.should_clausify_shallowly() {
                 view.shallow_clausify_term(term)?
             } else {
                 view.preserve_term_as_clause(term)?
             }
         };
-
-        let mut output = vec![];
-        let mut undefined_ids = vec![];
-        for id in &skolem_ids {
-            if let Some(def) = self.synthetic_registry.get(id) {
-                for clause in &def.clauses {
-                    output.push(clause.clone());
-                }
-            } else {
-                undefined_ids.push(*id);
-            }
-        }
-
-        if !undefined_ids.is_empty() {
-            let type_vars: Vec<Term> = if let Some(ref tvm) = type_var_map {
-                let mut entries: Vec<_> = tvm.values().collect();
-                entries.sort_by_key(|(id, _)| *id);
-                entries.iter().map(|(_, kind)| kind.clone()).collect()
-            } else {
-                vec![]
-            };
-
-            let synthetic_types: Vec<Term> = undefined_ids
-                .iter()
-                .map(|&(m, i)| self.symbol_table.get_type(Symbol::Synthetic(m, i)).clone())
-                .collect();
-
-            self.define_synthetic_atoms(
-                undefined_ids,
-                type_vars,
-                synthetic_types,
-                clauses.clone(),
-                Some(source.clone()),
-            )?;
-        }
-
-        output.extend(clauses.into_iter());
-        Ok(output)
+        Ok(clauses)
     }
 
     /// Converts a value proposition to CNF clauses via:
