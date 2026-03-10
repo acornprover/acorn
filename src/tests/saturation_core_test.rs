@@ -2182,6 +2182,29 @@ fn test_proving_implied_boolean_equality() {
 }
 
 #[test]
+fn test_proving_typical_functional_equality_shape() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+        let f: (Nat, Nat) -> Nat = axiom
+        let g: (Nat, Nat) -> Nat = axiom
+
+        axiom results_equal(a: Nat, b: Nat) {
+            f(a, b) = g(a, b)
+        }
+
+        theorem goal {
+            f = g
+        }
+        "#,
+    );
+
+    prove(&mut p, "main", "goal");
+}
+
+#[test]
 fn test_proving_and_inside_arg() {
     // The boxed_and definition can't be normalized to CNF directly.
     let mut p = Project::new_mock();
