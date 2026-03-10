@@ -28,9 +28,6 @@ pub enum StepReason {
     /// The source points to where the exists was originally defined.
     Skolemization(Source),
 
-    /// A let...satisfy statement that introduces a synthetic definition.
-    SyntheticDefinition,
-
     /// The checker already had a contradiction, so everything is trivially true.
     Contradiction,
 
@@ -63,7 +60,6 @@ impl StepReason {
             StepReason::Assumption(source) | StepReason::Skolemization(source) => {
                 source.description()
             }
-            StepReason::SyntheticDefinition => "synthetic definition".to_string(),
             StepReason::Contradiction => "ex falso".to_string(),
             StepReason::PreviousClaim => "previous claim".to_string(),
             StepReason::Testing => "testing".to_string(),
@@ -468,7 +464,6 @@ impl Checker {
                     clause.normalize();
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
-                CertificateStep::DefineSynthetic { .. } => {}
             }
         }
 
@@ -966,7 +961,7 @@ mod tests {
         let Error::GeneratedBadCode(msg) = err else {
             panic!("expected GeneratedBadCode");
         };
-        assert!(msg.contains("witnesses are disabled"));
+        assert!(msg.contains("certificate `let ... satisfy` steps are no longer supported"));
     }
 
     #[test]

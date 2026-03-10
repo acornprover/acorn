@@ -96,7 +96,6 @@ const ATOM_TRUE: u8 = 4;
 const ATOM_FALSE: u8 = 5;
 const ATOM_SYMBOL_GLOBAL: u8 = 6;
 const ATOM_SYMBOL_SCOPED: u8 = 7;
-const ATOM_SYMBOL_SYNTHETIC: u8 = 8;
 const ATOM_SYMBOL_BOOL: u8 = 10;
 const ATOM_SYMBOL_TYPESORT: u8 = 11;
 const ATOM_SYMBOL_TYPE: u8 = 12;
@@ -143,7 +142,6 @@ impl Edge {
                 Atom::Symbol(Symbol::Choose) => ATOM_SYMBOL_CHOOSE,
                 Atom::Symbol(Symbol::GlobalConstant(..)) => ATOM_SYMBOL_GLOBAL,
                 Atom::Symbol(Symbol::ScopedConstant(_)) => ATOM_SYMBOL_SCOPED,
-                Atom::Symbol(Symbol::Synthetic(..)) => ATOM_SYMBOL_SYNTHETIC,
             },
         }
     }
@@ -193,11 +191,6 @@ impl Edge {
                     v.extend_from_slice(&c.to_ne_bytes());
                 }
                 Atom::Symbol(Symbol::ScopedConstant(c)) => v.extend_from_slice(&c.to_ne_bytes()),
-                Atom::Symbol(Symbol::Synthetic(m, s)) => {
-                    // Synthetic uses 4 bytes: module_id (2) + local_id (2)
-                    v.extend_from_slice(&m.get().to_ne_bytes());
-                    v.extend_from_slice(&s.to_ne_bytes());
-                }
             },
         }
     }
@@ -240,18 +233,6 @@ impl Edge {
             ATOM_SYMBOL_SCOPED => {
                 let id = u16::from_ne_bytes([bytes[1], bytes[2]]);
                 (Edge::Atom(Atom::Symbol(Symbol::ScopedConstant(id))), 3)
-            }
-            ATOM_SYMBOL_SYNTHETIC => {
-                // Synthetic uses 5 bytes: 1 discriminant + 2 module_id + 2 local_id
-                let module_id = u16::from_ne_bytes([bytes[1], bytes[2]]);
-                let local_id = u16::from_ne_bytes([bytes[3], bytes[4]]);
-                (
-                    Edge::Atom(Atom::Symbol(Symbol::Synthetic(
-                        ModuleId(module_id),
-                        local_id,
-                    ))),
-                    5,
-                )
             }
             ATOM_SYMBOL_BOOL => (Edge::Atom(Atom::Symbol(Symbol::Bool)), 3),
             ATOM_SYMBOL_TYPESORT => (Edge::Atom(Atom::Symbol(Symbol::Type0)), 3),
@@ -1396,10 +1377,10 @@ mod tests {
         }
 
         // Edges with 5-byte encoding (module-scoped)
-        let edges_5_bytes = vec![
-            Edge::Atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(5), 10))),
-            Edge::Atom(Atom::Symbol(Symbol::Synthetic(ModuleId(0), 40))),
-        ];
+        let edges_5_bytes = vec![Edge::Atom(Atom::Symbol(Symbol::GlobalConstant(
+            ModuleId(5),
+            10,
+        )))];
 
         for edge in edges_5_bytes {
             let mut bytes = Vec::new();

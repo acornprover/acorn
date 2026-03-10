@@ -18,7 +18,6 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::termination_checker::TerminationChecker;
 use crate::elaborator::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
-use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -143,40 +142,6 @@ impl BindingMap {
         self.constant_to_alias.get(name)
     }
 
-    /// Returns preferred unqualified names for synthetic IDs visible in this scope.
-    ///
-    /// This is used for user-facing code generation so checked proof steps can reuse
-    /// names that came from parsed certificate lines.
-    pub fn synthetic_name_map(&self) -> HashMap<(ModuleId, AtomId), String> {
-        let mut names = HashMap::new();
-        for (name, info) in &self.constant_defs {
-            let ConstantName::Unqualified(_, alias) = name else {
-                continue;
-            };
-
-            let synthetic_id = match &info.value {
-                PotentialValue::Unresolved(unresolved) => unresolved.name.synthetic_id(),
-                PotentialValue::Resolved(value) => {
-                    value.as_name().and_then(|name| name.synthetic_id())
-                }
-            };
-
-            let Some(synthetic_id) = synthetic_id else {
-                continue;
-            };
-
-            names
-                .entry(synthetic_id)
-                .and_modify(|existing: &mut String| {
-                    if alias < existing {
-                        *existing = alias.clone();
-                    }
-                })
-                .or_insert_with(|| alias.clone());
-        }
-        names
-    }
-
     /// Gets the local alias to use for a given datatype.
     pub fn datatype_alias(&self, datatype: &Datatype) -> Option<&String> {
         self.datatype_defs.get(datatype)?.alias.as_ref()
@@ -240,15 +205,7 @@ impl BindingMap {
                         // (already checked above, so this should always be false here)
                         self.has_type_attr(datatype, attr)
                     }
-                    ConstantName::TypeclassAttribute(..) => {
-                        // This doesn't seem right!
-                        false
-                    }
-                    ConstantName::Synthetic(m, i) => {
-                        let name = format!("s{}_{}", m.0, i);
-                        self.unqualified.contains_key(&name)
-                            || self.name_to_module.contains_key(&name)
-                    }
+                    ConstantName::TypeclassAttribute(..) => false,
                 }
             }
             DefinedName::Instance(instance_name) => {
@@ -529,7 +486,6 @@ impl BindingMap {
             ConstantName::TypeclassAttribute(_, typeclass, attr) => {
                 self.resolve_typeclass_attr(typeclass, attr)
             }
-            ConstantName::Synthetic(..) => None,
         }
     }
 
@@ -1135,10 +1091,6 @@ impl BindingMap {
             ConstantName::Unqualified(_, name) => {
                 self.unqualified.insert(name.clone(), ());
             }
-            ConstantName::Synthetic(m, i) => {
-                let name = format!("s{}_{}", m.0, i);
-                self.unqualified.insert(name, ());
-            }
         }
 
         self.constant_defs.insert(constant_name, info);
@@ -1165,7 +1117,7 @@ impl BindingMap {
         doc_comments: Vec<String>,
         definition_string: Option<String>,
     ) {
-        if !canonical.is_synthetic() && canonical.module_id() != self.module_id {
+        if canonical.module_id() != self.module_id {
             // Prefer this alias locally to using the qualified, canonical name
             self.constant_to_alias
                 .entry(canonical)

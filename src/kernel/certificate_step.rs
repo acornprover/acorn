@@ -1,8 +1,5 @@
-use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
-use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
-use crate::module::ModuleId;
 
 /// A certificate claim line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,21 +17,6 @@ pub struct Claim {
 /// line of certificate code.
 #[derive(Clone, PartialEq, Eq)]
 pub enum CertificateStep {
-    /// Define one synthetic group produced by normalization.
-    DefineSynthetic {
-        /// Synthetic atom IDs introduced together by this definition.
-        /// Each pair is `(module_id, local_atom_id)` and maps to a generated `sN` name.
-        atoms: Vec<(ModuleId, AtomId)>,
-
-        /// Type-variable kind terms (in var-id order) for the synthetic definition.
-        /// Each entry is either `Type`-like or a typeclass kind constraint.
-        type_vars: Vec<Term>,
-
-        /// Kernel clauses that define the synthetic condition.
-        /// These clauses are converted into the `satisfy { ... }` body.
-        clauses: Vec<Clause>,
-    },
-
     /// A claim statement with a generic clause plus specialization map.
     Claim(Claim),
 }
