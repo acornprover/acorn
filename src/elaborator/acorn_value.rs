@@ -342,6 +342,8 @@ pub struct MatchCase {
     /// Types introduced by this match branch (new pattern-bound variables).
     pub new_vars: Vec<AcornType>,
     /// The branch pattern value.
+    /// Invariant: this must agree with `constructor_index` / `constructor_total`.
+    /// Term lowering uses the constructor metadata as the authoritative branch identity.
     pub pattern: AcornValue,
     /// The branch result value.
     pub result: AcornValue,
