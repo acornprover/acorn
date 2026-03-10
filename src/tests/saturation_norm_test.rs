@@ -459,7 +459,6 @@ fn test_unwrapping_new_option() {
 }
 
 #[test]
-#[ignore = "known unsoundness: skolemization can demonstrate inhabitedness"]
 fn test_skolem_should_not_demonstrate_inhabitedness() {
     let text = r#"
 
