@@ -57,12 +57,14 @@ impl fmt::Display for Node {
 
 impl Node {
     pub fn structural(project: &Project, env: &Environment, prop: Proposition) -> Node {
-        let prop = env.bindings.expand_theorems(prop, project);
+        let _ = project;
+        let prop = env.bindings.canonicalize_proposition(prop);
         Node::Structural(Fact::Proposition(Arc::new(prop)), None)
     }
 
     pub fn claim(project: &Project, env: &Environment, prop: Proposition) -> Result<Node, String> {
-        let prop = env.bindings.expand_theorems(prop, project);
+        let _ = project;
+        let prop = env.bindings.canonicalize_proposition(prop);
         let prop = Arc::new(prop);
         let goal = Goal::interior(env, prop.clone())?;
         let fact = Fact::Proposition(prop);
@@ -83,12 +85,11 @@ impl Node {
         block: Block,
         prop: Option<Proposition>,
     ) -> Node {
-        let fact = match prop {
-            Some(prop) => Some(Fact::Proposition(Arc::new(
-                env.bindings.expand_theorems(prop, project),
-            ))),
-            None => None,
-        };
+        let _ = project;
+        let fact = prop.map(|prop| {
+            let prop = env.bindings.canonicalize_proposition(prop);
+            Fact::Proposition(Arc::new(prop))
+        });
         Node::Block(block, fact, None)
     }
 

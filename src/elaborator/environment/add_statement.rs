@@ -2731,6 +2731,7 @@ impl Environment {
             let claim = claim.expand_lambdas(0);
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);
             let prop = Proposition::new(claim, vec![], source);
+            let prop = self.bindings.expand_citation(prop, project);
             self.add_node(Node::structural(project, self, prop));
             self.add_other_lines(statement);
         } else {

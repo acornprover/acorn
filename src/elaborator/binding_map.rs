@@ -7,7 +7,7 @@ use crate::code_generator::CodeGenerator;
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, PotentialType, TypeParam, Typeclass, UnresolvedType, Variance,
 };
-use crate::elaborator::acorn_value::AcornValue;
+use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::named_entity::NamedEntity;
@@ -1412,7 +1412,7 @@ impl BindingMap {
 
     /// Whether this value is calling a theorem on some arguments.
     pub fn is_citation(&self, claim: &AcornValue, project: &Project) -> bool {
-        match claim.is_named_function_call() {
+        match claim.is_named_function_call().or_else(|| claim.as_name()) {
             Some(constant_name) => {
                 let bindings = self.get_bindings(constant_name.module_id(), project);
                 bindings.is_theorem(constant_name)
@@ -1974,11 +1974,8 @@ impl BindingMap {
         }
     }
 
-    /// Replaces all theorems in the proposition with their definitions.
-    /// This is admittedly weird.
-    /// Note that it needs to work with templated theorems, which makes it tricky to do the
-    /// type inference.
-    pub fn expand_theorems(&self, proposition: Proposition, project: &Project) -> Proposition {
+    /// Canonicalize proposition syntax without replacing theorem calls.
+    pub fn canonicalize_proposition(&self, proposition: Proposition) -> Proposition {
         proposition
             .value
             .validate()
@@ -1986,27 +1983,63 @@ impl BindingMap {
 
         let value = proposition
             .value
-            .replace_constants(0, &|c| {
-                let bindings = self.get_bindings(c.name.module_id(), project);
-                if bindings.is_theorem(&c.name) {
-                    match bindings.get_definition_and_params(&c.name) {
-                        Some((def, params)) => {
-                            let mut pairs = vec![];
-                            for (param, t) in params.iter().zip(c.params.iter()) {
-                                pairs.push((param.name.clone(), t.clone()));
-                            }
-                            Some(def.instantiate(&pairs))
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                }
-            })
             .expand_lambdas(0)
             .flatten_applications()
             .reduce_eta(0);
         proposition.with_value(value)
+    }
+
+    /// Replaces the cited outer theorem with its definition.
+    pub fn expand_citation(&self, proposition: Proposition, project: &Project) -> Proposition {
+        fn expand_citation_value(
+            bindings: &BindingMap,
+            value: &AcornValue,
+            project: &Project,
+        ) -> Option<AcornValue> {
+            match value {
+                AcornValue::Constant(c) => {
+                    let theorem_bindings = bindings.get_bindings(c.name.module_id(), project);
+                    if !theorem_bindings.is_theorem(&c.name) {
+                        return None;
+                    }
+
+                    let (def, params) = theorem_bindings.get_definition_and_params(&c.name)?;
+                    let pairs: Vec<_> = params
+                        .iter()
+                        .zip(c.params.iter())
+                        .map(|(param, t)| (param.name.clone(), t.clone()))
+                        .collect();
+                    Some(def.instantiate(&pairs))
+                }
+                AcornValue::TypeApplication(app) => {
+                    Some(AcornValue::TypeApplication(TypeApplication {
+                        function: Box::new(expand_citation_value(
+                            bindings,
+                            &app.function,
+                            project,
+                        )?),
+                        type_param_names: app.type_param_names.clone(),
+                        type_param_constraints: app.type_param_constraints.clone(),
+                        type_args: app.type_args.clone(),
+                    }))
+                }
+                AcornValue::Application(app) => {
+                    Some(AcornValue::Application(FunctionApplication {
+                        function: Box::new(expand_citation_value(
+                            bindings,
+                            &app.function,
+                            project,
+                        )?),
+                        args: app.args.clone(),
+                    }))
+                }
+                _ => None,
+            }
+        }
+
+        let value = expand_citation_value(self, &proposition.value, project)
+            .unwrap_or_else(|| proposition.value.clone());
+        self.canonicalize_proposition(proposition.with_value(value))
     }
 
     ////////////////////////////////////////////////////////////////////////////////

@@ -733,3 +733,61 @@ fn test_iet_citation_line_expands_to_instantiated_implication() {
         proposition_values
     );
 }
+
+#[test]
+fn test_iet_type_only_theorem_citation_expands() {
+    let text = r#"
+        type Nat: axiom
+
+        let constant_false[K]: K -> Bool = axiom
+
+        theorem cite_me[K] {
+            constant_false[K] = constant_false[K]
+        }
+
+        theorem goal {
+            constant_false[Nat] = constant_false[Nat]
+        } by {
+            cite_me[Nat]
+            constant_false[Nat] = constant_false[Nat]
+        }
+        "#;
+
+    let mut project = crate::project::Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(env) => env,
+        crate::module::LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    fn collect_props(env: &crate::elaborator::environment::Environment, out: &mut Vec<String>) {
+        for node in &env.nodes {
+            if let Some(crate::elaborator::fact::Fact::Proposition(prop)) = node.get_fact() {
+                out.push(prop.value.to_string());
+            }
+            if let Some(block) = node.get_block() {
+                collect_props(&block.env, out);
+            }
+        }
+    }
+
+    let mut proposition_values = vec![];
+    collect_props(env, &mut proposition_values);
+
+    assert!(
+        proposition_values
+            .iter()
+            .any(|value| value == "(constant_false[Nat] = constant_false[Nat])"),
+        "expected expanded type-only citation fact, got {:?}",
+        proposition_values
+    );
+    assert!(
+        proposition_values
+            .iter()
+            .all(|value| value != "cite_me[Nat]"),
+        "expected type-only citation to expand, got {:?}",
+        proposition_values
+    );
+}
