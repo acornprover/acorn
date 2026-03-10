@@ -1142,7 +1142,7 @@ impl<'a> Clausifier<'a> {
         }
 
         if !fn_arg_types.is_empty() {
-            if negate && cfg!(feature = "direct_fn_neq") {
+            if negate {
                 let left = self.term_to_extended_term(left, stack, next_var_id, synth, context)?;
                 let right =
                     self.term_to_extended_term(right, stack, next_var_id, synth, context)?;
@@ -1152,68 +1152,6 @@ impl<'a> Clausifier<'a> {
             }
 
             if result_type == Term::bool_type() {
-                if negate {
-                    // f != g for Bool-valued functions:
-                    // skolemize an argument tuple and assert result disagreement.
-                    let arg_terms = self.make_skolem_terms_from_type_terms(
-                        &fn_arg_types,
-                        stack,
-                        synth,
-                        context,
-                    )?;
-                    let args: Vec<_> = arg_terms.iter().cloned().map(ExtendedTerm::Term).collect();
-                    let left_pos = self.apply_term_to_cnf(
-                        left,
-                        args.clone(),
-                        false,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-                    let left_neg = self.apply_term_to_cnf(
-                        left,
-                        args.clone(),
-                        true,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-                    let right_pos = self.apply_term_to_cnf(
-                        right,
-                        args.clone(),
-                        false,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-                    let right_neg = self.apply_term_to_cnf(
-                        right,
-                        args,
-                        true,
-                        stack,
-                        next_var_id,
-                        synth,
-                        context,
-                    )?;
-
-                    if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg) {
-                        if let Some((right_term, right_sign)) = right_pos.match_negated(&right_neg)
-                        {
-                            let positive = left_sign != right_sign;
-                            let literal =
-                                Literal::new(positive, left_term.clone(), right_term.clone());
-                            return Ok(Cnf::from_literal(literal));
-                        }
-                    }
-
-                    let some = left_pos.or(right_pos);
-                    let not_both = left_neg.or(right_neg);
-                    return Ok(not_both.and(some));
-                }
-
                 // f = g for Bool-valued functions:
                 // introduce fresh universally-quantified arguments.
                 let mut args = vec![];
