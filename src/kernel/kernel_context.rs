@@ -3,7 +3,6 @@ use crate::kernel::atom::AtomId;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::SymbolTable;
-use crate::kernel::synthetic::SyntheticRegistry;
 use crate::kernel::term::Term;
 use crate::kernel::type_store::TypeStore;
 use crate::kernel::types::TypeclassId;
@@ -13,7 +12,6 @@ use crate::kernel::types::TypeclassId;
 pub struct KernelContext {
     pub type_store: TypeStore,
     pub symbol_table: SymbolTable,
-    pub synthetic_registry: SyntheticRegistry,
 }
 
 impl KernelContext {
@@ -21,7 +19,6 @@ impl KernelContext {
         KernelContext {
             type_store: TypeStore::new(),
             symbol_table: SymbolTable::new(),
-            synthetic_registry: SyntheticRegistry::new(),
         }
     }
 
@@ -1099,7 +1096,6 @@ impl KernelContext {
     pub fn merge(&mut self, other: &KernelContext) {
         self.type_store.merge(&other.type_store);
         self.symbol_table.merge(&other.symbol_table);
-        self.synthetic_registry.merge(&other.synthetic_registry);
     }
 
     /// Merges another KernelContext into this one, excluding scoped constants.
@@ -1107,7 +1103,6 @@ impl KernelContext {
     pub fn merge_imports(&mut self, other: &KernelContext) {
         self.type_store.merge(&other.type_store);
         self.symbol_table.merge_imports(&other.symbol_table);
-        self.synthetic_registry.merge(&other.synthetic_registry);
     }
 }
 

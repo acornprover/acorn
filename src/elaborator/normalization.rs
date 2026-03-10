@@ -13,7 +13,6 @@ use crate::elaborator::source::Source;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::elaborate_value_to_term;
-use crate::elaborator::to_term::elaborate_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::clausifier::Clausifier;
@@ -71,7 +70,7 @@ impl KernelContext {
     /// Returns all synthetic atom IDs that have been defined.
     #[cfg(test)]
     pub fn get_synthetic_ids(&self) -> Vec<(ModuleId, AtomId)> {
-        self.synthetic_registry.get_ids()
+        vec![]
     }
 
     /// Registers an arbitrary type with the type store.
@@ -95,57 +94,9 @@ impl KernelContext {
         value: &AcornValue,
         type_var_map: Option<&HashMap<String, (AtomId, Term)>>,
     ) -> Option<&Arc<SyntheticDefinition>> {
-        let (num_definitions, quant_types) = match value {
-            AcornValue::Exists(quants, _) => (quants.len(), quants.clone()),
-            _ => (0, vec![]),
-        };
-
-        // Skip the type variables when replacing existentials
-        let num_type_vars = type_var_map.map_or(0, |m| m.len());
-
-        // Convert quantifier types to type terms, including polymorphic wrapper if applicable.
-        // Keep type variable kinds in sorted order so the lookup key is stable.
-        let type_var_kinds: Vec<Term> = if let Some(tvm) = type_var_map {
-            let mut entries: Vec<_> = tvm.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            entries.iter().map(|(_, kind)| kind.clone()).collect()
-        } else {
-            vec![]
-        };
-
-        let num_type_params = type_var_kinds.len() as u16;
-        let synthetic_types: Vec<Term> = quant_types
-            .iter()
-            .map(|t| {
-                // First convert the base type
-                let mut type_term = self.type_store.to_type_term_with_vars(t, type_var_map);
-                // Convert free variables to bound variables using the normalized type-var prefix.
-                type_term = type_term.convert_free_to_bound(num_type_params);
-                // Wrap with Pi types for each type variable
-                for kind in type_var_kinds.iter().rev() {
-                    type_term = Term::pi(kind.clone(), type_term);
-                }
-                type_term
-            })
-            .collect();
-
-        let alt_value = match value {
-            AcornValue::Exists(quants, subvalue) => {
-                AcornValue::ForAll(quants.clone(), subvalue.clone())
-            }
-            _ => value.clone(),
-        };
-        let term = elaborate_value_to_term_existing(self, &alt_value, type_var_map).ok()?;
-        let mut view = Clausifier::new_mut(self, type_var_map.cloned());
-        let Ok(uninstantiated) = view.clausify_term_to_denormalized_clauses(&term) else {
-            return None;
-        };
-        let clauses: Vec<Clause> = uninstantiated
-            .iter()
-            .map(|c| c.instantiate_invalid_synthetics_with_skip(num_definitions, num_type_vars))
-            .collect();
-        self.synthetic_registry
-            .lookup_by_key(&type_var_kinds, &synthetic_types, &clauses)
+        let _ = value;
+        let _ = type_var_map;
+        None
     }
 
     pub fn add_scoped_constant(
@@ -409,7 +360,8 @@ impl KernelContext {
         &self,
         ids: &[(ModuleId, AtomId)],
     ) -> Vec<Arc<SyntheticDefinition>> {
-        self.synthetic_registry.find_covering_info(ids)
+        let _ = ids;
+        vec![]
     }
 
     /// When you denormalize and renormalize a clause, you should get the same thing.
