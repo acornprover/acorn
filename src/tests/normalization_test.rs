@@ -28,6 +28,16 @@ fn get_inline_exists_body(
     })
 }
 
+fn is_signed_outer_equality(clause: &crate::kernel::clause::Clause, positive: bool) -> bool {
+    clause.literals.len() == 1
+        && clause.literals[0].is_signed_term()
+        && clause.literals[0].positive == positive
+        && matches!(
+            clause.literals[0].left.as_ref().decompose(),
+            crate::kernel::term::Decomposition::Application(_, _)
+        )
+}
+
 #[test]
 fn test_nat_normalization() {
     let mut env = Environment::test();
@@ -205,11 +215,21 @@ fn test_boolean_equality() {
         "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["n1 != n0 or n3 = n2", "n3 != n2 or n1 = n0"],
-    );
+    if cfg!(feature = "nocnf") {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
+        assert!(
+            is_signed_outer_equality(&clauses[0], true),
+            "expected a single signed equality clause, got {:?}",
+            clauses
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &["n1 != n0 or n3 = n2", "n3 != n2 or n1 = n0"],
+        );
+    }
 }
 
 #[test]
@@ -226,11 +246,21 @@ fn test_boolean_inequality() {
         "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["n3 != n2 or n1 != n0", "n3 = n2 or n1 = n0"],
-    );
+    if cfg!(feature = "nocnf") {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
+        assert!(
+            is_signed_outer_equality(&clauses[0], false),
+            "expected a single signed inequality clause, got {:?}",
+            clauses
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &["n3 != n2 or n1 != n0", "n3 = n2 or n1 = n0"],
+        );
+    }
 }
 
 #[test]
@@ -337,16 +367,20 @@ fn test_if_then_else_under_equality() {
         "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not b or not a or c",
-            "not a or d or b",
-            "not c or not b or a",
-            "not d or b or a",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        norm.check(&env, "goal", &["eq(Bool, ite(Bool, b, c, d), a)"]);
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not b or not a or c",
+                "not a or d or b",
+                "not c or not b or a",
+                "not d or b or a",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -368,11 +402,15 @@ fn test_if_then_else_with_true_branch_under_equality() {
         "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &["not a or d or b", "not b or a", "not d or b or a"],
-    );
+    if cfg!(feature = "nocnf") {
+        norm.check(&env, "goal", &["eq(Bool, ite(Bool, b, true, d), a)"]);
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &["not a or d or b", "not b or a", "not d or b or a"],
+        );
+    }
 }
 
 #[test]
@@ -416,15 +454,23 @@ fn test_if_then_else_normalization_with_variables() {
         "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not foo(x0, x1, x2) or x1 = x2 or x0(x2)",
-            "x0 != x1 or foo(x2, x0, x1)",
-            "not x0(x1) or foo(x0, x2, x1) or x1 = x2",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        norm.check(
+            &env,
+            "goal",
+            &["eq(Bool, foo(x0, x1, x2), ite(Bool, eq(T0_0, x1, x2), true, x0(x2)))"],
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not foo(x0, x1, x2) or x1 = x2 or x0(x2)",
+                "x0 != x1 or foo(x2, x0, x1)",
+                "not x0(x1) or foo(x0, x2, x1) or x1 = x2",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -468,16 +514,24 @@ fn test_normalizing_functional_or() {
     "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not dis(x0) or h(x0) or g(x0) or f(x0)",
-            "not f(x0) or dis(x0)",
-            "not g(x0) or dis(x0)",
-            "not h(x0) or dis(x0)",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        norm.check(
+            &env,
+            "goal",
+            &["eq(Bool, dis(x0), or(or(f(x0), g(x0)), h(x0)))"],
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not dis(x0) or h(x0) or g(x0) or f(x0)",
+                "not f(x0) or dis(x0)",
+                "not g(x0) or dis(x0)",
+                "not h(x0) or dis(x0)",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -500,14 +554,24 @@ fn test_normalizing_lambda_inside_equality() {
     "#,
     );
     let mut norm = KernelContext::new();
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not f(x0, x1) or g(h(x0, x1)) = z",
-            "g(h(x0, x1)) != z or f(x0, x1)",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
+        assert!(
+            clauses[0].literals.len() == 1 && clauses[0].literals[0].positive,
+            "expected a single positive literal clause, got {:?}",
+            clauses
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not f(x0, x1) or g(h(x0, x1)) = z",
+                "g(h(x0, x1)) != z or f(x0, x1)",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -573,14 +637,24 @@ fn test_normalizing_func_eq_inside_lambda() {
     );
     let mut norm = KernelContext::new();
     // Functional equality inside lambda gets expanded with free variables
-    norm.check(
-        &env,
-        "goal",
-        &[
-            "not f(x0) or h(x0, x1) = g(x0, x1)",
-            "h(x0) != g(x0) or f(x0)",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        let clauses = norm.get_all_clauses(&env);
+        assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
+        assert!(
+            clauses[0].literals.len() == 1 && clauses[0].literals[0].positive,
+            "expected a single positive literal clause, got {:?}",
+            clauses
+        );
+    } else {
+        norm.check(
+            &env,
+            "goal",
+            &[
+                "not f(x0) or h(x0, x1) = g(x0, x1)",
+                "h(x0) != g(x0) or f(x0)",
+            ],
+        );
+    }
     let _clauses = norm.get_all_clauses(&env);
 }
 
@@ -605,22 +679,31 @@ fn test_normalizing_forall_inside_lambda() {
     );
     let mut norm = KernelContext::new();
     let clauses = norm.get_all_clauses(&env);
-    assert_eq!(clauses.len(), 2, "expected two clauses");
-    assert!(
-        clauses.iter().any(|clause| {
-            !has_inline_exists(clause)
-                && clause.literals.len() == 2
-                && clause.literals.iter().any(|lit| lit.positive)
-                && clause.literals.iter().any(|lit| !lit.positive)
-        }),
-        "expected the forward implication clause to stay first-order"
-    );
-    assert!(
-        clauses
-            .iter()
-            .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
-        "expected the reverse implication to keep an inline exists"
-    );
+    if cfg!(feature = "nocnf") {
+        assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
+        assert!(
+            clauses[0].literals.len() == 1 && clauses[0].literals[0].positive,
+            "expected a single positive literal clause, got {:?}",
+            clauses
+        );
+    } else {
+        assert_eq!(clauses.len(), 2, "expected two clauses");
+        assert!(
+            clauses.iter().any(|clause| {
+                !has_inline_exists(clause)
+                    && clause.literals.len() == 2
+                    && clause.literals.iter().any(|lit| lit.positive)
+                    && clause.literals.iter().any(|lit| !lit.positive)
+            }),
+            "expected the forward implication clause to stay first-order"
+        );
+        assert!(
+            clauses
+                .iter()
+                .any(|clause| has_inline_exists(clause) && clause.literals.len() == 2),
+            "expected the reverse implication to keep an inline exists"
+        );
+    }
 }
 
 #[test]

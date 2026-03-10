@@ -520,4 +520,35 @@ mod tests {
         let step = passive_set.pop().unwrap();
         assert_eq!(step.clause.to_string(), "<empty>");
     }
+
+    #[test]
+    fn test_passive_simplification_rejects_typeclass_constraint_strengthening() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("String");
+        kctx.parse_typeclass("Monoid");
+        kctx.parse_polymorphic_constant("g0", "T: Monoid", "T -> Bool");
+        kctx.parse_constant("c0", "Bool");
+        kctx.parse_constant("c1", "String");
+
+        let passive_clause = kctx.parse_clause("not g0(String, c1) or c0", &[]);
+        let expected_clause = passive_clause.clone();
+
+        let mut passive_set = PassiveSet::new();
+        passive_set.push_batch(vec![ProofStep::mock_from_clause(passive_clause)], &kctx);
+
+        let active_clause = kctx.parse_clause("g0(x0, x1)", &["Monoid", "x0"]);
+        let active_set = ActiveSet::new();
+        passive_set.simplify(
+            5,
+            &ProofStep::mock_from_clause(active_clause),
+            &active_set,
+            &kctx,
+        );
+
+        let step = passive_set.pop().unwrap();
+        assert_eq!(
+            step.clause, expected_clause,
+            "Simplification should not apply when it would strengthen an unconstrained type variable to a typeclass constraint"
+        );
+    }
 }

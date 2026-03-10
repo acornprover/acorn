@@ -748,8 +748,12 @@ impl Clause {
             (&literal.right, &literal.left)
         };
 
-        // Both sides must be function applications
-        if longer.num_args() == 0 || shorter.num_args() == 0 {
+        let longer_args = longer.args();
+        let shorter_args = shorter.args();
+
+        // Both sides must be function applications. Terms like lambdas/foralls are not
+        // application spines even though `num_args()` can count their nested structure.
+        if longer_args.is_empty() || shorter_args.is_empty() {
             return None;
         }
 
@@ -757,9 +761,6 @@ impl Clause {
         if longer.get_head_atom().is_variable() || shorter.get_head_atom().is_variable() {
             return None;
         }
-
-        let longer_args = longer.args();
-        let shorter_args = shorter.args();
 
         // Find the longest matching suffix between longer_args and shorter_args.
         // We compare from the right: longer_args[len-1] vs shorter_args[len-1], etc.

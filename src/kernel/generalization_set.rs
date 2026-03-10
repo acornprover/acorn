@@ -1286,4 +1286,22 @@ mod tests {
             "Pattern with typeclass variable should match concrete query"
         );
     }
+
+    #[test]
+    fn test_typeclass_generalization_rejects_unconstrained_query_variable() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Ring");
+        kctx.parse_polymorphic_constant("g0", "R: Ring", "R -> Bool");
+
+        let mut clause_set = GeneralizationSet::new();
+        let pattern_clause = kctx.parse_clause("g0(x0, x1)", &["Ring", "x0"]);
+        clause_set.insert(pattern_clause, 7, &kctx);
+
+        let query_clause = kctx.parse_clause("g0(x0, x1)", &["Type", "x0"]);
+        let found = clause_set.find_generalization(query_clause, &kctx);
+        assert_eq!(
+            found, None,
+            "A Ring-constrained pattern should not match an unconstrained query variable"
+        );
+    }
 }

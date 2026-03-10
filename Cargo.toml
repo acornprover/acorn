@@ -46,6 +46,8 @@ default = []
 validate = []
 # Keep existential quantifiers inline in clausification instead of skolemizing.
 iet = []
+# Keep normalization/clausification to at most one initial clause per fact.
+nocnf = []
 
 [lib]
 doctest = false

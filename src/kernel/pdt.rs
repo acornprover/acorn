@@ -618,6 +618,29 @@ fn types_compatible(
     query_context: &LocalContext,
     kernel_context: &KernelContext,
 ) -> bool {
+    fn typeclass_binding_is_compatible(
+        actual_tc_id: crate::kernel::types::TypeclassId,
+        required_tc_id: crate::kernel::types::TypeclassId,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        actual_tc_id == required_tc_id
+            || kernel_context
+                .type_store
+                .typeclass_extends(actual_tc_id, required_tc_id)
+    }
+
+    fn resolve_typeclass_constraint(
+        type_term: TermRef,
+        context: &LocalContext,
+    ) -> Option<crate::kernel::types::TypeclassId> {
+        if let Some(tc_id) = type_term.as_typeclass() {
+            return Some(tc_id);
+        }
+        let var_id = type_term.atomic_variable()?;
+        let var_type = context.get_var_type(var_id as usize)?;
+        resolve_typeclass_constraint(var_type.as_ref(), context)
+    }
+
     let bound_type = match bound_term.decompose() {
         Decomposition::Atom(KernelAtom::BoundVariable(i)) => {
             // Bound variables are indexed from the innermost binder.
@@ -685,9 +708,15 @@ fn types_compatible(
             // compatible typeclass constraints
             return kernel_context.type_store.is_instance_of(ground_id, *tc_id);
         }
-        // If it's a type variable, accept it (polymorphic matching)
-        if let Decomposition::Atom(KernelAtom::FreeVariable(_)) = bound_term.decompose() {
-            return true;
+        if let Some(var_id) = bound_term.atomic_variable() {
+            let Some(var_type) = query_context.get_var_type(var_id as usize) else {
+                return false;
+            };
+            let Some(actual_tc_id) = resolve_typeclass_constraint(var_type.as_ref(), query_context)
+            else {
+                return false;
+            };
+            return typeclass_binding_is_compatible(actual_tc_id, *tc_id, kernel_context);
         }
         return false;
     }
@@ -709,6 +738,19 @@ fn types_compatible(
                     // compatible typeclass constraints
                     return kernel_context.type_store.is_instance_of(ground_id, *tc_id);
                 }
+                if let Some(bound_var_id) = bound_type.as_ref().atomic_variable() {
+                    let Some(bound_var_type) = query_context.get_var_type(bound_var_id as usize)
+                    else {
+                        return false;
+                    };
+                    let Some(actual_tc_id) =
+                        resolve_typeclass_constraint(bound_var_type.as_ref(), query_context)
+                    else {
+                        return false;
+                    };
+                    return typeclass_binding_is_compatible(actual_tc_id, *tc_id, kernel_context);
+                }
+                return false;
             }
             // If x0's type is Type/TypeSort (not a typeclass constraint), check universe level.
             // x0: TypeSort means x0 is a type variable that can be bound to types like Foo, Nat.

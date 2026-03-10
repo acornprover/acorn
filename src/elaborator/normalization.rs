@@ -103,10 +103,18 @@ impl KernelContext {
 
         let clauses = {
             let mut view = Clausifier::new_mut(self, type_var_map.clone());
-            if source.should_clausify_shallowly() {
-                view.shallow_clausify_term(term)?
-            } else {
-                view.preserve_term_as_clause(term)?
+            #[cfg(feature = "nocnf")]
+            {
+                let _ = source;
+                view.clausify_term_to_single_clause(term)?
+            }
+            #[cfg(not(feature = "nocnf"))]
+            {
+                if source.should_clausify_shallowly() {
+                    view.shallow_clausify_term(term)?
+                } else {
+                    view.preserve_term_as_clause(term)?
+                }
             }
         };
         Ok(clauses)
