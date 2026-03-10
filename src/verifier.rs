@@ -193,6 +193,7 @@ impl Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::certificate::{Certificate, CertificateStore};
     use assert_fs::fixture::ChildPath;
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
@@ -324,6 +325,49 @@ mod tests {
         assert_eq!(output3.metrics.certs_unused, 0);
         // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_verify_trims_unused_cached_cert_steps() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem simple_truth {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let cert_path = build.child("foo.jsonl");
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "simple_truth".to_string(),
+                vec!["let s0: Bool satisfy { true }".to_string()],
+            )],
+        }
+        .save(cert_path.path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.certs_cached, 1);
+        assert_eq!(output.metrics.searches_total, 0);
+
+        let loaded = CertificateStore::load(cert_path.path()).unwrap();
+        assert_eq!(loaded.certs.len(), 1);
+        assert_eq!(loaded.certs[0].goal, "simple_truth");
+        assert_eq!(loaded.certs[0].proof, Some(vec![]));
     }
 
     #[test]

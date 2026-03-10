@@ -54,6 +54,13 @@ pub struct CertificateLine {
     pub reason: StepReason,
 }
 
+/// A successfully checked certificate, including how many proof lines were consumed.
+#[derive(Debug, Clone)]
+pub struct CheckedCertificate {
+    pub lines: Vec<CertificateLine>,
+    pub consumed_proof_steps: usize,
+}
+
 fn value_to_code(
     value: &AcornValue,
     bindings: &Cow<BindingMap>,
@@ -351,6 +358,14 @@ impl Certificate {
     /// Create a placeholder certificate with no proof
     pub fn placeholder(goal: String) -> Self {
         Certificate { goal, proof: None }
+    }
+
+    /// Trim this certificate's proof to the consumed prefix.
+    pub fn trim_to_consumed_prefix(mut self, keep_steps: usize) -> Self {
+        if let Some(proof) = &mut self.proof {
+            proof.truncate(keep_steps);
+        }
+        self
     }
 
     /// Check if this certificate has a proof
@@ -1453,22 +1468,41 @@ impl Certificate {
     /// Consumes checker/bindings/kernel_context since checking mutates all three.
     pub fn check(
         &self,
+        checker: Checker,
+        project: &Project,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<Vec<CertificateLine>, CodeGenError> {
+        Ok(self
+            .check_with_usage(checker, project, bindings, kernel_context)?
+            .lines)
+    }
+
+    /// Check this certificate and report how many proof lines were actually consumed.
+    ///
+    /// Consumes checker/bindings/kernel_context since checking mutates all three.
+    pub fn check_with_usage(
+        &self,
         mut checker: Checker,
         project: &Project,
         mut bindings: Cow<BindingMap>,
         mut kernel_context: Cow<KernelContext>,
-    ) -> Result<Vec<CertificateLine>, CodeGenError> {
+    ) -> Result<CheckedCertificate, CodeGenError> {
         if checker.has_contradiction() {
-            return Ok(Vec::new());
+            return Ok(CheckedCertificate {
+                lines: Vec::new(),
+                consumed_proof_steps: 0,
+            });
         }
         let Some(proof) = &self.proof else {
             return Err(CodeGenError::NoProof);
         };
         let cert_steps =
             Self::parse_cert_steps(proof, project, &mut bindings, &mut kernel_context)?;
-        let checked_steps = checker.check_cert_steps(&cert_steps, Some(proof), &kernel_context)?;
+        let (checked_steps, consumed_proof_steps) =
+            checker.check_cert_steps(&cert_steps, Some(proof), &kernel_context)?;
         let synthetic_names = bindings.synthetic_name_map();
-        Ok(checked_steps
+        let lines = checked_steps
             .into_iter()
             .map(|checked_step| {
                 let value = kernel_context
@@ -1486,7 +1520,11 @@ impl Certificate {
                     reason: checked_step.reason,
                 }
             })
-            .collect())
+            .collect();
+        Ok(CheckedCertificate {
+            lines,
+            consumed_proof_steps,
+        })
     }
 
     /// Remove unneeded steps from this certificate.

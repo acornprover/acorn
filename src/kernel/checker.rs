@@ -418,14 +418,14 @@ impl Checker {
         cert_steps: &[CertificateStep],
         code_lines: Option<&[String]>,
         kernel_context: &KernelContext,
-    ) -> Result<Vec<CheckedStep>, Error> {
+    ) -> Result<(Vec<CheckedStep>, usize), Error> {
         let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
 
         for (step_index, step) in cert_steps.iter().enumerate() {
             if self.has_contradiction() {
                 trace!("has_contradiction (early exit)");
-                return Ok(checked_steps);
+                return Ok((checked_steps, step_index));
             }
 
             match step {
@@ -474,7 +474,7 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
-            Ok(checked_steps)
+            Ok((checked_steps, cert_steps.len()))
         } else {
             Err(Error::GeneratedBadCode(
                 "proof does not result in a contradiction".to_string(),

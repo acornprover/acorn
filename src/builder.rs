@@ -832,14 +832,20 @@ impl<'a> Builder<'a> {
                 }
             } else {
                 // Normal path: just check the certificate
-                let result = processor.check_cert(
+                let result = processor.check_cert_with_usage(
                     &cert,
                     Some(normalized_goal),
                     goal_kernel_context,
                     self.project,
                     &env.bindings,
                 );
-                (cert, result)
+                match result {
+                    Ok(checked_cert) => (
+                        cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
+                        Ok(checked_cert.lines),
+                    ),
+                    Err(e) => (cert, Err(e)),
+                }
             };
 
             match check_result {
