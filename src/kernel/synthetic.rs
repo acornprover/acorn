@@ -157,46 +157,6 @@ impl SyntheticRegistry {
             .get(&Self::build_key(type_vars, synthetic_types, clauses))
     }
 
-    /// Defines synthetic atoms with the given information.
-    ///
-    pub fn define(
-        &mut self,
-        atoms: Vec<(ModuleId, AtomId)>,
-        type_vars: Vec<Term>,
-        synthetic_types: Vec<Term>,
-        clauses: Vec<Clause>,
-        source: Option<Source>,
-    ) -> Result<(), String> {
-        // Check if any atoms are already defined
-        for atom in &atoms {
-            if self.definitions.contains_key(atom) {
-                return Err(format!("synthetic atom {:?} is already defined", atom));
-            }
-        }
-
-        // In the key, normalize out the concrete ids of the defined synthetic atoms.
-        let num_type_vars = type_vars.len();
-        let key_clauses: Vec<Clause> = clauses
-            .iter()
-            .map(|c| c.invalidate_synthetics_with_pinned(&atoms, num_type_vars))
-            .collect();
-        let key = Self::build_key(&type_vars, &synthetic_types, &key_clauses);
-
-        let info = Arc::new(SyntheticDefinition {
-            atoms: atoms.clone(),
-            type_vars,
-            synthetic_types,
-            clauses,
-            source,
-        });
-
-        for atom in &atoms {
-            self.definitions.insert(*atom, info.clone());
-        }
-        self.by_key.insert(key, info);
-        Ok(())
-    }
-
     /// Returns all synthetic atom IDs that have been defined.
     #[cfg(test)]
     pub fn get_ids(&self) -> Vec<(ModuleId, AtomId)> {
