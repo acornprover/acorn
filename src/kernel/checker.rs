@@ -795,6 +795,30 @@ mod tests {
     }
 
     #[test]
+    fn test_checker_mixed_clause_extensionality_contradicts_direct_function_inequality() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        context
+            .parse_constant("g0", "Bool -> Bool -> Bool")
+            .parse_constant("g1", "Bool -> Bool -> Bool");
+
+        let mut checker = Checker::new();
+        let mixed = context.parse_clause("not c1 or g0(c0, x0) = g1(c0, x0)", &["Bool"]);
+        checker.insert_clause(&mixed, StepReason::Testing, &context);
+
+        let guard = context.parse_clause("c1", &[]);
+        checker.insert_clause(&guard, StepReason::Testing, &context);
+
+        let neq = context.parse_clause("g0(c0) != g1(c0)", &[]);
+        checker.insert_clause(&neq, StepReason::Testing, &context);
+
+        assert!(
+            checker.has_contradiction(),
+            "mixed-clause extensionality should derive g0(c0) = g1(c0) and contradict the direct inequality"
+        );
+    }
+
+    #[test]
     fn test_checker_typeclass_generalization() {
         // This test reproduces the exact bug from test_proving_with_default_required_attribute.
         //

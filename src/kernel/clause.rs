@@ -761,7 +761,9 @@ impl Clause {
 
     /// Finds if extensionality can be applied to this clause.
     /// Returns the resulting literals if extensionality applies.
-    /// Only works on single-literal clauses.
+    ///
+    /// For mixed clauses, extensionality is only sound when the peeled variables
+    /// do not appear in any of the other literals.
     ///
     /// Lambda-native: We peel arguments from the right only as long as they are
     /// distinct free variables. This allows extensionality to work when leading
@@ -770,12 +772,40 @@ impl Clause {
     /// Example: f(T, x, y) = g(T, x, y) where T is ground, x and y are free vars
     /// → Peels y then x, stops at T → Result: f(T) = g(T)
     pub fn find_extensionality(&self, kernel_context: &KernelContext) -> Option<Vec<Literal>> {
-        // Extensionality only works on single-literal clauses
-        if self.literals.len() != 1 {
-            return None;
-        }
-        let literal = &self.literals[0];
+        for (index, literal) in self.literals.iter().enumerate() {
+            let Some((new_lit, peeled_vars)) =
+                self.find_extensionality_for_literal(literal, kernel_context)
+            else {
+                continue;
+            };
 
+            let peeled_used_elsewhere =
+                self.literals
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, other)| {
+                        other_index != index
+                            && peeled_vars.iter().any(|var_id| {
+                                other.left.has_variable(*var_id)
+                                    || other.right.has_variable(*var_id)
+                            })
+                    });
+            if peeled_used_elsewhere {
+                continue;
+            }
+
+            let mut literals = self.literals.clone();
+            literals[index] = new_lit;
+            return Some(literals);
+        }
+        None
+    }
+
+    fn find_extensionality_for_literal(
+        &self,
+        literal: &Literal,
+        kernel_context: &KernelContext,
+    ) -> Option<(Literal, HashSet<AtomId>)> {
         // Extensionality only applies to positive equality literals
         if !literal.positive {
             return None;
@@ -915,7 +945,7 @@ impl Clause {
         }
 
         let (new_lit, _) = Literal::new_with_flip(true, new_longer, new_shorter);
-        Some(vec![new_lit])
+        Some((new_lit, peeled_vars))
     }
 
     /// Generates all clauses that can be derived from this clause using boolean reduction.
@@ -1535,6 +1565,41 @@ mod tests {
         assert_eq!(
             result_lit.left.get_head_atom(),
             result_lit.right.get_head_atom()
+        );
+    }
+
+    #[test]
+    fn test_extensionality_with_guard_literal() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool")
+            .parse_constant("c1", "Bool")
+            .parse_constant("g0", "Bool -> Bool -> Bool")
+            .parse_constant("g1", "Bool -> Bool -> Bool");
+
+        let clause = kctx.parse_clause("not c1 or g0(c0, x0) = g1(c0, x0)", &["Bool"]);
+        let result = clause.find_extensionality(&kctx);
+        assert!(
+            result.is_some(),
+            "Extensionality should work when peeled variables do not appear in the guard"
+        );
+
+        let ext_clause = Clause::new(result.unwrap(), clause.get_local_context());
+        let expected = kctx.parse_clause("not c1 or g0(c0) = g1(c0)", &[]);
+        assert_eq!(ext_clause, expected);
+    }
+
+    #[test]
+    fn test_extensionality_rejects_guard_with_peeled_var() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool")
+            .parse_constant("g0", "Bool -> Bool -> Bool")
+            .parse_constant("g1", "Bool -> Bool -> Bool")
+            .parse_constant("g2", "Bool -> Bool");
+
+        let clause = kctx.parse_clause("not g2(x0) or g0(c0, x0) = g1(c0, x0)", &["Bool"]);
+        assert!(
+            clause.find_extensionality(&kctx).is_none(),
+            "Extensionality must not peel variables that still appear in another literal"
         );
     }
 
