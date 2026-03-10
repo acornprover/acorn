@@ -6,7 +6,6 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::{PathStep, Term};
-use crate::module::ModuleId;
 
 /// A Literal stores an equation (or inequality) between two terms.
 /// Type information is stored separately in the TypeStore and SymbolTable.
@@ -117,11 +116,6 @@ impl Literal {
     /// Check if this literal contains any local constants.
     pub fn has_scoped_constant(&self) -> bool {
         self.left.has_scoped_constant() || self.right.has_scoped_constant()
-    }
-
-    /// Check if this literal contains any synthetic atoms.
-    pub fn has_synthetic(&self) -> bool {
-        self.left.has_synthetic() || self.right.has_synthetic()
     }
 
     /// Count the total number of atoms in both terms.
@@ -323,36 +317,6 @@ impl Literal {
     /// Whether either side of the literal has this as its head.
     pub fn has_head(&self, head: &Atom) -> bool {
         self.left.get_head_atom() == head || self.right.get_head_atom() == head
-    }
-
-    /// Renumbers synthetic atoms from the provided list into the invalid range.
-    pub fn invalidate_synthetics(&self, from: &[(ModuleId, AtomId)]) -> Literal {
-        let new_left = self.left.invalidate_synthetics(from);
-        let new_right = self.right.invalidate_synthetics(from);
-        let (lit, _) = Literal::new_with_flip(self.positive, new_left, new_right);
-        lit
-    }
-
-    /// Replace the first `num_to_replace` variables with invalid synthetic atoms.
-    pub fn instantiate_invalid_synthetics(&self, num_to_replace: usize) -> Literal {
-        self.instantiate_invalid_synthetics_with_skip(num_to_replace, 0)
-    }
-
-    /// Replace `num_to_replace` free variables (starting after `skip` variables) with invalid
-    /// synthetic atoms. Variables before `skip` are preserved.
-    pub fn instantiate_invalid_synthetics_with_skip(
-        &self,
-        num_to_replace: usize,
-        skip: usize,
-    ) -> Literal {
-        let new_left = self
-            .left
-            .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
-        let new_right = self
-            .right
-            .instantiate_invalid_synthetics_with_skip(num_to_replace, skip);
-        let (lit, _) = Literal::new_with_flip(self.positive, new_left, new_right);
-        lit
     }
 
     /// Get the subterm at the given path.

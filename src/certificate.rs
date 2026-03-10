@@ -1,4 +1,3 @@
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
@@ -8,19 +7,15 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::code_generator::{CodeGenerator, Error as CodeGenError, SyntheticNameSet};
+use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::AcornType;
 use crate::elaborator::acorn_type::PotentialType;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
-use crate::elaborator::names::ConstantName;
-use crate::elaborator::potential_value::PotentialValue;
-use crate::elaborator::stack::Stack;
 use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::elaborator::to_term::{elaborate_value_to_term_existing, TypeVarMap};
-use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
@@ -34,17 +29,17 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
-use crate::module::{ModuleDescriptor, ModuleId};
+use crate::module::ModuleDescriptor;
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
-use crate::syntax::expression::{Declaration, Expression};
+use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Statement, StatementInfo};
 use crate::syntax::token::TokenType;
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
 pub struct CertificateLine {
-    /// The structured clause value, after denormalization and synthetic replacement.
+    /// The structured clause value after denormalization.
     pub value: AcornValue,
 
     /// The statement from the certificate (the code line).
@@ -64,20 +59,12 @@ pub struct CheckedCertificate {
 fn value_to_code(
     value: &AcornValue,
     bindings: &Cow<BindingMap>,
-    synthetic_names: &HashMap<(ModuleId, AtomId), String>,
     code_line: Option<&str>,
 ) -> String {
     // First try normal code generation.
     let mut code_gen = CodeGenerator::new_for_certificate(bindings);
     if let Ok(code) = code_gen.value_to_code(&value) {
         return code;
-    }
-
-    if !synthetic_names.is_empty() {
-        let mut code_gen = CodeGenerator::new_for_certificate(bindings);
-        if let Ok(code) = code_gen.value_to_code_with_synthetic_names(&value, synthetic_names) {
-            return code;
-        }
     }
 
     // If we have the original certificate line, prefer it over reconstructed internal output.
@@ -292,27 +279,6 @@ impl Certificate {
         })
     }
 
-    fn dequalify_synthetic_name_refs(
-        code: String,
-        synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
-    ) -> String {
-        let Some(synthetic_names) = synthetic_names else {
-            return code;
-        };
-        let mut normalized = code;
-        for synthetic_name in synthetic_names.values() {
-            let pattern = format!(
-                r"(?:lib\([^)]+\)|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.{}\b",
-                regex::escape(synthetic_name)
-            );
-            let re = Regex::new(&pattern).expect("synthetic dequalification regex should compile");
-            normalized = re
-                .replace_all(&normalized, synthetic_name.as_str())
-                .into_owned();
-        }
-        normalized
-    }
-
     fn ensure_claim_code_parses_as_claim(code: String) -> Result<String, CodeGenError> {
         let parses_as_claim = |candidate: &str| -> Result<bool, CodeGenError> {
             Ok(matches!(
@@ -376,7 +342,7 @@ impl Certificate {
     /// Convert a ConcreteProof to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to denormalize clauses and look up synthetic definitions)
+    /// Requires the kernel_context (to denormalize clauses)
     /// and the bindings (to generate readable names).
     pub fn from_concrete_steps(
         goal: String,
@@ -386,16 +352,11 @@ impl Certificate {
     ) -> Result<Certificate, CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
-        let mut names = SyntheticNameSet::new();
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
 
         for step in concrete_steps {
             let cert_steps = generator
-                .concrete_step_to_certificate_steps(
-                    &mut names,
-                    step,
-                    &mut generation_kernel_context,
-                )
+                .concrete_step_to_certificate_steps(step, &mut generation_kernel_context)
                 .map_err(|err| {
                     CodeGenError::GeneratedBadCode(format!(
                         "{} [while converting concrete clause {}]",
@@ -426,14 +387,11 @@ impl Certificate {
                         claim,
                         &generation_kernel_context,
                         bindings,
-                        Some(&names.synthetic_names),
                     ) {
                         Ok(line) => line,
-                        Err(_) => match generator.certificate_step_to_code(
-                            &names,
-                            step,
-                            &generation_kernel_context,
-                        ) {
+                        Err(_) => match generator
+                            .certificate_step_to_code(step, &generation_kernel_context)
+                        {
                             Ok(line) => line,
                             Err(inner) => {
                                 return Err(CodeGenError::GeneratedBadCode(format!(
@@ -445,7 +403,7 @@ impl Certificate {
                     }
                 }
                 _ => generator
-                    .certificate_step_to_code(&names, step, &generation_kernel_context)
+                    .certificate_step_to_code(step, &generation_kernel_context)
                     .map_err(|err| {
                         CodeGenError::GeneratedBadCode(format!(
                             "{} [while serializing certificate step]",
@@ -453,10 +411,7 @@ impl Certificate {
                         ))
                     })?,
             };
-            let line = match step {
-                CertificateStep::Claim(_) => Self::ensure_claim_code_parses_as_claim(line)?,
-                _ => line,
-            };
+            let line = Self::ensure_claim_code_parses_as_claim(line)?;
             answer.push(line);
         }
 
@@ -466,7 +421,7 @@ impl Certificate {
     /// Convert a ConcreteProof to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to denormalize clauses and look up synthetic definitions)
+    /// Requires the kernel_context (to denormalize clauses)
     /// and the bindings (to generate readable names).
     pub fn from_concrete_proof(
         concrete_proof: &ConcreteProof,
@@ -580,160 +535,9 @@ impl Certificate {
             };
 
         match statement.statement {
-            StatementInfo::VariableSatisfy(vss) => {
-                // Bind type parameters first
-                let type_params = evaluator.evaluate_type_params(&vss.type_params)?;
-                let type_param_names: Vec<String> =
-                    type_params.iter().map(|p| p.name.clone()).collect();
-                for param in &type_params {
-                    bindings.to_mut().add_arbitrary_type(param.clone());
-                    kernel_context.to_mut().register_arbitrary_type(param);
-                }
-                let result = (|| -> Result<CertificateStep, CodeGenError> {
-                    // Re-create evaluator with updated bindings
-                    let mut evaluator =
-                        Evaluator::new_with_allow_choose(project, bindings, None, true);
-
-                    // Parse declarations
-                    let mut decls = vec![];
-                    for decl in &vss.declarations {
-                        match decl {
-                            Declaration::Typed(name_token, type_expr) => {
-                                let name = name_token.text().to_string();
-                                let acorn_type = evaluator.evaluate_type(type_expr)?;
-                                decls.push((name, acorn_type));
-                            }
-                            Declaration::SelfToken(_) => {
-                                return Err(CodeGenError::GeneratedBadCode(
-                                    "Unexpected 'self' in let...satisfy statement".to_string(),
-                                ));
-                            }
-                        }
-                    }
-
-                    // Evaluate the condition
-                    let mut stack = Stack::new();
-                    evaluator.bind_args(&mut stack, &vss.declarations, None)?;
-                    let condition_value = evaluator.evaluate_value_with_stack(
-                        &mut stack,
-                        &vss.condition,
-                        Some(&AcornType::Bool),
-                    )?;
-
-                    // Look up synthetic definition
-                    let types: Vec<_> = decls.iter().map(|(_, ty)| ty.clone()).collect();
-                    let exists_value = AcornValue::exists(types.clone(), condition_value.clone());
-
-                    // Build type_var_map from type parameters
-                    let type_var_map: Option<HashMap<String, (AtomId, Term)>> = if type_params
-                        .is_empty()
-                    {
-                        None
-                    } else {
-                        Some(
-                            type_params
-                                .iter()
-                                .enumerate()
-                                .map(|(i, p)| {
-                                    let var_type = if let Some(tc) = &p.typeclass {
-                                        let tc_id =
-                                            kernel_context.to_mut().type_store.add_typeclass(tc);
-                                        Term::typeclass(tc_id)
-                                    } else {
-                                        Term::type_sort()
-                                    };
-                                    (p.name.clone(), (i as AtomId, var_type))
-                                })
-                                .collect(),
-                        )
-                    };
-
-                    let synthetic_definition = match kernel_context
-                        .to_mut()
-                        .get_synthetic_definition(&exists_value, type_var_map.as_ref())
-                    {
-                        Some(def) => def.clone(),
-                        None => {
-                            if condition_value != AcornValue::Bool(true) {
-                                return Err(CodeGenError::GeneratedBadCode(format!(
-                                    "statement '{}' does not match any synthetic definition",
-                                    code
-                                )));
-                            }
-                            return Err(CodeGenError::GeneratedBadCode(
-                                "trivial `let ... satisfy { true }` witnesses are disabled; \
-                                 provide a concrete example or a nontrivial satisfy condition"
-                                    .to_string(),
-                            ));
-                        }
-                    };
-
-                    let atoms = &synthetic_definition.atoms;
-                    if atoms.len() != decls.len() {
-                        return Err(CodeGenError::GeneratedBadCode(
-                            "let ... satisfy declaration count does not match synthetic definition"
-                                .to_string(),
-                        ));
-                    }
-                    for (i, (name, acorn_type)) in decls.iter().enumerate() {
-                        let (module_id, local_id) = atoms[i];
-                        let synthetic_cname = ConstantName::Synthetic(module_id, local_id);
-
-                        let (param_names, generic_type) = if !type_params.is_empty() {
-                            let names: Vec<String> =
-                                type_params.iter().map(|p| p.name.clone()).collect();
-                            (names, acorn_type.genericize(&type_params))
-                        } else {
-                            (vec![], acorn_type.clone())
-                        };
-
-                        let user_cname = ConstantName::unqualified(bindings.module_id(), name);
-                        let type_args: Vec<_> = type_params
-                            .iter()
-                            .map(|p| AcornType::Variable(p.clone()))
-                            .collect();
-
-                        let resolved_value = AcornValue::constant(
-                            synthetic_cname.clone(),
-                            type_args,
-                            acorn_type.clone(),
-                            generic_type.clone(),
-                            param_names.clone(),
-                        );
-
-                        let potential_value = if !type_params.is_empty() {
-                            PotentialValue::Unresolved(UnresolvedConstant {
-                                name: synthetic_cname.clone(),
-                                params: type_params.clone(),
-                                generic_type: generic_type.clone(),
-                                args: vec![],
-                            })
-                        } else {
-                            PotentialValue::Resolved(resolved_value)
-                        };
-
-                        bindings.to_mut().add_constant_alias(
-                            user_cname,
-                            synthetic_cname,
-                            potential_value,
-                            vec![],
-                            None,
-                        );
-                    }
-                    Ok(CertificateStep::DefineSynthetic {
-                        atoms: synthetic_definition.atoms.clone(),
-                        type_vars: synthetic_definition.type_vars.clone(),
-                        clauses: synthetic_definition.clauses.clone(),
-                    })
-                })();
-
-                // Type parameters in certificate lines are local to that line.
-                for name in type_param_names {
-                    bindings.to_mut().remove_type(&name);
-                }
-
-                result
-            }
+            StatementInfo::VariableSatisfy(_) => Err(CodeGenError::GeneratedBadCode(
+                "certificate `let ... satisfy` steps are no longer supported".to_string(),
+            )),
             StatementInfo::Claim(claim) => claim_step_from_expr(&claim.claim),
             _ => Err(CodeGenError::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
@@ -754,7 +558,7 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
-        Self::serialize_claim_with_names(claim, kernel_context, bindings, None)
+        Self::serialize_claim_with_names(claim, kernel_context, bindings)
     }
 
     fn infer_in_scope_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
@@ -803,7 +607,6 @@ impl Certificate {
         claim: &Claim,
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-        synthetic_names: Option<&HashMap<(ModuleId, AtomId), String>>,
     ) -> Result<String, CodeGenError> {
         let local_context = claim.clause.get_local_context();
         let var_count = local_context.len();
@@ -815,12 +618,7 @@ impl Certificate {
 
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let generic_value = kernel_context.denormalize(&claim.clause, None, None, false);
-        let generic_code = if let Some(synthetic_names) = synthetic_names {
-            generator.value_to_code_with_synthetic_names(&generic_value, synthetic_names)?
-        } else {
-            generator.value_to_code(&generic_value)?
-        };
-        let generic_code = Self::dequalify_synthetic_name_refs(generic_code, synthetic_names);
+        let generic_code = generator.value_to_code(&generic_value)?;
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
             match generic_expr {
@@ -992,15 +790,7 @@ impl Certificate {
                     continue;
                 }
             }
-            let arg_code = if let Some(synthetic_names) = synthetic_names {
-                generator.value_to_code_with_synthetic_names(&arg_value, synthetic_names)?
-            } else {
-                generator.value_to_code(&arg_value)?
-            };
-            value_arg_codes.push(Self::dequalify_synthetic_name_refs(
-                arg_code,
-                synthetic_names,
-            ));
+            value_arg_codes.push(generator.value_to_code(&arg_value)?);
         }
 
         if value_decl_codes.is_empty() {
@@ -1009,15 +799,7 @@ impl Certificate {
                     .var_map
                     .specialize_clause(&claim.clause, kernel_context);
                 let specialized_value = kernel_context.denormalize(&specialized, None, None, true);
-                let code = if let Some(synthetic_names) = synthetic_names {
-                    generator
-                        .value_to_code_with_synthetic_names(&specialized_value, synthetic_names)
-                        .map(|code| {
-                            Self::dequalify_synthetic_name_refs(code, Some(synthetic_names))
-                        })
-                } else {
-                    generator.value_to_code(&specialized_value)
-                }?;
+                let code = generator.value_to_code(&specialized_value)?;
                 return Self::ensure_claim_code_parses_as_claim(code);
             }
 
@@ -1501,19 +1283,11 @@ impl Certificate {
             Self::parse_cert_steps(proof, project, &mut bindings, &mut kernel_context)?;
         let (checked_steps, consumed_proof_steps) =
             checker.check_cert_steps(&cert_steps, Some(proof), &kernel_context)?;
-        let synthetic_names = bindings.synthetic_name_map();
         let lines = checked_steps
             .into_iter()
             .map(|checked_step| {
-                let value = kernel_context
-                    .denormalize(&checked_step.clause, None, None, false)
-                    .replace_synthetics(&synthetic_names);
-                let statement = value_to_code(
-                    &value,
-                    &bindings,
-                    &synthetic_names,
-                    checked_step.code_line.as_deref(),
-                );
+                let value = kernel_context.denormalize(&checked_step.clause, None, None, false);
+                let statement = value_to_code(&value, &bindings, checked_step.code_line.as_deref());
                 CertificateLine {
                     value,
                     statement,
@@ -2382,7 +2156,8 @@ mod tests {
         };
 
         assert!(
-            err.to_string().contains("witnesses are disabled"),
+            err.to_string()
+                .contains("certificate `let ... satisfy` steps are no longer supported"),
             "unexpected error: {}",
             err
         );
@@ -2690,23 +2465,5 @@ theorem goal(k: Bool) {\n\
                 .is_some(),
             "generic claim should be accepted once inserted"
         );
-    }
-
-    #[test]
-    fn test_dequalify_synthetic_name_refs_rewrites_module_qualified_calls() {
-        use crate::module::ModuleId;
-
-        let mut synthetic_names = HashMap::new();
-        synthetic_names.insert((ModuleId(7), 0), "s0".to_string());
-        let code =
-            "function(x0: Nat) { not f(x0) or f(x0.suc) }(lib(nat.nat_base).s0(f))".to_string();
-
-        let normalized = Certificate::dequalify_synthetic_name_refs(code, Some(&synthetic_names));
-
-        assert_eq!(
-            normalized,
-            "function(x0: Nat) { not f(x0) or f(x0.suc) }(s0(f))"
-        );
-        assert!(!normalized.contains("lib(nat.nat_base).s0"));
     }
 }

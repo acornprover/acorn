@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::builder::BuildError;
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
@@ -19,12 +16,13 @@ use crate::kernel::clausifier::Clausifier;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
-use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
-use crate::kernel::synthetic::SyntheticDefinition;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_boolean_subterms;
+#[cfg(test)]
 use crate::module::ModuleId;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::trace;
 
 /// A fact that has been normalized into proof steps.
@@ -61,18 +59,6 @@ pub fn normalize_goal(
 }
 
 impl KernelContext {
-    pub fn get_synthetic_type(&self, module_id: ModuleId, local_id: AtomId) -> AcornType {
-        let symbol = Symbol::Synthetic(module_id, local_id);
-        let type_term = self.symbol_table.get_type(symbol);
-        self.type_store.type_term_to_acorn_type(type_term)
-    }
-
-    /// Returns all synthetic atom IDs that have been defined.
-    #[cfg(test)]
-    pub fn get_synthetic_ids(&self) -> Vec<(ModuleId, AtomId)> {
-        vec![]
-    }
-
     /// Registers an arbitrary type with the type store.
     /// This is needed for certificate checking where type parameters defined
     /// in a let...satisfy statement need to be available for subsequent steps.
@@ -84,19 +70,6 @@ impl KernelContext {
         if let Some(typeclass) = &param.typeclass {
             self.type_store.add_typeclass(typeclass);
         }
-    }
-
-    /// Gets a synthetic definition for a value, if one exists.
-    /// The value should be of the form "exists ___ (forall x and forall y and ...)".
-    /// The type_var_map is used for polymorphic normalization.
-    pub fn get_synthetic_definition(
-        &mut self,
-        value: &AcornValue,
-        type_var_map: Option<&HashMap<String, (AtomId, Term)>>,
-    ) -> Option<&Arc<SyntheticDefinition>> {
-        let _ = value;
-        let _ = type_var_map;
-        None
     }
 
     pub fn add_scoped_constant(
@@ -350,18 +323,6 @@ impl KernelContext {
             arbitrary_names,
             instantiate_type_vars,
         )
-    }
-
-    /// Given a list of (module_id, atom_id) for synthetic atoms that we need to define, find a set
-    /// of SyntheticInfo that covers them.
-    /// The output may have synthetic atoms that aren't used in the input.
-    /// The input doesn't have to be in order and may contain duplicates.
-    pub fn find_covering_synthetic_info(
-        &self,
-        ids: &[(ModuleId, AtomId)],
-    ) -> Vec<Arc<SyntheticDefinition>> {
-        let _ = ids;
-        vec![]
     }
 
     /// When you denormalize and renormalize a clause, you should get the same thing.

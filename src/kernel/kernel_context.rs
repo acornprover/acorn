@@ -43,7 +43,6 @@ impl KernelContext {
             }
             Atom::FreeVariable(i) => format!("x{}", i),
             Atom::BoundVariable(i) => format!("b{}", i),
-            Atom::Symbol(Symbol::Synthetic(m, i)) => format!("s{}_{}", m.0, i),
             Atom::Symbol(Symbol::Type(t)) => {
                 format!("T{}_{}", t.module_id().get(), t.local_id())
             }

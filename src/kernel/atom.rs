@@ -7,10 +7,6 @@ use super::symbol::Symbol;
 
 pub type AtomId = u16;
 
-/// A sentinel ModuleId used for "invalid" synthetics during normalization.
-/// Synthetics with this ModuleId are temporary markers used for deduplication.
-pub const INVALID_SYNTHETIC_MODULE: crate::module::ModuleId = crate::module::ModuleId(u16::MAX);
-
 /// An atomic value does not have any internal structure.
 /// The Atom is a lower-level representation.
 /// It is used in the prover, but not in the AcornValue / Environment.
@@ -74,25 +70,6 @@ impl Atom {
             'c' => Some(Atom::Symbol(Symbol::ScopedConstant(rest.parse().ok()?))),
             'x' => Some(Atom::FreeVariable(rest.parse().ok()?)),
             'b' => Some(Atom::BoundVariable(rest.parse().ok()?)),
-            's' => {
-                // Format: s{module_id}_{local_id} or s{local_id} (with implicit module_id 0)
-                let parts: Vec<&str> = rest.split('_').collect();
-                if parts.len() == 2 {
-                    // New format: s{module_id}_{local_id}
-                    let module_id = crate::module::ModuleId(parts[0].parse().ok()?);
-                    let local_id: AtomId = parts[1].parse().ok()?;
-                    Some(Atom::Symbol(Symbol::Synthetic(module_id, local_id)))
-                } else if parts.len() == 1 {
-                    // Old format for tests: s{local_id} -> module 0
-                    let local_id: AtomId = rest.parse().ok()?;
-                    Some(Atom::Symbol(Symbol::Synthetic(
-                        crate::module::ModuleId(0),
-                        local_id,
-                    )))
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
@@ -146,60 +123,6 @@ impl Atom {
             (a, _) if is_bool_constant(a) => Ordering::Less,
             (_, b) if is_bool_constant(b) => Ordering::Greater,
             (x, y) => x.cmp(y),
-        }
-    }
-
-    /// Renumbers synthetic atoms from the provided list into the invalid range.
-    /// Invalid synthetics use INVALID_SYNTHETIC_MODULE with sequential AtomIds.
-    pub fn invalidate_synthetics(&self, from: &[(crate::module::ModuleId, AtomId)]) -> Atom {
-        match self {
-            Atom::Symbol(Symbol::Synthetic(m, i)) => {
-                match from.iter().position(|(fm, fi)| fm == m && fi == i) {
-                    Some(j) => {
-                        Atom::Symbol(Symbol::Synthetic(INVALID_SYNTHETIC_MODULE, j as AtomId))
-                    }
-                    None => *self,
-                }
-            }
-            a => *a,
-        }
-    }
-
-    /// Replace the first `num_to_replace` free variables with invalid synthetic atoms, adjusting
-    /// the subsequent variable ids accordingly.
-    /// Bound variables are left unchanged.
-    pub fn instantiate_invalid_synthetics(&self, num_to_replace: usize) -> Atom {
-        self.instantiate_invalid_synthetics_with_skip(num_to_replace, 0)
-    }
-
-    /// Replace `num_to_replace` free variables (starting after `skip` variables) with invalid
-    /// synthetic atoms. Variables before `skip` are preserved, variables in the replacement
-    /// range become invalid synthetics, and variables after are shifted down.
-    /// Invalid synthetics use INVALID_SYNTHETIC_MODULE with sequential AtomIds.
-    pub fn instantiate_invalid_synthetics_with_skip(
-        &self,
-        num_to_replace: usize,
-        skip: usize,
-    ) -> Atom {
-        match self {
-            Atom::FreeVariable(i) => {
-                let idx = *i as usize;
-                if idx < skip {
-                    // Before skip range: preserve type variables unchanged
-                    *self
-                } else if idx < skip + num_to_replace {
-                    // In replacement range: convert to invalid synthetic
-                    // The synthetic id is based on position within the replacement range
-                    Atom::Symbol(Symbol::Synthetic(
-                        INVALID_SYNTHETIC_MODULE,
-                        (idx - skip) as AtomId,
-                    ))
-                } else {
-                    // After replacement range: shift down by num_to_replace
-                    Atom::FreeVariable((idx - num_to_replace) as AtomId)
-                }
-            }
-            a => *a,
         }
     }
 }

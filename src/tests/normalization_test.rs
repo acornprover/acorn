@@ -294,10 +294,6 @@ fn test_normalizing_exists_inline_with_iet() {
         "expected inline exists term, got {}",
         lit.left
     );
-    assert!(
-        !clause.has_synthetic(),
-        "inline exists clausification should not synthesize skolems"
-    );
 }
 
 #[test]
@@ -555,7 +551,6 @@ fn test_normalizing_function_inequality() {
     norm.check(&env, "goal", &["g(a) != f"]);
     let clauses = norm.get_all_clauses(&env);
     assert_eq!(clauses.len(), 1, "expected one clause");
-    assert!(!clauses[0].has_synthetic());
 }
 
 #[test]
@@ -586,9 +581,7 @@ fn test_normalizing_func_eq_inside_lambda() {
             "h(x0) != g(x0) or f(x0)",
         ],
     );
-    let clauses = norm.get_all_clauses(&env);
-    let has_synthetic = clauses.iter().any(|clause| clause.has_synthetic());
-    assert!(!has_synthetic);
+    let _clauses = norm.get_all_clauses(&env);
 }
 
 #[test]
@@ -682,10 +675,6 @@ fn test_normalizing_forall_inside_neq_lambda() {
         "expected direct function inequality to preserve the lambda body, got {}",
         lambda_side
     );
-    assert!(
-        !clauses[0].has_synthetic(),
-        "direct function inequality should not synthesize a witness"
-    );
 }
 
 #[test]
@@ -725,7 +714,6 @@ fn test_normalizing_boolean_function_inequality() {
     norm.check(&env, "goal", &["g != f"]);
     let clauses = norm.get_all_clauses(&env);
     assert_eq!(clauses.len(), 1, "expected one clause");
-    assert!(!clauses[0].has_synthetic());
 }
 
 #[test]

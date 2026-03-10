@@ -8,7 +8,6 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
-use crate::module::ModuleId;
 
 /// A Clause represents a disjunction (an "or") of literals.
 /// Type information is stored separately in the TypeStore and SymbolTable,
@@ -419,11 +418,6 @@ impl Clause {
         self.literals.iter().any(|x| x.has_scoped_constant())
     }
 
-    /// Check if this clause contains any synthetic atoms.
-    pub fn has_synthetic(&self) -> bool {
-        self.literals.iter().any(|x| x.has_synthetic())
-    }
-
     /// Count the total number of atoms across all literals.
     pub fn atom_count(&self) -> u32 {
         self.literals.iter().map(|x| x.atom_count()).sum()
@@ -582,71 +576,6 @@ impl Clause {
                 }
             }
         }
-    }
-
-    /// Renumbers synthetic atoms from the provided list into the invalid range.
-    pub fn invalidate_synthetics(&self, from: &[(ModuleId, AtomId)]) -> Clause {
-        self.invalidate_synthetics_with_pinned(from, 0)
-    }
-
-    /// Renumbers synthetic atoms from the provided list into the invalid range,
-    /// keeping the first `pinned` variables at their original positions.
-    pub fn invalidate_synthetics_with_pinned(
-        &self,
-        from: &[(ModuleId, AtomId)],
-        pinned: usize,
-    ) -> Clause {
-        let new_literals: Vec<Literal> = self
-            .literals
-            .iter()
-            .map(|lit| lit.invalidate_synthetics(from))
-            .collect();
-        Clause::new_with_pinned_vars(new_literals, &self.context, pinned)
-            .canonicalize_with_pinned(pinned)
-    }
-
-    /// Replace the first `num_to_replace` variables with invalid synthetic atoms.
-    pub fn instantiate_invalid_synthetics(&self, num_to_replace: usize) -> Clause {
-        self.instantiate_invalid_synthetics_with_skip(num_to_replace, 0)
-    }
-
-    /// Replace `num_to_replace` free variables (starting after `skip` variables) with invalid
-    /// synthetic atoms. Variables before `skip` (typically type variables) are preserved and
-    /// "pinned" at their original positions (x0, x1, ..., x_{skip-1}).
-    pub fn instantiate_invalid_synthetics_with_skip(
-        &self,
-        num_to_replace: usize,
-        skip: usize,
-    ) -> Clause {
-        let new_literals: Vec<Literal> = self
-            .literals
-            .iter()
-            .map(|lit| lit.instantiate_invalid_synthetics_with_skip(num_to_replace, skip))
-            .collect();
-        // The context needs to be adjusted:
-        // - Keep the first `skip` types (type variables)
-        // - Remove the next `num_to_replace` types (existential variables becoming synthetics)
-        // - Keep the rest (shifted down)
-        let types = self.context.get_var_types();
-        let mut new_context = LocalContext::empty();
-        let mut target_idx = 0usize;
-        // Keep types before skip (type variables)
-        for i in 0..skip.min(types.len()) {
-            if let Some(var_type) = &types[i] {
-                new_context.set_type(target_idx, var_type.clone());
-            }
-            target_idx += 1;
-        }
-        // Skip the replacement range, keep the rest
-        for i in (skip + num_to_replace)..types.len() {
-            if let Some(var_type) = &types[i] {
-                new_context.set_type(target_idx, var_type.clone());
-            }
-            target_idx += 1;
-        }
-        // Use pinned normalization to keep type variables (x0..x_{skip-1}) at their positions
-        Clause::new_with_pinned_vars(new_literals, &new_context, skip)
-            .canonicalize_with_pinned(skip)
     }
 
     /// Returns a canonical form of this clause with literals in deterministic order,

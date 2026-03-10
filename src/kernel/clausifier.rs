@@ -1430,19 +1430,10 @@ mod tests {
                 .expect("negated forall should clausify")
         };
 
-        assert!(
-            kernel_context.get_synthetic_ids().is_empty(),
-            "iet negated forall clausification should not introduce synthetic witnesses",
-        );
         assert_eq!(
             clauses.len(),
             1,
             "expected a single clause for negated forall"
-        );
-        assert!(
-            !clauses[0].has_synthetic(),
-            "negated forall clause should stay synthetic-free: {:?}",
-            clauses[0]
         );
         assert_eq!(clauses[0].literals.len(), 1, "expected a single literal");
         assert!(

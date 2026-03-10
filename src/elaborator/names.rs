@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
-use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
 
 /// An instance name is something like Ring.add<Int>.
@@ -77,10 +76,6 @@ pub enum ConstantName {
 
     /// A name for a constant that is not an attribute.
     Unqualified(ModuleId, String),
-
-    /// A synthetic constant, created by the kernel_context to simplify expressions.
-    /// The ModuleId identifies which module's normalization created this synthetic.
-    Synthetic(ModuleId, AtomId),
 }
 
 impl ConstantName {
@@ -123,7 +118,6 @@ impl ConstantName {
             }
             ConstantName::TypeclassAttribute(_, tc, attr) => Some((tc.module_id, &tc.name, attr)),
             ConstantName::Unqualified(..) => None,
-            ConstantName::Synthetic(..) => None,
         }
     }
 
@@ -133,17 +127,6 @@ impl ConstantName {
 
     pub fn is_typeclass_attr(&self) -> bool {
         matches!(self, ConstantName::TypeclassAttribute(..))
-    }
-
-    pub fn is_synthetic(&self) -> bool {
-        matches!(self, ConstantName::Synthetic(..))
-    }
-
-    pub fn synthetic_id(&self) -> Option<(ModuleId, AtomId)> {
-        match self {
-            ConstantName::Synthetic(m, id) => Some((*m, *id)),
-            _ => None,
-        }
     }
 
     /// Returns the defining module id for this constant.
@@ -156,7 +139,6 @@ impl ConstantName {
             ConstantName::SpecificDatatypeAttribute(module_id, _, _, _) => *module_id,
             ConstantName::TypeclassAttribute(module_id, _, _) => *module_id,
             ConstantName::Unqualified(module_id, _) => *module_id,
-            ConstantName::Synthetic(module_id, _) => *module_id,
         }
     }
 
@@ -191,7 +173,6 @@ impl fmt::Display for ConstantName {
                 write!(f, "{}.{}", tc.name, attr)
             }
             ConstantName::Unqualified(_, name) => write!(f, "{}", name),
-            ConstantName::Synthetic(m, i) => write!(f, "s{}_{}", m.0, i),
         }
     }
 }

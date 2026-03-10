@@ -1,14 +1,9 @@
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
-use crate::elaborator::acorn_type::{
-    AcornType, Datatype, FunctionType, PotentialType, TypeParam, Typeclass,
-};
-use crate::elaborator::acorn_value::{
-    AcornValue, ConstantInstance, MatchCase, TypeApplication as ValueTypeApplication,
-};
+use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, Typeclass};
+use crate::elaborator::acorn_value::{AcornValue, ConstantInstance};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
@@ -27,380 +22,6 @@ use crate::syntax::token::TokenType;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Collects type variable names from an AcornType in order of first appearance.
-fn collect_type_var_names(acorn_type: &AcornType) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_type_var_names_recursive(acorn_type, &mut names);
-    names
-}
-
-fn collect_type_var_names_recursive(acorn_type: &AcornType, names: &mut Vec<String>) {
-    match acorn_type {
-        AcornType::Variable(param) | AcornType::Arbitrary(param) => {
-            if !names.contains(&param.name) {
-                names.push(param.name.clone());
-            }
-        }
-        AcornType::Data(_, params) => {
-            for p in params {
-                collect_type_var_names_recursive(p, names);
-            }
-        }
-        AcornType::Function(ft) => {
-            for arg in &ft.arg_types {
-                collect_type_var_names_recursive(arg, names);
-            }
-            collect_type_var_names_recursive(&ft.return_type, names);
-        }
-        _ => {}
-    }
-}
-
-/// Collects all type variable names from an AcornValue.
-fn collect_type_var_names_from_value(value: &AcornValue) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_type_var_names_from_value_recursive(value, &mut names);
-    names
-}
-
-fn collect_type_var_names_from_value_recursive(value: &AcornValue, names: &mut Vec<String>) {
-    match value {
-        AcornValue::Variable(_, t) => {
-            collect_type_var_names_recursive(t, names);
-        }
-        AcornValue::Constant(c) => {
-            collect_type_var_names_recursive(&c.instance_type, names);
-            for p in &c.params {
-                collect_type_var_names_recursive(p, names);
-            }
-        }
-        AcornValue::Application(fa) => {
-            collect_type_var_names_from_value_recursive(&fa.function, names);
-            for arg in &fa.args {
-                collect_type_var_names_from_value_recursive(arg, names);
-            }
-        }
-        AcornValue::TypeApplication(app) => {
-            collect_type_var_names_from_value_recursive(&app.function, names);
-            for type_arg in &app.type_args {
-                collect_type_var_names_recursive(type_arg, names);
-            }
-        }
-        AcornValue::Binary(_, left, right) => {
-            collect_type_var_names_from_value_recursive(left, names);
-            collect_type_var_names_from_value_recursive(right, names);
-        }
-        AcornValue::Not(v) => {
-            collect_type_var_names_from_value_recursive(v, names);
-        }
-        AcornValue::ForAll(quants, v) | AcornValue::Exists(quants, v) => {
-            for q in quants {
-                collect_type_var_names_recursive(q, names);
-            }
-            collect_type_var_names_from_value_recursive(v, names);
-        }
-        AcornValue::Choose(choice_type, v) => {
-            collect_type_var_names_recursive(choice_type, names);
-            collect_type_var_names_from_value_recursive(v, names);
-        }
-        AcornValue::Lambda(args, body) => {
-            for t in args {
-                collect_type_var_names_recursive(t, names);
-            }
-            collect_type_var_names_from_value_recursive(body, names);
-        }
-        AcornValue::IfThenElse(cond, t, f) => {
-            collect_type_var_names_from_value_recursive(cond, names);
-            collect_type_var_names_from_value_recursive(t, names);
-            collect_type_var_names_from_value_recursive(f, names);
-        }
-        AcornValue::Try(inner, unwrapped_type) => {
-            collect_type_var_names_from_value_recursive(inner, names);
-            collect_type_var_names_recursive(unwrapped_type, names);
-        }
-        AcornValue::Match(scrutinee, cases) => {
-            collect_type_var_names_from_value_recursive(scrutinee, names);
-            for case in cases {
-                for t in &case.new_vars {
-                    collect_type_var_names_recursive(t, names);
-                }
-                collect_type_var_names_from_value_recursive(&case.pattern, names);
-                collect_type_var_names_from_value_recursive(&case.result, names);
-            }
-        }
-        AcornValue::Bool(_) => {}
-    }
-}
-
-/// Renames type variables in an AcornType according to the provided mapping.
-/// Also handles Arbitrary types by converting them to Variable types with the new name.
-fn rename_type_vars_in_type(
-    acorn_type: &AcornType,
-    rename_map: &HashMap<String, String>,
-) -> AcornType {
-    match acorn_type {
-        AcornType::Variable(param) => {
-            if let Some(new_name) = rename_map.get(&param.name) {
-                AcornType::Variable(TypeParam {
-                    name: new_name.clone(),
-                    typeclass: param.typeclass.clone(),
-                })
-            } else {
-                acorn_type.clone()
-            }
-        }
-        AcornType::Arbitrary(param) => {
-            // Convert Arbitrary types to Variable types when renaming.
-            // This is needed for certificate generation where we want canonical
-            // type parameter names (T0, T1) instead of specific names (G, H).
-            if let Some(new_name) = rename_map.get(&param.name) {
-                AcornType::Variable(TypeParam {
-                    name: new_name.clone(),
-                    typeclass: param.typeclass.clone(),
-                })
-            } else {
-                acorn_type.clone()
-            }
-        }
-        AcornType::Data(datatype, params) => {
-            let new_params = params
-                .iter()
-                .map(|p| rename_type_vars_in_type(p, rename_map))
-                .collect();
-            AcornType::Data(datatype.clone(), new_params)
-        }
-        AcornType::Function(ft) => {
-            let new_args = ft
-                .arg_types
-                .iter()
-                .map(|a| rename_type_vars_in_type(a, rename_map))
-                .collect();
-            let new_ret = rename_type_vars_in_type(&ft.return_type, rename_map);
-            AcornType::Function(FunctionType {
-                arg_types: new_args,
-                return_type: Box::new(new_ret),
-            })
-        }
-        _ => acorn_type.clone(),
-    }
-}
-
-/// Renames type variables in an AcornValue according to the provided mapping.
-/// `defining_synthetics` contains the IDs of synthetics being defined in the current
-/// let...satisfy block - these should NOT get type params added since they're already bound.
-fn rename_type_vars_in_value(
-    value: &AcornValue,
-    rename_map: &HashMap<String, String>,
-    defining_synthetics: &HashSet<(ModuleId, AtomId)>,
-) -> AcornValue {
-    match value {
-        AcornValue::Variable(i, t) => {
-            AcornValue::Variable(*i, rename_type_vars_in_type(t, rename_map))
-        }
-        AcornValue::Constant(c) => {
-            let new_instance_type = rename_type_vars_in_type(&c.instance_type, rename_map);
-
-            // If the original params is empty but the instance_type has type variables
-            // that we're renaming, we need to add those as params so they get included
-            // in the generated code (e.g., foo[T0] instead of just foo).
-            // BUT: Don't do this for synthetics being defined in the current let...satisfy block -
-            // they're defined with let s0[T0]: ... satisfy { } and the s0 inside the body
-            // shouldn't have [T0] because it's already bound by the declaration.
-            let is_being_defined = c
-                .name
-                .synthetic_id()
-                .map(|id| defining_synthetics.contains(&id))
-                .unwrap_or(false);
-            let new_params = if is_being_defined {
-                // For synthetics being defined, don't include type params - they're already in scope
-                vec![]
-            } else if c.params.is_empty() {
-                // Extract type vars from instance_type and use renamed versions as params
-                let type_vars = collect_type_var_names(&c.instance_type);
-                type_vars
-                    .iter()
-                    .filter_map(|name| rename_map.get(name))
-                    .map(|new_name| {
-                        AcornType::Variable(TypeParam {
-                            name: new_name.clone(),
-                            typeclass: None,
-                        })
-                    })
-                    .collect()
-            } else {
-                c.params
-                    .iter()
-                    .map(|p| rename_type_vars_in_type(p, rename_map))
-                    .collect()
-            };
-
-            AcornValue::Constant(ConstantInstance {
-                name: c.name.clone(),
-                params: new_params,
-                instance_type: new_instance_type,
-                generic_type: c.generic_type.clone(),
-                type_param_names: c.type_param_names.clone(),
-            })
-        }
-        AcornValue::Application(fa) => {
-            let new_func = rename_type_vars_in_value(&fa.function, rename_map, defining_synthetics);
-            let new_args = fa
-                .args
-                .iter()
-                .map(|a| rename_type_vars_in_value(a, rename_map, defining_synthetics))
-                .collect();
-            AcornValue::apply(new_func, new_args)
-        }
-        AcornValue::TypeApplication(app) => AcornValue::TypeApplication(ValueTypeApplication {
-            function: Box::new(rename_type_vars_in_value(
-                &app.function,
-                rename_map,
-                defining_synthetics,
-            )),
-            type_param_names: app
-                .type_param_names
-                .iter()
-                .map(|name| {
-                    rename_map
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| name.clone())
-                })
-                .collect(),
-            type_param_constraints: app.type_param_constraints.clone(),
-            type_args: app
-                .type_args
-                .iter()
-                .map(|t| rename_type_vars_in_type(t, rename_map))
-                .collect(),
-        }),
-        AcornValue::Binary(op, left, right) => AcornValue::Binary(
-            *op,
-            Box::new(rename_type_vars_in_value(
-                left,
-                rename_map,
-                defining_synthetics,
-            )),
-            Box::new(rename_type_vars_in_value(
-                right,
-                rename_map,
-                defining_synthetics,
-            )),
-        ),
-        AcornValue::Not(v) => AcornValue::Not(Box::new(rename_type_vars_in_value(
-            v,
-            rename_map,
-            defining_synthetics,
-        ))),
-        AcornValue::ForAll(quants, v) => {
-            let new_quants = quants
-                .iter()
-                .map(|q| rename_type_vars_in_type(q, rename_map))
-                .collect();
-            AcornValue::ForAll(
-                new_quants,
-                Box::new(rename_type_vars_in_value(
-                    v,
-                    rename_map,
-                    defining_synthetics,
-                )),
-            )
-        }
-        AcornValue::Exists(quants, v) => {
-            let new_quants = quants
-                .iter()
-                .map(|q| rename_type_vars_in_type(q, rename_map))
-                .collect();
-            AcornValue::Exists(
-                new_quants,
-                Box::new(rename_type_vars_in_value(
-                    v,
-                    rename_map,
-                    defining_synthetics,
-                )),
-            )
-        }
-        AcornValue::Choose(choice_type, v) => AcornValue::Choose(
-            rename_type_vars_in_type(choice_type, rename_map),
-            Box::new(rename_type_vars_in_value(
-                v,
-                rename_map,
-                defining_synthetics,
-            )),
-        ),
-        AcornValue::Lambda(quants, v) => {
-            let new_quants = quants
-                .iter()
-                .map(|q| rename_type_vars_in_type(q, rename_map))
-                .collect();
-            AcornValue::Lambda(
-                new_quants,
-                Box::new(rename_type_vars_in_value(
-                    v,
-                    rename_map,
-                    defining_synthetics,
-                )),
-            )
-        }
-        AcornValue::IfThenElse(cond, then_v, else_v) => AcornValue::IfThenElse(
-            Box::new(rename_type_vars_in_value(
-                cond,
-                rename_map,
-                defining_synthetics,
-            )),
-            Box::new(rename_type_vars_in_value(
-                then_v,
-                rename_map,
-                defining_synthetics,
-            )),
-            Box::new(rename_type_vars_in_value(
-                else_v,
-                rename_map,
-                defining_synthetics,
-            )),
-        ),
-        AcornValue::Match(scrutinee, cases) => {
-            let new_scrutinee =
-                rename_type_vars_in_value(scrutinee, rename_map, defining_synthetics);
-            let new_cases = cases
-                .iter()
-                .map(|case| {
-                    let new_bound_types = case
-                        .new_vars
-                        .iter()
-                        .map(|t| rename_type_vars_in_type(t, rename_map))
-                        .collect();
-                    MatchCase {
-                        new_vars: new_bound_types,
-                        pattern: rename_type_vars_in_value(
-                            &case.pattern,
-                            rename_map,
-                            defining_synthetics,
-                        ),
-                        result: rename_type_vars_in_value(
-                            &case.result,
-                            rename_map,
-                            defining_synthetics,
-                        ),
-                        constructor_index: case.constructor_index,
-                        constructor_total: case.constructor_total,
-                    }
-                })
-                .collect();
-            AcornValue::Match(Box::new(new_scrutinee), new_cases)
-        }
-        AcornValue::Bool(_) => value.clone(),
-        AcornValue::Try(v, t) => AcornValue::Try(
-            Box::new(rename_type_vars_in_value(
-                v,
-                rename_map,
-                defining_synthetics,
-            )),
-            rename_type_vars_in_type(t, rename_map),
-        ),
-    }
-}
-
 pub struct CodeGenerator<'a> {
     /// Bindings for the module we are generating code in.
     bindings: &'a BindingMap,
@@ -416,77 +37,11 @@ pub struct CodeGenerator<'a> {
     /// We use variables named k0, k1, k2, etc for existential variables.
     next_k: u32,
 
-    /// We use variables named T0, T1, T2, etc for type parameters.
-    next_t: u32,
-
     /// The names we have assigned to stack variables so far.
     var_names: Vec<String>,
 }
 
-/// Mutable naming state shared across certificate generation steps.
-///
-/// This tracks stable names for synthetic IDs so a later
-/// step can refer to names introduced in an earlier step.
-pub struct SyntheticNameSet {
-    /// We use variables named s0, s1, s2, etc for synthetic atoms.
-    pub next_s: u32,
-
-    /// The names we have assigned to synthetic atoms so far.
-    pub synthetic_names: HashMap<(ModuleId, AtomId), String>,
-
-    /// Synthetics we've already emitted a definition line for.
-    defined_synthetics: HashSet<(ModuleId, AtomId)>,
-}
-
-impl SyntheticNameSet {
-    pub fn new() -> Self {
-        SyntheticNameSet {
-            next_s: 0,
-            synthetic_names: HashMap::new(),
-            defined_synthetics: HashSet::new(),
-        }
-    }
-
-    /// Check if a constant name is a replaced synthetic (after replace_synthetics was called).
-    /// Replaced synthetics have unqualified names like "s0", "s1", etc.
-    pub fn is_replaced_synthetic(&self, name: &ConstantName) -> bool {
-        if let ConstantName::Unqualified(_, word) = name {
-            self.synthetic_names.values().any(|s| s == word)
-        } else {
-            false
-        }
-    }
-
-    /// Assign fresh names to synthetics that don't already have one.
-    /// Returns only the synthetics that were newly named in this call.
-    fn assign_synthetic_names(
-        &mut self,
-        bindings: &BindingMap,
-        atoms: &[(ModuleId, AtomId)],
-    ) -> Vec<(ModuleId, AtomId, String)> {
-        let mut assigned = vec![];
-        for &(module_id, local_id) in atoms {
-            if self.synthetic_names.contains_key(&(module_id, local_id)) {
-                continue;
-            }
-            let name = bindings.next_indexed_var('s', &mut self.next_s);
-            self.synthetic_names
-                .insert((module_id, local_id), name.clone());
-            assigned.push((module_id, local_id, name));
-        }
-        assigned
-    }
-
-    fn are_synthetics_defined(&self, atoms: &[(ModuleId, AtomId)]) -> bool {
-        atoms.iter().all(|id| self.defined_synthetics.contains(id))
-    }
-
-    fn mark_synthetics_defined(&mut self, atoms: &[(ModuleId, AtomId)]) {
-        for id in atoms {
-            self.defined_synthetics.insert(*id);
-        }
-    }
-
+impl CodeGenerator<'_> {
     fn ensure_explicit_inhabitant_for_type(
         kernel_context: &KernelContext,
         concrete_type: &Term,
@@ -673,68 +228,6 @@ impl SyntheticNameSet {
         }
         Ok(var_map)
     }
-
-    fn collect_synthetic_ids_from_clauses(clauses: &[Clause]) -> Vec<(ModuleId, AtomId)> {
-        let mut seen = HashSet::new();
-        let mut ids = vec![];
-        for clause in clauses {
-            for literal in &clause.literals {
-                for term in [&literal.left, &literal.right] {
-                    for atom in term.iter_atoms() {
-                        if let &Atom::Symbol(Symbol::Synthetic(module_id, local_id)) = atom {
-                            let id = (module_id, local_id);
-                            if seen.insert(id) {
-                                ids.push(id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ids
-    }
-
-    /// Collect synthetic definitions needed for the given ids.
-    /// This updates naming state and records kernel-level synthetic steps in dependency order.
-    fn collect_synthetic_steps(
-        &mut self,
-        bindings: &BindingMap,
-        skolem_ids: Vec<(ModuleId, AtomId)>,
-        kernel_context: &KernelContext,
-        steps: &mut Vec<CertificateStep>,
-    ) {
-        let infos = kernel_context.find_covering_synthetic_info(&skolem_ids);
-        for info in &infos {
-            if self.are_synthetics_defined(&info.atoms) {
-                continue;
-            }
-
-            self.assign_synthetic_names(bindings, &info.atoms);
-            // Mark this synthetic definition before recursive expansion so cycles don't recurse
-            // infinitely when the condition references synthetics in the same definition group.
-            self.mark_synthetics_defined(&info.atoms);
-
-            // This definition may refer to other synthetics in its clauses.
-            // Collect and define those first so generated code has dependencies in order.
-            let mut additional_synthetic_ids =
-                Self::collect_synthetic_ids_from_clauses(&info.clauses);
-            additional_synthetic_ids.retain(|id| !info.atoms.contains(id));
-            if !additional_synthetic_ids.is_empty() {
-                self.collect_synthetic_steps(
-                    bindings,
-                    additional_synthetic_ids,
-                    kernel_context,
-                    steps,
-                );
-            }
-
-            steps.push(CertificateStep::DefineSynthetic {
-                atoms: info.atoms.clone(),
-                type_vars: info.type_vars.clone(),
-                clauses: info.clauses.clone(),
-            });
-        }
-    }
 }
 
 impl CodeGenerator<'_> {
@@ -745,7 +238,6 @@ impl CodeGenerator<'_> {
             allow_out_of_scope_typeclass_calls: false,
             next_x: 0,
             next_k: 0,
-            next_t: 0,
             var_names: vec![],
         }
     }
@@ -899,30 +391,18 @@ impl CodeGenerator<'_> {
     /// If this value cannot be expressed in a single chunk of code, returns an error.
     /// For example, it might refer to a constant that is not in scope.
     pub fn value_to_code(&mut self, value: &AcornValue) -> Result<String> {
-        let empty_names = SyntheticNameSet::new();
-        let expr = self.value_to_expr(value, false, &empty_names)?;
+        let expr = self.value_to_expr(value, false)?;
         Ok(expr.to_string())
     }
 
-    /// Like value_to_code, but uses externally managed synthetic/arbitrary naming state.
-    fn value_to_code_with_names(
+    fn value_to_code_with_initial_vars_internal(
         &mut self,
         value: &AcornValue,
-        names: &SyntheticNameSet,
-    ) -> Result<String> {
-        let expr = self.value_to_expr(value, false, names)?;
-        Ok(expr.to_string())
-    }
-
-    fn value_to_code_with_names_and_initial_vars(
-        &mut self,
-        value: &AcornValue,
-        names: &SyntheticNameSet,
         initial_var_names: &[String],
     ) -> Result<String> {
         let initial_len = self.var_names.len();
         self.var_names.extend(initial_var_names.iter().cloned());
-        let expr = self.value_to_expr(value, false, names)?;
+        let expr = self.value_to_expr(value, false)?;
         self.var_names.truncate(initial_len);
         Ok(expr.to_string())
     }
@@ -933,163 +413,11 @@ impl CodeGenerator<'_> {
         value: &AcornValue,
         initial_var_names: &[String],
     ) -> Result<String> {
-        let empty_names = SyntheticNameSet::new();
-        self.value_to_code_with_names_and_initial_vars(value, &empty_names, initial_var_names)
+        self.value_to_code_with_initial_vars_internal(value, initial_var_names)
     }
 
     pub fn type_to_code_for_display(&self, acorn_type: &AcornType) -> Result<String> {
         self.type_to_code(acorn_type)
-    }
-
-    /// Like value_to_code, but with explicit synthetic naming for replaced/imported synthetics.
-    pub fn value_to_code_with_synthetic_names(
-        &mut self,
-        value: &AcornValue,
-        synthetic_names: &HashMap<(ModuleId, AtomId), String>,
-    ) -> Result<String> {
-        let mut names = SyntheticNameSet::new();
-        names.synthetic_names = synthetic_names.clone();
-        self.value_to_code_with_names(value, &names)
-    }
-
-    /// Like value_to_code_with_synthetic_names, but also preloads in-scope variable names.
-    pub fn value_to_code_with_initial_vars_and_synthetic_names(
-        &mut self,
-        value: &AcornValue,
-        initial_var_names: &[String],
-        synthetic_names: &HashMap<(ModuleId, AtomId), String>,
-    ) -> Result<String> {
-        let mut names = SyntheticNameSet::new();
-        names.synthetic_names = synthetic_names.clone();
-        self.value_to_code_with_names_and_initial_vars(value, &names, initial_var_names)
-    }
-
-    /// Generate code for one kernel-level synthetic definition step.
-    fn generate_code_for_synthetic_step(
-        &mut self,
-        names: &SyntheticNameSet,
-        atoms: &[(ModuleId, AtomId)],
-        type_vars: &[Term],
-        clauses: &[Clause],
-        kernel_context: &KernelContext,
-    ) -> Result<String> {
-        let mut decl = vec![];
-        for &(module_id, local_id) in atoms {
-            let Some(name) = names.synthetic_names.get(&(module_id, local_id)).cloned() else {
-                return Err(Error::internal(
-                    "missing synthetic name during code generation",
-                ));
-            };
-            decl.push((name, kernel_context.get_synthetic_type(module_id, local_id)));
-        }
-        if decl.is_empty() {
-            return Err(Error::internal("synthetic definition has no atoms"));
-        }
-
-        let cond_val = {
-            // Denormalize clauses first so we can collect all type variable names.
-            // Keep type vars symbolic (no instantiation) because we emit a polymorphic definition.
-            let mut cond_parts = vec![];
-            for clause in clauses {
-                let part = kernel_context.denormalize(clause, None, None, false);
-                cond_parts.push(part);
-            }
-            AcornValue::reduce(crate::elaborator::acorn_value::BinaryOp::And, cond_parts)
-        };
-
-        // Collect all type variables from both declaration types and condition value.
-        let mut all_type_vars = Vec::new();
-        for (_, ty) in &decl {
-            for var_name in collect_type_var_names(ty) {
-                if !all_type_vars.contains(&var_name) {
-                    all_type_vars.push(var_name);
-                }
-            }
-        }
-        for var_name in collect_type_var_names_from_value(&cond_val) {
-            if !all_type_vars.contains(&var_name) {
-                all_type_vars.push(var_name);
-            }
-        }
-
-        // Build type parameter names/constraints in var_id order.
-        let mut var_id_to_new_name: HashMap<u16, String> = HashMap::new();
-        let mut type_param_names = Vec::new();
-        let mut type_param_constraints: Vec<Option<Typeclass>> = Vec::new();
-        for (id, type_var_kind) in type_vars.iter().enumerate() {
-            let id = id as u16;
-            let name = self.bindings.next_indexed_var('T', &mut self.next_t);
-            var_id_to_new_name.insert(id, name.clone());
-            type_param_names.push(name);
-
-            let constraint = type_var_kind
-                .as_ref()
-                .as_typeclass()
-                .map(|tc_id| kernel_context.type_store.get_typeclass(tc_id).clone());
-            type_param_constraints.push(constraint);
-        }
-
-        // Build rename map: x0/T0 -> new T0, x1/T1 -> new T1, ...
-        let mut rename_map = HashMap::new();
-        for old_name in &all_type_vars {
-            let var_id = old_name
-                .strip_prefix("x")
-                .or_else(|| old_name.strip_prefix("T"))
-                .and_then(|s| s.parse::<u16>().ok());
-            let new_name = if let Some(id) = var_id {
-                var_id_to_new_name
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| old_name.clone())
-            } else {
-                old_name.clone()
-            };
-            rename_map.insert(old_name.clone(), new_name);
-        }
-
-        let type_params_str = if type_param_names.is_empty() {
-            String::new()
-        } else {
-            let mut param_strs: Vec<String> = Vec::new();
-            for (name, constraint) in type_param_names.iter().zip(type_param_constraints.iter()) {
-                let param_str = if let Some(typeclass) = constraint {
-                    let tc_code = if self.bindings.has_typeclass_name(&typeclass.name) {
-                        typeclass.name.clone()
-                    } else {
-                        let module_expr = self.module_to_expr(typeclass.module_id)?;
-                        format!("{}.{}", module_expr, typeclass.name)
-                    };
-                    format!("{}: {}", name, tc_code)
-                } else {
-                    name.clone()
-                };
-                param_strs.push(param_str);
-            }
-            format!("[{}]", param_strs.join(", "))
-        };
-
-        let mut decl_parts = vec![];
-        for (name, ty) in &decl {
-            let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
-            let ty_code = self.type_to_code(&renamed_ty)?;
-            decl_parts.push(format!("{}: {}", name, ty_code));
-        }
-
-        let decl_str = if decl_parts.len() > 1 {
-            format!("{} ({})", type_params_str, decl_parts.join(", "))
-        } else if !type_params_str.is_empty() {
-            let (name, ty) = &decl[0];
-            let renamed_ty = rename_type_vars_in_type(ty, &rename_map);
-            let ty_code = self.type_to_code(&renamed_ty)?;
-            format!("{}{}: {}", name, type_params_str, ty_code)
-        } else {
-            decl_parts.join("")
-        };
-
-        let defining_synthetics: HashSet<(ModuleId, AtomId)> = atoms.iter().copied().collect();
-        let cond_val = rename_type_vars_in_value(&cond_val, &rename_map, &defining_synthetics);
-        let cond = self.value_to_code_with_names(&cond_val, names)?;
-        Ok(format!("let {} satisfy {{ {} }}", decl_str, cond))
     }
 
     fn infer_type_param_bindings_from_type_pattern(
@@ -1294,7 +622,6 @@ impl CodeGenerator<'_> {
     /// This is needed to look up variable types when specializing.
     fn specialization_to_certificate_steps(
         &mut self,
-        names: &mut SyntheticNameSet,
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
@@ -1312,9 +639,9 @@ impl CodeGenerator<'_> {
         // indices when some variables are replaced with constants.
         clause.normalize_var_ids_no_flip();
 
-        names.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
+        self.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
         let clause_context = clause.get_local_context().clone();
-        let inhabitant_var_map = names.build_inhabitant_var_map(kernel_context, &clause)?;
+        let inhabitant_var_map = self.build_inhabitant_var_map(kernel_context, &clause)?;
         clause = inhabitant_var_map.specialize_clause_with_replacement_context(
             &clause,
             &clause_context,
@@ -1328,17 +655,6 @@ impl CodeGenerator<'_> {
             self.bindings.module_id(),
         )?;
 
-        let synthetic_ids =
-            SyntheticNameSet::collect_synthetic_ids_from_clauses(std::slice::from_ref(&clause));
-        let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(
-            self.bindings,
-            synthetic_ids,
-            kernel_context,
-            &mut synthetic_steps,
-        );
-        steps.extend(synthetic_steps);
-
         // Convert replacement-context free variables into explicit inhabitants by type.
         // This yields a claim map that does not depend on concrete variable IDs.
         let mut replacement_inhabitant_map = VariableMap::new();
@@ -1347,7 +663,7 @@ impl CodeGenerator<'_> {
                 continue;
             };
             if let Some(term) =
-                names.inhabitant_for_variable_type(kernel_context, var_type, replacement_context)?
+                self.inhabitant_for_variable_type(kernel_context, var_type, replacement_context)?
             {
                 replacement_inhabitant_map.set(var_id as AtomId, term);
             }
@@ -1441,7 +757,7 @@ impl CodeGenerator<'_> {
                 continue;
             }
             if let Some(term) =
-                names.inhabitant_for_variable_type(kernel_context, var_type, generic_context)?
+                self.inhabitant_for_variable_type(kernel_context, var_type, generic_context)?
             {
                 claim_var_map.set(var_id, term);
             }
@@ -1561,29 +877,16 @@ impl CodeGenerator<'_> {
     /// Converts a certificate step to one line of code.
     pub fn certificate_step_to_code(
         &mut self,
-        names: &SyntheticNameSet,
         step: &CertificateStep,
         kernel_context: &KernelContext,
     ) -> Result<String> {
         match step {
-            CertificateStep::DefineSynthetic {
-                atoms,
-                type_vars,
-                clauses,
-            } => self.generate_code_for_synthetic_step(
-                names,
-                atoms,
-                type_vars,
-                clauses,
-                kernel_context,
-            ),
             CertificateStep::Claim(claim) => {
                 let clause = claim
                     .var_map
                     .specialize_clause(&claim.clause, kernel_context);
-                let mut value = kernel_context.denormalize(&clause, None, None, true);
-                value = value.replace_synthetics(&names.synthetic_names);
-                self.value_to_code_with_names(&value, names)
+                let value = kernel_context.denormalize(&clause, None, None, true);
+                self.value_to_code(&value)
             }
         }
     }
@@ -1591,14 +894,12 @@ impl CodeGenerator<'_> {
     /// Converts a ConcreteStep to certificate steps.
     pub fn concrete_step_to_certificate_steps(
         &mut self,
-        names: &mut SyntheticNameSet,
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_certificate_steps(
-                names,
                 &step.generic,
                 var_map,
                 replacement_context,
@@ -1733,21 +1034,7 @@ impl CodeGenerator<'_> {
 
     /// Given a constant instance, create an expression that refers to it.
     /// This does *not* include the parameters.
-    fn const_to_expr(&self, ci: &ConstantInstance, names: &SyntheticNameSet) -> Result<Expression> {
-        if ci.name.is_synthetic() {
-            if let Some(id) = ci.name.synthetic_id() {
-                if let Some(synthetic_name) = names.synthetic_names.get(&id) {
-                    return Ok(Expression::generate_identifier(synthetic_name));
-                }
-            }
-            return Err(Error::synthetic(&ci.name.to_string()));
-        }
-        if names.is_replaced_synthetic(&ci.name) {
-            if let ConstantName::Unqualified(_, word) = &ci.name {
-                return Ok(Expression::generate_identifier(word));
-            }
-        }
-
+    fn const_to_expr(&self, ci: &ConstantInstance) -> Result<Expression> {
         // Handle numeric literals for datatype attributes (not typeclass attributes).
         // Typeclass attribute numerals are handled in value_to_expr where we have
         // more context about whether the datatype has its own override.
@@ -1789,7 +1076,6 @@ impl CodeGenerator<'_> {
                 ConstantName::TypeclassAttribute(_, tc, attr) => {
                     Expression::generate_identifier(&tc.name).add_dot_str(attr)
                 }
-                ConstantName::Synthetic(..) => panic!("control should not get here"),
             });
         }
 
@@ -1835,14 +1121,12 @@ impl CodeGenerator<'_> {
             ConstantName::TypeclassAttribute(_, tc, attr) => {
                 Ok(module.add_dot_str(&tc.name).add_dot_str(attr))
             }
-            ConstantName::Synthetic(..) => panic!("control should not get here"),
         }
     }
 
     /// If use_x is true we use x-variables; otherwise we use k-variables.
     fn generate_quantifier_expr(
         &mut self,
-        names: &SyntheticNameSet,
         token_type: TokenType,
         quants: &[AcornType],
         value: &AcornValue,
@@ -1863,7 +1147,7 @@ impl CodeGenerator<'_> {
             let decl = var_name;
             decls.push(decl);
         }
-        let subresult = self.value_to_expr(value, false, names)?;
+        let subresult = self.value_to_expr(value, false)?;
         self.var_names.truncate(initial_var_names_len);
         Ok(Expression::Binder(
             token_type.generate(),
@@ -1878,12 +1162,7 @@ impl CodeGenerator<'_> {
     /// We automatically generate variable names sometimes, using next_x and next_k.
     /// "inferrable" is true if the type of this value can be inferred, which means
     /// we don't need top level parameters.
-    fn value_to_expr(
-        &mut self,
-        value: &AcornValue,
-        inferrable: bool,
-        names: &SyntheticNameSet,
-    ) -> Result<Expression> {
+    fn value_to_expr(&mut self, value: &AcornValue, inferrable: bool) -> Result<Expression> {
         match value {
             AcornValue::Variable(i, _) => {
                 if *i >= self.var_names.len() as u16 {
@@ -1905,7 +1184,7 @@ impl CodeGenerator<'_> {
                         let type_expr = self.type_to_expr(arg_type)?;
                         decls.push(Declaration::Typed(name_token, type_expr));
                     }
-                    let body_expr = self.value_to_expr(body, false, names)?;
+                    let body_expr = self.value_to_expr(body, false)?;
                     self.var_names.truncate(initial_var_names_len);
 
                     let mut type_params = vec![];
@@ -1946,7 +1225,7 @@ impl CodeGenerator<'_> {
                     ));
                 }
 
-                let function = self.value_to_expr(&app.function, inferrable, names)?;
+                let function = self.value_to_expr(&app.function, inferrable)?;
                 let type_arg_exprs = app
                     .type_args
                     .iter()
@@ -1963,7 +1242,7 @@ impl CodeGenerator<'_> {
                     // We currently never infer the type of arguments from the type of the function.
                     // Inference only goes the other way.
                     // We could improve this at some point.
-                    arg_exprs.push(self.value_to_expr(arg, false, names)?);
+                    arg_exprs.push(self.value_to_expr(arg, false)?);
                 }
 
                 // Check if we could replace this with receiver+attribute syntax
@@ -2084,13 +1363,7 @@ impl CodeGenerator<'_> {
                     if requires_explicit_type_args {
                         false
                     } else {
-                        // Synthetics can't have explicit type params in the syntax
-                        // Check both original synthetics and replaced ones (now named s0, s1, etc.)
-                        if c.name.is_synthetic() || names.is_replaced_synthetic(&c.name) {
-                            true
-                        } else if let ConstantName::TypeclassAttribute(_, typeclass, attr_name) =
-                            &c.name
-                        {
+                        if let ConstantName::TypeclassAttribute(_, typeclass, attr_name) = &c.name {
                             if let AcornType::Data(datatype, _) = &receiver_type {
                                 if self.bindings.is_instance_of(datatype, typeclass) {
                                     // If the datatype has its own attribute, don't infer parameters
@@ -2111,7 +1384,7 @@ impl CodeGenerator<'_> {
                 } else {
                     true
                 };
-                let f = self.value_to_expr(&fa.function, inferrable, names)?;
+                let f = self.value_to_expr(&fa.function, inferrable)?;
                 let grouped_args = Expression::generate_paren_grouping(arg_exprs);
                 Ok(Expression::Concatenation(
                     Box::new(f),
@@ -2119,8 +1392,8 @@ impl CodeGenerator<'_> {
                 ))
             }
             AcornValue::Binary(op, left, right) => {
-                let mut left_expr = self.value_to_expr(left, false, names)?;
-                let mut right_expr = self.value_to_expr(right, false, names)?;
+                let mut left_expr = self.value_to_expr(left, false)?;
+                let mut right_expr = self.value_to_expr(right, false)?;
                 let token = op.token_type().generate();
                 let paren = |expr: Expression| {
                     Expression::Grouping(
@@ -2163,28 +1436,27 @@ impl CodeGenerator<'_> {
                 ))
             }
             AcornValue::Not(x) => {
-                let x = self.value_to_expr(x, false, names)?;
+                let x = self.value_to_expr(x, false)?;
                 Ok(Expression::generate_unary(TokenType::Not, x))
             }
             AcornValue::Try(x, _) => {
-                let x = self.value_to_expr(x, false, names)?;
+                let x = self.value_to_expr(x, false)?;
                 Ok(Expression::generate_unary(TokenType::QuestionMark, x))
             }
             AcornValue::ForAll(quants, value) => {
-                self.generate_quantifier_expr(names, TokenType::ForAll, quants, value, true)
+                self.generate_quantifier_expr(TokenType::ForAll, quants, value, true)
             }
             AcornValue::Exists(quants, value) => {
-                self.generate_quantifier_expr(names, TokenType::Exists, quants, value, false)
+                self.generate_quantifier_expr(TokenType::Exists, quants, value, false)
             }
             AcornValue::Choose(choice_type, value) => self.generate_quantifier_expr(
-                names,
                 TokenType::Choose,
                 std::slice::from_ref(choice_type),
                 value,
                 false,
             ),
             AcornValue::Lambda(quants, value) => {
-                self.generate_quantifier_expr(names, TokenType::Function, quants, value, true)
+                self.generate_quantifier_expr(TokenType::Function, quants, value, true)
             }
             AcornValue::Bool(b) => {
                 let token = if *b {
@@ -2243,29 +1515,24 @@ impl CodeGenerator<'_> {
                     }
                 }
 
-                let const_expr = self.const_to_expr(&c, names)?;
-
-                // Synthetics can't have explicit type params in the syntax
-                // Check both original synthetics and replaced ones (now named s0, s1, etc.)
-                let is_synthetic_const =
-                    c.name.is_synthetic() || names.is_replaced_synthetic(&c.name);
+                let const_expr = self.const_to_expr(&c)?;
                 // Only add type params if the constant itself is polymorphic.
                 // A constant like `item: T` (theorem parameter) has params but empty
                 // type_param_names - it uses types from enclosing scope but isn't polymorphic.
                 let is_polymorphic = !c.type_param_names.is_empty()
                     || matches!(c.name, ConstantName::TypeclassAttribute(..));
-                if !inferrable && !c.params.is_empty() && !is_synthetic_const && is_polymorphic {
+                if !inferrable && !c.params.is_empty() && is_polymorphic {
                     self.parametrize_expr(const_expr, &c.params)
                 } else {
-                    // We don't need to parametrize because it can be inferred,
-                    // it's a synthetic (type params implicit), or it's not polymorphic
+                    // We don't need to parametrize because it can be inferred
+                    // or it's not polymorphic.
                     Ok(const_expr)
                 }
             }
             AcornValue::IfThenElse(condition, if_value, else_value) => {
-                let condition = self.value_to_expr(condition, false, names)?;
-                let if_value = self.value_to_expr(if_value, false, names)?;
-                let else_value = self.value_to_expr(else_value, false, names)?;
+                let condition = self.value_to_expr(condition, false)?;
+                let if_value = self.value_to_expr(if_value, false)?;
+                let else_value = self.value_to_expr(else_value, false)?;
                 Ok(Expression::IfThenElse(
                     TokenType::If.generate(),
                     Box::new(condition),
@@ -2298,9 +1565,6 @@ impl CodeGenerator<'_> {
 
 #[derive(Debug)]
 pub enum Error {
-    // Trouble expressing a synthetic atom created during normalization.
-    Synthetic(String),
-
     // Trouble referencing a module that has not been directly imported.
     UnimportedModule(ModuleId, String),
 
@@ -2324,10 +1588,6 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn synthetic(s: &str) -> Error {
-        Error::Synthetic(s.to_string())
-    }
-
     pub fn unnamed_type(datatype: &Datatype) -> Error {
         Error::UnnamedType(datatype.name.to_string())
     }
@@ -2342,7 +1602,6 @@ impl Error {
 
     pub fn error_type(&self) -> &'static str {
         match self {
-            Error::Synthetic(_) => "Synthetic",
             Error::UnimportedModule(..) => "UnimportedModule",
             Error::UnnamedType(_) => "UnnamedType",
             Error::UnhandledValue(_) => "UnhandledValue",
@@ -2357,9 +1616,6 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Synthetic(s) => {
-                write!(f, "could not find a name for the synthetic constant: {}", s)
-            }
             Error::UnimportedModule(_, name) => {
                 write!(
                     f,
@@ -2401,56 +1657,12 @@ impl From<String> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodeGenerator, SyntheticNameSet};
+    use super::CodeGenerator;
     use crate::elaborator::evaluator::Evaluator;
     use crate::elaborator::node::NodeCursor;
     use crate::module::LoadState;
     use crate::project::Project;
     use crate::syntax::expression::Expression;
-
-    #[test]
-    fn test_polymorphic_synthetic_with_multi_arg_function() {
-        use crate::processor::Processor;
-
-        // Use a pattern that creates a synthetic with type ((T, T) -> Bool) -> T
-        // The is_reflexive pattern has forall inside, which when negated becomes
-        // exists(t: T) { not f(t, t) } where t depends on f, giving synthetic type
-        // ((T, T) -> Bool) -> T
-        let (_processor, bindings, normalized_goal) = Processor::test_goal(
-            r#"
-            define is_reflexive[T](f: (T, T) -> Bool) -> Bool {
-                forall(t: T) { f(t, t) }
-            }
-            theorem goal[T](f: (T, T) -> Bool) { is_reflexive(f) }
-            "#,
-        );
-
-        let kernel_context = normalized_goal.kernel_context.clone();
-        let synthetic_ids = kernel_context.get_synthetic_ids();
-
-        let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
-        let mut synthetic_steps = vec![];
-        names.collect_synthetic_steps(
-            &bindings,
-            synthetic_ids,
-            &kernel_context,
-            &mut synthetic_steps,
-        );
-        let mut codes = vec![];
-        for step in synthetic_steps {
-            codes.push(
-                generator
-                    .certificate_step_to_code(&names, &step, &kernel_context)
-                    .unwrap(),
-            );
-        }
-
-        assert!(
-            codes.is_empty(),
-            "negated forall stays inline here, so no witness synthetics should be generated"
-        );
-    }
 
     #[test]
     fn test_foreign_scoped_constant_in_claim_codegen_is_rejected() {
@@ -2483,11 +1695,9 @@ mod tests {
         );
 
         let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
         let mut steps = vec![];
         let err = generator
             .specialization_to_certificate_steps(
-                &mut names,
                 &clause,
                 &VariableMap::new(),
                 &LocalContext::empty(),
@@ -2516,11 +1726,9 @@ mod tests {
         bad_map.set(0, Term::type_sort());
 
         let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
         let mut steps = vec![];
         let err = generator
             .specialization_to_certificate_steps(
-                &mut names,
                 &generic,
                 &bad_map,
                 &crate::kernel::local_context::LocalContext::empty(),
@@ -2558,11 +1766,9 @@ mod tests {
             LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
 
         let mut generator = CodeGenerator::new(&bindings);
-        let mut names = SyntheticNameSet::new();
         let mut steps = vec![];
         let err = generator
             .specialization_to_certificate_steps(
-                &mut names,
                 &generic,
                 &bad_map,
                 &replacement_context,
@@ -2601,13 +1807,10 @@ mod tests {
         // x0 and x1 here are in replacement_context; x0 should be inferred as Bool from x1's type.
         var_map.set(1, kernel_context.parse_term("g1(x0, Bool, x1)"));
 
-        let mut names = SyntheticNameSet::new();
-
         let mut generator = CodeGenerator::new(&bindings);
         let mut steps = vec![];
         generator
             .specialization_to_certificate_steps(
-                &mut names,
                 &generic,
                 &var_map,
                 &replacement_context,
@@ -2620,7 +1823,6 @@ mod tests {
             .iter()
             .find_map(|step| match step {
                 CertificateStep::Claim(claim) => Some(claim),
-                _ => None,
             })
             .expect("expected claim step");
         let mapped_x1 = claim

@@ -131,10 +131,6 @@ pub struct SymbolTable {
     /// Used for instance definitions where e.g. Arf.foo[Foo] = Foo.foo.
     instance_to_symbol: ImHashMap<ConstantInstance, Symbol>,
 
-    /// For synthetic atom (module_id, local_id), synthetic_types[module_id][local_id] is the type.
-    /// Uses im::Vector for O(1) clones.
-    synthetic_types: ImVector<ImVector<Term>>,
-
     /// Maps polymorphic constant names to their generic type info.
     /// Used to properly denormalize constants.
     polymorphic_info: ImHashMap<ConstantName, PolymorphicInfo>,
@@ -174,7 +170,6 @@ impl SymbolTable {
             scoped_constant_types: ImVector::new(),
             name_to_symbol: ImHashMap::new(),
             instance_to_symbol: ImHashMap::new(),
-            synthetic_types: ImVector::new(),
             polymorphic_info: ImHashMap::new(),
             match_eliminator_info: ImHashMap::new(),
             type_to_element: ImHashMap::new(),
@@ -264,17 +259,7 @@ impl SymbolTable {
                 .copied();
             let replace = match existing {
                 None => true,
-                Some(existing_symbol) => {
-                    if matches!(symbol, Symbol::Synthetic(_, _))
-                        && !matches!(existing_symbol, Symbol::Synthetic(_, _))
-                    {
-                        // Don't let provisional synthetics replace a concrete provider.
-                        false
-                    } else {
-                        // Prefer providers that don't require value-level arguments.
-                        !has_value_args
-                    }
-                }
+                Some(_existing_symbol) => !has_value_args,
             };
             if replace {
                 self.inhabited_type_constructor_witnesses
@@ -316,9 +301,6 @@ impl SymbolTable {
     }
 
     pub fn get_symbol(&self, name: &ConstantName) -> Option<Symbol> {
-        if let ConstantName::Synthetic(m, i) = name {
-            return Some(Symbol::Synthetic(*m, *i));
-        };
         self.name_to_symbol.get(name).cloned()
     }
 
@@ -346,7 +328,6 @@ impl SymbolTable {
             Symbol::Bool | Symbol::Type0 | Symbol::Type(_) | Symbol::Typeclass(_) => {
                 Term::type_sort_ref()
             }
-            Symbol::Synthetic(m, i) => &self.synthetic_types[m.get() as usize][i as usize],
             Symbol::GlobalConstant(m, i) => {
                 &self.global_constant_types[m.get() as usize][i as usize]
             }
@@ -366,7 +347,6 @@ impl SymbolTable {
             Symbol::Choose => choose_symbol_type_ref().clone(),
             Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => Term::type_sort(),
             Symbol::Type(ground_id) => type_store.get_type_kind(ground_id),
-            Symbol::Synthetic(m, i) => self.synthetic_types[m.get() as usize][i as usize].clone(),
             Symbol::GlobalConstant(m, i) => {
                 self.global_constant_types[m.get() as usize][i as usize].clone()
             }
@@ -419,9 +399,6 @@ impl SymbolTable {
         while self.global_constant_types.len() <= idx {
             self.global_constant_types.push_back(ImVector::new());
         }
-        while self.synthetic_types.len() <= idx {
-            self.synthetic_types.push_back(ImVector::new());
-        }
     }
 
     /// Add a scoped constant with the given type, without a name.
@@ -462,9 +439,6 @@ impl SymbolTable {
         ctype: NewConstantType,
         var_type: Term,
     ) -> Symbol {
-        if name.is_synthetic() {
-            panic!("synthetic atoms should not be stored in the ConstantMap");
-        }
         if let Some(&symbol) = self.name_to_symbol.get(&name) {
             return symbol;
         }
@@ -930,9 +904,6 @@ impl SymbolTable {
             &other.scoped_constant_types,
         );
 
-        // Merge synthetic types
-        merge_nested_vecs(&mut self.synthetic_types, &other.synthetic_types);
-
         // Merge hash maps
         for (k, v) in other.name_to_symbol.iter() {
             self.name_to_symbol.insert(k.clone(), *v);
@@ -987,9 +958,6 @@ impl SymbolTable {
         );
 
         // Skip scoped constants (locals are not mergeable across modules)
-
-        // Merge synthetic types
-        merge_nested_vecs(&mut self.synthetic_types, &other.synthetic_types);
 
         // Merge hash maps
         for (k, v) in other.name_to_symbol.iter() {

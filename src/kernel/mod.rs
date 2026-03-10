@@ -19,7 +19,6 @@ pub mod pdt;
 pub mod proof_step;
 pub mod symbol;
 pub mod symbol_table;
-pub mod synthetic;
 pub mod term;
 pub mod term_normalization;
 pub mod type_store;

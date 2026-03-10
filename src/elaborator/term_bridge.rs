@@ -28,7 +28,7 @@ impl<'a> TermBridge<'a> {
         local_context: &LocalContext,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         var_remapping: Option<&[Option<u16>]>,
-        type_param_names: Option<&[String]>,
+        _type_param_names: Option<&[String]>,
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
@@ -146,40 +146,6 @@ impl<'a> TermBridge<'a> {
                     *i
                 };
                 AcornValue::Variable(new_i, acorn_type)
-            }
-            Atom::Symbol(Symbol::Synthetic(m, i)) => {
-                let symbol = Symbol::Synthetic(*m, *i);
-                let type_term = self.kernel_context.symbol_table.get_type(symbol);
-                let acorn_type = if let Some(name_map) = type_var_id_to_name {
-                    self.kernel_context
-                        .type_store
-                        .type_term_to_acorn_type_with_var_names(type_term, name_map)
-                } else {
-                    self.kernel_context
-                        .type_store
-                        .type_term_to_acorn_type(type_term)
-                };
-                let name = ConstantName::Synthetic(*m, *i);
-
-                {
-                    let num_type_params = type_term.as_ref().count_type_params();
-                    if num_type_params > 0 {
-                        let names: Vec<String> = if let Some(provided) = type_param_names {
-                            provided[..num_type_params].to_vec()
-                        } else {
-                            (0..num_type_params).map(|i| format!("X{}", i)).collect()
-                        };
-                        return AcornValue::constant(
-                            name,
-                            vec![],
-                            acorn_type.clone(),
-                            acorn_type,
-                            names,
-                        );
-                    }
-                }
-
-                AcornValue::constant(name, vec![], acorn_type.clone(), acorn_type, vec![])
             }
             Atom::Symbol(Symbol::Type(_))
             | Atom::Symbol(Symbol::Bool)
