@@ -109,7 +109,7 @@ pub struct Checker {
     /// For deductions among concrete clauses.
     term_graph: EqualityGraph,
 
-    /// Clauses are matched by exact canonical equality only.
+    /// Clauses are matched by exact normalized equality only.
     /// The `usize` value is the `step_id` (index into `self.reasons`) for that clause.
     exact_clauses: ImHashMap<Clause, usize>,
 
@@ -161,9 +161,7 @@ impl Checker {
         let step_id = self.reasons.len();
         self.reasons.push_back(reason.clone());
 
-        self.exact_clauses
-            .entry(clause.exact_match_key())
-            .or_insert(step_id);
+        self.exact_clauses.entry(clause.clone()).or_insert(step_id);
 
         if clause.has_any_variable() {
             if let Some(reduced_clause) =
@@ -261,8 +259,7 @@ impl Checker {
             return Some(StepReason::EqualityGraph);
         }
 
-        let canonical_clause = clause.exact_match_key();
-        if let Some(step_id) = self.exact_clauses.get(&canonical_clause) {
+        if let Some(step_id) = self.exact_clauses.get(clause) {
             trace!(
                 clause = %clause,
                 result = "exact_clause",
@@ -279,7 +276,7 @@ impl Checker {
                 else {
                     continue;
                 };
-                if reduced_clause.exact_match_key() == canonical_clause {
+                if &reduced_clause == clause {
                     trace!(
                         clause = %clause,
                         result = "simplified_variable_clause",
@@ -737,7 +734,7 @@ mod tests {
         let mut checker = Checker::new();
         checker.insert_clause(&clause, StepReason::Testing, &context);
 
-        let canonical = clause.exact_match_key();
+        let canonical = clause.normalized();
         assert!(
             checker.exact_clauses.contains_key(&canonical),
             "expected canonical clause {} to be stored for exact matching",

@@ -184,13 +184,6 @@ impl Clause {
         self.literals.dedup();
     }
 
-    /// Normalizes the variable IDs in the literals.
-    /// This may flip literals, so keep in mind it will break any trace.
-    /// Also rebuilds the context to match the renumbered variables.
-    fn normalize_var_ids(&mut self) {
-        self.normalize_var_ids_with_pinned(0);
-    }
-
     /// Normalizes the variable IDs in the literals, keeping the first `pinned` variables
     /// at their original positions (x0, x1, ..., x_{pinned-1}).
     ///
@@ -206,23 +199,6 @@ impl Clause {
         self.context = input_context.remap(&var_ids);
     }
 
-    pub(crate) fn exact_match_key(&self) -> Clause {
-        let mut clause = Clause {
-            literals: self
-                .literals
-                .clone()
-                .into_iter()
-                .flat_map(Self::normalize_literals_for_matching)
-                .collect(),
-            context: self.context.clone(),
-        };
-        clause.literals.retain(|lit| !lit.is_impossible());
-        clause.literals.sort();
-        clause.literals.dedup();
-        clause.normalize_var_ids();
-        clause
-    }
-
     fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
         let right = normalize_clause_term(&literal.right);
         if right.is_true() {
@@ -235,48 +211,6 @@ impl Clause {
             normalize_clause_term(&literal.left),
             right,
         )]
-    }
-
-    fn normalize_literals_for_matching(literal: Literal) -> Vec<Literal> {
-        let right = normalize_clause_term(&literal.right);
-        if right.is_true() {
-            return Self::normalize_signed_boolean_term_to_literals(
-                &literal.left,
-                literal.positive,
-            );
-        }
-
-        vec![Literal::new(
-            literal.positive,
-            normalize_clause_term(&literal.left),
-            right,
-        )]
-    }
-
-    fn normalize_signed_boolean_term_to_literals(term: &Term, positive: bool) -> Vec<Literal> {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::normalize_signed_boolean_term_to_literals(&args[0], !positive);
-        }
-
-        if positive {
-            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-                let mut literals =
-                    Self::normalize_signed_boolean_term_to_literals(&args[0], positive);
-                literals.extend(Self::normalize_signed_boolean_term_to_literals(
-                    &args[1], positive,
-                ));
-                return literals;
-            }
-        } else if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
-            let mut literals = Self::normalize_signed_boolean_term_to_literals(&args[0], positive);
-            literals.extend(Self::normalize_signed_boolean_term_to_literals(
-                &args[1], positive,
-            ));
-            return literals;
-        }
-
-        let (term, positive) = normalize_signed_clause_term(term, positive);
-        vec![Literal::from_signed_term(term, positive)]
     }
 
     /// Create an impossible clause (empty clause, represents false).
