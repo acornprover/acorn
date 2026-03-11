@@ -120,14 +120,11 @@ impl ConcreteStep {
         self.var_maps
             .iter()
             .map(|(var_map, replacement_context)| {
-                let mut clause = var_map.specialize_clause_with_replacement_context(
+                var_map.specialize_clause_with_replacement_context_and_compact_vars(
                     &self.generic,
                     replacement_context,
                     kernel_context,
-                );
-                // Normalize variable IDs to ensure they are in order (0, 1, 2, ...) with no gaps.
-                clause.normalize_var_ids_no_flip();
-                clause
+                )
             })
             .collect()
     }
@@ -831,12 +828,12 @@ mod tests {
         premise_var_map.set(0, Term::new_variable(0));
         let replacement_context = generic_clause.get_local_context().clone();
 
-        let mut final_clause = premise_var_map.specialize_clause_with_replacement_context(
-            &generic_clause,
-            &replacement_context,
-            &kctx,
-        );
-        final_clause.normalize_var_ids_no_flip();
+        let final_clause = premise_var_map
+            .specialize_clause_with_replacement_context_and_compact_vars(
+                &generic_clause,
+                &replacement_context,
+                &kctx,
+            );
 
         let final_step = ProofStep::specialization(
             0,

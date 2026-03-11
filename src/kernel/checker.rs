@@ -462,7 +462,7 @@ impl Checker {
                             "Claim at step {} is not obviously true{} (generic debug: {:?}; specialized debug: {:?})",
                             step_index + 1,
                             cert_line_context,
-                            claim.clause,
+                            claim.clause(),
                             clause,
                         )));
                     };

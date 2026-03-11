@@ -193,8 +193,8 @@ impl Certificate {
         claim: &Claim,
         _kernel_context: &KernelContext,
     ) -> bool {
-        let local_context = claim.clause.get_local_context();
-        claim.var_map.iter().any(|(_, term)| {
+        let local_context = claim.clause().get_local_context();
+        claim.var_map().iter().any(|(_, term)| {
             Self::contains_partial_logical_builtin(term.as_ref())
                 || Self::references_value_local(term.as_ref(), local_context)
         })
@@ -374,7 +374,7 @@ impl Certificate {
         for step in &ordered_steps {
             let line = match step {
                 CertificateStep::Claim(claim)
-                    if !claim.clause.get_local_context().is_empty()
+                    if !claim.clause().get_local_context().is_empty()
                         && !Self::claim_requires_specialized_serialization(
                             claim,
                             &generation_kernel_context,
@@ -543,12 +543,12 @@ impl Certificate {
     }
 
     fn expected_roundtrip_claim(claim: &Claim, type_var_map: &VariableMap) -> Claim {
-        let local_context = claim.clause.get_local_context();
+        let local_context = claim.clause().get_local_context();
         let mut expected_var_map = VariableMap::new();
 
         for var_id in 0..local_context.len() {
             let var_id = var_id as AtomId;
-            if let Some(term) = claim.var_map.get_mapping(var_id) {
+            if let Some(term) = claim.var_map().get_mapping(var_id) {
                 expected_var_map.set(var_id, apply_to_term(term.as_ref(), type_var_map));
                 continue;
             }
@@ -557,7 +557,7 @@ impl Certificate {
             }
         }
 
-        Claim::new(claim.clause.clone(), expected_var_map)
+        Claim::new(claim.clause().clone(), expected_var_map)
             .expect("roundtrip claim should normalize")
     }
 
@@ -622,7 +622,7 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
-        let local_context = claim.clause.get_local_context();
+        let local_context = claim.clause().get_local_context();
         let var_count = local_context.len();
         if var_count == 0 {
             return Err(CodeGenError::GeneratedBadCode(
@@ -631,7 +631,7 @@ impl Certificate {
         }
 
         let mut generator = CodeGenerator::new_for_certificate(bindings);
-        let generic_value = kernel_context.denormalize(&claim.clause, None, None, false);
+        let generic_value = kernel_context.denormalize(claim.clause(), None, None, false);
         let generic_code = generator.value_to_code(&generic_value)?;
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
@@ -681,7 +681,7 @@ impl Certificate {
             if var_type.as_ref().is_type_param_kind() {
                 continue;
             }
-            if claim.var_map.get_mapping(var_id as AtomId).is_none() {
+            if claim.var_map().get_mapping(var_id as AtomId).is_none() {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "missing claim var map entry for x{}",
                     var_id
@@ -697,7 +697,7 @@ impl Certificate {
                 .expect("local context should provide all variable types")
                 .clone();
 
-            let arg_term = claim.var_map.get_mapping(var_id as AtomId);
+            let arg_term = claim.var_map().get_mapping(var_id as AtomId);
 
             if var_type.as_ref().is_type_param_kind() {
                 let type_param_name = format!("T{}", var_id);
@@ -1628,7 +1628,7 @@ mod tests {
         let clause = kernel.parse_clause("x0 = true", &["Bool"]);
         let mut var_map = VariableMap::new();
         var_map.set(0, Term::new_true());
-        let claim = Claim { clause, var_map };
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -1658,7 +1658,7 @@ mod tests {
         let mut var_map = VariableMap::new();
         var_map.set(0, Term::new_false());
         var_map.set(1, Term::new_true());
-        let claim = Claim { clause, var_map };
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -1685,7 +1685,7 @@ mod tests {
         let clause = kernel.parse_clause("x0", &["Bool"]);
         let mut var_map = VariableMap::new();
         var_map.set(0, Term::new_false());
-        let claim = Claim { clause, var_map };
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -1713,10 +1713,7 @@ mod tests {
         let mut var_map = VariableMap::new();
         var_map.set(0, Term::bool_type());
         var_map.set(1, Term::new_true());
-        let claim = Claim {
-            clause: clause.clone(),
-            var_map: var_map.clone(),
-        };
+        let claim = Claim::new(clause.clone(), var_map.clone()).expect("claim should normalize");
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization with type locals should succeed");
@@ -1766,10 +1763,8 @@ mod tests {
 
         let mut expected_var_map = VariableMap::new();
         expected_var_map.set(0, Term::new_false());
-        let expected = Claim {
-            clause: kernel.parse_clause("x0", &["Bool"]),
-            var_map: expected_var_map,
-        };
+        let expected = Claim::new(kernel.parse_clause("x0", &["Bool"]), expected_var_map)
+            .expect("claim should normalize");
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
@@ -1811,7 +1806,7 @@ mod tests {
         .expect("higher-order claim-with-args parsing should succeed");
 
         let CertificateStep::Claim(claim) = step;
-        assert_eq!(claim.var_map.len(), 1);
+        assert_eq!(claim.var_map().len(), 1);
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should preserve higher-order inequality literal");
@@ -1837,8 +1832,8 @@ mod tests {
             Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
                 .expect("deserialization should preserve a single not-if literal");
 
-        assert_eq!(claim.clause.get_local_context().len(), 1);
-        assert_eq!(claim.var_map.len(), 1);
+        assert_eq!(claim.clause().get_local_context().len(), 1);
+        assert_eq!(claim.var_map().len(), 1);
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -1866,10 +1861,11 @@ mod tests {
         let mut expected_var_map = VariableMap::new();
         expected_var_map.set(0, Term::bool_type());
         expected_var_map.set(1, Term::new_true());
-        let expected = Claim {
-            clause: kernel.parse_clause("x1 = x1", &["Type", "x0"]),
-            var_map: expected_var_map,
-        };
+        let expected = Claim::new(
+            kernel.parse_clause("x1 = x1", &["Type", "x0"]),
+            expected_var_map,
+        )
+        .expect("claim should normalize");
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
@@ -1907,7 +1903,7 @@ mod tests {
         .expect("type-only claim-with-args parsing should succeed");
 
         let CertificateStep::Claim(claim) = step;
-        assert!(claim.var_map.len() > 0);
+        assert!(claim.var_map().len() > 0);
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -1939,7 +1935,7 @@ mod tests {
         var_map.set(0, Term::new_true());
         var_map.set(1, Term::new_false());
         var_map.set(2, Term::new_true());
-        let claim = Claim { clause, var_map };
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
@@ -2031,7 +2027,7 @@ mod tests {
             .expect("claim specialization should succeed");
         assert!(
             checker
-                .check_clause(&claim.clause, kernel_context_cow.as_ref())
+                .check_clause(claim.clause(), kernel_context_cow.as_ref())
                 .or_else(|| checker.check_clause(&specialized, kernel_context_cow.as_ref()))
                 .is_some(),
             "parsed claim should match one of the normalized definition clauses"
@@ -2060,7 +2056,7 @@ mod tests {
         .expect("plain claim parsing should succeed");
 
         let CertificateStep::Claim(claim) = step;
-        assert_eq!(claim.var_map.len(), 0);
+        assert_eq!(claim.var_map().len(), 0);
     }
 
     #[test]
@@ -2114,7 +2110,7 @@ mod tests {
         )
         .expect("claim-with-args deserialization should succeed");
 
-        assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_false()));
+        assert_eq!(claim.var_map().get_mapping(0), Some(&Term::new_false()));
     }
 
     #[test]
@@ -2137,7 +2133,7 @@ mod tests {
         .expect("choose claim parsing should succeed for certificate parsing");
 
         let CertificateStep::Claim(claim) = step;
-        assert_eq!(claim.var_map.len(), 0);
+        assert_eq!(claim.var_map().len(), 0);
     }
 
     #[test]
@@ -2162,8 +2158,8 @@ mod tests {
         .expect("closed binder-heavy claim should parse");
 
         let CertificateStep::Claim(claim) = step;
-        assert_eq!(claim.var_map.len(), 0);
-        assert!(claim.clause.get_local_context().is_empty());
+        assert_eq!(claim.var_map().len(), 0);
+        assert!(claim.clause().get_local_context().is_empty());
     }
 
     #[test]
@@ -2425,7 +2421,7 @@ mod tests {
         )
         .expect("parenthesized binder-led claim should parse");
         let CertificateStep::Claim(claim) = step;
-        assert_eq!(claim.var_map.len(), 0);
+        assert_eq!(claim.var_map().len(), 0);
     }
 
     #[test]
@@ -2551,7 +2547,7 @@ theorem goal(k: Bool) {\n\
         )
         .expect("claim-with-args line should parse in a goal with local bindings");
         let CertificateStep::Claim(parsed) = step;
-        assert_eq!(parsed.var_map.len(), 2);
+        assert_eq!(parsed.var_map().len(), 2);
 
         let serialized =
             Certificate::serialize_claim_with_args(&parsed, kernel_context_cow.as_ref(), &bindings)
@@ -2568,13 +2564,13 @@ theorem goal(k: Bool) {\n\
 
         let mut checker = Checker::new();
         checker.insert_clause(
-            &parsed.clause,
+            parsed.clause(),
             StepReason::Testing,
             kernel_context_cow.as_ref(),
         );
         assert!(
             checker
-                .check_clause(&parsed.clause, kernel_context_cow.as_ref())
+                .check_clause(parsed.clause(), kernel_context_cow.as_ref())
                 .is_some(),
             "generic claim should be accepted once inserted"
         );

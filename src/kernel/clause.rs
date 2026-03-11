@@ -348,10 +348,12 @@ impl Clause {
         false
     }
 
-    /// Normalize variable IDs without flipping literals.
-    /// Also rebuilds the context to match the renumbered variables.
-    /// Uses type-aware ordering (type dependencies come first).
-    pub fn normalize_var_ids_no_flip(&mut self) {
+    /// Compact free-variable IDs without otherwise changing literal shape.
+    ///
+    /// This does not do full clause normalization: literals are not flipped, simplified,
+    /// deduplicated, or re-sorted. It only rewrites the local-variable numbering and rebuilds the
+    /// context to match.
+    fn compact_var_ids_preserving_literal_shape(&mut self) {
         let mut var_ids = vec![];
         let input_context = self.context.clone();
         for literal in &mut self.literals {
@@ -363,6 +365,13 @@ impl Clause {
                 .normalize_var_ids_with_context(&mut var_ids, &input_context);
         }
         self.context = input_context.remap(&var_ids);
+    }
+
+    /// Return a copy with compact free-variable IDs but the same literal shape.
+    pub fn compacted_var_ids_preserving_literal_shape(&self) -> Clause {
+        let mut clause = self.clone();
+        clause.compact_var_ids_preserving_literal_shape();
+        clause
     }
 
     /// Normalize variable IDs for PDT-based matching.

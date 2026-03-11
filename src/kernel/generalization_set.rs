@@ -342,8 +342,7 @@ fn specialized_form(mut clause: Clause, kernel_context: &KernelContext) -> Claus
         cmp.reverse() // Reverse to get non-increasing order
     });
 
-    clause.normalize_var_ids_no_flip();
-    clause
+    clause.compacted_var_ids_preserving_literal_shape()
 }
 
 #[cfg(test)]

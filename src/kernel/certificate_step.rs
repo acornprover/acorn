@@ -7,10 +7,10 @@ use crate::kernel::variable_map::VariableMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     /// The generic clause we are specializing.
-    pub clause: Clause,
+    clause: Clause,
 
     /// Variable substitutions used for this claim.
-    pub var_map: VariableMap,
+    var_map: VariableMap,
 }
 
 impl Claim {
@@ -49,6 +49,14 @@ impl Claim {
             }
         }
         Ok(())
+    }
+
+    pub fn clause(&self) -> &Clause {
+        &self.clause
+    }
+
+    pub fn var_map(&self) -> &VariableMap {
+        &self.var_map
     }
 
     pub fn normalized_generic_clause(&self) -> Clause {

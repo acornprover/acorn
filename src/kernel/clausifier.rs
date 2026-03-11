@@ -129,7 +129,7 @@ impl<'a> Clausifier<'a> {
             return Ok(literal);
         }
 
-        let term = self.term_to_simple_term(term, stack, next_var_id, context)?;
+        let term = self.term_to_inline_term(term, stack, next_var_id, context)?;
         Ok(Literal::from_signed_term(term, positive))
     }
 
@@ -593,9 +593,9 @@ impl<'a> Clausifier<'a> {
                         .split_symbol_application(&args[1], Symbol::And, 2)
                         .is_some();
                     if left_is_and || right_is_and {
-                        let simple_term =
-                            self.term_to_simple_term(term, stack, next_var_id, context)?;
-                        let literal = Literal::from_signed_term(simple_term, !negate);
+                        let inline_term =
+                            self.term_to_inline_term(term, stack, next_var_id, context)?;
+                        let literal = Literal::from_signed_term(inline_term, !negate);
                         return Ok(Cnf::from_literal(literal));
                     }
 
@@ -678,8 +678,8 @@ impl<'a> Clausifier<'a> {
                 }
 
                 // Everything else must normalize to a single signed literal.
-                let simple_term = self.term_to_simple_term(term, stack, next_var_id, context)?;
-                let literal = Literal::from_signed_term(simple_term, !negate);
+                let inline_term = self.term_to_inline_term(term, stack, next_var_id, context)?;
+                let literal = Literal::from_signed_term(inline_term, !negate);
                 Ok(Cnf::from_literal(literal))
             }
         }
@@ -735,17 +735,17 @@ impl<'a> Clausifier<'a> {
         Ok(left.or(right))
     }
 
-    fn try_simple_term_to_term(&self, term: &Term) -> Result<Option<Term>, String> {
-        match self.try_simple_term_to_signed_term(term)? {
+    fn try_inline_term_to_term(&self, term: &Term) -> Result<Option<Term>, String> {
+        match self.try_inline_term_to_signed_term(term)? {
             Some((t, true)) => Ok(Some(t)),
             Some((_t, false)) => Ok(None),
             None => Ok(None),
         }
     }
 
-    fn try_simple_term_to_signed_term(&self, term: &Term) -> Result<Option<(Term, bool)>, String> {
+    fn try_inline_term_to_signed_term(&self, term: &Term) -> Result<Option<(Term, bool)>, String> {
         if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
-            return match self.try_simple_term_to_signed_term(&args[0])? {
+            return match self.try_inline_term_to_signed_term(&args[0])? {
                 None => Ok(None),
                 Some((t, sign)) => Ok(Some((t, !sign))),
             };
@@ -777,14 +777,14 @@ impl<'a> Clausifier<'a> {
 
                 if let Some((function, arg_terms)) = term.as_ref().split_application_multi() {
                     let function = function.to_owned();
-                    let func_term = match self.try_simple_term_to_term(&function)? {
+                    let func_term = match self.try_inline_term_to_term(&function)? {
                         Some(t) => t,
                         None => return Ok(None),
                     };
                     let head = *func_term.get_head_atom();
                     let mut args = func_term.args().to_vec();
                     for arg in arg_terms {
-                        let arg_term = match self.try_simple_term_to_term(&arg)? {
+                        let arg_term = match self.try_inline_term_to_term(&arg)? {
                             Some(t) => t,
                             None => return Ok(None),
                         };
@@ -989,9 +989,9 @@ impl<'a> Clausifier<'a> {
         }
 
         if left_type == Term::bool_type() {
-            if let Some((left_term, left_sign)) = self.try_simple_term_to_signed_term(left)? {
+            if let Some((left_term, left_sign)) = self.try_inline_term_to_signed_term(left)? {
                 if let Some((right_term, right_sign)) =
-                    self.try_simple_term_to_signed_term(right)?
+                    self.try_inline_term_to_signed_term(right)?
                 {
                     let positive = (left_sign == right_sign) ^ negate;
                     let literal = Literal::new(positive, left_term, right_term);
@@ -1032,7 +1032,7 @@ impl<'a> Clausifier<'a> {
 
         // Keep complex boolean arguments inline instead of forcing atomization.
         let term_type = self.term_type_for_normalization(term, context);
-        if term_type == Term::bool_type() && self.try_simple_term_to_term(term)?.is_none() {
+        if term_type == Term::bool_type() && self.try_inline_term_to_term(term)?.is_none() {
             // Keep complex booleans inline as terms.
             return Ok(ExtendedTerm::Term(term.clone()));
         }
@@ -1201,8 +1201,8 @@ impl<'a> Clausifier<'a> {
 
                 let term_type = self.term_type_for_normalization(term, context);
                 if term_type == Term::bool_type() {
-                    if let Some(simple) = self.try_simple_term_to_term(term)? {
-                        return Ok(ExtendedTerm::Term(simple));
+                    if let Some(inline_term) = self.try_inline_term_to_term(term)? {
+                        return Ok(ExtendedTerm::Term(inline_term));
                     }
                     // Keep complex booleans inline as terms.
                     Ok(ExtendedTerm::Term(term.clone()))
@@ -1213,15 +1213,15 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    fn term_to_simple_term(
+    fn term_to_inline_term(
         &mut self,
         term: &Term,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
     ) -> Result<Term, String> {
-        if let Some(simple) = self.try_simple_term_to_term(term)? {
-            return Ok(simple);
+        if let Some(inline_term) = self.try_inline_term_to_term(term)? {
+            return Ok(inline_term);
         }
         let ext = self.term_to_extended_term(term, stack, next_var_id, context)?;
         self.extended_term_to_term(ext, context)
@@ -1234,7 +1234,7 @@ impl<'a> Clausifier<'a> {
     /// variable IDs are not canonicalized yet.
     ///
     /// Calling `Clause::normalized()` afterwards should produce the fully normalized clause.
-    fn clausify_term_to_denormalized_clauses(
+    fn term_to_pre_normalized_checker_clauses(
         &mut self,
         term: &Term,
     ) -> Result<Vec<Clause>, String> {
@@ -1263,11 +1263,11 @@ impl<'a> Clausifier<'a> {
         Ok(output)
     }
 
-    /// Convert a term expression into a simple kernel term.
+    /// Convert a term expression into the checker's inline single-term form.
     ///
-    /// This only succeeds for terms that are representable in simple-term form.
-    fn clausify_term_to_simple_term(&mut self, term: &Term) -> Result<Term, String> {
-        match self.try_simple_term_to_signed_term(term)? {
+    /// This only succeeds for terms that are representable without introducing clause structure.
+    fn term_to_checker_inline_term(&mut self, term: &Term) -> Result<Term, String> {
+        match self.try_inline_term_to_signed_term(term)? {
             Some((term, true)) => Ok(term),
             // `false` is represented as `not true` in signed-term form.
             Some((term, false)) if term == Term::new_true() => Ok(Term::new_false()),
@@ -1281,7 +1281,7 @@ impl<'a> Clausifier<'a> {
                     return Ok(term.clone());
                 }
                 Err(format!(
-                    "term cannot be represented as a simple term (has_free_var={}, has_bound_var={})",
+                    "term cannot be represented as a checker inline term (has_free_var={}, has_bound_var={})",
                     term.has_free_variable(),
                     term.has_bound_variable()
                 ))
@@ -1291,12 +1291,12 @@ impl<'a> Clausifier<'a> {
 
     /// Convert a claim argument term for `claim_with_args` parsing.
     ///
-    /// Prefer simple-term encoding when available (to preserve existing certificate shape),
+    /// Prefer inline checker-term encoding when available (to preserve existing certificate shape),
     /// but allow richer closed terms (for example lambdas) so cert parsing can round-trip
     /// generated witnesses.
-    fn clausify_term_for_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
-        match self.clausify_term_to_simple_term(term) {
-            Ok(simple) => Ok(simple),
+    fn term_to_claim_arg_shape(&mut self, term: &Term) -> Result<Term, String> {
+        match self.term_to_checker_inline_term(term) {
+            Ok(inline_term) => Ok(inline_term),
             Err(_) if !term.has_free_variable() => Ok(term.clone()),
             Err(e) => Err(e),
         }
@@ -1380,7 +1380,7 @@ impl KernelContext {
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
-        view.clausify_term_to_denormalized_clauses(term)
+        view.term_to_pre_normalized_checker_clauses(term)
     }
 
     /// Kernel-owned entry point for converting a term to the checker's single-term inline form.
@@ -1390,13 +1390,13 @@ impl KernelContext {
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Term, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
-        view.clausify_term_to_simple_term(term)
+        view.term_to_checker_inline_term(term)
     }
 
     /// Kernel-owned entry point for converting a term to claim-argument form.
     pub fn term_to_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
         let mut view = Clausifier::new_mut(self, None);
-        view.clausify_term_for_claim_arg(term)
+        view.term_to_claim_arg_shape(term)
     }
 }
 
@@ -1420,7 +1420,7 @@ mod tests {
         );
         let clauses = {
             let mut view = Clausifier::new_mut(&mut kernel_context, None);
-            view.clausify_term_to_denormalized_clauses(&Term::not(forall_term))
+            view.term_to_pre_normalized_checker_clauses(&Term::not(forall_term))
                 .expect("negated forall should clausify")
         };
 

@@ -503,6 +503,20 @@ impl VariableMap {
         Clause::from_literals_unnormalized(literals, &output_context)
     }
 
+    /// Like `specialize_clause`, but compacts surviving free-variable IDs to remove gaps.
+    ///
+    /// This preserves literal shape and does not do full clause normalization; it only rewrites
+    /// local-variable numbering so replay/display paths can compare structurally equivalent
+    /// specialized clauses without depending on sparse variable IDs.
+    pub fn specialize_clause_with_compact_vars(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Clause {
+        self.specialize_clause(clause, kernel_context)
+            .compacted_var_ids_preserving_literal_shape()
+    }
+
     /// Like specialize_clause, but uses a separate context for looking up types in replacement terms.
     /// This is needed when the VariableMap's replacement terms were created with
     /// variables from a different context than the clause being specialized.
@@ -531,6 +545,20 @@ impl VariableMap {
             .map(|lit| self.specialize_literal(lit, input_context, &output_context, kernel_context))
             .collect();
         Clause::from_literals_unnormalized(literals, &output_context)
+    }
+
+    /// Like `specialize_clause_with_replacement_context`, but compacts surviving free-variable
+    /// IDs to remove gaps.
+    ///
+    /// This preserves literal shape and does not do full clause normalization.
+    pub fn specialize_clause_with_replacement_context_and_compact_vars(
+        &self,
+        clause: &Clause,
+        replacement_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Clause {
+        self.specialize_clause_with_replacement_context(clause, replacement_context, kernel_context)
+            .compacted_var_ids_preserving_literal_shape()
     }
 
     pub fn output_has_any_variable(&self) -> bool {
@@ -652,6 +680,35 @@ impl fmt::Display for VariableMap {
 mod tests {
     use super::*;
     use crate::kernel::literal::Literal;
+
+    #[test]
+    fn test_specialize_clause_with_compact_vars_removes_gaps() {
+        let kernel_context = KernelContext::new();
+        let clause = Clause::from_literals_unnormalized(
+            vec![
+                Literal::positive(Term::new_variable(0)),
+                Literal::positive(Term::new_variable(2)),
+            ],
+            &LocalContext::from_types(vec![
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+            ]),
+        );
+
+        let specialized =
+            VariableMap::new().specialize_clause_with_compact_vars(&clause, &kernel_context);
+
+        assert_eq!(specialized.get_local_context().len(), 2);
+        assert!(specialized
+            .literals
+            .iter()
+            .any(|lit| lit.left == Term::new_variable(0)));
+        assert!(specialized
+            .literals
+            .iter()
+            .any(|lit| lit.left == Term::new_variable(1)));
+    }
 
     #[test]
     fn test_match_terms_with_lambda_bound_variable_does_not_panic() {

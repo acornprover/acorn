@@ -628,26 +628,20 @@ impl CodeGenerator<'_> {
         kernel_context: &mut KernelContext,
         steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
-        let mut clause = var_map.specialize_clause_with_replacement_context(
+        let mut clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
             &generic,
             replacement_context,
             kernel_context,
         );
 
-        // Normalize variable IDs to ensure they are in order (0, 1, 2, ...) with no gaps.
-        // This is needed because specialize_clause may produce clauses with gaps in variable
-        // indices when some variables are replaced with constants.
-        clause.normalize_var_ids_no_flip();
-
         self.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
         let clause_context = clause.get_local_context().clone();
         let inhabitant_var_map = self.build_inhabitant_var_map(kernel_context, &clause)?;
-        clause = inhabitant_var_map.specialize_clause_with_replacement_context(
+        clause = inhabitant_var_map.specialize_clause_with_replacement_context_and_compact_vars(
             &clause,
             &clause_context,
             kernel_context,
         );
-        clause.normalize_var_ids_no_flip();
 
         Self::ensure_no_foreign_scoped_constants_in_clause(
             &clause,
@@ -852,13 +846,11 @@ impl CodeGenerator<'_> {
                 clause
             )));
         }
-        let mut replayed = claim_var_map.specialize_clause(generic, kernel_context);
-        replayed.normalize_var_ids_no_flip();
+        let replayed = claim_var_map.specialize_clause_with_compact_vars(generic, kernel_context);
         // Compare against the concrete clause after only applying inferred replacement-type
         // substitutions; applying claim_var_map here can incorrectly capture overlapping IDs.
-        let mut concretized_clause =
-            replacement_type_map.specialize_clause(&clause, kernel_context);
-        concretized_clause.normalize_var_ids_no_flip();
+        let concretized_clause =
+            replacement_type_map.specialize_clause_with_compact_vars(&clause, kernel_context);
         if replayed != concretized_clause {
             return Err(Error::GeneratedBadCode(format!(
                 "certificate claim map replay mismatch: generic clause '{}' with map '{}' replays to '{}', but concrete clause is '{}'",
@@ -1823,7 +1815,7 @@ mod tests {
             })
             .expect("expected claim step");
         let mapped_x1 = claim
-            .var_map
+            .var_map()
             .get_mapping(1)
             .expect("expected x1 mapping in claim");
         assert!(
