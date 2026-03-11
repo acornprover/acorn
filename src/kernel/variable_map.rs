@@ -6,6 +6,51 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::{Decomposition, Term, TermRef};
+use crate::kernel::types::TypeclassId;
+
+fn resolve_typeclass_constraint(type_term: TermRef, context: &LocalContext) -> Option<TypeclassId> {
+    if let Some(tc_id) = type_term.as_typeclass() {
+        return Some(tc_id);
+    }
+    let var_id = type_term.atomic_variable()?;
+    let var_type = context.get_var_type(var_id as usize)?;
+    resolve_typeclass_constraint(var_type.as_ref(), context)
+}
+
+fn typeclass_binding_is_compatible(
+    actual_tc_id: TypeclassId,
+    required_tc_id: TypeclassId,
+    kernel_context: &KernelContext,
+) -> bool {
+    actual_tc_id == required_tc_id
+        || kernel_context
+            .type_store
+            .typeclass_extends(actual_tc_id, required_tc_id)
+}
+
+fn type_term_satisfies_typeclass_constraint(
+    type_term: TermRef,
+    context: &LocalContext,
+    kernel_context: &KernelContext,
+    required_tc_id: TypeclassId,
+) -> bool {
+    if let Some(ground_id) = type_term.as_type_atom() {
+        return kernel_context
+            .type_store
+            .is_instance_of(ground_id, required_tc_id);
+    }
+
+    let Some(var_id) = type_term.atomic_variable() else {
+        return false;
+    };
+    let Some(var_type) = context.get_var_type(var_id as usize) else {
+        return false;
+    };
+    let Some(actual_tc_id) = resolve_typeclass_constraint(var_type.as_ref(), context) else {
+        return false;
+    };
+    typeclass_binding_is_compatible(actual_tc_id, required_tc_id, kernel_context)
+}
 
 // A VariableMap maintains a mapping from variables to terms, allowing us to turn a more general term
 // into a more specific one by substituting variables.
@@ -131,6 +176,18 @@ impl VariableMap {
                 };
                 if var_type != &special_type {
                     return false;
+                }
+                if let Some(required_tc_id) =
+                    resolve_typeclass_constraint(var_type.as_ref(), general_context)
+                {
+                    if !type_term_satisfies_typeclass_constraint(
+                        special_type.as_ref(),
+                        special_context,
+                        kernel_context,
+                        required_tc_id,
+                    ) {
+                        return false;
+                    }
                 }
                 self.match_var(*i, special)
             }

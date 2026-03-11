@@ -1765,10 +1765,8 @@ mod tests {
         )
         .expect("claim-with-args parsing should succeed");
 
-        match step {
-            CertificateStep::Claim(claim) => assert_eq!(claim, expected),
-            _ => panic!("expected claim step"),
-        }
+        let CertificateStep::Claim(claim) = step;
+        assert_eq!(claim, expected);
     }
 
     #[test]
@@ -1796,9 +1794,7 @@ mod tests {
         )
         .expect("higher-order claim-with-args parsing should succeed");
 
-        let CertificateStep::Claim(claim) = step else {
-            panic!("expected claim step");
-        };
+        let CertificateStep::Claim(claim) = step;
         assert_eq!(claim.var_map.len(), 1);
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
@@ -1861,10 +1857,8 @@ mod tests {
         )
         .expect("claim-with-type-args parsing should succeed");
 
-        match step {
-            CertificateStep::Claim(claim) => assert_eq!(claim, expected),
-            _ => panic!("expected claim step"),
-        }
+        let CertificateStep::Claim(claim) = step;
+        assert_eq!(claim, expected);
     }
 
     #[test]
@@ -1888,10 +1882,7 @@ mod tests {
         )
         .expect("type-only claim-with-args parsing should succeed");
 
-        let claim = match step {
-            CertificateStep::Claim(claim) => claim,
-            _ => panic!("expected claim step"),
-        };
+        let CertificateStep::Claim(claim) = step;
         assert!(claim.var_map.len() > 0);
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
@@ -1940,10 +1931,8 @@ mod tests {
         )
         .expect("serialized line should parse even when x0/x1 are already bound");
 
-        match parsed {
-            CertificateStep::Claim(roundtrip_claim) => assert_eq!(roundtrip_claim, claim),
-            _ => panic!("expected claim step"),
-        }
+        let CertificateStep::Claim(roundtrip_claim) = parsed;
+        assert_eq!(roundtrip_claim, claim);
     }
 
     #[test]
@@ -2012,9 +2001,7 @@ mod tests {
         )
         .expect("claim-with-args parsing should succeed");
 
-        let CertificateStep::Claim(claim) = step else {
-            panic!("expected claim step");
-        };
+        let CertificateStep::Claim(claim) = step;
         let specialized = claim
             .var_map
             .specialize_clause(&claim.clause, kernel_context_cow.as_ref());
@@ -2048,10 +2035,8 @@ mod tests {
         )
         .expect("plain claim parsing should succeed");
 
-        match step {
-            CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
-            _ => panic!("expected claim step"),
-        }
+        let CertificateStep::Claim(claim) = step;
+        assert_eq!(claim.var_map.len(), 0);
     }
 
     #[test]
@@ -2073,10 +2058,8 @@ mod tests {
         )
         .expect("choose claim parsing should succeed for certificate parsing");
 
-        match step {
-            CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
-            _ => panic!("expected claim step"),
-        }
+        let CertificateStep::Claim(claim) = step;
+        assert_eq!(claim.var_map.len(), 0);
     }
 
     #[test]
@@ -2100,9 +2083,7 @@ mod tests {
         )
         .expect("closed binder-heavy claim should parse");
 
-        let CertificateStep::Claim(claim) = step else {
-            panic!("expected claim step");
-        };
+        let CertificateStep::Claim(claim) = step;
         assert_eq!(claim.var_map.len(), 0);
         assert!(claim.clause.get_local_context().is_empty());
     }
@@ -2358,17 +2339,15 @@ mod tests {
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-        match Certificate::parse_code_line(
+        let step = Certificate::parse_code_line(
             &proof[0],
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
         )
-        .expect("parenthesized binder-led claim should parse")
-        {
-            CertificateStep::Claim(claim) => assert_eq!(claim.var_map.len(), 0),
-            _ => panic!("expected claim step"),
-        }
+        .expect("parenthesized binder-led claim should parse");
+        let CertificateStep::Claim(claim) = step;
+        assert_eq!(claim.var_map.len(), 0);
     }
 
     #[test]
@@ -2486,17 +2465,14 @@ theorem goal(k: Bool) {\n\
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Owned(kernel_context);
-        let parsed = match Certificate::parse_code_line(
+        let step = Certificate::parse_code_line(
             line,
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
         )
-        .expect("claim-with-args line should parse in a goal with local bindings")
-        {
-            CertificateStep::Claim(claim) => claim,
-            _ => panic!("expected claim step"),
-        };
+        .expect("claim-with-args line should parse in a goal with local bindings");
+        let CertificateStep::Claim(parsed) = step;
         assert_eq!(parsed.var_map.len(), 2);
 
         let serialized =

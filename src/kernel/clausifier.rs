@@ -331,6 +331,39 @@ impl<'a> Clausifier<'a> {
         )
     }
 
+    /// Clausify a term into exactly one initial clause shape.
+    ///
+    /// Leading foralls are opened as free variables. At the top level we collect only
+    /// disjunctive literals, so formulas like `a or b` or `not (a and b)` become one
+    /// clause, while formulas that are not clause-shaped stay inline as one signed literal.
+    pub fn clausify_term_to_single_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
+        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
+        let mut stack = vec![];
+        let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
+        if let Some(args) = self.split_symbol_application(&opened, Symbol::Eq, 3) {
+            if self.split_match_eliminator_application(&args[1]).is_some()
+                || self.split_match_eliminator_application(&args[2]).is_some()
+            {
+                // Match eliminator equalities still rely on the old equality-to-CNF lowering
+                // to produce constructor-guarded case clauses.
+                return self.shallow_clausify_term(term);
+            }
+        }
+        let literals = self.shallow_term_to_disjunctive_literals(
+            &opened,
+            true,
+            &mut stack,
+            &mut next_var_id,
+            &mut context,
+        )?;
+        let clause = Clause::new_with_pinned_vars(literals, &context, pinned);
+        if clause.is_tautology() {
+            Ok(vec![])
+        } else {
+            Ok(vec![clause])
+        }
+    }
+
     pub fn preserve_term_as_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];

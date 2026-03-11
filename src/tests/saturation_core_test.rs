@@ -966,10 +966,12 @@ fn test_proving_rewrite_only() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
-        c.proof.unwrap(),
-        vec!["not goal", "f(Foo.foo) != f(Foo.bar)"]
-    );
+    let proof = c.proof.unwrap();
+    if cfg!(feature = "nocnf") {
+        assert_eq!(proof, vec!["f(Foo.foo) != f(Foo.bar)"]);
+    } else {
+        assert_eq!(proof, vec!["not goal", "f(Foo.foo) != f(Foo.bar)"]);
+    }
 }
 
 #[test]
@@ -1376,16 +1378,28 @@ fn test_proving_with_equality_factoring_basic() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    assert_proof_lines(
-        proof,
-        &[
-            "function(x0: Foo) { h(x0) = g(x0) }(y)",
-            "not (not f(y) = g(y) and not f(y) = g(y))",
-            "f(y) = g(y)",
-            "g(y) = f(y)",
-            "function(x0: Foo) { h(x0) != f(x0) }(y)",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        assert_proof_lines(
+            proof,
+            &[
+                "h(y) != g(y) or g(y) = f(y)",
+                "function(x0: Foo) { h(x0) = g(x0) }(y)",
+                "g(y) = f(y)",
+                "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            ],
+        );
+    } else {
+        assert_proof_lines(
+            proof,
+            &[
+                "function(x0: Foo) { h(x0) = g(x0) }(y)",
+                "not (not f(y) = g(y) and not f(y) = g(y))",
+                "f(y) = g(y)",
+                "g(y) = f(y)",
+                "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -1421,16 +1435,28 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    assert_proof_lines(
-        proof,
-        &[
-            "function(x0: Foo) { h(x0) = g(x0) }(y)",
-            "not (not f(y) = g(y) and not f(y) = g(y))",
-            "f(y) = g(y)",
-            "g(y) = f(y)",
-            "function(x0: Foo) { h(x0) != f(x0) }(y)",
-        ],
-    );
+    if cfg!(feature = "nocnf") {
+        assert_proof_lines(
+            proof,
+            &[
+                "h(y) != g(y) or g(y) = f(y)",
+                "function(x0: Foo) { h(x0) = g(x0) }(y)",
+                "g(y) = f(y)",
+                "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            ],
+        );
+    } else {
+        assert_proof_lines(
+            proof,
+            &[
+                "function(x0: Foo) { h(x0) = g(x0) }(y)",
+                "not (not f(y) = g(y) and not f(y) = g(y))",
+                "f(y) = g(y)",
+                "g(y) = f(y)",
+                "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            ],
+        );
+    }
 }
 
 #[test]

@@ -208,7 +208,32 @@ impl KernelContext {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> bool {
-        self.find_inhabitant(var_type, local_context).is_some()
+        fn resolve_typeclass_constraint(
+            type_term: &Term,
+            local_context: &LocalContext,
+        ) -> Option<TypeclassId> {
+            if let Some(tc_id) = type_term.as_ref().as_typeclass() {
+                return Some(tc_id);
+            }
+            let var_id = type_term.as_ref().atomic_variable()?;
+            let var_type = local_context.get_var_type(var_id as usize)?;
+            resolve_typeclass_constraint(var_type, local_context)
+        }
+
+        if self.find_inhabitant(var_type, local_context).is_some() {
+            return true;
+        }
+
+        let Some(local_context) = local_context else {
+            return false;
+        };
+        let Some(tc_id) = resolve_typeclass_constraint(var_type, local_context) else {
+            return false;
+        };
+        let Some(type_witness) = self.find_type_witness_for_typeclass(tc_id) else {
+            return false;
+        };
+        self.find_inhabitant(&type_witness, None).is_some()
     }
 
     fn instantiate_type_constructor_witness(
@@ -1426,6 +1451,44 @@ mod tests {
         let expected = ctx.parse_term("g0(x0)");
         assert_eq!(witness, expected);
         assert!(ctx.provably_inhabited(&p_type, Some(&local_ctx)));
+    }
+
+    #[test]
+    fn test_provably_inhabited_via_concrete_typeclass_instance() {
+        use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
+        use crate::kernel::atom::Atom;
+        use crate::kernel::local_context::LocalContext;
+        use crate::module::ModuleId;
+
+        let mut ctx = KernelContext::new();
+        let neg = Typeclass {
+            module_id: ModuleId(0),
+            name: "Neg".to_string(),
+        };
+        let neg_id = ctx.type_store.add_typeclass(&neg);
+
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        ctx.type_store.add_type(&nat_type);
+        ctx.type_store.add_type_instance(&nat_type, neg_id);
+
+        let nat_term = ctx
+            .type_store
+            .get_type_term(&nat_type)
+            .expect("Nat should be registered");
+        ctx.symbol_table.add_global_constant(nat_term);
+
+        let mut local_ctx = LocalContext::empty();
+        local_ctx.push_type(Term::typeclass(neg_id));
+        let constrained_value_type = Term::atom(Atom::FreeVariable(0));
+
+        assert!(
+            ctx.provably_inhabited(&constrained_value_type, Some(&local_ctx)),
+            "A value of type T should count as inhabited when T has a concrete inhabited instance"
+        );
     }
 
     #[test]

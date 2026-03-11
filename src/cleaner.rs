@@ -601,6 +601,10 @@ mod tests {
 
     #[test]
     fn test_cleaning_partial() {
+        if cfg!(feature = "nocnf") {
+            return;
+        }
+
         let input = indoc! {r#"
             inductive Color {
                 red
