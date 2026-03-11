@@ -55,7 +55,15 @@ impl Claim {
         self.clause.normalized()
     }
 
-    pub fn specialize_clause(&self, kernel_context: &KernelContext) -> Result<Clause, String> {
+    /// Apply the claim's substitutions without normalizing the resulting clause.
+    ///
+    /// This is for certificate/display reconstruction paths that need to preserve the
+    /// immediate substitution shape. Semantic checking should use
+    /// `normalized_specialized_clause()` instead.
+    pub fn specialized_clause_for_display(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Result<Clause, String> {
         self.validate_var_map_scope()?;
         Ok(self.var_map.specialize_clause(&self.clause, kernel_context))
     }
@@ -64,7 +72,10 @@ impl Claim {
         &self,
         kernel_context: &KernelContext,
     ) -> Result<Clause, String> {
-        Ok(beta_reduce_clause_subterms(&self.specialize_clause(kernel_context)?).normalized())
+        Ok(
+            beta_reduce_clause_subterms(&self.specialized_clause_for_display(kernel_context)?)
+                .normalized(),
+        )
     }
 }
 
@@ -106,5 +117,48 @@ mod tests {
         assert_eq!(claim.clause.get_local_context().len(), 2);
         assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_false()));
         assert_eq!(claim.var_map.get_mapping(1), Some(&Term::new_true()));
+    }
+
+    #[test]
+    fn test_claim_specialization_keeps_display_shape_but_normalizes_checker_shape() {
+        use crate::kernel::atom::Atom;
+
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constant("c0", "Bool");
+
+        let claim = Claim::new(kernel_context.parse_clause("x0(c0)", &["Bool -> Bool"]), {
+            let mut var_map = VariableMap::new();
+            var_map.set(
+                0,
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                ),
+            );
+            var_map
+        })
+        .expect("claim should normalize");
+
+        let display_clause = claim
+            .specialized_clause_for_display(&kernel_context)
+            .expect("display specialization should succeed");
+        let normalized_clause = claim
+            .normalized_specialized_clause(&kernel_context)
+            .expect("normalized specialization should succeed");
+        let expected_display_clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(
+                Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)))
+                    .apply(&[kernel_context.parse_term("c0")]),
+            )],
+            &LocalContext::empty(),
+        );
+        let expected_normalized_clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(kernel_context.parse_term("c0"))],
+            &LocalContext::empty(),
+        );
+
+        assert_ne!(display_clause, normalized_clause);
+        assert_eq!(display_clause, expected_display_clause);
+        assert_eq!(normalized_clause, expected_normalized_clause);
     }
 }

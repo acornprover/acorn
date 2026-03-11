@@ -880,8 +880,8 @@ impl CodeGenerator<'_> {
         match step {
             CertificateStep::Claim(claim) => {
                 let clause = claim
-                    .var_map
-                    .specialize_clause(&claim.clause, kernel_context);
+                    .specialized_clause_for_display(kernel_context)
+                    .map_err(Error::GeneratedBadCode)?;
                 let value = kernel_context.denormalize(&clause, None, None, true);
                 self.value_to_code(&value)
             }
