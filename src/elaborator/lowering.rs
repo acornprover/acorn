@@ -21,7 +21,7 @@ use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::elaborate_value_to_term;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
-use crate::kernel::clausifier::Clausifier;
+use crate::kernel::clausifier::TermLoweringMode;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
@@ -98,35 +98,29 @@ impl KernelContext {
 }
 
 impl KernelContext {
+    fn source_term_lowering_mode(source: &Source) -> TermLoweringMode {
+        if source.should_clausify_shallowly() {
+            TermLoweringMode::ClausifyShallowly
+        } else {
+            TermLoweringMode::PreserveAsLiteral
+        }
+    }
+
     /// Lower a term-level proposition into clauses.
     ///
     /// This is the term-native backend for proposition lowering.
     fn lower_term_to_clauses(
         &mut self,
         term: &Term,
-        _ctype: NewConstantType,
         source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         term.validate();
-
-        let clauses = {
-            let mut view = Clausifier::new_mut(self, type_var_map.clone());
-            #[cfg(feature = "nocnf")]
-            {
-                let _ = source;
-                view.clausify_term_to_single_clause(term)?
-            }
-            #[cfg(not(feature = "nocnf"))]
-            {
-                if source.should_clausify_shallowly() {
-                    view.shallow_clausify_term(term)?
-                } else {
-                    view.preserve_term_as_clause(term)?
-                }
-            }
-        };
-        Ok(clauses)
+        self.lower_normalized_term_to_clauses(
+            term,
+            type_var_map,
+            Self::source_term_lowering_mode(source),
+        )
     }
 
     /// Lowers a value proposition to clauses via:
@@ -148,7 +142,7 @@ impl KernelContext {
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        self.lower_term_to_clauses(&term, ctype, source, type_var_map)
+        self.lower_term_to_clauses(&term, source, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.

@@ -36,6 +36,16 @@ pub struct Clausifier<'a> {
     type_var_map: Option<HashMap<String, (AtomId, Term)>>,
 }
 
+/// How a normalized top-level term should be lowered into initial clauses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TermLoweringMode {
+    /// Lower clause-shaped boolean structure at the top level.
+    ClausifyShallowly,
+
+    /// Preserve the normalized term as a single top-level literal clause.
+    PreserveAsLiteral,
+}
+
 impl<'a> Clausifier<'a> {
     /// Create a new Clausifier with immutable access.
     pub fn new_ref(
@@ -56,6 +66,26 @@ impl<'a> Clausifier<'a> {
         Clausifier {
             inner: ClausifierContext::Mut(kernel_context),
             type_var_map,
+        }
+    }
+
+    /// Lower a normalized term into initial clause form using the selected top-level policy.
+    pub fn lower_normalized_term_to_clauses(
+        &mut self,
+        term: &Term,
+        mode: TermLoweringMode,
+    ) -> Result<Vec<Clause>, String> {
+        #[cfg(feature = "nocnf")]
+        {
+            let _ = mode;
+            self.clausify_term_to_single_clause(term)
+        }
+        #[cfg(not(feature = "nocnf"))]
+        {
+            match mode {
+                TermLoweringMode::ClausifyShallowly => self.shallow_clausify_term(term),
+                TermLoweringMode::PreserveAsLiteral => self.preserve_term_as_clause(term),
+            }
         }
     }
 
@@ -1439,9 +1469,22 @@ impl<'a> Clausifier<'a> {
     }
 }
 
+impl KernelContext {
+    /// Kernel-owned entry point for lowering an already-normalized top-level term to clauses.
+    pub fn lower_normalized_term_to_clauses(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+        mode: TermLoweringMode,
+    ) -> Result<Vec<Clause>, String> {
+        let mut view = Clausifier::new_mut(self, type_var_map);
+        view.lower_normalized_term_to_clauses(term, mode)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Clausifier;
+    use super::{Clausifier, TermLoweringMode};
     use crate::kernel::atom::Atom;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::term::{Decomposition, Term};
@@ -1482,5 +1525,27 @@ mod tests {
             "expected literal to keep the forall term inline: {:?}",
             clauses[0].literals[0]
         );
+    }
+
+    #[test]
+    fn test_lower_normalized_term_to_clauses_respects_mode() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1"], "Bool");
+        let term = Term::or(
+            kernel_context.parse_term("c0"),
+            kernel_context.parse_term("c1"),
+        );
+
+        let preserved = kernel_context
+            .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::PreserveAsLiteral)
+            .expect("preserve-mode lowering should succeed");
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(preserved[0].literals.len(), 1);
+
+        let clausified = kernel_context
+            .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::ClausifyShallowly)
+            .expect("shallow clausification should succeed");
+        assert_eq!(clausified.len(), 1);
+        assert_eq!(clausified[0].literals.len(), 2);
     }
 }
