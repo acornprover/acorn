@@ -155,8 +155,8 @@ fn make_simplified(
             new_literals.push(literal);
         }
     }
-    let (clause, var_ids) = Clause::normalize_with_var_ids(new_literals, passive_context);
-    Some((clause, var_ids, simp_var_maps))
+    let normalized = Clause::normalize_with_trace(new_literals, passive_context);
+    Some((normalized.clause, normalized.var_ids, simp_var_maps))
 }
 
 impl PassiveSet {

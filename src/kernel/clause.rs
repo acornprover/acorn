@@ -19,7 +19,12 @@ pub struct Clause {
     pub context: LocalContext,
 }
 
-pub struct BooleanReductionResult {
+/// A normalized clause together with the variable-renumbering trace used to produce it.
+///
+/// `var_ids[new_id] = old_pre_norm_id`, and `pre_norm_context` records the local-variable
+/// types before renumbering/elimination so premise reconstruction can assign types to
+/// eliminated variables later.
+pub struct NormalizedClauseTrace {
     pub clause: Clause,
     pub var_ids: Vec<AtomId>,
     pub pre_norm_context: LocalContext,
@@ -140,6 +145,20 @@ impl Clause {
         context: &LocalContext,
     ) -> (Clause, Vec<AtomId>) {
         Self::normalize_with_var_ids_prefilled(literals, context, vec![])
+    }
+
+    /// Normalize literals into a clause and keep the variable-renumbering trace.
+    pub(crate) fn normalize_with_trace(
+        literals: Vec<Literal>,
+        context: &LocalContext,
+    ) -> NormalizedClauseTrace {
+        let pre_norm_context = context.clone();
+        let (clause, var_ids) = Self::normalize_with_var_ids(literals, &pre_norm_context);
+        NormalizedClauseTrace {
+            clause,
+            var_ids,
+            pre_norm_context,
+        }
     }
 
     /// Sorts literals.
@@ -995,7 +1014,7 @@ impl Clause {
         literals: Vec<Literal>,
         context: LocalContext,
         pinned_old_var_count: usize,
-    ) -> BooleanReductionResult {
+    ) -> NormalizedClauseTrace {
         let (_, default_var_ids) = Clause::normalize_with_var_ids(literals.clone(), &context);
         let pinned_old_vars: Vec<AtomId> = default_var_ids
             .iter()
@@ -1004,7 +1023,7 @@ impl Clause {
             .collect();
         let (clause, var_ids) =
             Clause::normalize_with_var_ids_prefilled(literals, &context, pinned_old_vars);
-        BooleanReductionResult {
+        NormalizedClauseTrace {
             clause,
             var_ids,
             pre_norm_context: context,
@@ -1016,7 +1035,7 @@ impl Clause {
         index: usize,
         replacements: Vec<Vec<Literal>>,
         context: &LocalContext,
-    ) -> Vec<BooleanReductionResult> {
+    ) -> Vec<NormalizedClauseTrace> {
         self.with_replaced_literal(index, replacements)
             .into_iter()
             .map(|literals| {
@@ -1040,7 +1059,7 @@ impl Clause {
     pub fn find_boolean_reductions(
         &self,
         kernel_context: &KernelContext,
-    ) -> Vec<BooleanReductionResult> {
+    ) -> Vec<NormalizedClauseTrace> {
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];

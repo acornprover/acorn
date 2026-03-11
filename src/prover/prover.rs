@@ -424,8 +424,7 @@ impl Prover {
             // specific equality used by this rewrite.
             let (literal, _flipped) =
                 Literal::new_with_flip(true, step.left_term().clone(), step.right_term().clone());
-            let (clause, _var_ids) =
-                Clause::normalize_with_var_ids(vec![literal], &LocalContext::empty());
+            let clause = Clause::new(vec![literal], &LocalContext::empty());
             if new_clauses.contains(&clause) {
                 // We already created a step for this equality
                 // TODO: is it really okay to not insert any sort of id here?

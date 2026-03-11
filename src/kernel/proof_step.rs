@@ -720,14 +720,13 @@ impl ProofStep {
             combined
         };
 
-        let (clause, var_ids) =
-            Clause::normalize_with_var_ids(vec![new_literal], &rewritten_context);
+        let normalized = Clause::normalize_with_trace(vec![new_literal], &rewritten_context);
 
         // Build premise map: pattern gets raw var map, target is concrete (empty map)
         let premise_map = PremiseMap::new(
             vec![pattern_var_map.clone(), VariableMap::new()],
-            var_ids,
-            rewritten_context,
+            normalized.var_ids,
+            normalized.pre_norm_context,
         );
 
         let truthiness = pattern_step.truthiness.combine(target_step.truthiness);
@@ -746,7 +745,14 @@ impl ProofStep {
             dependency_depth + 1
         };
 
-        Self::new_with_normalized_clause(clause, truthiness, rule, proof_size, depth, premise_map)
+        Self::new_with_normalized_clause(
+            normalized.clause,
+            truthiness,
+            rule,
+            proof_size,
+            depth,
+            premise_map,
+        )
     }
 
     /// A proof step for finding a contradiction via a series of rewrites.

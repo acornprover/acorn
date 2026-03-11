@@ -210,7 +210,7 @@ impl ActiveSet {
     }
 
     fn boolean_reduction_is_sound(
-        reduction: &crate::kernel::clause::BooleanReductionResult,
+        reduction: &crate::kernel::clause::NormalizedClauseTrace,
         kernel_context: &KernelContext,
     ) -> bool {
         for var_id in 0..reduction.pre_norm_context.len() {
@@ -472,13 +472,14 @@ impl ActiveSet {
             }
         }
 
-        let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
+        let normalized = Clause::normalize_with_trace(literals, &context);
 
         let premise_map = PremiseMap::new(
             vec![short_var_map.clone(), long_var_map.clone()],
-            var_ids,
-            context.clone(),
+            normalized.var_ids,
+            normalized.pre_norm_context,
         );
+        let clause = normalized.clause;
 
         // Debug: validate resolution output before creating step
         // Note: use clause.get_local_context() because literals have been renormalized
@@ -915,19 +916,19 @@ impl ActiveSet {
                 continue;
             }
 
-            let (new_clause, var_ids) = Clause::normalize_with_var_ids(new_literals, &context);
+            let normalized = Clause::normalize_with_trace(new_literals, &context);
 
             // Check if normalization resulted in a tautology
-            if !new_clause.is_tautology() {
+            if !normalized.clause.is_tautology() {
                 let premise_map = PremiseMap::new(
                     vec![input_var_map.clone()],
-                    var_ids.clone(),
-                    context.clone(),
+                    normalized.var_ids,
+                    normalized.pre_norm_context,
                 );
                 let step = ProofStep::direct(
                     activated_step,
                     Rule::EqualityResolution(SingleSourceInfo { id: activated_id }),
-                    new_clause,
+                    normalized.clause,
                     premise_map,
                 );
                 answer.push(step);
@@ -986,13 +987,16 @@ impl ActiveSet {
                 continue;
             }
 
-            let context = original_context.clone();
-            let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
-            let premise_map = PremiseMap::new(vec![VariableMap::new()], var_ids, context);
+            let normalized = Clause::normalize_with_trace(literals, original_context);
+            let premise_map = PremiseMap::new(
+                vec![VariableMap::new()],
+                normalized.var_ids,
+                normalized.pre_norm_context,
+            );
             let step = ProofStep::direct(
                 activated_step,
                 Rule::Injectivity(SingleSourceInfo { id: activated_id }),
-                clause,
+                normalized.clause,
                 premise_map,
             );
             answer.push(step);
@@ -1044,13 +1048,17 @@ impl ActiveSet {
         let mut answer = vec![];
 
         if let Some(literals) = clause.find_extensionality(kernel_context) {
-            let context = activated_step.clause.get_local_context().clone();
-            let (clause, var_ids) = Clause::normalize_with_var_ids(literals, &context);
-            let premise_map = PremiseMap::new(vec![VariableMap::new()], var_ids, context);
+            let normalized =
+                Clause::normalize_with_trace(literals, activated_step.clause.get_local_context());
+            let premise_map = PremiseMap::new(
+                vec![VariableMap::new()],
+                normalized.var_ids,
+                normalized.pre_norm_context,
+            );
             let step = ProofStep::direct(
                 activated_step,
                 Rule::Extensionality(SingleSourceInfo { id: activated_id }),
-                clause,
+                normalized.clause,
                 premise_map,
             );
             answer.push(step);
@@ -1082,13 +1090,17 @@ impl ActiveSet {
 
         for (literals, output_context, input_var_map) in factorings {
             // Create the new clause using the unifier's output context
-            let (new_clause, var_ids) = Clause::normalize_with_var_ids(literals, &output_context);
+            let normalized = Clause::normalize_with_trace(literals, &output_context);
 
-            let premise_map = PremiseMap::new(vec![input_var_map.clone()], var_ids, output_context);
+            let premise_map = PremiseMap::new(
+                vec![input_var_map.clone()],
+                normalized.var_ids,
+                normalized.pre_norm_context,
+            );
             let step = ProofStep::direct(
                 activated_step,
                 Rule::EqualityFactoring(SingleSourceInfo { id: activated_id }),
-                new_clause,
+                normalized.clause,
                 premise_map,
             );
             answer.push(step);
@@ -1354,8 +1366,9 @@ impl ActiveSet {
             return Some(step);
         }
 
-        let pre_norm_context = step.clause.get_local_context().clone();
-        let (clause, var_ids) = Clause::normalize_with_var_ids(output_literals, &pre_norm_context);
+        let normalized =
+            Clause::normalize_with_trace(output_literals, step.clause.get_local_context());
+        let clause = normalized.clause;
         if clause.is_tautology() {
             return None;
         }
@@ -1377,7 +1390,11 @@ impl ActiveSet {
             })
             .collect();
 
-        let premise_map = PremiseMap::new(simplifying_var_maps, var_ids, pre_norm_context);
+        let premise_map = PremiseMap::new(
+            simplifying_var_maps,
+            normalized.var_ids,
+            normalized.pre_norm_context,
+        );
 
         // Restore the original literals so the inline step has its complete clause
         step.clause.literals = original_literals;
