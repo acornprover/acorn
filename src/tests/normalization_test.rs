@@ -108,7 +108,7 @@ fn test_tautology_elimination() {
 }
 
 #[test]
-fn test_forall_reflexive_goal_keeps_normalized_goal() {
+fn test_forall_reflexive_goal_keeps_lowered_goal() {
     let mut project = Project::new_mock();
     project.mock(
         "/mock/main.ac",
@@ -130,8 +130,8 @@ fn test_forall_reflexive_goal_keeps_normalized_goal() {
 
     let cursor = env.get_node_by_goal_name("goal");
     let normalized_goal = cursor
-        .normalized_goal()
-        .expect("reflexive forall goal should normalize");
+        .lowered_goal()
+        .expect("reflexive forall goal should lower");
     assert!(
         normalized_goal
             .steps

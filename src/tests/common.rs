@@ -31,10 +31,10 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
     };
     let node = base_env.get_node_by_goal_name(goal_name);
     let env = node.goal_env().unwrap();
-    let normalized_goal = node.normalized_goal().expect("missing normalized goal");
+    let normalized_goal = node.lowered_goal().expect("missing lowered goal");
     let mut processor = Processor::with_imports(None, base_env).unwrap();
     processor.add_module_facts(&node).unwrap();
-    processor.set_normalized_goal(normalized_goal);
+    processor.set_lowered_goal(normalized_goal);
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
 
@@ -77,11 +77,11 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
             if processor.add_module_facts(&cursor).is_err() {
                 return Outcome::Inconsistent;
             }
-            let normalized_goal = match cursor.normalized_goal() {
+            let normalized_goal = match cursor.lowered_goal() {
                 Some(n) => n,
                 None => return Outcome::Inconsistent,
             };
-            processor.set_normalized_goal(normalized_goal);
+            processor.set_lowered_goal(normalized_goal);
             let goal_kernel_context = &normalized_goal.kernel_context;
             return processor.search(ProverMode::Test, goal_kernel_context);
         }
@@ -118,9 +118,9 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         let mut processor = Processor::with_imports(None, env)?;
         processor.add_module_facts(&cursor)?;
         let normalized_goal = cursor
-            .normalized_goal()
-            .ok_or_else(|| "missing normalized goal".to_string())?;
-        processor.set_normalized_goal(normalized_goal);
+            .lowered_goal()
+            .ok_or_else(|| "missing lowered goal".to_string())?;
+        processor.set_lowered_goal(normalized_goal);
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         // This is a key difference between our verification tests, and our real verification.
@@ -145,16 +145,16 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         }
     }
 
-    // Normalize any facts after the last goal (or all facts if there are no goals).
-    // This catches normalization errors in trailing definitions.
-    // Note: the normalization pass already does this during module loading, but we keep
+    // Lower any facts after the last goal (or all facts if there are no goals).
+    // This catches lowering errors in trailing definitions.
+    // Note: the lowering pass already does this during module loading, but we keep
     // this check for test coverage.
     let first_unnormalized = last_goal_top_index.map_or(0, |i| i + 1);
     if first_unnormalized < env.nodes.len() {
-        // Ensure all facts were normalized during the normalization pass.
+        // Ensure all facts were lowered during the lowering pass.
         for node in &env.nodes {
-            if node.get_fact().is_some() && node.get_normalized_fact().is_none() {
-                return Err("missing normalized fact".to_string());
+            if node.get_fact().is_some() && node.lowered_fact().is_none() {
+                return Err("missing lowered fact".to_string());
             }
         }
     }

@@ -12,9 +12,9 @@ use crate::elaborator::block::{Block, BlockParams};
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
+use crate::elaborator::lowering::{lower_fact, lower_goal, LoweredFact};
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::node::{Node, NodeCursor};
-use crate::elaborator::normalization::{normalize_fact, normalize_goal, NormalizedFact};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::kernel_context::KernelContext;
@@ -85,14 +85,14 @@ pub struct Environment {
     /// This can be cloned to create a Processor without re-normalizing imports.
     pub import_kernel_context: Option<KernelContext>,
 
-    /// Stores normalized facts from imports.
-    pub normalized_imports: Vec<NormalizedFact>,
+    /// Stores lowered facts from imports.
+    pub lowered_imports: Vec<LoweredFact>,
 
     /// Stores the kernel context state after processing all facts.
     pub kernel_context: Option<KernelContext>,
 
-    /// Stores normalized facts from this module's nodes.
-    pub normalized_module_facts: Vec<NormalizedFact>,
+    /// Stores lowered facts from this module's nodes.
+    pub lowered_module_facts: Vec<LoweredFact>,
 }
 
 impl Environment {
@@ -113,9 +113,9 @@ impl Environment {
             at_module_beginning: true,
             last_statement_line: None,
             import_kernel_context: None,
-            normalized_imports: Vec::new(),
+            lowered_imports: Vec::new(),
             kernel_context: None,
-            normalized_module_facts: Vec::new(),
+            lowered_module_facts: Vec::new(),
         }
     }
 
@@ -137,9 +137,9 @@ impl Environment {
             at_module_beginning: false,      // Child environments are never at module beginning
             last_statement_line: None,
             import_kernel_context: None,
-            normalized_imports: Vec::new(),
+            lowered_imports: Vec::new(),
             kernel_context: None,
-            normalized_module_facts: Vec::new(),
+            lowered_module_facts: Vec::new(),
         }
     }
 
@@ -627,7 +627,7 @@ impl Environment {
     }
 
     /// Helper to collect all transitive dependencies for this environment.
-    /// Used by the normalization pass since the module isn't in the project yet.
+    /// Used by the lowering pass since the module isn't in the project yet.
     fn collect_dependencies(
         &self,
         project: &Project,
@@ -646,20 +646,19 @@ impl Environment {
         }
     }
 
-    /// Populates normalized fields by processing all facts during the normalization pass.
+    /// Populates lowered fields by processing all facts during the lowering pass.
     /// This should be called after elaboration is complete.
     ///
-    /// For dependencies that have already been normalized, we merge their
-    /// kernel context state and reuse their pre-normalized facts, avoiding redundant
-    /// normalization work.
+    /// For dependencies that have already been lowered, we merge their
+    /// kernel context state and reuse their pre-lowered facts, avoiding redundant
+    /// lowering work.
     ///
-    /// Returns Ok(()) if all facts normalized successfully, or Err if any failed.
+    /// Returns Ok(()) if all facts lowered successfully, or Err if any failed.
     /// Even on error, the kernel context states are set to what was achieved before the error.
-    pub fn run_normalization_pass(&mut self, project: &Project) -> Result<(), String> {
-        if !self.normalized_module_facts.is_empty() {
+    pub fn run_lowering_pass(&mut self, project: &Project) -> Result<(), String> {
+        if !self.lowered_module_facts.is_empty() {
             return Err(
-                "normalization pass called after normalized_module_facts was already populated"
-                    .to_string(),
+                "lowering pass called after lowered_module_facts was already populated".to_string(),
             );
         }
         use std::collections::HashSet;
@@ -674,34 +673,34 @@ impl Environment {
         self.collect_dependencies(project, &mut seen, &mut deps);
 
         // Add imported facts from dependencies.
-        // If a dependency has normalized state, merge it and reuse the normalized facts.
-        // Otherwise, fall back to normalizing (shouldn't happen in practice).
+        // If a dependency has lowered state, merge it and reuse the lowered facts.
+        // Otherwise, fall back to lowering (shouldn't happen in practice).
         //
-        // Important: we only copy normalized_module_facts (the dependency's own facts),
-        // not normalized_imports. The transitive imports are handled by processing
+        // Important: we only copy lowered_module_facts (the dependency's own facts),
+        // not lowered_imports. The transitive imports are handled by processing
         // dependencies in topological order - each dependency's own facts are added
         // when we process that dependency directly.
         for dep_id in deps {
             if let Some(dep_env) = project.get_env_by_id(dep_id) {
                 if let Some(ref dep_kernel_context) = dep_env.kernel_context {
-                    // Dependency has normalized state - merge and reuse
+                    // Dependency has lowered state - merge and reuse
                     kernel_context.merge_imports(dep_kernel_context);
                     // Add only the dependency's own facts (not its imports)
-                    for normalized in &dep_env.normalized_module_facts {
-                        self.normalized_imports.push(normalized.clone());
+                    for normalized in &dep_env.lowered_module_facts {
+                        self.lowered_imports.push(normalized.clone());
                     }
                 } else {
-                    // This should never happen - dependencies are processed first
-                    panic!("Dependency {} not normalized", dep_id.0);
+                    // This should never happen - dependencies are processed first.
+                    panic!("Dependency {} not lowered", dep_id.0);
                 }
             }
         }
 
         // Store the kernel context state after processing imports.
-        // This can be cloned by Processor::with_imports to avoid re-normalizing.
+        // This can be cloned by Processor::with_imports to avoid re-lowering.
         self.import_kernel_context = Some(kernel_context.clone());
 
-        // Now normalize goals. For each goal, we compute the kernel_context state that matches
+        // Now lower goals. For each goal, we compute the kernel_context state that matches
         // what verification sees. This iterates through nodes in order, adding facts to
         // the kernel_context as we go (mirroring verify_node behavior).
         let import_kernel_context = self
@@ -709,17 +708,17 @@ impl Environment {
             .clone()
             .expect("import kernel context should be present");
         let final_kernel_context =
-            Self::normalize_nodes_pass(&mut self.nodes, &import_kernel_context, &mut first_error);
+            Self::lower_nodes_pass(&mut self.nodes, &import_kernel_context, &mut first_error);
 
-        // Collect normalized top-level facts for use as module facts in dependents.
-        // Facts should be normalized exactly once during normalize_nodes_pass.
+        // Collect lowered top-level facts for use as module facts in dependents.
+        // Facts should be lowered exactly once during lower_nodes_pass.
         for node in &self.nodes {
             if node.get_fact().is_some() {
-                match node.get_normalized_fact() {
-                    Some(normalized) => self.normalized_module_facts.push(normalized.clone()),
+                match node.lowered_fact() {
+                    Some(normalized) => self.lowered_module_facts.push(normalized.clone()),
                     None => {
                         if first_error.is_none() {
-                            first_error = Some("missing normalized fact".to_string());
+                            first_error = Some("missing lowered fact".to_string());
                         }
                     }
                 }
@@ -733,7 +732,7 @@ impl Environment {
         }
     }
 
-    /// Recursively normalizes goals in nodes, computing the correct kernel_context state for each.
+    /// Recursively lowers goals in nodes, computing the correct kernel_context state for each.
     ///
     /// The kernel_context state for a goal depends on:
     /// 1. Import facts (from base_kernel_context)
@@ -747,7 +746,7 @@ impl Environment {
     /// This function mirrors that behavior: we iterate through nodes in order, adding facts
     /// to the kernel_context as we go. When recursing into a block, we clone the current
     /// kernel_context and process the block's nodes independently.
-    fn normalize_nodes_pass(
+    fn lower_nodes_pass(
         nodes: &mut [Node],
         base_kernel_context: &KernelContext,
         first_error: &mut Option<String>,
@@ -759,8 +758,8 @@ impl Environment {
         for node in nodes.iter_mut() {
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {
-                    // Normalize the fact and store it
-                    match normalize_fact(&mut current_kernel_context, fact) {
+                    // Lower the fact and store it
+                    match lower_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -773,13 +772,13 @@ impl Environment {
                 }
                 Node::Claim(goal, fact, normalized_goal_slot, normalized_fact_slot) => {
                     // Runtime order: verify_goal (which calls set_goal) runs BEFORE add_fact.
-                    // So we normalize the goal FIRST, then add the fact for subsequent nodes.
+                    // So we lower the goal FIRST, then add the fact for subsequent nodes.
 
-                    // Normalize the goal on a CLONE of current_kernel_context (without the claim's fact).
+                    // Lower the goal on a CLONE of current_kernel_context (without the claim's fact).
                     // This captures the state that would exist after set_goal is called.
-                    // The NormalizedGoal.kernel_context will include the negated goal.
+                    // The LoweredGoal.kernel_context will include the negated goal.
                     let mut goal_kernel_context = current_kernel_context.clone();
-                    match normalize_goal(&mut goal_kernel_context, goal) {
+                    match lower_goal(&mut goal_kernel_context, goal) {
                         Ok(normalized) => {
                             *normalized_goal_slot = Some(normalized);
                         }
@@ -792,7 +791,7 @@ impl Environment {
 
                     // AFTER goal verification, add the claim's fact to current_kernel_context.
                     // This matches runtime: add_fact is called after verify_node returns.
-                    match normalize_fact(&mut current_kernel_context, fact) {
+                    match lower_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
                             *normalized_fact_slot = Some(normalized);
                         }
@@ -806,14 +805,14 @@ impl Environment {
                 Node::Block(block, external_fact, normalized_fact_slot) => {
                     // Recurse into the block's nodes with current kernel_context state.
                     // This mirrors how verify_node clones the processor when entering a block.
-                    Self::normalize_nodes_pass(
+                    Self::lower_nodes_pass(
                         &mut block.env.nodes,
                         &current_kernel_context,
                         first_error,
                     );
                     // After the block, add the external fact (if any) for subsequent nodes
                     if let Some(fact) = external_fact {
-                        match normalize_fact(&mut current_kernel_context, fact) {
+                        match lower_fact(&mut current_kernel_context, fact) {
                             Ok(normalized) => {
                                 *normalized_fact_slot = Some(normalized);
                             }

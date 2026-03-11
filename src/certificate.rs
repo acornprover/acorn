@@ -382,8 +382,8 @@ impl Certificate {
                         ) =>
                 {
                     let specialized_clause = claim
-                        .var_map
-                        .specialize_clause(&claim.clause, &generation_kernel_context);
+                        .specialize_clause(&generation_kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
                     match Self::serialize_claim_with_names(
                         claim,
                         &generation_kernel_context,
@@ -798,8 +798,8 @@ impl Certificate {
         if value_decl_codes.is_empty() {
             if type_param_decl_codes.is_empty() {
                 let specialized = claim
-                    .var_map
-                    .specialize_clause(&claim.clause, kernel_context);
+                    .specialize_clause(kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
                 let specialized_value = kernel_context.denormalize(&specialized, None, None, true);
                 let code = generator.value_to_code(&specialized_value)?;
                 return Self::ensure_claim_code_parses_as_claim(code);
@@ -1588,8 +1588,8 @@ mod tests {
             let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
             let goal_env = cursor.goal_env().expect("selected line should be a goal");
             let normalized_goal = cursor
-                .normalized_goal()
-                .expect("selected line should have a normalized goal");
+                .lowered_goal()
+                .expect("selected line should have a lowered goal");
             (
                 goal_env.bindings.clone(),
                 normalized_goal.kernel_context.clone(),
@@ -1965,8 +1965,8 @@ mod tests {
         };
         let cursor = env.get_node_by_goal_name("goal");
         let normalized_facts = cursor
-            .visible_normalized_facts()
-            .expect("normalized facts should be available");
+            .visible_lowered_facts()
+            .expect("lowered facts should be available");
         let bindings = cursor
             .goal_env()
             .expect("goal env should be available")
@@ -1981,7 +1981,7 @@ mod tests {
         for normalized in normalized_facts {
             for step in &normalized.steps {
                 let Rule::Assumption(info) = &step.rule else {
-                    panic!("expected normalized fact assumptions");
+                    panic!("expected lowered fact assumptions");
                 };
                 checker.insert_clause(
                     &step.clause,
@@ -2003,8 +2003,8 @@ mod tests {
 
         let CertificateStep::Claim(claim) = step;
         let specialized = claim
-            .var_map
-            .specialize_clause(&claim.clause, kernel_context_cow.as_ref());
+            .specialize_clause(kernel_context_cow.as_ref())
+            .expect("claim specialization should succeed");
         assert!(
             checker
                 .check_clause(&claim.clause, kernel_context_cow.as_ref())

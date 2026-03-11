@@ -5,8 +5,8 @@ use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
 use crate::code_generator::Error;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
 use crate::elaborator::node::NodeCursor;
-use crate::elaborator::normalization::{NormalizedFact, NormalizedGoal};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
@@ -60,8 +60,8 @@ impl Processor {
         }
     }
 
-    /// Creates a new Processor with imports already added from normalized state.
-    /// This uses pre-normalized facts directly (no normalization in phase three).
+    /// Creates a new Processor with imports already added from lowered state.
+    /// This uses pre-lowered facts directly (no lowering in phase three).
     pub fn with_imports(
         cancellation_token: Option<CancellationToken>,
         env: &crate::elaborator::environment::Environment,
@@ -74,8 +74,8 @@ impl Processor {
             checker: Checker::new(),
         };
         // Add pre-normalized import facts
-        for normalized in &env.normalized_imports {
-            processor.add_normalized_fact(normalized)?;
+        for normalized in &env.lowered_imports {
+            processor.add_lowered_fact(normalized)?;
         }
         Ok(processor)
     }
@@ -83,10 +83,10 @@ impl Processor {
     /// Adds all module-local facts that are usable at the given cursor position.
     pub fn add_module_facts(&mut self, cursor: &NodeCursor) -> Result<(), BuildError> {
         let facts = cursor
-            .visible_normalized_facts()
+            .visible_lowered_facts()
             .map_err(|message| BuildError::new(Default::default(), message))?;
         for normalized in facts {
-            self.add_normalized_fact(normalized)?;
+            self.add_lowered_fact(normalized)?;
         }
         Ok(())
     }
@@ -98,8 +98,8 @@ impl Processor {
         &self.checker
     }
 
-    /// Adds a normalized fact to the prover.
-    pub fn add_normalized_fact(&mut self, normalized: &NormalizedFact) -> Result<(), BuildError> {
+    /// Adds a lowered fact to the prover.
+    pub fn add_lowered_fact(&mut self, normalized: &LoweredFact) -> Result<(), BuildError> {
         let kernel_context = &normalized.kernel_context;
         for step in &normalized.steps {
             // Extract the source from the step's rule.
@@ -109,7 +109,7 @@ impl Processor {
                     return Err(BuildError::new(
                         Default::default(),
                         format!(
-                            "Expected assumption step from normalize_fact, got: {:?}",
+                            "Expected assumption step from lower_fact, got: {:?}",
                             step.rule
                         ),
                     ));
@@ -126,8 +126,8 @@ impl Processor {
         Ok(())
     }
 
-    /// Sets a normalized goal as the prover's goal.
-    pub fn set_normalized_goal(&mut self, normalized: &NormalizedGoal) {
+    /// Sets a lowered goal as the prover's goal.
+    pub fn set_lowered_goal(&mut self, normalized: &LoweredGoal) {
         let source = &normalized.goal.proposition.source;
         let kernel_context = &normalized.kernel_context;
         for step in &normalized.steps {
@@ -173,7 +173,7 @@ impl Processor {
     pub fn check_cert(
         &self,
         cert: &Certificate,
-        normalized_goal: Option<&NormalizedGoal>,
+        normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
@@ -187,7 +187,7 @@ impl Processor {
     pub fn check_cert_with_usage(
         &self,
         cert: &Certificate,
-        normalized_goal: Option<&NormalizedGoal>,
+        normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
@@ -197,7 +197,7 @@ impl Processor {
         let effective_kernel_context: &KernelContext;
 
         if let Some(normalized_goal) = normalized_goal {
-            checker.insert_normalized_goal(normalized_goal)?;
+            checker.insert_lowered_goal(normalized_goal)?;
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
             effective_kernel_context = &normalized_goal.kernel_context;
@@ -217,7 +217,7 @@ impl Processor {
     pub fn clean_cert(
         &self,
         cert: Certificate,
-        normalized_goal: Option<&NormalizedGoal>,
+        normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
@@ -227,7 +227,7 @@ impl Processor {
         let effective_kernel_context: &KernelContext;
 
         if let Some(normalized_goal) = normalized_goal {
-            checker.insert_normalized_goal(normalized_goal)?;
+            checker.insert_lowered_goal(normalized_goal)?;
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
             effective_kernel_context = &normalized_goal.kernel_context;
@@ -246,7 +246,7 @@ impl Processor {
     /// Loads facts and sets up the goal, which triggers normalization.
     /// Returns the Processor and the goal-level BindingMap.
     #[cfg(test)]
-    pub fn test_goal(code: &str) -> (Processor, BindingMap, NormalizedGoal) {
+    pub fn test_goal(code: &str) -> (Processor, BindingMap, LoweredGoal) {
         use crate::module::LoadState;
 
         let mut p = Project::new_mock();
@@ -264,8 +264,8 @@ impl Processor {
 
         let mut processor = Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
-        processor.set_normalized_goal(normalized_goal);
+        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+        processor.set_lowered_goal(normalized_goal);
 
         (
             processor,

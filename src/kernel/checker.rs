@@ -11,7 +11,6 @@ use crate::kernel::clause::Clause;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
-use crate::kernel::term_normalization::beta_reduce_clause_subterms;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
 
@@ -359,11 +358,11 @@ impl Checker {
         trace!("inserting goal {} (line {})", goal.name, goal.first_line);
 
         let source = &goal.proposition.source;
-        let normalized = crate::elaborator::normalization::normalize_goal(kernel_context, goal)
-            .map_err(|e| e.message)?;
-        // Get kernel_context after normalizing, since normalize_goal may create new synthetics
+        let lowered =
+            crate::elaborator::lowering::lower_goal(kernel_context, goal).map_err(|e| e.message)?;
+        // Use the post-lowering kernel context, since lowering the goal may create synthetics.
         let kernel_context = kernel_context;
-        for step in &normalized.steps {
+        for step in &lowered.steps {
             // Use the step's own source if it's an assumption (which includes negated goals),
             // otherwise use the goal's source
             let step_source = if let Rule::Assumption(info) = &step.rule {
@@ -380,14 +379,14 @@ impl Checker {
         Ok(())
     }
 
-    /// Insert pre-normalized goal clauses into the checker.
-    /// Uses the provided normalized goal (including its kernel context state).
-    pub fn insert_normalized_goal(
+    /// Insert pre-lowered goal clauses into the checker.
+    /// Uses the provided lowered goal (including its kernel context state).
+    pub fn insert_lowered_goal(
         &mut self,
-        normalized: &crate::elaborator::normalization::NormalizedGoal,
+        normalized: &crate::elaborator::lowering::LoweredGoal,
     ) -> Result<(), Error> {
         trace!(
-            "inserting normalized goal {} (line {})",
+            "inserting lowered goal {} (line {})",
             normalized.goal.name,
             normalized.goal.first_line
         );
@@ -427,13 +426,14 @@ impl Checker {
 
             match step {
                 CertificateStep::Claim(claim) => {
-                    let mut clause = Self::instantiate_claim_clause(claim, kernel_context)?;
+                    let generic_clause = claim.normalized_generic_clause();
+                    let clause = Self::instantiate_claim_clause(claim, kernel_context)?;
                     if !seen_claims.insert(clause.clone()) {
                         continue;
                     }
 
                     let reason = self
-                        .check_clause(&claim.clause, &kernel_context)
+                        .check_clause(&generic_clause, &kernel_context)
                         .or_else(|| self.check_clause(&clause, &kernel_context));
 
                     let Some(reason) = reason else {
@@ -458,11 +458,7 @@ impl Checker {
                         code_line: code_lines.and_then(|lines| lines.get(step_index)).cloned(),
                     });
 
-                    let mut generic_clause = claim.clause.clone();
-                    generic_clause.normalize();
                     self.insert_clause(&generic_clause, StepReason::PreviousClaim, &kernel_context);
-
-                    clause.normalize();
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
             }
@@ -482,27 +478,9 @@ impl Checker {
         claim: &crate::kernel::certificate_step::Claim,
         kernel_context: &KernelContext,
     ) -> Result<Clause, Error> {
-        let generic_len = claim.clause.get_local_context().len();
-        for (var_id, term) in claim.var_map.iter() {
-            if var_id >= generic_len {
-                return Err(Error::GeneratedBadCode(format!(
-                    "claim var map binds out-of-scope variable x{}",
-                    var_id
-                )));
-            }
-            if let Some(max_var) = term.max_variable() {
-                if max_var as usize >= generic_len {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "claim var map term references out-of-scope variable x{}",
-                        max_var
-                    )));
-                }
-            }
-        }
-        let clause = claim
-            .var_map
-            .specialize_clause(&claim.clause, kernel_context);
-        Ok(beta_reduce_clause_subterms(&clause))
+        claim
+            .normalized_specialized_clause(kernel_context)
+            .map_err(Error::GeneratedBadCode)
     }
 }
 
@@ -967,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_instantiate_claim_clause_beta_reduces_lambda_valued_arguments() {
+    fn test_instantiate_claim_clause_normalizes_lambda_valued_arguments() {
         use crate::kernel::atom::Atom;
         use crate::kernel::certificate_step::Claim;
         use crate::kernel::clause::Clause;
@@ -1000,10 +978,57 @@ mod tests {
         assert_eq!(
             instantiated,
             Clause::from_literals_unnormalized(
-                vec![Literal::positive(Term::not(Term::not(Term::parse("c0"))))],
+                vec![Literal::positive(Term::parse("c0"))],
                 &LocalContext::empty(),
             )
         );
+    }
+
+    #[test]
+    fn test_check_cert_steps_records_normalized_claim_clause() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::certificate_step::{CertificateStep, Claim};
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+
+        let known = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::parse("c0"))],
+            &LocalContext::empty(),
+        );
+        let generic = context.parse_clause("x0(c0)", &["Bool -> Bool"]);
+        let negated = context.parse_clause("not c0", &[]);
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+        checker.insert_clause(&negated, StepReason::Testing, &context);
+
+        let claim = Claim {
+            clause: context.parse_clause("x0(c0)", &["Bool -> Bool"]),
+            var_map: {
+                let mut var_map = VariableMap::new();
+                var_map.set(
+                    0,
+                    Term::lambda(
+                        Term::bool_type(),
+                        Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                    ),
+                );
+                var_map
+            },
+        };
+
+        let (checked_steps, used) = checker
+            .check_cert_steps(&[CertificateStep::Claim(claim)], None, &context)
+            .expect("claim should check");
+
+        assert_eq!(used, 1);
+        assert_eq!(checked_steps.len(), 1);
+        assert_eq!(checked_steps[0].clause, known);
     }
 
     #[test]

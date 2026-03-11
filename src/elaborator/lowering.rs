@@ -1,3 +1,12 @@
+//! Elaborator-side lowering from user propositions to kernel proof inputs.
+//!
+//! This module orchestrates:
+//! `AcornValue -> Term -> kernel term normalization -> theorem/clause lowering`.
+//!
+//! The elaborator does not define the normalization policy. Kernel term normalization
+//! lives in `kernel::term_normalization`, and clause/theorem lowering lives in the
+//! kernel clause/clausifier layers.
+
 use crate::builder::BuildError;
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
@@ -18,44 +27,44 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
-use crate::kernel::term_normalization::normalize_boolean_subterms;
+use crate::kernel::term_normalization::normalize_term;
 #[cfg(test)]
 use crate::module::ModuleId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::trace;
 
-/// A fact that has been normalized into proof steps.
+/// A fact that has been lowered into proof steps.
 #[derive(Clone)]
-pub struct NormalizedFact {
+pub struct LoweredFact {
     pub steps: Vec<ProofStep>,
     pub kernel_context: KernelContext,
 }
 
-/// A goal that has been normalized into proof steps.
-/// Includes the kernel_context state after normalizing this goal.
+/// A goal that has been lowered into proof steps.
+/// Includes the kernel_context state after lowering this goal.
 #[derive(Clone)]
-pub struct NormalizedGoal {
+pub struct LoweredGoal {
     pub goal: Goal,
     pub steps: Vec<ProofStep>,
-    /// The kernel context state after normalizing this goal (with negated goal added).
+    /// The kernel context state after lowering this goal (with negated goal added).
     pub kernel_context: KernelContext,
 }
 
-/// Normalize one fact using kernel context state.
-pub fn normalize_fact(
+/// Lower one fact using kernel context state.
+pub fn lower_fact(
     kernel_context: &mut KernelContext,
     fact: &Fact,
-) -> Result<NormalizedFact, BuildError> {
-    kernel_context.normalize_fact(fact)
+) -> Result<LoweredFact, BuildError> {
+    kernel_context.lower_fact(fact)
 }
 
-/// Normalize one goal using kernel context state.
-pub fn normalize_goal(
+/// Lower one goal using kernel context state.
+pub fn lower_goal(
     kernel_context: &mut KernelContext,
     goal: &Goal,
-) -> Result<NormalizedGoal, BuildError> {
-    kernel_context.normalize_goal(goal)
+) -> Result<LoweredGoal, BuildError> {
+    kernel_context.lower_goal(goal)
 }
 
 impl KernelContext {
@@ -89,10 +98,10 @@ impl KernelContext {
 }
 
 impl KernelContext {
-    /// Normalize a term-level proposition into clauses.
+    /// Lower a term-level proposition into clauses.
     ///
-    /// This is the term-native backend for proposition normalization.
-    fn normalize_term(
+    /// This is the term-native backend for proposition lowering.
+    fn lower_term_to_clauses(
         &mut self,
         term: &Term,
         _ctype: NewConstantType,
@@ -120,9 +129,9 @@ impl KernelContext {
         Ok(clauses)
     }
 
-    /// Converts a value proposition to CNF clauses via:
-    /// `AcornValue --elaborate--> Term --normalize_term--> Vec<Clause>`.
-    fn normalize_value(
+    /// Lowers a value proposition to clauses via:
+    /// `AcornValue --elaborate--> Term --kernel normalize--> clauses`.
+    fn lower_value_to_clauses(
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
@@ -138,12 +147,12 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
-        let term = normalize_boolean_subterms(&term);
-        self.normalize_term(&term, ctype, source, type_var_map)
+        let term = normalize_term(&term);
+        self.lower_term_to_clauses(&term, ctype, source, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.
-    pub fn normalize_fact(&mut self, fact: &Fact) -> Result<NormalizedFact, BuildError> {
+    pub fn lower_fact(&mut self, fact: &Fact) -> Result<LoweredFact, BuildError> {
         let mut steps = vec![];
 
         // Register typeclass relationships in TypeStore
@@ -211,7 +220,7 @@ impl KernelContext {
                     NewConstantType::Local
                 };
                 let clauses = self
-                    .normalize_value(&value, ctype, &source, type_var_map_opt.clone())
+                    .lower_value_to_clauses(&value, ctype, &source, type_var_map_opt.clone())
                     .map_err(|msg| BuildError::new(range, msg))?;
                 for clause in &clauses {
                     trace!(clause = %clause, "normalized to clause");
@@ -224,15 +233,15 @@ impl KernelContext {
             }
         }
 
-        Ok(NormalizedFact {
+        Ok(LoweredFact {
             steps,
             kernel_context: self.clone(),
         })
     }
 
-    /// Normalizes a goal into proof steps that include both positive versions
+    /// Lowers a goal into proof steps that include both positive versions
     /// of the hypotheses and negated versions of the conclusion.
-    pub fn normalize_goal(&mut self, goal: &Goal) -> Result<NormalizedGoal, BuildError> {
+    pub fn lower_goal(&mut self, goal: &Goal) -> Result<LoweredGoal, BuildError> {
         let prop = &goal.proposition;
 
         let (hypo, counterfactual) = prop.value.clone().negate_goal();
@@ -242,7 +251,7 @@ impl KernelContext {
             let hypo_prop = Proposition::new(hypo, prop.params.clone(), prop.source.clone())
                 .with_arg_count(prop.arg_count);
             let fact = Fact::Proposition(Arc::new(hypo_prop));
-            steps.extend(self.normalize_fact(&fact)?.steps);
+            steps.extend(self.lower_fact(&fact)?.steps);
         }
         // Preserve type parameters when creating counterfactual fact
         let counterfactual_prop = Proposition::new(
@@ -252,9 +261,9 @@ impl KernelContext {
         )
         .with_arg_count(prop.arg_count);
         let fact = Fact::Proposition(Arc::new(counterfactual_prop));
-        steps.extend(self.normalize_fact(&fact)?.steps);
+        steps.extend(self.lower_fact(&fact)?.steps);
 
-        Ok(NormalizedGoal {
+        Ok(LoweredGoal {
             goal: goal.clone(),
             steps,
             kernel_context: self.clone(),
@@ -344,7 +353,7 @@ impl KernelContext {
             panic!("denormalized clause should validate: {:?}", e);
         }
         let renormalized = self
-            .normalize_value(
+            .lower_value_to_clauses(
                 &denormalized,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
@@ -450,7 +459,7 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .normalize_value(
+            .lower_value_to_clauses(
                 value,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
@@ -517,7 +526,7 @@ impl KernelContext {
         let mut clauses = vec![];
         for node in &env.nodes {
             if let Some(fact) = node.get_fact() {
-                if let Ok(normalized) = self.normalize_fact(&fact) {
+                if let Ok(normalized) = self.lower_fact(&fact) {
                     for step in normalized.steps {
                         clauses.push(step.clause);
                     }

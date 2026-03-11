@@ -8,6 +8,7 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
+use crate::kernel::term_normalization::{normalize_clause_term, normalize_signed_clause_term};
 
 /// A Clause represents a disjunction (an "or") of literals.
 /// Type information is stored separately in the TypeStore and SymbolTable,
@@ -174,42 +175,21 @@ impl Clause {
     }
 
     fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
-        let right = Self::normalize_boolean_term(&literal.right);
+        let right = normalize_clause_term(&literal.right);
         if right.is_true() {
-            let (left, positive) =
-                Self::normalize_signed_boolean_term(&literal.left, literal.positive);
+            let (left, positive) = normalize_signed_clause_term(&literal.left, literal.positive);
             return vec![Literal::from_signed_term(left, positive)];
         }
 
         vec![Literal::new(
             literal.positive,
-            Self::normalize_boolean_term(&literal.left),
+            normalize_clause_term(&literal.left),
             right,
         )]
     }
 
-    fn normalize_signed_boolean_term(term: &Term, positive: bool) -> (Term, bool) {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::normalize_signed_boolean_term(&args[0], !positive);
-        }
-
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-            let left = Self::normalize_boolean_term_with_polarity(&args[0], false);
-            let right = Self::normalize_boolean_term_with_polarity(&args[1], false);
-            return (Term::and(left, right), !positive);
-        }
-
-        if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
-            let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
-            let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), false);
-            return (Term::exists(binder_type, body), !positive);
-        }
-
-        (Self::normalize_boolean_term(term), positive)
-    }
-
     fn normalize_literals_for_matching(literal: Literal) -> Vec<Literal> {
-        let right = Self::normalize_boolean_term(&literal.right);
+        let right = normalize_clause_term(&literal.right);
         if right.is_true() {
             return Self::normalize_signed_boolean_term_to_literals(
                 &literal.left,
@@ -219,7 +199,7 @@ impl Clause {
 
         vec![Literal::new(
             literal.positive,
-            Self::normalize_boolean_term(&literal.left),
+            normalize_clause_term(&literal.left),
             right,
         )]
     }
@@ -246,129 +226,8 @@ impl Clause {
             return literals;
         }
 
-        if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
-            let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
-            let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), false);
-            return vec![Literal::from_signed_term(
-                Term::exists(binder_type, body),
-                !positive,
-            )];
-        }
-
-        if !positive {
-            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-                let left = Self::normalize_boolean_term_with_polarity(&args[0], false);
-                let right = Self::normalize_boolean_term_with_polarity(&args[1], false);
-                return vec![Literal::positive(Term::and(left, right))];
-            }
-        }
-
-        vec![Literal::from_signed_term(
-            Self::normalize_boolean_term(term),
-            positive,
-        )]
-    }
-
-    fn normalize_boolean_term(term: &Term) -> Term {
-        Self::normalize_boolean_term_with_polarity(term, true)
-    }
-
-    fn normalize_boolean_term_with_polarity(term: &Term, positive: bool) -> Term {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::normalize_boolean_term_with_polarity(&args[0], !positive);
-        }
-
-        if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
-            let left = Self::normalize_boolean_term_with_polarity(&args[0], positive);
-            let right = Self::normalize_boolean_term_with_polarity(&args[1], positive);
-            return if positive {
-                Term::and(left, right)
-            } else {
-                Term::or(left, right)
-            };
-        }
-
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-            let left = Self::normalize_boolean_term_with_polarity(&args[0], positive);
-            let right = Self::normalize_boolean_term_with_polarity(&args[1], positive);
-            return if positive {
-                Term::or(left, right)
-            } else {
-                Term::and(left, right)
-            };
-        }
-
-        match term.as_ref().decompose() {
-            Decomposition::ForAll(binder_type, body) => {
-                let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
-                let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), positive);
-                if positive {
-                    Term::forall(binder_type, body)
-                } else {
-                    Term::exists(binder_type, body)
-                }
-            }
-            Decomposition::Exists(binder_type, body) => {
-                let binder_type = Self::normalize_boolean_term(&binder_type.to_owned());
-                let body = Self::normalize_boolean_term_with_polarity(&body.to_owned(), positive);
-                if positive {
-                    Term::exists(binder_type, body)
-                } else {
-                    Term::forall(binder_type, body)
-                }
-            }
-            Decomposition::Atom(_) => {
-                if positive {
-                    term.clone()
-                } else {
-                    Term::not(term.clone())
-                }
-            }
-            Decomposition::Application(function, argument) => {
-                let function = Self::normalize_boolean_term(&function.to_owned());
-                let argument = Self::normalize_boolean_term(&argument.to_owned());
-                let rebuilt = Self::normalize_boolean_eq(function.apply(&[argument]));
-                if positive {
-                    rebuilt
-                } else {
-                    Term::not(rebuilt)
-                }
-            }
-            Decomposition::Pi(input, output) => {
-                let input = Self::normalize_boolean_term(&input.to_owned());
-                let output = Self::normalize_boolean_term(&output.to_owned());
-                let rebuilt = Term::pi(input, output);
-                if positive {
-                    rebuilt
-                } else {
-                    Term::not(rebuilt)
-                }
-            }
-            Decomposition::Lambda(input, body) => {
-                let input = Self::normalize_boolean_term(&input.to_owned());
-                let body = Self::normalize_boolean_term(&body.to_owned());
-                let rebuilt = Term::lambda(input, body);
-                if positive {
-                    rebuilt
-                } else {
-                    Term::not(rebuilt)
-                }
-            }
-        }
-    }
-
-    fn normalize_boolean_eq(term: Term) -> Term {
-        let Some(args) = Self::split_symbol_application(&term, Symbol::Eq, 3) else {
-            return term;
-        };
-        let eq_type = args[0].clone();
-        let left = args[1].clone();
-        let right = args[2].clone();
-        if left <= right {
-            term
-        } else {
-            Term::eq(eq_type, right, left)
-        }
+        let (term, positive) = normalize_signed_clause_term(term, positive);
+        vec![Literal::from_signed_term(term, positive)]
     }
 
     /// Create an impossible clause (empty clause, represents false).

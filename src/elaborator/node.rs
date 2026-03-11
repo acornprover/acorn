@@ -6,7 +6,7 @@ use crate::elaborator::block::Block;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::normalization::{NormalizedFact, NormalizedGoal};
+use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
@@ -25,23 +25,23 @@ pub enum Node {
     /// The prover doesn't need to prove these.
     /// For example, this could be an axiom, or a definition.
     /// It could also be a form like a citation that has already been proven by the prover.
-    /// The optional NormalizedFact is populated during the normalization pass.
-    Structural(Fact, Option<NormalizedFact>),
+    /// The optional LoweredFact is populated during the lowering pass.
+    Structural(Fact, Option<LoweredFact>),
 
     /// A claim is something that we need to prove, and then we can subsequently use it.
     /// The Goal represents what needs to be proven; the Fact represents what can be used once proven.
-    /// The optional NormalizedGoal is the pre-normalized goal with captured kernel_context state.
-    /// The optional NormalizedFact is the pre-normalized fact.
-    /// Both are populated during the normalization pass.
-    Claim(Goal, Fact, Option<NormalizedGoal>, Option<NormalizedFact>),
+    /// The optional LoweredGoal is the pre-lowered goal with captured kernel_context state.
+    /// The optional LoweredFact is the pre-lowered fact.
+    /// Both are populated during the lowering pass.
+    Claim(Goal, Fact, Option<LoweredGoal>, Option<LoweredFact>),
 
     /// A block has its own environment inside. We need to validate everything in the block.
     /// The block might not exist in the code, but it at least needs to exist for the prover.
     /// The optional fact is what we can use externally once the block is proven.
     /// It is relative to the outside environment.
     /// Other than the external claim, nothing else in the block is visible outside the block.
-    /// The optional NormalizedFact is the external fact normalized during the normalization pass.
-    Block(Block, Option<Fact>, Option<NormalizedFact>),
+    /// The optional LoweredFact is the external fact lowered during the lowering pass.
+    Block(Block, Option<Fact>, Option<LoweredFact>),
 }
 
 impl fmt::Display for Node {
@@ -182,8 +182,8 @@ impl Node {
         }
     }
 
-    /// Returns the pre-normalized fact at this node, if there is one.
-    pub fn get_normalized_fact(&self) -> Option<&NormalizedFact> {
+    /// Returns the pre-lowered fact at this node, if there is one.
+    pub fn lowered_fact(&self) -> Option<&LoweredFact> {
         match self {
             Node::Structural(_, Some(nf)) => Some(nf),
             Node::Claim(_, _, _, Some(nf)) => Some(nf),
@@ -341,17 +341,17 @@ impl<'a> NodeCursor<'a> {
         facts
     }
 
-    /// Pre-normalized facts from this module that are visible at the current node.
+    /// Pre-lowered facts from this module that are visible at the current node.
     /// This does not include imported facts.
-    pub fn visible_normalized_facts(&self) -> Result<Vec<&NormalizedFact>, String> {
+    pub fn visible_lowered_facts(&self) -> Result<Vec<&LoweredFact>, String> {
         let mut facts = vec![];
         let (env, i) = &self.annotated_path[0];
         for node in &env.nodes[0..*i] {
             if node.get_fact().is_some() {
-                match node.get_normalized_fact() {
+                match node.lowered_fact() {
                     Some(nf) => facts.push(nf),
                     None => {
-                        return Err(format!("missing normalized fact for node {}", node));
+                        return Err(format!("missing lowered fact for node {}", node));
                     }
                 }
             }
@@ -360,10 +360,10 @@ impl<'a> NodeCursor<'a> {
         for (env, i) in self.annotated_path.iter().skip(1) {
             for node in &env.nodes[0..*i] {
                 if node.get_fact().is_some() {
-                    match node.get_normalized_fact() {
+                    match node.lowered_fact() {
                         Some(nf) => facts.push(nf),
                         None => {
-                            return Err(format!("missing normalized fact for node {}", node));
+                            return Err(format!("missing lowered fact for node {}", node));
                         }
                     }
                 }
@@ -373,10 +373,10 @@ impl<'a> NodeCursor<'a> {
         if let Some(block) = &self.node().get_block() {
             for node in &block.env.nodes {
                 if node.get_fact().is_some() {
-                    match node.get_normalized_fact() {
+                    match node.lowered_fact() {
                         Some(nf) => facts.push(nf),
                         None => {
-                            return Err(format!("missing normalized fact for node {}", node));
+                            return Err(format!("missing lowered fact for node {}", node));
                         }
                     }
                 }
@@ -418,9 +418,9 @@ impl<'a> NodeCursor<'a> {
         }
     }
 
-    /// Get the pre-normalized goal for the current node, if available.
-    /// Returns None for Structural and Block nodes, or if the goal hasn't been pre-normalized.
-    pub fn normalized_goal(&self) -> Option<&'a NormalizedGoal> {
+    /// Get the pre-lowered goal for the current node, if available.
+    /// Returns None for Structural and Block nodes, or if the goal hasn't been pre-lowered.
+    pub fn lowered_goal(&self) -> Option<&'a LoweredGoal> {
         match self.node() {
             Node::Claim(_, _, Some(normalized), _) => Some(normalized),
             _ => None,
