@@ -371,6 +371,57 @@ mod tests {
     }
 
     #[test]
+    fn test_read_only_check_does_not_trim_cached_cert_steps() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem simple_truth {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let cert_path = build.child("foo.jsonl");
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "simple_truth".to_string(),
+                vec!["let s0: Bool satisfy { true }".to_string()],
+            )],
+        }
+        .save(cert_path.path())
+        .unwrap();
+        let original = std::fs::read_to_string(cert_path.path()).unwrap();
+
+        let config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+        };
+        let mut verifier = Verifier::new(acornlib.path().to_path_buf(), config, None).unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.builder.check_mode = true;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.certs_cached, 1);
+        assert_eq!(output.metrics.searches_total, 0);
+
+        let after = std::fs::read_to_string(cert_path.path()).unwrap();
+        assert_eq!(after, original);
+
+        let loaded = CertificateStore::load(cert_path.path()).unwrap();
+        assert_eq!(loaded.certs.len(), 1);
+        assert_eq!(loaded.certs[0].goal, "simple_truth");
+        assert_eq!(
+            loaded.certs[0].proof,
+            Some(vec!["let s0: Bool satisfy { true }".to_string()])
+        );
+    }
+
+    #[test]
     fn test_single_line_goal_index_selects_specific_goal() {
         let (acornlib, src, _build) = setup();
 

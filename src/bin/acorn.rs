@@ -563,7 +563,13 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            let mut verifier = match Verifier::new(current_dir, ProjectConfig::default(), target) {
+            let config = ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            };
+
+            let mut verifier = match Verifier::new(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("{}", e);
