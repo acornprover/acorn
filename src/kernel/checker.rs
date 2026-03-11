@@ -135,6 +135,16 @@ impl Checker {
         }
     }
 
+    /// Boolean reduction preserves existing local slots, but the checker wants fully normalized
+    /// clauses for exact matching and loop detection.
+    fn checker_boolean_reductions(clause: &Clause, kernel_context: &KernelContext) -> Vec<Clause> {
+        clause
+            .boolean_reductions(kernel_context)
+            .into_iter()
+            .map(|clause| clause.normalized())
+            .collect()
+    }
+
     fn insert_clause_internal(
         &mut self,
         clause: &Clause,
@@ -206,8 +216,7 @@ impl Checker {
             );
         }
 
-        for boolean_reduction in clause.boolean_reductions(kernel_context) {
-            let boolean_reduction = boolean_reduction.normalized();
+        for boolean_reduction in Self::checker_boolean_reductions(clause, kernel_context) {
             // Guard against infinite loops
             if self.past_boolean_reductions.contains(&boolean_reduction) {
                 continue;
@@ -240,6 +249,7 @@ impl Checker {
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<StepReason> {
+        debug_assert!(clause.is_normalized());
         if self.has_contradiction() {
             trace!(clause = %clause, result = "contradiction", "checking clause");
             return Some(StepReason::Contradiction);
@@ -295,8 +305,8 @@ impl Checker {
 
         let mut seen = HashSet::new();
         let mut queue = VecDeque::new();
-        for next in clause.boolean_reductions(kernel_context) {
-            queue.push_back(next.normalized());
+        for next in Self::checker_boolean_reductions(clause, kernel_context) {
+            queue.push_back(next);
         }
 
         while let Some(candidate) = queue.pop_front() {
@@ -308,8 +318,7 @@ impl Checker {
                 return Some(reason);
             }
 
-            for next in candidate.boolean_reductions(kernel_context) {
-                let next = next.normalized();
+            for next in Self::checker_boolean_reductions(&candidate, kernel_context) {
                 if !seen.contains(&next) {
                     queue.push_back(next);
                 }
