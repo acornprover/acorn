@@ -6,7 +6,7 @@ author="$(git config user.name)"
 
 printf "%-12s %10s %10s %10s\n" "Date" "Added" "Removed" "Total"
 
-for i in $(seq 0 99); do
+for i in $(seq 0 29); do
   day=$(date -d "$i days ago" +%Y-%m-%d)
   next_day=$(date -d "$((i-1)) days ago" +%Y-%m-%d)
 
