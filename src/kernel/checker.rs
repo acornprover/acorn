@@ -1038,11 +1038,7 @@ mod tests {
 
         let canonical_count = closure
             .iter()
-            .map(|clause| {
-                let mut canonical = clause.clone();
-                canonical.normalize();
-                canonical
-            })
+            .map(Clause::normalized)
             .collect::<HashSet<_>>()
             .len();
         let display_count = closure

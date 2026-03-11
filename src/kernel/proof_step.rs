@@ -574,10 +574,9 @@ impl ProofStep {
         depth: u32,
         premise_map: PremiseMap,
     ) -> ProofStep {
-        let pinned = clause.get_local_context().len();
-        clause.normalize_with_pinned(pinned);
+        clause = clause.normalized_preserving_locals();
         debug_assert!(
-            clause.is_normalized_with_pinned(pinned),
+            clause.is_normalized_preserving_locals(),
             "ProofStep clauses must normalize at construction time: {}",
             clause
         );
@@ -980,7 +979,7 @@ mod tests {
         );
 
         let step = ProofStep::mock_from_clause(clause);
-        assert!(step.clause.is_normalized_with_pinned(0));
+        assert!(step.clause.is_normalized_preserving_locals());
         assert_eq!(
             step.clause,
             Clause::new(

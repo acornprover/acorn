@@ -105,9 +105,30 @@ impl Clause {
         c
     }
 
+    /// Return a normalized clone of this clause.
+    pub fn normalized(&self) -> Clause {
+        let mut normalized = self.clone();
+        normalized.normalize();
+        normalized
+    }
+
+    /// Return a normalized clone while keeping all existing local-variable slots fixed.
+    pub fn normalized_preserving_locals(&self) -> Clause {
+        let pinned = self.get_local_context().len();
+        let mut normalized = self.clone();
+        normalized.normalize_with_pinned(pinned);
+        normalized
+    }
+
     /// Check whether this clause is already in normalized form.
     pub fn is_normalized(&self) -> bool {
-        self.is_normalized_with_pinned(0)
+        *self == self.normalized()
+    }
+
+    /// Check whether this clause is normalized while keeping all existing local-variable slots
+    /// fixed in place.
+    pub fn is_normalized_preserving_locals(&self) -> bool {
+        *self == self.normalized_preserving_locals()
     }
 
     /// Check whether this clause is normalized while keeping the first `pinned`
@@ -2185,9 +2206,10 @@ mod tests {
         );
 
         assert!(
-            clause.boolean_reductions(&kctx).iter().all(|reduction| {
-                reduction.is_normalized_with_pinned(reduction.get_local_context().len())
-            }),
+            clause
+                .boolean_reductions(&kctx)
+                .iter()
+                .all(|reduction| { reduction.is_normalized_preserving_locals() }),
             "expected all boolean-reduction outputs to be normalized"
         );
     }

@@ -16,11 +16,10 @@ pub struct Claim {
 impl Claim {
     /// Build a certificate claim pair in its canonical certificate form.
     ///
-    /// Unlike full clause normalization, this keeps all existing local-variable slots pinned in
+    /// Unlike full clause normalization, this keeps all existing local-variable slots fixed in
     /// place so `(clause, var_map)` round-trips remain stable for certificates.
     pub fn new(mut clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {
-        let pinned = clause.get_local_context().len();
-        clause.normalize_with_pinned(pinned);
+        clause = clause.normalized_preserving_locals();
         var_map.apply_to_all(normalize_term);
 
         let claim = Claim { clause, var_map };
@@ -50,9 +49,7 @@ impl Claim {
     }
 
     pub fn normalized_generic_clause(&self) -> Clause {
-        let mut clause = self.clause.clone();
-        clause.normalize();
-        clause
+        self.clause.normalized()
     }
 
     pub fn specialize_clause(&self, kernel_context: &KernelContext) -> Result<Clause, String> {
@@ -64,9 +61,7 @@ impl Claim {
         &self,
         kernel_context: &KernelContext,
     ) -> Result<Clause, String> {
-        let mut clause = beta_reduce_clause_subterms(&self.specialize_clause(kernel_context)?);
-        clause.normalize();
-        Ok(clause)
+        Ok(beta_reduce_clause_subterms(&self.specialize_clause(kernel_context)?).normalized())
     }
 }
 
