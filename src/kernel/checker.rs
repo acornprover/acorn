@@ -381,7 +381,8 @@ impl Checker {
         let source = &goal.proposition.source;
         let lowered =
             crate::elaborator::lowering::lower_goal(kernel_context, goal).map_err(|e| e.message)?;
-        // Use the post-lowering kernel context, since lowering the goal may create synthetics.
+        // Use the post-lowering kernel context, since lowering the goal may register
+        // additional symbols and type metadata.
         let kernel_context = kernel_context;
         for step in &lowered.steps {
             // Use the step's own source if it's an assumption (which includes negated goals),

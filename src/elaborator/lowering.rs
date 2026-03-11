@@ -281,12 +281,14 @@ impl KernelContext {
     }
 
     /// Converts backwards, from a clause to a value.
-    /// The resulting value may have synthetic atoms in it.
+    /// The resulting value may include generated `choose(...)` witnesses or other
+    /// normalized boolean structure that did not appear verbatim in the source.
     /// If arbitrary names are provided, any free variables of the keyed types are converted
     /// to constants.
     /// If type_vars is provided, those variable indices are treated as type-level variables
     /// and excluded from the forall quantifier (their indices are remapped in the body).
-    /// If type_param_names is provided, it's used for naming polymorphic synthetic type params.
+    /// If type_param_names is provided, it's used for naming denormalized type params in
+    /// polymorphic clauses.
     /// If instantiate_type_vars is true, FreeVariable type atoms become concrete types.
     /// Any remaining free variables are enclosed in a "forall" quantifier.
     pub fn denormalize(
@@ -321,7 +323,7 @@ impl KernelContext {
 
     /// Converts a single term to an AcornValue using the provided LocalContext.
     /// This is equivalent to the term-level work done by `denormalize(...)`,
-    /// but avoids wrapping the term into a synthetic clause first.
+    /// but avoids wrapping the term into a temporary one-literal clause first.
     pub fn denormalize_term_with_context(
         &self,
         term: &Term,
