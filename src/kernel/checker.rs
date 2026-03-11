@@ -135,8 +135,7 @@ impl Checker {
         }
     }
 
-    /// Adds a true clause to the checker with a specific reason.
-    pub fn insert_clause(
+    fn insert_clause_internal(
         &mut self,
         clause: &Clause,
         reason: StepReason,
@@ -152,8 +151,6 @@ impl Checker {
         let step_id = self.reasons.len();
         self.reasons.push_back(reason.clone());
 
-        // Normalize before exact matching so we do not depend on literal ordering
-        // or variable numbering conventions at insertion sites.
         self.exact_clauses
             .entry(clause.exact_match_key())
             .or_insert(step_id);
@@ -162,7 +159,11 @@ impl Checker {
             if let Some(reduced_clause) =
                 self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
             {
-                self.insert_clause(&reduced_clause, StepReason::EqualityGraph, kernel_context);
+                self.insert_clause_internal(
+                    &reduced_clause,
+                    StepReason::EqualityGraph,
+                    kernel_context,
+                );
             }
 
             // We only need to do equality resolution for clauses with free variables,
@@ -177,7 +178,7 @@ impl Checker {
 
             if let Some(extensionality) = clause.find_extensionality(kernel_context) {
                 let ext_clause = Clause::new(extensionality, clause.get_local_context());
-                self.insert_clause(
+                self.insert_clause_internal(
                     &ext_clause,
                     StepReason::Extensionality(step_id),
                     kernel_context,
@@ -206,18 +207,30 @@ impl Checker {
         }
 
         for boolean_reduction in clause.boolean_reductions(kernel_context) {
+            let boolean_reduction = boolean_reduction.normalized();
             // Guard against infinite loops
             if self.past_boolean_reductions.contains(&boolean_reduction) {
                 continue;
             }
             self.past_boolean_reductions
                 .insert(boolean_reduction.clone());
-            self.insert_clause(
+            self.insert_clause_internal(
                 &boolean_reduction,
                 StepReason::BooleanReduction(step_id),
                 kernel_context,
             );
         }
+    }
+
+    /// Adds a true clause to the checker with a specific reason.
+    pub fn insert_clause(
+        &mut self,
+        clause: &Clause,
+        reason: StepReason,
+        kernel_context: &KernelContext,
+    ) {
+        let clause = clause.normalized();
+        self.insert_clause_internal(&clause, reason, kernel_context);
     }
 
     /// Checks if a clause is known to be true, and returns the reason if so.
@@ -283,7 +296,7 @@ impl Checker {
         let mut seen = HashSet::new();
         let mut queue = VecDeque::new();
         for next in clause.boolean_reductions(kernel_context) {
-            queue.push_back(next);
+            queue.push_back(next.normalized());
         }
 
         while let Some(candidate) = queue.pop_front() {
@@ -296,6 +309,7 @@ impl Checker {
             }
 
             for next in candidate.boolean_reductions(kernel_context) {
+                let next = next.normalized();
                 if !seen.contains(&next) {
                     queue.push_back(next);
                 }
@@ -312,8 +326,9 @@ impl Checker {
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<StepReason> {
-        self.check_clause_direct(clause, kernel_context)
-            .or_else(|| self.check_clause_via_boolean_reductions(clause, kernel_context))
+        let clause = clause.normalized();
+        self.check_clause_direct(&clause, kernel_context)
+            .or_else(|| self.check_clause_via_boolean_reductions(&clause, kernel_context))
     }
 
     fn simplify_variable_clause_with_concrete_facts(
@@ -720,6 +735,34 @@ mod tests {
             canonical
         );
         assert!(checker.check_clause(&clause, &context).is_some());
+    }
+
+    #[test]
+    fn test_insert_clause_normalizes_raw_impossible_clause() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+        let c0 = context.parse_term("c0");
+
+        let raw_clause = Clause::from_literals_unnormalized(
+            vec![Literal::negative(Term::eq(
+                Term::bool_type(),
+                c0.clone(),
+                c0,
+            ))],
+            &LocalContext::empty(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&raw_clause, StepReason::Testing, &context);
+
+        assert!(
+            checker.has_contradiction(),
+            "checker insertion should normalize raw impossible clauses on entry"
+        );
     }
 
     #[test]
