@@ -11,6 +11,7 @@ use crate::kernel::clause::Clause;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
+use crate::kernel::term_normalization::beta_reduce_clause_subterms;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
 
@@ -498,9 +499,10 @@ impl Checker {
                 }
             }
         }
-        Ok(claim
+        let clause = claim
             .var_map
-            .specialize_clause(&claim.clause, kernel_context))
+            .specialize_clause(&claim.clause, kernel_context);
+        Ok(beta_reduce_clause_subterms(&clause))
     }
 }
 
@@ -962,6 +964,46 @@ mod tests {
             panic!("expected GeneratedBadCode");
         };
         assert!(msg.contains("certificate `let ... satisfy` steps are no longer supported"));
+    }
+
+    #[test]
+    fn test_instantiate_claim_clause_beta_reduces_lambda_valued_arguments() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::certificate_step::Claim;
+        use crate::kernel::clause::Clause;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+        use crate::kernel::variable_map::VariableMap;
+
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+
+        let claim = Claim {
+            clause: context.parse_clause("x0(c0)", &["Bool -> Bool"]),
+            var_map: {
+                let mut var_map = VariableMap::new();
+                var_map.set(
+                    0,
+                    Term::lambda(
+                        Term::bool_type(),
+                        Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                    ),
+                );
+                var_map
+            },
+        };
+
+        let instantiated = Checker::instantiate_claim_clause(&claim, &context)
+            .expect("claim instantiation should succeed");
+
+        assert_eq!(
+            instantiated,
+            Clause::from_literals_unnormalized(
+                vec![Literal::positive(Term::not(Term::not(Term::parse("c0"))))],
+                &LocalContext::empty(),
+            )
+        );
     }
 
     #[test]

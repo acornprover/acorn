@@ -28,6 +28,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term_normalization::beta_reduce_subterms;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleDescriptor;
 use crate::project::Project;
@@ -487,6 +488,7 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
+                let term = beta_reduce_subterms(&term);
                 if Self::should_preserve_single_literal_claim(&term) {
                     if let Some(clause) = Self::try_deserialize_single_literal_clause(&term, &[]) {
                         return Ok(CertificateStep::Claim(Claim {
@@ -964,6 +966,7 @@ impl Certificate {
             &generic_value,
             type_var_map.as_ref(),
         )?;
+        let generic_term = beta_reduce_subterms(&generic_term);
         if Self::term_has_inline_clause_shape(&generic_term, true) {
             let clause = Self::try_deserialize_inline_clause(&generic_term, &type_param_kinds)
                 .expect("inline clause shape should deserialize");
@@ -1484,6 +1487,7 @@ impl CertificateWorklist {
 mod tests {
     use super::*;
     use crate::module::LoadState;
+    use crate::processor::Processor;
     use std::borrow::Cow;
     use tempfile::tempdir;
 
@@ -2131,6 +2135,53 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_check_cert_accepts_lambda_valued_claim_argument() {
+        let code = r#"
+            type Nat: axiom
+            let rel: (Nat, Nat) -> Bool = axiom
+
+            define is_transitive[T](f: (T, T) -> Bool) -> Bool {
+                forall(x: T, y: T, z: T) {
+                    f(x, y) and f(y, z) implies f(x, z)
+                }
+            }
+
+            axiom rel_trans(x: Nat, y: Nat, z: Nat) {
+                rel(x, y) and rel(y, z) implies rel(x, z)
+            }
+
+            theorem goal {
+                is_transitive(function(a: Nat, b: Nat) { rel(a, b) })
+            } by {
+                forall(x: Nat, y: Nat, z: Nat) {
+                    rel_trans(x, y, z)
+                }
+            }
+        "#;
+
+        let (processor, bindings, normalized_goal) = Processor::test_goal(code);
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", code);
+
+        let cert = Certificate::new(
+            "goal".to_string(),
+            vec![
+                "function[T0](x0: (T0, T0) -> Bool) { exists(k0: T0, k1: T0, k2: T0) { x0(k0, k1) and x0(k1, k2) and not x0(k0, k2) } or is_transitive[T0](x0) }[Nat](function(a: Nat, b: Nat) { rel(a, b) })".to_string(),
+            ],
+        );
+
+        processor
+            .check_cert(
+                &cert,
+                Some(&normalized_goal),
+                &normalized_goal.kernel_context,
+                &project,
+                &bindings,
+            )
+            .expect("lambda-valued claim argument should verify");
     }
 
     #[test]

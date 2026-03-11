@@ -1,6 +1,8 @@
 use crate::kernel::atom::Atom;
+use crate::kernel::clause::Clause;
+use crate::kernel::literal::Literal;
 use crate::kernel::symbol::Symbol;
-use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term::{Decomposition, Term, TermRef};
 
 fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
     let (head, args) = term.as_ref().split_application_multi()?;
@@ -44,6 +46,93 @@ fn normalize_term_children(term: &Term) -> Term {
     }
 }
 
+fn beta_reduce_term_children(term: &Term) -> Term {
+    match term.as_ref().decompose() {
+        Decomposition::Atom(_) => term.clone(),
+        Decomposition::Application(function, argument) => {
+            let function = beta_reduce_subterms(&function.to_owned());
+            let argument = beta_reduce_subterms(&argument.to_owned());
+            function.apply(&[argument])
+        }
+        Decomposition::Pi(input, output) => {
+            let input = beta_reduce_subterms(&input.to_owned());
+            let output = beta_reduce_subterms(&output.to_owned());
+            Term::pi(input, output)
+        }
+        Decomposition::Lambda(input, body) => {
+            let input = beta_reduce_subterms(&input.to_owned());
+            let body = beta_reduce_subterms(&body.to_owned());
+            Term::lambda(input, body)
+        }
+        Decomposition::ForAll(binder_type, body) => {
+            let binder_type = beta_reduce_subterms(&binder_type.to_owned());
+            let body = beta_reduce_subterms(&body.to_owned());
+            Term::forall(binder_type, body)
+        }
+        Decomposition::Exists(binder_type, body) => {
+            let binder_type = beta_reduce_subterms(&binder_type.to_owned());
+            let body = beta_reduce_subterms(&body.to_owned());
+            Term::exists(binder_type, body)
+        }
+    }
+}
+
+fn substitute_bound_capture_avoiding(
+    term: TermRef<'_>,
+    index: u16,
+    replacement: &Term,
+    depth: u16,
+) -> Term {
+    match term.decompose() {
+        Decomposition::Atom(Atom::BoundVariable(i)) if *i == index + depth => {
+            replacement.shift_bound(0, depth as i16)
+        }
+        Decomposition::Atom(_) => term.to_owned(),
+        Decomposition::Application(function, argument) => {
+            let function = substitute_bound_capture_avoiding(function, index, replacement, depth);
+            let argument = substitute_bound_capture_avoiding(argument, index, replacement, depth);
+            function.apply(&[argument])
+        }
+        Decomposition::Pi(input, output) => {
+            let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
+            let output = substitute_bound_capture_avoiding(output, index, replacement, depth + 1);
+            Term::pi(input, output)
+        }
+        Decomposition::Lambda(input, body) => {
+            let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
+            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+            Term::lambda(input, body)
+        }
+        Decomposition::ForAll(binder_type, body) => {
+            let binder_type =
+                substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
+            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+            Term::forall(binder_type, body)
+        }
+        Decomposition::Exists(binder_type, body) => {
+            let binder_type =
+                substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
+            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
+            Term::exists(binder_type, body)
+        }
+    }
+}
+
+fn beta_reduce_head_lambda_application(term: &Term) -> Option<Term> {
+    let Decomposition::Application(function, argument) = term.as_ref().decompose() else {
+        return None;
+    };
+    let Decomposition::Lambda(_, body) = function.decompose() else {
+        return None;
+    };
+
+    // Standard de Bruijn beta reduction:
+    // shift(-1, subst(0, shift(1, arg), body))
+    let lifted_argument = argument.to_owned().shift_bound(0, 1);
+    let substituted = substitute_bound_capture_avoiding(body, 0, &lifted_argument, 0);
+    Some(substituted.shift_bound(0, -1))
+}
+
 fn cancel_double_negation(term: &Term) -> Option<Term> {
     let args = split_symbol_application(term, Symbol::Not, 1)?;
     let inner_args = split_symbol_application(&args[0], Symbol::Not, 1)?;
@@ -61,9 +150,33 @@ fn normalize_fully_applied_eq(term: &Term) -> Option<Term> {
     Some(Term::eq(eq_type, right, left))
 }
 
+/// Recursively beta-reduces head lambda applications within an arbitrary term.
+pub fn beta_reduce_subterms(term: &Term) -> Term {
+    let normalized = beta_reduce_term_children(term);
+    if let Some(reduced) = beta_reduce_head_lambda_application(&normalized) {
+        return beta_reduce_subterms(&reduced);
+    }
+    normalized
+}
+
+/// Recursively beta-reduces head lambda applications within every literal of a clause.
+pub fn beta_reduce_clause_subterms(clause: &Clause) -> Clause {
+    let literals = clause
+        .literals
+        .iter()
+        .map(|literal| Literal {
+            positive: literal.positive,
+            left: beta_reduce_subterms(&literal.left),
+            right: beta_reduce_subterms(&literal.right),
+        })
+        .collect();
+    Clause::from_literals_unnormalized(literals, clause.get_local_context())
+}
+
 /// Recursively normalizes boolean-valued subterms within an arbitrary term.
 ///
 /// This:
+/// - beta-reduces head lambda applications
 /// - cancels `not not`
 /// - orders fully applied equality terms
 /// - recurses under quantifier bodies
@@ -74,14 +187,20 @@ fn normalize_fully_applied_eq(term: &Term) -> Option<Term> {
 /// without pushing `not` through connectives everywhere.
 pub fn normalize_boolean_subterms(term: &Term) -> Term {
     let normalized = normalize_term_children(term);
+    if let Some(reduced) = beta_reduce_head_lambda_application(&normalized) {
+        return normalize_boolean_subterms(&reduced);
+    }
     let normalized = cancel_double_negation(&normalized).unwrap_or(normalized);
     normalize_fully_applied_eq(&normalized).unwrap_or(normalized)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_boolean_subterms;
+    use super::{beta_reduce_clause_subterms, normalize_boolean_subterms};
     use crate::kernel::atom::Atom;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol::Symbol;
     use crate::kernel::term::Term;
 
@@ -90,6 +209,48 @@ mod tests {
         let atom = Term::parse("c0");
         let term = Term::not(Term::not(atom.clone()));
         assert_eq!(normalize_boolean_subterms(&term), atom);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_beta_reduces_head_lambda_application() {
+        let body = Term::not(Term::not(Term::atom(Atom::BoundVariable(0))));
+        let term = Term::lambda(Term::bool_type(), body).apply(&[Term::parse("c0")]);
+        assert_eq!(normalize_boolean_subterms(&term), Term::parse("c0"));
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_beta_reduces_capture_avoiding() {
+        let term = Term::lambda(
+            Term::bool_type(),
+            Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1))),
+        )
+        .apply(&[Term::parse("c0")]);
+        let expected = Term::lambda(Term::bool_type(), Term::parse("c0"));
+        assert_eq!(normalize_boolean_subterms(&term), expected);
+    }
+
+    #[test]
+    fn test_beta_reduce_clause_subterms_reduces_literal_terms() {
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                )
+                .apply(&[Term::parse("c0")]),
+            )],
+            &LocalContext::empty(),
+        );
+
+        let reduced = beta_reduce_clause_subterms(&clause);
+
+        assert_eq!(
+            reduced,
+            Clause::from_literals_unnormalized(
+                vec![Literal::positive(Term::not(Term::not(Term::parse("c0"))))],
+                &LocalContext::empty(),
+            )
+        );
     }
 
     #[test]

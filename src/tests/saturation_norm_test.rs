@@ -678,7 +678,7 @@ fn test_iet_verify_partial_application_theorem_citation() {
 }
 
 #[test]
-fn test_iet_citation_line_expands_to_instantiated_implication() {
+fn test_iet_citation_line_expands_to_instantiated_theorem_body() {
     let text = r#"
         type Ix: axiom
         type Val: axiom
@@ -728,8 +728,11 @@ fn test_iet_citation_line_expands_to_instantiated_implication() {
     assert!(
         proposition_values
             .iter()
-            .any(|value| value == "(good(f(i)) implies rel(f(i, m), f(i, n)))"),
-        "expected instantiated citation fact, got {:?}",
+            .any(|value| {
+                value
+                    == "function(x0: Ix -> Val, x1: Ix, x2: Ix) { (good(x0) implies rel(x0(x1), x0(x2))) }(f(i), m, n)"
+            }),
+        "expected expanded citation fact, got {:?}",
         proposition_values
     );
 }

@@ -1981,11 +1981,7 @@ impl BindingMap {
             .validate()
             .unwrap_or_else(|e| panic!("invalid claim: {} ({})", proposition.value, e));
 
-        let value = proposition
-            .value
-            .expand_lambdas(0)
-            .flatten_applications()
-            .reduce_eta(0);
+        let value = proposition.value.flatten_applications().reduce_eta(0);
         proposition.with_value(value)
     }
 
