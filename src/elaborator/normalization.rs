@@ -18,7 +18,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
-use crate::kernel::term_normalization::normalize_boolean_subterms;
+use crate::kernel::term_normalization::normalize_term;
 #[cfg(test)]
 use crate::module::ModuleId;
 use std::collections::HashMap;
@@ -138,7 +138,7 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
-        let term = normalize_boolean_subterms(&term);
+        let term = normalize_term(&term);
         self.normalize_term(&term, ctype, source, type_var_map)
     }
 

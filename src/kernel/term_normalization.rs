@@ -1,3 +1,31 @@
+//! Kernel term normalization is the base normalization layer for semantic terms.
+//!
+//! The normalization model has three distinct operations:
+//!
+//! 1. Term normalization
+//!    This module owns the recursive, structure-preserving normalization of [`Term`]s.
+//!    It must normalize every subterm of a normalized term.
+//! 2. Theorem lowering
+//!    This is a stronger top-level transformation that opens leading universal binders
+//!    and lowers clause-shaped propositions to clauses. It does not belong in this file.
+//! 3. Clause normalization
+//!    This normalizes already-open clauses, including literal ordering, deduplication,
+//!    and best-effort free-variable renumbering. It builds on term normalization but
+//!    does not belong in this file.
+//!
+//! The global normalization requirements are:
+//!
+//! - Every `ProofStep` must have its clause normalized.
+//! - In a normalized term or clause, every subterm must also be normalized.
+//! - For certificates, serializing a `(clause, var_map)` pair and then deserializing it
+//!   must recover the exact same `(clause, var_map)` pair.
+//! - Normalization canonicalizes the built-in commutative operators `=`, `and`, and `or`
+//!   up to commutativity only.
+//! - Clause normalization may deterministically renumber free variables to a preferred
+//!   numbering, but this is best-effort only.
+//! - Normalization must be idempotent.
+//!
+//! This file is the source of truth for the term-normalization part of that contract.
 use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::literal::Literal;
@@ -19,28 +47,28 @@ fn normalize_term_children(term: &Term) -> Term {
     match term.as_ref().decompose() {
         Decomposition::Atom(_) => term.clone(),
         Decomposition::Application(function, argument) => {
-            let function = normalize_boolean_subterms(&function.to_owned());
-            let argument = normalize_boolean_subterms(&argument.to_owned());
+            let function = normalize_term(&function.to_owned());
+            let argument = normalize_term(&argument.to_owned());
             function.apply(&[argument])
         }
         Decomposition::Pi(input, output) => {
-            let input = normalize_boolean_subterms(&input.to_owned());
-            let output = normalize_boolean_subterms(&output.to_owned());
+            let input = normalize_term(&input.to_owned());
+            let output = normalize_term(&output.to_owned());
             Term::pi(input, output)
         }
         Decomposition::Lambda(input, body) => {
-            let input = normalize_boolean_subterms(&input.to_owned());
-            let body = normalize_boolean_subterms(&body.to_owned());
+            let input = normalize_term(&input.to_owned());
+            let body = normalize_term(&body.to_owned());
             Term::lambda(input, body)
         }
         Decomposition::ForAll(binder_type, body) => {
-            let binder_type = normalize_boolean_subterms(&binder_type.to_owned());
-            let body = normalize_boolean_subterms(&body.to_owned());
+            let binder_type = normalize_term(&binder_type.to_owned());
+            let body = normalize_term(&body.to_owned());
             Term::forall(binder_type, body)
         }
         Decomposition::Exists(binder_type, body) => {
-            let binder_type = normalize_boolean_subterms(&binder_type.to_owned());
-            let body = normalize_boolean_subterms(&body.to_owned());
+            let binder_type = normalize_term(&binder_type.to_owned());
+            let body = normalize_term(&body.to_owned());
             Term::exists(binder_type, body)
         }
     }
@@ -173,7 +201,7 @@ pub fn beta_reduce_clause_subterms(clause: &Clause) -> Clause {
     Clause::from_literals_unnormalized(literals, clause.get_local_context())
 }
 
-/// Recursively normalizes boolean-valued subterms within an arbitrary term.
+/// Recursively normalizes a kernel term.
 ///
 /// This:
 /// - beta-reduces head lambda applications
@@ -185,18 +213,23 @@ pub fn beta_reduce_clause_subterms(clause: &Clause) -> Clause {
 /// Polarity-sensitive top-level decomposition still belongs in clausification,
 /// so theorem normalization can flatten shapes like `not (a and b)` into a clause
 /// without pushing `not` through connectives everywhere.
-pub fn normalize_boolean_subterms(term: &Term) -> Term {
+pub fn normalize_term(term: &Term) -> Term {
     let normalized = normalize_term_children(term);
     if let Some(reduced) = beta_reduce_head_lambda_application(&normalized) {
-        return normalize_boolean_subterms(&reduced);
+        return normalize_term(&reduced);
     }
     let normalized = cancel_double_negation(&normalized).unwrap_or(normalized);
     normalize_fully_applied_eq(&normalized).unwrap_or(normalized)
 }
 
+/// Compatibility wrapper while callers migrate to `normalize_term`.
+pub fn normalize_boolean_subterms(term: &Term) -> Term {
+    normalize_term(term)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{beta_reduce_clause_subterms, normalize_boolean_subterms};
+    use super::{beta_reduce_clause_subterms, normalize_boolean_subterms, normalize_term};
     use crate::kernel::atom::Atom;
     use crate::kernel::clause::Clause;
     use crate::kernel::literal::Literal;
@@ -208,14 +241,14 @@ mod tests {
     fn test_normalize_boolean_subterms_cancels_double_negation() {
         let atom = Term::parse("c0");
         let term = Term::not(Term::not(atom.clone()));
-        assert_eq!(normalize_boolean_subterms(&term), atom);
+        assert_eq!(normalize_term(&term), atom);
     }
 
     #[test]
     fn test_normalize_boolean_subterms_beta_reduces_head_lambda_application() {
         let body = Term::not(Term::not(Term::atom(Atom::BoundVariable(0))));
         let term = Term::lambda(Term::bool_type(), body).apply(&[Term::parse("c0")]);
-        assert_eq!(normalize_boolean_subterms(&term), Term::parse("c0"));
+        assert_eq!(normalize_term(&term), Term::parse("c0"));
     }
 
     #[test]
@@ -226,7 +259,7 @@ mod tests {
         )
         .apply(&[Term::parse("c0")]);
         let expected = Term::lambda(Term::bool_type(), Term::parse("c0"));
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
@@ -259,7 +292,7 @@ mod tests {
         let c1 = Term::parse("c1");
         let term = Term::not(Term::and(c0.clone(), Term::not(Term::not(c1.clone()))));
         let expected = Term::not(Term::and(c0, c1));
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
@@ -271,7 +304,7 @@ mod tests {
             Term::not(Term::not(Term::and(bound.clone(), predicate.clone()))),
         ));
         let expected = Term::not(Term::exists(Term::bool_type(), Term::and(bound, predicate)));
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
@@ -283,7 +316,7 @@ mod tests {
             Term::not(Term::not(Term::and(bound.clone(), predicate.clone()))),
         );
         let expected = Term::forall(Term::bool_type(), Term::and(bound, predicate));
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
@@ -293,7 +326,7 @@ mod tests {
             Term::parse("c2"),
         )))]);
         let expected = Term::parse("c0").apply(&[Term::and(Term::parse("c1"), Term::parse("c2"))]);
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
@@ -308,13 +341,23 @@ mod tests {
             Term::and(Term::parse("c0"), Term::parse("c1")),
             Term::parse("c2"),
         ]);
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
     fn test_normalize_boolean_subterms_orders_fully_applied_eq() {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
-        assert_eq!(normalize_boolean_subterms(&term), expected);
+        assert_eq!(normalize_term(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_wrapper_matches_normalize_term() {
+        let term = Term::not(Term::not(Term::eq(
+            Term::bool_type(),
+            Term::parse("c1"),
+            Term::parse("c0"),
+        )));
+        assert_eq!(normalize_boolean_subterms(&term), normalize_term(&term));
     }
 }
