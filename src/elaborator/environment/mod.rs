@@ -962,3 +962,67 @@ pub enum LineType {
     /// The line has the closing brace for this block.
     Closing,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elaborator::acorn_value::AcornValue;
+    use crate::elaborator::fact::Fact;
+    use crate::elaborator::names::ConstantName;
+    use crate::elaborator::potential_value::PotentialValue;
+
+    #[test]
+    fn test_instance_statement_emits_public_bridge_to_internal_impl() {
+        let mut env = Environment::test();
+        env.add(
+            r#"
+            inductive Z1 {
+                zero
+            }
+
+            typeclass T: TwoColored {
+                is_red: T -> Bool
+            }
+
+            instance Z1: TwoColored {
+                define is_red(self) -> Bool {
+                    true
+                }
+            }
+            "#,
+        );
+
+        let facts = env.importable_facts(None);
+
+        let has_internal_impl = facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Fact::Definition(
+                    PotentialValue::Resolved(AcornValue::Constant(ci)),
+                    _,
+                    _
+                ) if matches!(ci.name, ConstantName::InstanceAttribute(..))
+            )
+        });
+        assert!(
+            has_internal_impl,
+            "expected an internal instance implementation fact"
+        );
+
+        let has_public_bridge = facts.iter().any(|fact| {
+            matches!(
+                fact,
+                Fact::Definition(
+                    PotentialValue::Resolved(AcornValue::Constant(public_ci)),
+                    AcornValue::Constant(instance_ci),
+                    _
+                ) if matches!(public_ci.name, ConstantName::TypeclassAttribute(..))
+                    && matches!(instance_ci.name, ConstantName::InstanceAttribute(..))
+            )
+        });
+        assert!(
+            has_public_bridge,
+            "expected a post-instance bridge from the public typeclass attribute to the internal implementation"
+        );
+    }
+}

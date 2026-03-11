@@ -74,6 +74,13 @@ impl Fact {
         match self {
             Fact::Instance(..) => true,
             Fact::Extends(..) => true,
+            Fact::Definition(PotentialValue::Resolved(AcornValue::Constant(ci)), _, _) => {
+                // Instance implementation symbols are only meant to exist while elaborating an
+                // `instance` block, but later public bridge facts still refer to them. Keep their
+                // definitions in normalized/imported state even though user code never names them.
+                matches!(ci.name, ConstantName::InstanceAttribute(..))
+                    || self.as_instance_alias().is_some()
+            }
             _ => self.as_instance_alias().is_some(),
         }
     }

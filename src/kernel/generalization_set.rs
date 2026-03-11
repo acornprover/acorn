@@ -1287,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_typeclass_generalization_rejects_unconstrained_query_variable() {
+    fn test_typeclass_generalization_rejects_unconstrained_query_variable_at_parse_time() {
         let mut kctx = KernelContext::new();
         kctx.parse_typeclass("Ring");
         kctx.parse_polymorphic_constant("g0", "R: Ring", "R -> Bool");
@@ -1296,11 +1296,12 @@ mod tests {
         let pattern_clause = kctx.parse_clause("g0(x0, x1)", &["Ring", "x0"]);
         clause_set.insert(pattern_clause, 7, &kctx);
 
-        let query_clause = kctx.parse_clause("g0(x0, x1)", &["Type", "x0"]);
-        let found = clause_set.find_generalization(query_clause, &kctx);
-        assert_eq!(
-            found, None,
-            "A Ring-constrained pattern should not match an unconstrained query variable"
+        let query_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            kctx.parse_clause("g0(x0, x1)", &["Type", "x0"])
+        }));
+        assert!(
+            query_result.is_err(),
+            "An unconstrained query variable should be rejected before generalization matching"
         );
     }
 }

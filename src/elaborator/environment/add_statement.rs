@@ -273,9 +273,18 @@ impl Environment {
                 let value = if ls.value.is_axiom() {
                     None
                 } else {
-                    let v = self
-                        .evaluator(project)
-                        .evaluate_value(&ls.value, Some(&acorn_type))?;
+                    let v = if let Some(instance_name) = defined_name.as_instance() {
+                        Evaluator::new_for_instance_member(
+                            project,
+                            &self.bindings,
+                            Some(&mut self.token_map),
+                            instance_name,
+                        )
+                        .evaluate_value(&ls.value, Some(&acorn_type))?
+                    } else {
+                        self.evaluator(project)
+                            .evaluate_value(&ls.value, Some(&acorn_type))?
+                    };
                     Some(v)
                 };
                 (acorn_type, value)
@@ -289,7 +298,17 @@ impl Environment {
                         .error("axiom constants require explicit type annotation"));
                 }
                 // Evaluate the value first to infer its type
-                let value = self.evaluator(project).evaluate_value(&ls.value, None)?;
+                let value = if let Some(instance_name) = defined_name.as_instance() {
+                    Evaluator::new_for_instance_member(
+                        project,
+                        &self.bindings,
+                        Some(&mut self.token_map),
+                        instance_name,
+                    )
+                    .evaluate_value(&ls.value, None)?
+                } else {
+                    self.evaluator(project).evaluate_value(&ls.value, None)?
+                };
                 let acorn_type = value.get_type();
                 (acorn_type, Some(value))
             }
@@ -383,6 +402,7 @@ impl Environment {
                 &ds.return_value,
                 self_type,
                 recursion_name.as_ref(),
+                defined_name.as_instance(),
                 datatype_params,
                 project,
                 Some(&mut self.token_map),
@@ -487,6 +507,7 @@ impl Environment {
             &ts.args,
             None,
             &ts.claim,
+            None,
             None,
             None,
             None,
@@ -794,6 +815,7 @@ impl Environment {
                 &fss.condition,
                 None,
                 recursion_name.as_ref(),
+                defined_name.as_instance(),
                 datatype_params,
                 project,
                 Some(&mut self.token_map),
@@ -2381,6 +2403,7 @@ impl Environment {
                         None,
                         None,
                         None,
+                        None,
                         project,
                         Some(&mut self.token_map),
                     )?;
@@ -2461,7 +2484,10 @@ impl Environment {
             }
         }
 
-        // Pairs contains (resolved constant, defined constant) for each attribute.
+        // Each pair is a public typeclass attribute specialized to this datatype together with the
+        // concrete implementation symbol/value that should back it. We only emit the public bridge
+        // after the `instance` relationship node, because before that point `Typeclass.attr[Type]`
+        // is not yet a valid public constant.
         let mut pairs = vec![];
 
         // Process definitions if they exist (block syntax), otherwise skip (no-block syntax)
@@ -2613,8 +2639,8 @@ impl Environment {
                         )));
                     }
 
-                    // Store the information to add the default after the loop
-                    defaults_to_add.push((name, tc_type, dt_value.clone(), tc_resolved, dt_value));
+                    // Store the information to add the default after the loop.
+                    defaults_to_add.push((name, tc_type, dt_value.clone(), tc_resolved));
                 } else {
                     return Err(statement
                         .error(&format!("missing implementation for attribute '{}'", name)));
@@ -2623,30 +2649,36 @@ impl Environment {
         }
 
         // Now add any defaults we found
-        for (name, tc_type, dt_value, tc_resolved, dt_value_for_pair) in defaults_to_add {
+        for (name, tc_type, dt_value, tc_resolved) in defaults_to_add {
             self.define_constant(
-                name,
+                name.clone(),
                 vec![],
                 tc_type,
                 Some(dt_value),
                 statement.range(),
                 None,
             );
-            pairs.push((tc_resolved, dt_value_for_pair));
+            let instance_impl = self
+                .bindings
+                .get_constant_value(&name)
+                .map_err(|e| statement.error(&e))?
+                .as_value(statement)?;
+            pairs.push((tc_resolved, instance_impl));
         }
 
         // Create a node for the instance relationship.
-        let source = Source {
-            module_id: self.module_id,
-            range: statement.range(),
-            source_type: SourceType::Instance(
-                is.type_name.text().to_string(),
-                typeclass.name.to_string(),
-            ),
-            importable: true,
-            depth: self.depth,
-        };
-        let instance_fact = Fact::Instance(instance_datatype.clone(), typeclass.clone(), source);
+        let instance_source = Source::instance(
+            self.module_id,
+            statement.range(),
+            self.depth,
+            is.type_name.text(),
+            &typeclass.name,
+        );
+        let instance_fact = Fact::Instance(
+            instance_datatype.clone(),
+            typeclass.clone(),
+            instance_source.clone(),
+        );
 
         let node = if conditions.is_empty() {
             Node::Structural(instance_fact, None)
@@ -2679,6 +2711,20 @@ impl Environment {
         self.add_node_lines(index, &statement.range());
         self.bindings
             .add_instance_of(instance_datatype.clone(), typeclass);
+
+        for (public_attr, instance_impl) in pairs {
+            // This synthetic definition is the only place where the temporary instance-only
+            // implementation symbol escapes the `instance` block. It is added strictly after the
+            // instance fact so that the public spelling `Typeclass.attr[Datatype]` is only usable
+            // once the datatype really is known to implement the typeclass.
+            let bridge = Node::definition(
+                PotentialValue::Resolved(public_attr),
+                instance_impl,
+                instance_source.clone(),
+            );
+            let index = self.add_node(bridge);
+            self.add_node_lines(index, &statement.range());
+        }
         Ok(())
     }
 

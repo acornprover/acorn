@@ -286,10 +286,26 @@ impl Literal {
             // Validate type consistency
             let left_type = self
                 .left
-                .get_type_with_context(local_context, kernel_context);
+                .checked_type_with_context(local_context, kernel_context)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "Literal left side is not well-typed: {}\n  Term: {}\n  Context: {:?}",
+                        err,
+                        self.left,
+                        local_context.get_var_types()
+                    )
+                });
             let right_type = self
                 .right
-                .get_type_with_context(local_context, kernel_context);
+                .checked_type_with_context(local_context, kernel_context)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "Literal right side is not well-typed: {}\n  Term: {}\n  Context: {:?}",
+                        err,
+                        self.right,
+                        local_context.get_var_types()
+                    )
+                });
             if left_type != right_type {
                 panic!(
                     "Literal type mismatch: {} has type {:?} but {} has type {:?}\n  Context: {:?}",

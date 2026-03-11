@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_passive_simplification_rejects_typeclass_constraint_strengthening() {
+    fn test_passive_simplification_rejects_invalid_typeclass_clause_at_parse_time() {
         let mut kctx = KernelContext::new();
         kctx.parse_datatype("String");
         kctx.parse_typeclass("Monoid");
@@ -530,25 +530,12 @@ mod tests {
         kctx.parse_constant("c0", "Bool");
         kctx.parse_constant("c1", "String");
 
-        let passive_clause = kctx.parse_clause("not g0(String, c1) or c0", &[]);
-        let expected_clause = passive_clause.clone();
-
-        let mut passive_set = PassiveSet::new();
-        passive_set.push_batch(vec![ProofStep::mock_from_clause(passive_clause)], &kctx);
-
-        let active_clause = kctx.parse_clause("g0(x0, x1)", &["Monoid", "x0"]);
-        let active_set = ActiveSet::new();
-        passive_set.simplify(
-            5,
-            &ProofStep::mock_from_clause(active_clause),
-            &active_set,
-            &kctx,
-        );
-
-        let step = passive_set.pop().unwrap();
-        assert_eq!(
-            step.clause, expected_clause,
-            "Simplification should not apply when it would strengthen an unconstrained type variable to a typeclass constraint"
+        let passive_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            kctx.parse_clause("not g0(String, c1) or c0", &[])
+        }));
+        assert!(
+            passive_result.is_err(),
+            "A clause that applies a Monoid-constrained symbol to String should be rejected before passive simplification"
         );
     }
 }

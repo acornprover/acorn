@@ -819,6 +819,104 @@ mod tests {
     }
 
     #[test]
+    fn test_checker_accepts_unit_resolution_for_existential_formula_clause() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+        let bound = Term::atom(Atom::BoundVariable(0));
+
+        let forward_exists = Term::exists(
+            Term::bool_type(),
+            Term::eq(Term::bool_type(), bound.clone(), c1.clone()),
+        );
+        let reversed_exists =
+            Term::exists(Term::bool_type(), Term::eq(Term::bool_type(), c1, bound));
+
+        let mut checker = Checker::new();
+        let premise = Clause::from_literals_unnormalized(
+            vec![Literal::positive(c0.clone())],
+            &LocalContext::empty(),
+        );
+        checker.insert_clause(&premise, StepReason::Testing, &context);
+
+        let implication = Clause::from_literals_unnormalized(
+            vec![Literal::negative(c0), Literal::positive(forward_exists)],
+            &LocalContext::empty(),
+        );
+        checker.insert_clause(&implication, StepReason::Testing, &context);
+
+        let query = Clause::from_literals_unnormalized(
+            vec![Literal::positive(reversed_exists)],
+            &LocalContext::empty(),
+        );
+        assert!(checker.check_clause(&query, &context).is_some());
+    }
+
+    #[test]
+    fn test_checker_accepts_multi_step_unit_resolution_for_existential_formula_clause() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1", "c2"], "Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+        let c2 = context.parse_term("c2");
+        let bound = Term::atom(Atom::BoundVariable(0));
+
+        let forward_exists = Term::exists(
+            Term::bool_type(),
+            Term::eq(Term::bool_type(), bound.clone(), c2.clone()),
+        );
+        let reversed_exists =
+            Term::exists(Term::bool_type(), Term::eq(Term::bool_type(), c2, bound));
+
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::positive(c0.clone())],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::negative(c1.clone())],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![
+                    Literal::negative(c0),
+                    Literal::positive(forward_exists),
+                    Literal::positive(c1),
+                ],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+
+        let query = Clause::from_literals_unnormalized(
+            vec![Literal::positive(reversed_exists)],
+            &LocalContext::empty(),
+        );
+        assert!(checker.check_clause(&query, &context).is_some());
+    }
+
+    #[test]
     fn test_checker_mixed_clause_extensionality_contradicts_direct_function_inequality() {
         let mut context = KernelContext::new();
         context.parse_constants(&["c0", "c1"], "Bool");

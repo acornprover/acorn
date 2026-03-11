@@ -1065,6 +1065,10 @@ impl CodeGenerator<'_> {
                 ConstantName::TypeclassAttribute(_, tc, attr) => {
                     Expression::generate_identifier(&tc.name).add_dot_str(attr)
                 }
+                ConstantName::InstanceAttribute(_, inst) => {
+                    Expression::generate_identifier(&inst.typeclass.name)
+                        .add_dot_str(&inst.attribute)
+                }
             });
         }
 
@@ -1109,6 +1113,13 @@ impl CodeGenerator<'_> {
             }
             ConstantName::TypeclassAttribute(_, tc, attr) => {
                 Ok(module.add_dot_str(&tc.name).add_dot_str(attr))
+            }
+            ConstantName::InstanceAttribute(_, inst) => {
+                self.module_to_expr(inst.typeclass.module_id).map(|module| {
+                    module
+                        .add_dot_str(&inst.typeclass.name)
+                        .add_dot_str(&inst.attribute)
+                })
             }
         }
     }
@@ -1456,6 +1467,24 @@ impl CodeGenerator<'_> {
                 Ok(Expression::Singleton(token))
             }
             AcornValue::Constant(c) => {
+                if let ConstantName::InstanceAttribute(_, inst) = &c.name {
+                    let public_name = ConstantName::typeclass_attr(
+                        inst.typeclass.module_id,
+                        inst.typeclass.clone(),
+                        &inst.attribute,
+                    );
+                    let public_constant = ConstantInstance {
+                        name: public_name,
+                        params: vec![],
+                        instance_type: c.instance_type.clone(),
+                        generic_type: c.instance_type.clone(),
+                        type_param_names: vec![],
+                    };
+                    let const_expr = self.const_to_expr(&public_constant)?;
+                    let datatype = AcornType::Data(inst.datatype.clone(), vec![]);
+                    return self.parametrize_expr(const_expr, &[datatype]);
+                }
+
                 if c.params.len() == 1 {
                     if let Some((module_id, entity, attr)) = c.name.as_attribute() {
                         if self

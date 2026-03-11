@@ -206,6 +206,7 @@ impl BindingMap {
                         self.has_type_attr(datatype, attr)
                     }
                     ConstantName::TypeclassAttribute(..) => false,
+                    ConstantName::InstanceAttribute(..) => false,
                 }
             }
             DefinedName::Instance(instance_name) => {
@@ -239,7 +240,8 @@ impl BindingMap {
                     .instance_attr_defs
                     .get(instance_name)
                     .ok_or_else(|| format!("instance constant {} not found", name))?;
-                let value = AcornValue::instance_constant(
+                let value = AcornValue::instance_impl_constant(
+                    self.module_id,
                     instance_name.clone(),
                     definition.value.get_type(),
                 );
@@ -486,6 +488,7 @@ impl BindingMap {
             ConstantName::TypeclassAttribute(_, typeclass, attr) => {
                 self.resolve_typeclass_attr(typeclass, attr)
             }
+            ConstantName::InstanceAttribute(module_id, _) => Some((*module_id, name.clone())),
         }
     }
 
@@ -881,7 +884,11 @@ impl BindingMap {
                         range,
                     },
                 );
-                let value = AcornValue::instance_constant(instance_name.clone(), constant_type);
+                let value = AcornValue::instance_impl_constant(
+                    self.module_id,
+                    instance_name.clone(),
+                    constant_type,
+                );
                 PotentialValue::Resolved(value)
             }
         }
@@ -1088,6 +1095,7 @@ impl BindingMap {
                     .attributes
                     .insert(attribute.clone(), (*module_id, typeclass.clone()));
             }
+            ConstantName::InstanceAttribute(_, _) => {}
             ConstantName::Unqualified(_, name) => {
                 self.unqualified.insert(name.clone(), ());
             }
@@ -1751,6 +1759,10 @@ impl BindingMap {
     ///   (None means expect a boolean value.)
     /// value_expr is the expression for the value itself.
     /// function_name, when it is provided, can be used recursively.
+    /// current_instance, when it is provided, means we are evaluating the body of a concrete
+    /// instance member inside an `instance` block. In that temporary scope, explicit
+    /// `Typeclass.attr[Datatype]` references for the same in-progress instance are redirected to
+    /// the instance implementation slot instead of the public typeclass constant.
     /// datatype_params: if this is a method on a parameterized datatype, these are the datatype's params.
     ///
     /// This function mutates the binding map but sets it back to its original state when finished.
@@ -1778,6 +1790,7 @@ impl BindingMap {
         value_expr: &Expression,
         class_type: Option<&AcornType>,
         function_name: Option<&ConstantName>,
+        current_instance: Option<&InstanceName>,
         datatype_params: Option<&Vec<TypeParam>>,
         project: &Project,
         mut token_map: Option<&mut TokenMap>,
@@ -1789,13 +1802,29 @@ impl BindingMap {
         AcornType,
     )> {
         // Bind all the type parameters and arguments
-        let mut evaluator = Evaluator::new(project, self, token_map.as_deref_mut());
+        let mut evaluator = match current_instance {
+            Some(instance_name) => Evaluator::new_for_instance_member(
+                project,
+                self,
+                token_map.as_deref_mut(),
+                instance_name,
+            ),
+            None => Evaluator::new(project, self, token_map.as_deref_mut()),
+        };
         let type_params = evaluator.evaluate_type_params(type_param_exprs)?;
         for param in &type_params {
             self.add_arbitrary_type(param.clone());
         }
         let mut stack = Stack::new();
-        let mut evaluator = Evaluator::new(project, self, token_map.as_deref_mut());
+        let mut evaluator = match current_instance {
+            Some(instance_name) => Evaluator::new_for_instance_member(
+                project,
+                self,
+                token_map.as_deref_mut(),
+                instance_name,
+            ),
+            None => Evaluator::new(project, self, token_map.as_deref_mut()),
+        };
         let (arg_names, internal_arg_types) = evaluator.bind_args(&mut stack, args, class_type)?;
 
         // Figure out types.
@@ -1834,7 +1863,12 @@ impl BindingMap {
         let internal_value = if value_expr.is_axiom() {
             None
         } else {
-            let mut evaluator = Evaluator::new(project, self, token_map);
+            let mut evaluator = match current_instance {
+                Some(instance_name) => {
+                    Evaluator::new_for_instance_member(project, self, token_map, instance_name)
+                }
+                None => Evaluator::new(project, self, token_map),
+            };
             let value = evaluator.evaluate_value_with_stack(
                 &mut stack,
                 value_expr,
@@ -1929,6 +1963,9 @@ impl BindingMap {
         match value {
             AcornValue::Variable(_, _) | AcornValue::Bool(_) => {}
             AcornValue::Constant(c) => {
+                if matches!(c.name, ConstantName::InstanceAttribute(..)) {
+                    return;
+                }
                 if c.name.module_id() == self.module_id && !self.constant_defs.contains_key(&c.name)
                 {
                     assert!(c.params.is_empty());

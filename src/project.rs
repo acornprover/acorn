@@ -588,6 +588,9 @@ impl Project {
             ConstantName::TypeclassAttribute(module_id, _typeclass, _attr_name) => {
                 self.get_env_by_id(*module_id)
             }
+            ConstantName::InstanceAttribute(module_id, _instance_name) => {
+                self.get_env_by_id(*module_id)
+            }
             ConstantName::Unqualified(module_id, _name) => self.get_env_by_id(*module_id),
         }
     }

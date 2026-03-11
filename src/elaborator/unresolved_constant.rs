@@ -26,12 +26,11 @@ pub struct UnresolvedConstant {
 }
 
 impl UnresolvedConstant {
-    /// Resolves the constant with the given parameters.
-    pub fn resolve(
+    fn named_params(
         &self,
         source: &dyn ErrorContext,
-        params: Vec<AcornType>,
-    ) -> error::Result<AcornValue> {
+        params: &[AcornType],
+    ) -> error::Result<Vec<(String, AcornType)>> {
         if params.len() != self.params.len() {
             return Err(source.error(&format!(
                 "expected {} type parameters, but got {}",
@@ -40,25 +39,46 @@ impl UnresolvedConstant {
             )));
         }
 
-        let named_params: Vec<_> = self
+        Ok(self
             .params
             .iter()
             .zip(params.iter())
             .map(|(param, t)| (param.name.clone(), t.clone()))
-            .collect();
-        let resolved_type = self.generic_type.instantiate(&named_params);
+            .collect())
+    }
+
+    pub fn resolved_type(
+        &self,
+        source: &dyn ErrorContext,
+        params: &[AcornType],
+    ) -> error::Result<AcornType> {
+        let named_params = self.named_params(source, params)?;
+        Ok(self.generic_type.instantiate(&named_params))
+    }
+
+    /// Resolves the constant with the given parameters.
+    pub fn resolve(
+        &self,
+        source: &dyn ErrorContext,
+        params: Vec<AcornType>,
+    ) -> error::Result<AcornValue> {
+        self.resolve_with_name(source, self.name.clone(), params)
+    }
+
+    pub fn resolve_with_name(
+        &self,
+        source: &dyn ErrorContext,
+        name: ConstantName,
+        params: Vec<AcornType>,
+    ) -> error::Result<AcornValue> {
+        let resolved_type = self.resolved_type(source, &params)?;
 
         // Convert generic_type from Arbitrary to Variable types
         let generic_type = self.generic_type.genericize(&self.params);
         let type_param_names: Vec<String> = self.params.iter().map(|p| p.name.clone()).collect();
 
-        let mut value = AcornValue::constant(
-            self.name.clone(),
-            params,
-            resolved_type,
-            generic_type,
-            type_param_names,
-        );
+        let mut value =
+            AcornValue::constant(name, params, resolved_type, generic_type, type_param_names);
 
         // Apply any stored arguments
         if !self.args.is_empty() {

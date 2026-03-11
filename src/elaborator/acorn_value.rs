@@ -298,6 +298,11 @@ impl ConstantInstance {
         typeclass: &Typeclass,
         datatype: &Datatype,
     ) -> Option<DefinedName> {
+        if let ConstantName::InstanceAttribute(_, instance_name) = &self.name {
+            if &instance_name.typeclass == typeclass && &instance_name.datatype == datatype {
+                return Some(DefinedName::Instance(instance_name.clone()));
+            }
+        }
         if let Some((receiver_module_id, receiver, attribute)) = self.name.as_attribute() {
             if receiver_module_id == typeclass.module_id
                 && receiver == typeclass.name
@@ -703,32 +708,23 @@ impl AcornValue {
         AcornValue::Binary(BinaryOp::Or, Box::new(left), Box::new(right))
     }
 
-    /// Make a constant for an instance attribute.
-    pub fn instance_constant(instance_name: InstanceName, instance_type: AcornType) -> AcornValue {
-        let name = ConstantName::typeclass_attr(
-            instance_name.typeclass.module_id,
-            instance_name.typeclass.clone(),
-            &instance_name.attribute,
-        );
-        let param = AcornType::Data(instance_name.datatype.clone(), vec![]);
-
-        // Create the type parameter for the generic form
-        let type_param = TypeParam {
-            name: "Self".to_string(),
-            typeclass: Some(instance_name.typeclass),
-        };
-        // Compute generic_type by abstracting over the datatype
-        let generic_type =
-            instance_type.abstract_over_datatype(&instance_name.datatype, type_param);
-
-        let ci = ConstantInstance {
-            name,
-            params: vec![param],
+    /// Make the internal constant used for a concrete instance implementation.
+    ///
+    /// This is intentionally monomorphic and is only meant to exist while elaborating or
+    /// normalizing an `instance` block. Outside that context, the public-facing spelling
+    /// remains the typeclass attribute form such as `Add.add[Nat]`.
+    pub fn instance_impl_constant(
+        defining_module: ModuleId,
+        instance_name: InstanceName,
+        instance_type: AcornType,
+    ) -> AcornValue {
+        AcornValue::constant(
+            ConstantName::instance_attr(defining_module, instance_name),
+            vec![],
+            instance_type.clone(),
             instance_type,
-            generic_type,
-            type_param_names: vec!["Self".to_string()],
-        };
-        AcornValue::Constant(ci)
+            vec![],
+        )
     }
 
     /// Creates a constant value.

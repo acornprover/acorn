@@ -175,7 +175,8 @@ impl KernelContext {
             _ => {}
         }
 
-        let range = fact.source().range;
+        let source = fact.source().clone();
+        let range = source.range;
 
         {
             // We keep track of type params to build the type_var_map
@@ -225,6 +226,21 @@ impl KernelContext {
                     steps.push(step);
                 }
             }
+        }
+
+        if let Some((constant_instance, alias_name, constant_type)) = fact.as_instance_alias() {
+            // Normalize the bridge fact first so proof search still gets the explicit equality
+            // between the public typeclass constant and the instance-only implementation symbol.
+            // After that, register the alias so all later elaboration and certificate replay can
+            // treat the public spelling as the same kernel symbol.
+            let local = source.truthiness() != Truthiness::Factual;
+            self.symbol_table.alias_instance(
+                constant_instance,
+                alias_name,
+                &constant_type,
+                local,
+                &mut self.type_store,
+            );
         }
 
         Ok(LoweredFact {

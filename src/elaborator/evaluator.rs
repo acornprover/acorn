@@ -4,9 +4,10 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::inference::InferenceEngine;
 use crate::elaborator::named_entity::NamedEntity;
-use crate::elaborator::names::DefinedName;
+use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
+use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -21,6 +22,14 @@ pub enum AttributesTypeArgs {
     Generic(Vec<TypeParam>),
     /// Concrete types like `attributes Set[Color]`
     Concrete(Vec<AcornType>),
+}
+
+#[derive(Clone, Debug)]
+struct CurrentInstanceContext {
+    defining_module: ModuleId,
+    typeclass: Typeclass,
+    datatype: Datatype,
+    current_attr: String,
 }
 
 /// The Evaluator turns expressions into types and values, and other things of that nature.
@@ -39,6 +48,12 @@ pub struct Evaluator<'a> {
     /// Whether the evaluator accepts `choose(...) { ... }` binder syntax.
     /// This is currently intended for certificate parsing only.
     allow_choose: bool,
+
+    /// When we are elaborating the body of an `instance` member, explicit uses of the matching
+    /// typeclass attribute such as `Add.add[Nat]` should resolve to the instance implementation
+    /// slot, not to the public typeclass constant. This context is only set for that temporary,
+    /// in-progress instance-body elaboration path.
+    current_instance_context: Option<CurrentInstanceContext>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -62,6 +77,27 @@ impl<'a> Evaluator<'a> {
             bindings,
             token_map,
             allow_choose,
+            current_instance_context: None,
+        }
+    }
+
+    pub fn new_for_instance_member(
+        project: &'a Project,
+        bindings: &'a BindingMap,
+        token_map: Option<&'a mut TokenMap>,
+        instance_name: &InstanceName,
+    ) -> Self {
+        Self {
+            project,
+            bindings,
+            token_map,
+            allow_choose: false,
+            current_instance_context: Some(CurrentInstanceContext {
+                defining_module: bindings.module_id(),
+                typeclass: instance_name.typeclass.clone(),
+                datatype: instance_name.datatype.clone(),
+                current_attr: instance_name.attribute.clone(),
+            }),
         }
     }
 
@@ -78,6 +114,94 @@ impl<'a> Evaluator<'a> {
 
     fn inference(&self) -> InferenceEngine<'_> {
         InferenceEngine::new(self.bindings)
+    }
+
+    /// Creates a sibling evaluator that shares the current evaluation mode.
+    ///
+    /// We use this when we need a temporary evaluator with different bindings or without token
+    /// tracking, but we still need to preserve flags like `allow_choose` and the temporary
+    /// instance-member context. Reconstructing via `Evaluator::new(...)` would silently drop that
+    /// context and change how explicit typeclass attributes resolve inside an `instance` body.
+    fn fork(&self, bindings: &'a BindingMap, token_map: Option<&'a mut TokenMap>) -> Self {
+        Self {
+            project: self.project,
+            bindings,
+            token_map,
+            allow_choose: self.allow_choose,
+            current_instance_context: self.current_instance_context.clone(),
+        }
+    }
+
+    /// If we are currently elaborating a concrete `instance` member body, redirect an explicit
+    /// public-looking typeclass attribute like `Add.add[Nat]` to the private instance-impl
+    /// constant for that same `(typeclass, datatype, attribute)`.
+    ///
+    /// This only applies in the temporary "inside an instance body" context. Outside that path,
+    /// or for any other typeclass/datatype/attribute combination, we return `None` and let normal
+    /// unresolved-constant resolution handle it.
+    fn resolve_instance_impl_constant(
+        &self,
+        unresolved: &UnresolvedConstant,
+        type_params: &[AcornType],
+        source: &dyn ErrorContext,
+    ) -> error::Result<Option<AcornValue>> {
+        let Some(context) = &self.current_instance_context else {
+            return Ok(None);
+        };
+        let ConstantName::TypeclassAttribute(_, typeclass, attr_name) = &unresolved.name else {
+            return Ok(None);
+        };
+        if typeclass != &context.typeclass {
+            return Ok(None);
+        }
+        let [AcornType::Data(datatype, datatype_args)] = type_params else {
+            return Ok(None);
+        };
+        if datatype != &context.datatype || !datatype_args.is_empty() {
+            return Ok(None);
+        }
+
+        let instance_name = InstanceName {
+            typeclass: context.typeclass.clone(),
+            attribute: attr_name.clone(),
+            datatype: context.datatype.clone(),
+        };
+        let defined_name = DefinedName::Instance(instance_name.clone());
+
+        // This redirect is only valid while we are elaborating the current instance body:
+        // either for the member being defined recursively right now, or for another instance
+        // member that has already been defined earlier in the same block.
+        if attr_name != &context.current_attr
+            && self.bindings.get_definition(&defined_name).is_none()
+        {
+            return Ok(None);
+        }
+
+        let resolved_type = unresolved.resolved_type(source, type_params)?;
+        Ok(Some(AcornValue::instance_impl_constant(
+            context.defining_module,
+            instance_name,
+            resolved_type,
+        )))
+    }
+
+    /// Resolves an unresolved constant after type arguments are known.
+    ///
+    /// The only special case is the temporary instance-member redirect above. If that does not
+    /// apply, resolution falls through to the normal inference path.
+    fn resolve_unresolved_with_type_params(
+        &self,
+        unresolved: UnresolvedConstant,
+        type_params: Vec<AcornType>,
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        if let Some(value) =
+            self.resolve_instance_impl_constant(&unresolved, &type_params, source)?
+        {
+            return Ok(value);
+        }
+        self.inference()
+            .resolve_unresolved_with_type_params(unresolved, type_params, source)
     }
 
     /// Tracks token information for the given entity.
@@ -317,20 +441,14 @@ impl<'a> Evaluator<'a> {
             Expression::Concatenation(function, args) if !args.is_type() => (function, args),
             _ => {
                 // This can only be a no-argument constructor.
-                let mut no_token_evaluator = Evaluator::new_with_allow_choose(
-                    self.project,
-                    self.bindings,
-                    None,
-                    self.allow_choose,
-                );
+                let mut no_token_evaluator = self.fork(self.bindings, None);
                 let constructor =
                     no_token_evaluator.evaluate_value(pattern, Some(expected_type))?;
                 let (i, total) = self.expect_constructor(expected_type, &constructor, pattern)?;
                 return Ok((constructor, vec![], i, total));
             }
         };
-        let mut no_token_evaluator =
-            Evaluator::new_with_allow_choose(self.project, self.bindings, None, self.allow_choose);
+        let mut no_token_evaluator = self.fork(self.bindings, None);
         let potential_constructor =
             no_token_evaluator.evaluate_potential_value(&mut Stack::new(), fn_exp, None)?;
         let constructor = match potential_constructor {
@@ -345,8 +463,7 @@ impl<'a> Evaluator<'a> {
                         &uc.name, datatype.name
                     )));
                 }
-                self.inference()
-                    .resolve_unresolved_with_type_params(uc, params.clone(), pattern)?
+                self.resolve_unresolved_with_type_params(uc, params.clone(), pattern)?
             }
         };
         let (i, total) = self.expect_constructor(expected_type, &constructor, pattern)?;
@@ -451,7 +568,7 @@ impl<'a> Evaluator<'a> {
         match value {
             PotentialValue::Unresolved(unresolved) => {
                 let instance_type = AcornType::Data(datatype.clone(), vec![]);
-                let resolved = self.inference().resolve_unresolved_with_type_params(
+                let resolved = self.resolve_unresolved_with_type_params(
                     unresolved,
                     vec![instance_type],
                     source,
@@ -530,7 +647,7 @@ impl<'a> Evaluator<'a> {
                     // If this is a typeclass attribute, instantiate it with the datatype.
                     if let PotentialValue::Unresolved(unresolved) = value {
                         let instance_type = AcornType::Data(datatype.clone(), vec![]);
-                        let resolved = self.inference().resolve_unresolved_with_type_params(
+                        let resolved = self.resolve_unresolved_with_type_params(
                             unresolved,
                             vec![instance_type],
                             source,
@@ -613,12 +730,11 @@ impl<'a> Evaluator<'a> {
                                         NamedEntity::UnresolvedValue(u)
                                     } else {
                                         // Resolve it with the params from the type name
-                                        let value =
-                                            self.inference().resolve_unresolved_with_type_params(
-                                                u,
-                                                params.clone(),
-                                                name_token,
-                                            )?;
+                                        let value = self.resolve_unresolved_with_type_params(
+                                            u,
+                                            params.clone(),
+                                            name_token,
+                                        )?;
                                         NamedEntity::Value(value)
                                     }
                                 }
@@ -631,7 +747,7 @@ impl<'a> Evaluator<'a> {
                             PotentialValue::Resolved(value) => NamedEntity::Value(value),
                             PotentialValue::Unresolved(u) => {
                                 // Resolve it with the arbitrary type itself
-                                let value = self.inference().resolve_unresolved_with_type_params(
+                                let value = self.resolve_unresolved_with_type_params(
                                     u,
                                     vec![t.clone()],
                                     name_token,
@@ -647,13 +763,8 @@ impl<'a> Evaluator<'a> {
                 if let Some(bindings) = self.project.get_bindings(module) {
                     // Funny case where the bindings aren't in the same module as the token.
                     // Be careful not to track the token map here.
-                    Evaluator::new_with_allow_choose(
-                        self.project,
-                        bindings,
-                        None,
-                        self.allow_choose,
-                    )
-                    .evaluate_name(name_token, stack, None)?
+                    self.fork(bindings, None)
+                        .evaluate_name(name_token, stack, None)?
                 } else {
                     return Err(name_token.error("could not load bindings for module"));
                 }
@@ -1057,9 +1168,9 @@ impl<'a> Evaluator<'a> {
                     // Resolve the constructor with the type parameters
                     let some_value = match some_potential {
                         PotentialValue::Resolved(v) => v,
-                        PotentialValue::Unresolved(u) => self
-                            .inference()
-                            .resolve_unresolved_with_type_params(u, type_params.clone(), token)?,
+                        PotentialValue::Unresolved(u) => {
+                            self.resolve_unresolved_with_type_params(u, type_params.clone(), token)?
+                        }
                     };
 
                     // Verify that .some is a function of type T -> inner_type
@@ -1243,12 +1354,7 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Create a new evaluator with the modified bindings
-                    let mut evaluator = Evaluator::new_with_allow_choose(
-                        self.project,
-                        &new_bindings,
-                        None,
-                        self.allow_choose,
-                    );
+                    let mut evaluator = self.fork(&new_bindings, None);
 
                     // Evaluate type arguments in the generic lambda's type-parameter scope,
                     // so self-instantiation like function[T](...)[T] is representable.
@@ -1292,12 +1398,11 @@ impl<'a> Evaluator<'a> {
                                 for expr in exprs {
                                     type_params.push(self.evaluate_type(expr)?);
                                 }
-                                let resolved =
-                                    self.inference().resolve_unresolved_with_type_params(
-                                        unresolved,
-                                        type_params,
-                                        left_delimiter,
-                                    )?;
+                                let resolved = self.resolve_unresolved_with_type_params(
+                                    unresolved,
+                                    type_params,
+                                    left_delimiter,
+                                )?;
                                 resolved.check_type(expected_type, expression)?;
                                 return Ok(PotentialValue::Resolved(resolved));
                             }
@@ -1651,5 +1756,69 @@ mod tests {
         e.assert_type_ok("(Bool, Bool) -> Bool");
         e.assert_type_bad("Bool, Bool -> Bool");
         e.assert_type_bad("(Bool, Bool)");
+    }
+
+    #[test]
+    fn test_instance_member_context_redirects_explicit_typeclass_attr_to_internal_constant() {
+        let project = Project::new_mock();
+        let bindings = BindingMap::new(ModuleId(0));
+        let typeclass = Typeclass {
+            module_id: ModuleId(0),
+            name: "Add".to_string(),
+        };
+        let datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let instance_name = InstanceName {
+            typeclass: typeclass.clone(),
+            attribute: "add".to_string(),
+            datatype: datatype.clone(),
+        };
+        let evaluator =
+            Evaluator::new_for_instance_member(&project, &bindings, None, &instance_name);
+        let unresolved = UnresolvedConstant {
+            name: ConstantName::typeclass_attr(ModuleId(0), typeclass.clone(), "add"),
+            params: vec![TypeParam {
+                name: "Self".to_string(),
+                typeclass: Some(typeclass.clone()),
+            }],
+            generic_type: AcornType::functional(
+                vec![
+                    AcornType::Variable(TypeParam {
+                        name: "Self".to_string(),
+                        typeclass: Some(typeclass.clone()),
+                    }),
+                    AcornType::Variable(TypeParam {
+                        name: "Self".to_string(),
+                        typeclass: Some(typeclass.clone()),
+                    }),
+                ],
+                AcornType::Variable(TypeParam {
+                    name: "Self".to_string(),
+                    typeclass: Some(typeclass),
+                }),
+            ),
+            args: vec![],
+        };
+
+        let resolved = evaluator
+            .resolve_instance_impl_constant(
+                &unresolved,
+                &[AcornType::Data(datatype.clone(), vec![])],
+                &Token::empty(),
+            )
+            .expect("resolution should succeed")
+            .expect("instance context should redirect matching typeclass attrs");
+
+        let AcornValue::Constant(constant) = resolved else {
+            panic!("expected a constant");
+        };
+        assert!(constant.params.is_empty());
+        assert!(matches!(
+            constant.name,
+            ConstantName::InstanceAttribute(ModuleId(0), ref inst)
+                if *inst == instance_name
+        ));
     }
 }

@@ -87,6 +87,30 @@ pub enum Decomposition<'a> {
     Exists(TermRef<'a>, TermRef<'a>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeConstraintKind {
+    Type0,
+    Typeclass(TypeclassId),
+    Other,
+}
+
+fn resolve_type_constraint_kind(
+    type_term: TermRef<'_>,
+    local_context: &LocalContext,
+) -> TypeConstraintKind {
+    match type_term.decompose() {
+        Decomposition::Atom(Atom::Symbol(Symbol::Type0)) => TypeConstraintKind::Type0,
+        Decomposition::Atom(Atom::Symbol(Symbol::Typeclass(tc_id))) => {
+            TypeConstraintKind::Typeclass(*tc_id)
+        }
+        Decomposition::Atom(Atom::FreeVariable(var_id)) => local_context
+            .get_var_type(*var_id as usize)
+            .map(|var_type| resolve_type_constraint_kind(var_type.as_ref(), local_context))
+            .unwrap_or(TypeConstraintKind::Other),
+        _ => TypeConstraintKind::Other,
+    }
+}
+
 /// A borrowed reference to a term - wraps a slice of components.
 /// This is the borrowed equivalent of Term, similar to how &str relates to String.
 /// Most operations work on TermRef to avoid unnecessary allocations.
@@ -96,6 +120,115 @@ pub struct TermRef<'a> {
 }
 
 impl<'a> TermRef<'a> {
+    fn validate_typeclass_argument(
+        required_tc: TypeclassId,
+        arg: TermRef<'_>,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Result<(), String> {
+        let required_name = &kernel_context.type_store.get_typeclass(required_tc).name;
+
+        if arg.is_type0() {
+            return Err(format!(
+                "expected a type implementing {}, got kind {}",
+                required_name, arg
+            ));
+        }
+        if let Some(actual_tc) = arg.as_typeclass() {
+            let actual_name = &kernel_context.type_store.get_typeclass(actual_tc).name;
+            return Err(format!(
+                "expected a type implementing {}, got typeclass kind {}",
+                required_name, actual_name
+            ));
+        }
+        if matches!(
+            arg.decompose(),
+            Decomposition::Pi(_, _)
+                | Decomposition::Lambda(_, _)
+                | Decomposition::ForAll(_, _)
+                | Decomposition::Exists(_, _)
+        ) {
+            return Err(format!(
+                "expected a concrete type implementing {}, got higher-order term {}",
+                required_name, arg
+            ));
+        }
+        if matches!(
+            arg.decompose(),
+            Decomposition::Atom(Atom::Symbol(Symbol::Bool))
+        ) {
+            return Err(format!(
+                "type {} is not an instance of {}",
+                arg, required_name
+            ));
+        }
+
+        if let Some(ground_id) = arg.as_type_atom() {
+            if kernel_context
+                .type_store
+                .is_instance_of(ground_id, required_tc)
+            {
+                return Ok(());
+            }
+            return Err(format!(
+                "type {} is not an instance of {}",
+                arg, required_name
+            ));
+        }
+
+        let Some(var_id) = arg.atomic_variable() else {
+            return Err(format!(
+                "expected a ground type or constrained type variable implementing {}, got {}",
+                required_name, arg
+            ));
+        };
+        let Some(var_type) = local_context.get_var_type(var_id as usize) else {
+            return Err(format!("type variable {} is out of scope", arg));
+        };
+
+        match resolve_type_constraint_kind(var_type.as_ref(), local_context) {
+            TypeConstraintKind::Typeclass(actual_tc)
+                if actual_tc == required_tc
+                    || kernel_context
+                        .type_store
+                        .typeclass_extends(actual_tc, required_tc) =>
+            {
+                Ok(())
+            }
+            TypeConstraintKind::Typeclass(actual_tc) => Err(format!(
+                "type variable {} has incompatible constraint {}; expected {}",
+                arg,
+                kernel_context.type_store.get_typeclass(actual_tc).name,
+                required_name
+            )),
+            TypeConstraintKind::Type0 => Err(format!(
+                "type variable {} is unconstrained; expected an instance of {}",
+                arg, required_name
+            )),
+            TypeConstraintKind::Other => Err(format!(
+                "expected a type implementing {}, got {}",
+                required_name, arg
+            )),
+        }
+    }
+
+    fn validate_application_argument(
+        input_type: TermRef<'_>,
+        arg: TermRef<'_>,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Result<(), String> {
+        if let Some(required_tc) = input_type.as_typeclass() {
+            return Self::validate_typeclass_argument(
+                required_tc,
+                arg,
+                local_context,
+                kernel_context,
+            );
+        }
+        Ok(())
+    }
+
     /// Create a TermRef from a slice of components.
     fn new(components: &'a [TermComponent]) -> TermRef<'a> {
         TermRef { components }
@@ -588,6 +721,170 @@ impl<'a> TermRef<'a> {
         };
         result.validate();
         result
+    }
+
+    pub fn checked_type_with_context(
+        &self,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Result<Term, String> {
+        let result = match self.decompose() {
+            Decomposition::Atom(atom) => match atom {
+                Atom::FreeVariable(i) => local_context
+                    .get_var_type(*i as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "Variable x{} not found in LocalContext (size={}). TermRef components: {:?}",
+                            i,
+                            local_context.len(),
+                            self.components
+                        )
+                    })?,
+                Atom::BoundVariable(_) => {
+                    return Err(
+                        "BoundVariable should not appear as standalone term in checked_type_with_context"
+                            .to_string(),
+                    )
+                }
+                Atom::Symbol(symbol) => kernel_context
+                    .symbol_table
+                    .get_symbol_type(*symbol, &kernel_context.type_store),
+            },
+            Decomposition::Application(func, arg) => {
+                let func_type = func.checked_type_with_context(local_context, kernel_context)?;
+                let _arg_type = arg.checked_type_with_context(local_context, kernel_context)?;
+                let Some((input_type, _)) = func_type.as_ref().split_pi() else {
+                    return Err(format!(
+                        "Function type expected but not found during type application.\n\
+                         func = {}\n\
+                         func_type = {}\n\
+                         arg = {}\n\
+                         self = {}",
+                        func, func_type, arg, self
+                    ));
+                };
+                Self::validate_application_argument(
+                    input_type,
+                    arg,
+                    local_context,
+                    kernel_context,
+                )?;
+
+                let arg_term = arg.to_owned();
+                func_type.type_apply_with_arg(&arg_term).ok_or_else(|| {
+                    format!(
+                        "Function type expected but not found during type application.\n\
+                         func = {}\n\
+                         func_type = {}\n\
+                         arg = {}\n\
+                         self = {}",
+                        func, func_type, arg, self
+                    )
+                })?
+            }
+            Decomposition::Pi(_, _) => Term::type_sort(),
+            Decomposition::Lambda(input, body) => {
+                fn abstract_free_var_as_bound_at_depth(
+                    term: &Term,
+                    var_id: AtomId,
+                    depth: u16,
+                ) -> Term {
+                    match term.as_ref().decompose() {
+                        Decomposition::Atom(atom) => match atom {
+                            Atom::FreeVariable(i) if *i == var_id => {
+                                Term::atom(Atom::BoundVariable(depth))
+                            }
+                            Atom::BoundVariable(i) if *i >= depth => {
+                                Term::atom(Atom::BoundVariable(*i + 1))
+                            }
+                            _ => term.clone(),
+                        },
+                        Decomposition::Application(func, arg) => {
+                            let new_func = abstract_free_var_as_bound_at_depth(
+                                &func.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_arg = abstract_free_var_as_bound_at_depth(
+                                &arg.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            new_func.apply(&[new_arg])
+                        }
+                        Decomposition::Pi(input, output) => {
+                            let new_input = abstract_free_var_as_bound_at_depth(
+                                &input.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_output = abstract_free_var_as_bound_at_depth(
+                                &output.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::pi(new_input, new_output)
+                        }
+                        Decomposition::Lambda(input, body) => {
+                            let new_input = abstract_free_var_as_bound_at_depth(
+                                &input.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::lambda(new_input, new_body)
+                        }
+                        Decomposition::ForAll(binder_type, body) => {
+                            let new_binder_type = abstract_free_var_as_bound_at_depth(
+                                &binder_type.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::forall(new_binder_type, new_body)
+                        }
+                        Decomposition::Exists(binder_type, body) => {
+                            let new_binder_type = abstract_free_var_as_bound_at_depth(
+                                &binder_type.to_owned(),
+                                var_id,
+                                depth,
+                            );
+                            let new_body = abstract_free_var_as_bound_at_depth(
+                                &body.to_owned(),
+                                var_id,
+                                depth + 1,
+                            );
+                            Term::exists(new_binder_type, new_body)
+                        }
+                    }
+                }
+
+                let input_type = input.to_owned();
+                let mut nested_context = local_context.clone();
+                let fresh_var = nested_context.push_type(input_type.clone()) as AtomId;
+                let replacement = Term::new_variable(fresh_var);
+                let opened_body = body
+                    .to_owned()
+                    .substitute_bound(0, &replacement)
+                    .shift_bound(0, -1);
+                let body_type =
+                    opened_body.checked_type_with_context(&nested_context, kernel_context)?;
+                let output_type = abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
+                Term::pi(input_type, output_type)
+            }
+            Decomposition::ForAll(_, _) | Decomposition::Exists(_, _) => Term::bool_type(),
+        };
+        result.validate();
+        Ok(result)
     }
 
     /// Check if this term contains a variable with the given index anywhere.
@@ -1750,6 +2047,15 @@ impl Term {
             .get_type_with_context(local_context, kernel_context)
     }
 
+    pub fn checked_type_with_context(
+        &self,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Result<Term, String> {
+        self.as_ref()
+            .checked_type_with_context(local_context, kernel_context)
+    }
+
     /// Check if this term is atomic (no arguments).
     pub fn is_atomic(&self) -> bool {
         self.as_ref().is_atomic()
@@ -2703,6 +3009,7 @@ impl<'a> Iterator for TermRefArgsIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
     use crate::kernel::symbol::Symbol;
     use crate::module::ModuleId;
 
@@ -3047,5 +3354,69 @@ mod tests {
             "x0",
             "FreeVariables are not substituted by type_apply_with_arg"
         );
+    }
+
+    #[test]
+    fn test_checked_type_with_context_rejects_invalid_typeclass_type_arg() {
+        let mut kctx = KernelContext::new();
+
+        let arf = Typeclass {
+            module_id: ModuleId(0),
+            name: "Arf".to_string(),
+        };
+        let arf_tc_id = kctx.type_store.add_typeclass(&arf);
+
+        kctx.parse_datatype("Foo");
+        let foo_id = kctx.type_store.get_ground_id_by_name("Foo").unwrap();
+
+        let arf_type = Term::typeclass(arf_tc_id);
+        let dependent_result = Term::atom(Atom::BoundVariable(0));
+        let arf_method_type = Term::pi(arf_type, dependent_result);
+        kctx.symbol_table.add_global_constant(arf_method_type);
+
+        let invalid = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(&[Term::ground_type(foo_id)]);
+
+        let err = invalid
+            .checked_type_with_context(&LocalContext::empty(), &kctx)
+            .expect_err("Foo should not typecheck as an Arf instance");
+        assert!(
+            err.contains("not an instance of Arf"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_checked_type_with_context_accepts_valid_typeclass_type_arg() {
+        let mut kctx = KernelContext::new();
+
+        let arf = Typeclass {
+            module_id: ModuleId(0),
+            name: "Arf".to_string(),
+        };
+        let arf_tc_id = kctx.type_store.add_typeclass(&arf);
+
+        kctx.parse_datatype("Foo");
+        let foo_id = kctx.type_store.get_ground_id_by_name("Foo").unwrap();
+        let foo_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Foo".to_string(),
+        };
+        kctx.type_store
+            .add_type_instance(&AcornType::Data(foo_datatype, vec![]), arf_tc_id);
+
+        let arf_type = Term::typeclass(arf_tc_id);
+        let dependent_result = Term::atom(Atom::BoundVariable(0));
+        let arf_method_type = Term::pi(arf_type, dependent_result);
+        kctx.symbol_table.add_global_constant(arf_method_type);
+
+        let valid = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(&[Term::ground_type(foo_id)]);
+
+        let ty = valid
+            .checked_type_with_context(&LocalContext::empty(), &kctx)
+            .expect("Foo should typecheck as an Arf instance");
+        assert_eq!(ty, Term::ground_type(foo_id));
     }
 }
