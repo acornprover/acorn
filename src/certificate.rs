@@ -28,7 +28,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
-use crate::kernel::term_normalization::beta_reduce_subterms;
+use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleDescriptor;
 use crate::project::Project;
@@ -488,7 +488,7 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
-                let term = beta_reduce_subterms(&term);
+                let term = normalize_term(&term);
                 if Self::should_preserve_single_literal_claim(&term) {
                     if let Some(clause) = Self::try_deserialize_single_literal_clause(&term, &[]) {
                         return Ok(CertificateStep::Claim(Claim {
@@ -966,7 +966,7 @@ impl Certificate {
             &generic_value,
             type_var_map.as_ref(),
         )?;
-        let generic_term = beta_reduce_subterms(&generic_term);
+        let generic_term = normalize_term(&generic_term);
         if Self::term_has_inline_clause_shape(&generic_term, true) {
             let clause = Self::try_deserialize_inline_clause(&generic_term, &type_param_kinds)
                 .expect("inline clause shape should deserialize");
@@ -1064,6 +1064,7 @@ impl Certificate {
                     NewConstantType::Local,
                     type_var_map.as_ref(),
                 )?;
+                let term = normalize_term(&term);
                 let mut term_view = Clausifier::new_mut(kernel_context, None);
                 term_view.clausify_term_for_claim_arg(&term)?
             };
@@ -1826,7 +1827,15 @@ mod tests {
 
         let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
             .expect("serialization should succeed");
-        assert_eq!(serialized, line);
+        assert!(serialized.contains("not if"));
+        let reparsed = Certificate::deserialize_claim_with_args(
+            &serialized,
+            &project,
+            &bindings,
+            &kernel_context,
+        )
+        .expect("serialized claim should deserialize again");
+        assert_eq!(reparsed, claim);
     }
 
     #[test]
@@ -2037,6 +2046,60 @@ mod tests {
 
         let CertificateStep::Claim(claim) = step;
         assert_eq!(claim.var_map.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_code_line_canonicalizes_plain_claim_equality() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let mut lhs_bindings = Cow::Borrowed(&bindings);
+        let mut lhs_kernel_context = Cow::Borrowed(&kernel_context);
+        let lhs = Certificate::parse_code_line(
+            "true = false",
+            &project,
+            &mut lhs_bindings,
+            &mut lhs_kernel_context,
+        )
+        .expect("left equality should parse");
+
+        let mut rhs_bindings = Cow::Borrowed(&bindings);
+        let mut rhs_kernel_context = Cow::Borrowed(&kernel_context);
+        let rhs = Certificate::parse_code_line(
+            "false = true",
+            &project,
+            &mut rhs_bindings,
+            &mut rhs_kernel_context,
+        )
+        .expect("right equality should parse");
+
+        let CertificateStep::Claim(lhs_claim) = lhs;
+        let CertificateStep::Claim(rhs_claim) = rhs;
+        assert_eq!(lhs_claim, rhs_claim);
+    }
+
+    #[test]
+    fn test_deserialize_claim_with_args_normalizes_value_argument_term() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+        let claim = Certificate::deserialize_claim_with_args(
+            "function(x0: Bool) { x0 }(not not false)",
+            &project,
+            &bindings,
+            &kernel_context,
+        )
+        .expect("claim-with-args deserialization should succeed");
+
+        assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_false()));
     }
 
     #[test]
@@ -2478,7 +2541,15 @@ theorem goal(k: Bool) {\n\
         let serialized =
             Certificate::serialize_claim_with_args(&parsed, kernel_context_cow.as_ref(), &bindings)
                 .expect("parsed claim should serialize again");
-        assert_eq!(serialized, line);
+        let reparsed = Certificate::parse_code_line(
+            &serialized,
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("serialized claim should parse again");
+        let CertificateStep::Claim(reparsed) = reparsed;
+        assert_eq!(reparsed, parsed);
 
         let mut checker = Checker::new();
         checker.insert_clause(
