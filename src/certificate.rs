@@ -491,10 +491,10 @@ impl Certificate {
                 let term = normalize_term(&term);
                 if Self::should_preserve_single_literal_claim(&term) {
                     if let Some(clause) = Self::try_deserialize_single_literal_clause(&term, &[]) {
-                        return Ok(CertificateStep::Claim(Claim {
-                            clause,
-                            var_map: VariableMap::new(),
-                        }));
+                        return Ok(CertificateStep::Claim(
+                            Claim::new(clause, VariableMap::new())
+                                .map_err(CodeGenError::GeneratedBadCode)?,
+                        ));
                     }
                 }
                 let mut view = Clausifier::new_mut(kernel_context.to_mut(), None);
@@ -504,13 +504,14 @@ impl Certificate {
                     // as a single signed literal term (for example, `a and b`) rather
                     // than expanding it into multiple CNF clauses.
                     let simple_term = view.clausify_term_to_simple_term(&term)?;
-                    return Ok(CertificateStep::Claim(Claim {
-                        clause: crate::kernel::clause::Clause::from_literals_unnormalized(
-                            vec![Literal::positive(simple_term)],
-                            &LocalContext::empty(),
-                        ),
-                        var_map: VariableMap::new(),
-                    }));
+                    let clause = crate::kernel::clause::Clause::from_literals_unnormalized(
+                        vec![Literal::positive(simple_term)],
+                        &LocalContext::empty(),
+                    );
+                    return Ok(CertificateStep::Claim(
+                        Claim::new(clause, VariableMap::new())
+                            .map_err(CodeGenError::GeneratedBadCode)?,
+                    ));
                 }
                 let clause = clauses
                     .into_iter()
@@ -522,18 +523,19 @@ impl Certificate {
                     let simple_term = view.clausify_term_to_simple_term(&term)?;
                     let literal = Self::try_term_to_single_denormalized_literal(&simple_term)
                         .unwrap_or_else(|| Literal::positive(simple_term));
-                    return Ok(CertificateStep::Claim(Claim {
-                        clause: crate::kernel::clause::Clause::from_literals_unnormalized(
-                            vec![literal],
-                            &LocalContext::empty(),
-                        ),
-                        var_map: VariableMap::new(),
-                    }));
+                    let clause = crate::kernel::clause::Clause::from_literals_unnormalized(
+                        vec![literal],
+                        &LocalContext::empty(),
+                    );
+                    return Ok(CertificateStep::Claim(
+                        Claim::new(clause, VariableMap::new())
+                            .map_err(CodeGenError::GeneratedBadCode)?,
+                    ));
                 }
-                Ok(CertificateStep::Claim(Claim {
-                    clause,
-                    var_map: VariableMap::new(),
-                }))
+                Ok(CertificateStep::Claim(
+                    Claim::new(clause, VariableMap::new())
+                        .map_err(CodeGenError::GeneratedBadCode)?,
+                ))
             };
 
         match statement.statement {
@@ -599,10 +601,8 @@ impl Certificate {
             }
         }
 
-        Claim {
-            clause: claim.clause.clone(),
-            var_map: expected_var_map,
-        }
+        Claim::new(claim.clause.clone(), expected_var_map)
+            .expect("roundtrip claim should normalize")
     }
 
     fn serialize_claim_with_names(
@@ -972,7 +972,9 @@ impl Certificate {
                 .expect("inline clause shape should deserialize");
             let var_map =
                 Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
-            return Ok(Some(Claim { clause, var_map }));
+            return Ok(Some(
+                Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
+            ));
         }
         if Self::should_preserve_single_literal_claim(&generic_term) {
             if let Some(clause) =
@@ -983,7 +985,9 @@ impl Certificate {
                     args.as_slice(),
                     kernel_context,
                 )?;
-                return Ok(Some(Claim { clause, var_map }));
+                return Ok(Some(
+                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
+                ));
             }
         }
 
@@ -998,7 +1002,9 @@ impl Certificate {
                     args.as_slice(),
                     kernel_context,
                 )?;
-                return Ok(Some(Claim { clause, var_map }));
+                return Ok(Some(
+                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
+                ));
             }
             if let Some(clause) =
                 Self::try_deserialize_single_formula_clause(&generic_term, &type_param_kinds)
@@ -1008,7 +1014,9 @@ impl Certificate {
                     args.as_slice(),
                     kernel_context,
                 )?;
-                return Ok(Some(Claim { clause, var_map }));
+                return Ok(Some(
+                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
+                ));
             }
             // This lambda form only round-trips to `Claim { clause, var_map }` when
             // the body can be represented as a single inline clause. If it doesn't,
@@ -1023,7 +1031,9 @@ impl Certificate {
         let var_map =
             Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
 
-        Ok(Some(Claim { clause, var_map }))
+        Ok(Some(
+            Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
+        ))
     }
 
     fn build_claim_var_map(

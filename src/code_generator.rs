@@ -865,10 +865,7 @@ impl CodeGenerator<'_> {
                 generic, claim_var_map, replayed, clause
             )));
         }
-        let claim = Claim {
-            clause: generic.clone(),
-            var_map: claim_var_map,
-        };
+        let claim = Claim::new(generic.clone(), claim_var_map).map_err(Error::GeneratedBadCode)?;
 
         steps.push(CertificateStep::Claim(claim));
         Ok(())

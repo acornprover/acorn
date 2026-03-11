@@ -957,20 +957,18 @@ mod tests {
         let mut context = KernelContext::new();
         context.parse_constant("c0", "Bool");
 
-        let claim = Claim {
-            clause: context.parse_clause("x0(c0)", &["Bool -> Bool"]),
-            var_map: {
-                let mut var_map = VariableMap::new();
-                var_map.set(
-                    0,
-                    Term::lambda(
-                        Term::bool_type(),
-                        Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
-                    ),
-                );
-                var_map
-            },
-        };
+        let claim = Claim::new(context.parse_clause("x0(c0)", &["Bool -> Bool"]), {
+            let mut var_map = VariableMap::new();
+            var_map.set(
+                0,
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                ),
+            );
+            var_map
+        })
+        .expect("claim should normalize");
 
         let instantiated = Checker::instantiate_claim_clause(&claim, &context)
             .expect("claim instantiation should succeed");
@@ -1007,20 +1005,18 @@ mod tests {
         checker.insert_clause(&generic, StepReason::Testing, &context);
         checker.insert_clause(&negated, StepReason::Testing, &context);
 
-        let claim = Claim {
-            clause: context.parse_clause("x0(c0)", &["Bool -> Bool"]),
-            var_map: {
-                let mut var_map = VariableMap::new();
-                var_map.set(
-                    0,
-                    Term::lambda(
-                        Term::bool_type(),
-                        Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
-                    ),
-                );
-                var_map
-            },
-        };
+        let claim = Claim::new(context.parse_clause("x0(c0)", &["Bool -> Bool"]), {
+            let mut var_map = VariableMap::new();
+            var_map.set(
+                0,
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                ),
+            );
+            var_map
+        })
+        .expect("claim should normalize");
 
         let (checked_steps, used) = checker
             .check_cert_steps(&[CertificateStep::Claim(claim)], None, &context)

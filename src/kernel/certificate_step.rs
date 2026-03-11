@@ -1,6 +1,6 @@
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
-use crate::kernel::term_normalization::beta_reduce_clause_subterms;
+use crate::kernel::term_normalization::{beta_reduce_clause_subterms, normalize_term};
 use crate::kernel::variable_map::VariableMap;
 
 /// A certificate claim line.
@@ -14,6 +14,20 @@ pub struct Claim {
 }
 
 impl Claim {
+    /// Build a certificate claim pair in its canonical certificate form.
+    ///
+    /// Unlike full clause normalization, this keeps all existing local-variable slots pinned in
+    /// place so `(clause, var_map)` round-trips remain stable for certificates.
+    pub fn new(mut clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {
+        let pinned = clause.get_local_context().len();
+        clause.normalize_with_pinned(pinned);
+        var_map.apply_to_all(normalize_term);
+
+        let claim = Claim { clause, var_map };
+        claim.validate_var_map_scope()?;
+        Ok(claim)
+    }
+
     fn validate_var_map_scope(&self) -> Result<(), String> {
         let generic_len = self.clause.get_local_context().len();
         for (var_id, term) in self.var_map.iter() {
@@ -64,4 +78,35 @@ impl Claim {
 pub enum CertificateStep {
     /// A claim statement with a generic clause plus specialization map.
     Claim(Claim),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+
+    #[test]
+    fn test_claim_new_preserves_local_slots_and_normalizes_var_map_terms() {
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::eq(
+                Term::bool_type(),
+                Term::new_variable(1),
+                Term::new_variable(1),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
+        );
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::not(Term::not(Term::new_false())));
+        var_map.set(1, Term::new_true());
+
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
+
+        assert_eq!(claim.clause.get_local_context().len(), 2);
+        assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_false()));
+        assert_eq!(claim.var_map.get_mapping(1), Some(&Term::new_true()));
+    }
 }
