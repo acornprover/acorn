@@ -1,6 +1,6 @@
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
-use crate::kernel::term_normalization::{beta_reduce_clause_subterms, normalize_term};
+use crate::kernel::term_normalization::{normalize_clause_subterms, normalize_term};
 use crate::kernel::variable_map::VariableMap;
 
 /// A certificate claim line.
@@ -81,7 +81,7 @@ impl Claim {
         kernel_context: &KernelContext,
     ) -> Result<Clause, String> {
         Ok(
-            beta_reduce_clause_subterms(&self.specialized_clause_for_display(kernel_context)?)
+            normalize_clause_subterms(&self.specialized_clause_for_display(kernel_context)?)
                 .normalized(),
         )
     }

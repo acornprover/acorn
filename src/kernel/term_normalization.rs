@@ -203,6 +203,23 @@ pub fn beta_reduce_clause_subterms(clause: &Clause) -> Clause {
     Clause::from_literals_unnormalized(literals, clause.get_local_context())
 }
 
+/// Recursively term-normalizes every literal subterm of a clause.
+///
+/// This applies the standard kernel term normalizer to each side of each literal, without doing
+/// any clause-level cleanup such as literal deduplication or variable renumbering.
+pub fn normalize_clause_subterms(clause: &Clause) -> Clause {
+    let literals = clause
+        .literals
+        .iter()
+        .map(|literal| Literal {
+            positive: literal.positive,
+            left: normalize_term(&literal.left),
+            right: normalize_term(&literal.right),
+        })
+        .collect();
+    Clause::from_literals_unnormalized(literals, clause.get_local_context())
+}
+
 /// Recursively normalizes a kernel term.
 ///
 /// This:
@@ -349,7 +366,7 @@ pub fn normalize_boolean_subterms(term: &Term) -> Term {
 #[cfg(test)]
 mod tests {
     use super::{
-        beta_reduce_clause_subterms, normalize_boolean_subterms,
+        beta_reduce_clause_subterms, normalize_boolean_subterms, normalize_clause_subterms,
         normalize_clause_term_with_polarity, normalize_signed_clause_term, normalize_term,
     };
     use crate::kernel::atom::Atom;
@@ -403,6 +420,30 @@ mod tests {
             reduced,
             Clause::from_literals_unnormalized(
                 vec![Literal::positive(Term::not(Term::not(Term::parse("c0"))))],
+                &LocalContext::empty(),
+            )
+        );
+    }
+
+    #[test]
+    fn test_normalize_clause_subterms_applies_full_term_normalization() {
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
+                )
+                .apply(&[Term::parse("c0")]),
+            )],
+            &LocalContext::empty(),
+        );
+
+        let normalized = normalize_clause_subterms(&clause);
+
+        assert_eq!(
+            normalized,
+            Clause::from_literals_unnormalized(
+                vec![Literal::positive(Term::parse("c0"))],
                 &LocalContext::empty(),
             )
         );
