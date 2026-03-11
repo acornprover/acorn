@@ -359,8 +359,8 @@ impl Checker {
         trace!("inserting goal {} (line {})", goal.name, goal.first_line);
 
         let source = &goal.proposition.source;
-        let normalized = crate::elaborator::lowering::normalize_goal(kernel_context, goal)
-            .map_err(|e| e.message)?;
+        let normalized =
+            crate::elaborator::lowering::lower_goal(kernel_context, goal).map_err(|e| e.message)?;
         // Get kernel_context after normalizing, since normalize_goal may create new synthetics
         let kernel_context = kernel_context;
         for step in &normalized.steps {
@@ -380,14 +380,14 @@ impl Checker {
         Ok(())
     }
 
-    /// Insert pre-normalized goal clauses into the checker.
-    /// Uses the provided normalized goal (including its kernel context state).
-    pub fn insert_normalized_goal(
+    /// Insert pre-lowered goal clauses into the checker.
+    /// Uses the provided lowered goal (including its kernel context state).
+    pub fn insert_lowered_goal(
         &mut self,
-        normalized: &crate::elaborator::lowering::NormalizedGoal,
+        normalized: &crate::elaborator::lowering::LoweredGoal,
     ) -> Result<(), Error> {
         trace!(
-            "inserting normalized goal {} (line {})",
+            "inserting lowered goal {} (line {})",
             normalized.goal.name,
             normalized.goal.first_line
         );

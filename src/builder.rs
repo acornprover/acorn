@@ -12,7 +12,7 @@ use crate::elaborator::environment::Environment;
 use crate::elaborator::error::Error as ElaborationError;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::lowering::NormalizedGoal;
+use crate::elaborator::lowering::LoweredGoal;
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::source::SourceType;
 use crate::module::{LoadState, ModuleDescriptor, ModuleId};
@@ -762,7 +762,7 @@ impl<'a> Builder<'a> {
 
     /// Verifies a goal.
     /// env should be the environment that the proof happens in.
-    /// normalized_goal is the normalized goal from the normalization pass, used for validation.
+    /// lowered_goal is the lowered goal from the lowering pass, used for validation.
     fn verify_goal(
         &mut self,
         mut processor: Rc<Processor>,
@@ -770,7 +770,7 @@ impl<'a> Builder<'a> {
         env: &Environment,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
-        normalized_goal: Option<&NormalizedGoal>,
+        lowered_goal: Option<&LoweredGoal>,
     ) -> Result<(), BuildError> {
         // Check if we've been cancelled before starting any work
         if self.cancellation_token.is_cancelled() {
@@ -780,7 +780,7 @@ impl<'a> Builder<'a> {
         // If there's a cert override for single-goal verification, use it instead of the worklist
         if let Some(ref cert) = self.cert_override {
             let normalized_goal =
-                normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
+                lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
             let goal_kernel_context = &normalized_goal.kernel_context;
             let result = processor.check_cert(
                 cert,
@@ -812,7 +812,7 @@ impl<'a> Builder<'a> {
 
             // If clean_certs is enabled, clean the certificate
             let normalized_goal =
-                normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
+                lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
             let goal_kernel_context = &normalized_goal.kernel_context;
             let (cert_to_use, check_result) = if self.clean_certs {
                 match processor.clean_cert(
@@ -895,11 +895,11 @@ impl<'a> Builder<'a> {
         // Try searching
         let processor = Rc::make_mut(&mut processor);
 
-        // Use normalized goal data only; do not normalize during phase three.
+        // Use lowered goal data only; do not lower during phase three.
         let normalized_goal =
-            normalized_goal.ok_or_else(|| BuildError::goal(goal, "missing normalized goal"))?;
+            lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
         let goal_kernel_context = &normalized_goal.kernel_context;
-        processor.set_normalized_goal(normalized_goal);
+        processor.set_lowered_goal(normalized_goal);
 
         let start = std::time::Instant::now();
         let outcome = processor.search(
@@ -1034,10 +1034,10 @@ impl<'a> Builder<'a> {
                 }
 
                 if cursor.node().get_fact().is_some() {
-                    let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
-                        BuildError::new(Default::default(), "missing normalized fact".to_string())
+                    let normalized = cursor.node().lowered_fact().ok_or_else(|| {
+                        BuildError::new(Default::default(), "missing lowered fact".to_string())
                     })?;
-                    Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
+                    Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
                 }
 
                 if cursor.has_next() {
@@ -1052,7 +1052,7 @@ impl<'a> Builder<'a> {
 
         assert!(cursor.node().has_goal());
         let goal = cursor.goal().unwrap();
-        let normalized_goal = cursor.normalized_goal();
+        let normalized_goal = cursor.lowered_goal();
         if let Some(ref filter) = self.goal_filter {
             let matches = match filter {
                 GoalFilter::SingleLine {
@@ -1155,10 +1155,10 @@ impl<'a> Builder<'a> {
                     break;
                 }
                 if cursor.node().get_fact().is_some() {
-                    let normalized = cursor.node().get_normalized_fact().ok_or_else(|| {
-                        BuildError::new(Default::default(), "missing normalized fact".to_string())
+                    let normalized = cursor.node().lowered_fact().ok_or_else(|| {
+                        BuildError::new(Default::default(), "missing lowered fact".to_string())
                     })?;
-                    Rc::make_mut(&mut processor).add_normalized_fact(normalized)?;
+                    Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
                 }
                 cursor.next();
             }

@@ -1290,7 +1290,7 @@ impl Project {
         // Normalize all facts after elaboration.
         // We ignore errors here since some facts may intentionally fail to normalize
         // (e.g., exists over uninhabited types in test cases).
-        let _ = env.run_normalization_pass(self);
+        let _ = env.run_lowering_pass(self);
 
         // Compute simple blake3 hash of just the file contents
         let content_hash = blake3::hash(text.as_bytes());
@@ -1394,7 +1394,7 @@ impl Project {
         for cert in &cert_store.certs {
             if cert.goal == goal.name {
                 // Try to verify this certificate
-                let normalized_goal = cursor.normalized_goal()?;
+                let normalized_goal = cursor.lowered_goal()?;
                 if let Ok(steps) = processor.check_cert(
                     cert,
                     Some(normalized_goal),

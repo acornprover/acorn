@@ -34,37 +34,37 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::trace;
 
-/// A fact that has been normalized into proof steps.
+/// A fact that has been lowered into proof steps.
 #[derive(Clone)]
-pub struct NormalizedFact {
+pub struct LoweredFact {
     pub steps: Vec<ProofStep>,
     pub kernel_context: KernelContext,
 }
 
-/// A goal that has been normalized into proof steps.
-/// Includes the kernel_context state after normalizing this goal.
+/// A goal that has been lowered into proof steps.
+/// Includes the kernel_context state after lowering this goal.
 #[derive(Clone)]
-pub struct NormalizedGoal {
+pub struct LoweredGoal {
     pub goal: Goal,
     pub steps: Vec<ProofStep>,
-    /// The kernel context state after normalizing this goal (with negated goal added).
+    /// The kernel context state after lowering this goal (with negated goal added).
     pub kernel_context: KernelContext,
 }
 
-/// Normalize one fact using kernel context state.
-pub fn normalize_fact(
+/// Lower one fact using kernel context state.
+pub fn lower_fact(
     kernel_context: &mut KernelContext,
     fact: &Fact,
-) -> Result<NormalizedFact, BuildError> {
-    kernel_context.normalize_fact(fact)
+) -> Result<LoweredFact, BuildError> {
+    kernel_context.lower_fact(fact)
 }
 
-/// Normalize one goal using kernel context state.
-pub fn normalize_goal(
+/// Lower one goal using kernel context state.
+pub fn lower_goal(
     kernel_context: &mut KernelContext,
     goal: &Goal,
-) -> Result<NormalizedGoal, BuildError> {
-    kernel_context.normalize_goal(goal)
+) -> Result<LoweredGoal, BuildError> {
+    kernel_context.lower_goal(goal)
 }
 
 impl KernelContext {
@@ -152,7 +152,7 @@ impl KernelContext {
     }
 
     /// A single fact can turn into a bunch of proof steps.
-    pub fn normalize_fact(&mut self, fact: &Fact) -> Result<NormalizedFact, BuildError> {
+    pub fn lower_fact(&mut self, fact: &Fact) -> Result<LoweredFact, BuildError> {
         let mut steps = vec![];
 
         // Register typeclass relationships in TypeStore
@@ -233,15 +233,15 @@ impl KernelContext {
             }
         }
 
-        Ok(NormalizedFact {
+        Ok(LoweredFact {
             steps,
             kernel_context: self.clone(),
         })
     }
 
-    /// Normalizes a goal into proof steps that include both positive versions
+    /// Lowers a goal into proof steps that include both positive versions
     /// of the hypotheses and negated versions of the conclusion.
-    pub fn normalize_goal(&mut self, goal: &Goal) -> Result<NormalizedGoal, BuildError> {
+    pub fn lower_goal(&mut self, goal: &Goal) -> Result<LoweredGoal, BuildError> {
         let prop = &goal.proposition;
 
         let (hypo, counterfactual) = prop.value.clone().negate_goal();
@@ -251,7 +251,7 @@ impl KernelContext {
             let hypo_prop = Proposition::new(hypo, prop.params.clone(), prop.source.clone())
                 .with_arg_count(prop.arg_count);
             let fact = Fact::Proposition(Arc::new(hypo_prop));
-            steps.extend(self.normalize_fact(&fact)?.steps);
+            steps.extend(self.lower_fact(&fact)?.steps);
         }
         // Preserve type parameters when creating counterfactual fact
         let counterfactual_prop = Proposition::new(
@@ -261,9 +261,9 @@ impl KernelContext {
         )
         .with_arg_count(prop.arg_count);
         let fact = Fact::Proposition(Arc::new(counterfactual_prop));
-        steps.extend(self.normalize_fact(&fact)?.steps);
+        steps.extend(self.lower_fact(&fact)?.steps);
 
-        Ok(NormalizedGoal {
+        Ok(LoweredGoal {
             goal: goal.clone(),
             steps,
             kernel_context: self.clone(),
@@ -526,7 +526,7 @@ impl KernelContext {
         let mut clauses = vec![];
         for node in &env.nodes {
             if let Some(fact) = node.get_fact() {
-                if let Ok(normalized) = self.normalize_fact(&fact) {
+                if let Ok(normalized) = self.lower_fact(&fact) {
                     for step in normalized.steps {
                         clauses.push(step.clause);
                     }

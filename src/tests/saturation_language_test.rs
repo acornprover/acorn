@@ -1156,8 +1156,8 @@ fn test_proving_with_mixin_instance() {
 
         let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
         processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
-        processor.set_normalized_goal(normalized_goal);
+        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+        processor.set_lowered_goal(normalized_goal);
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
@@ -1799,8 +1799,8 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
 
     let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
-    processor.set_normalized_goal(normalized_goal);
+    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+    processor.set_lowered_goal(normalized_goal);
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
@@ -2033,8 +2033,8 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
 
     let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
     processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.normalized_goal().expect("missing normalized goal");
-    processor.set_normalized_goal(normalized_goal);
+    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+    processor.set_lowered_goal(normalized_goal);
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);

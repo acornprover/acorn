@@ -1588,8 +1588,8 @@ mod tests {
             let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
             let goal_env = cursor.goal_env().expect("selected line should be a goal");
             let normalized_goal = cursor
-                .normalized_goal()
-                .expect("selected line should have a normalized goal");
+                .lowered_goal()
+                .expect("selected line should have a lowered goal");
             (
                 goal_env.bindings.clone(),
                 normalized_goal.kernel_context.clone(),
@@ -1965,8 +1965,8 @@ mod tests {
         };
         let cursor = env.get_node_by_goal_name("goal");
         let normalized_facts = cursor
-            .visible_normalized_facts()
-            .expect("normalized facts should be available");
+            .visible_lowered_facts()
+            .expect("lowered facts should be available");
         let bindings = cursor
             .goal_env()
             .expect("goal env should be available")
@@ -1981,7 +1981,7 @@ mod tests {
         for normalized in normalized_facts {
             for step in &normalized.steps {
                 let Rule::Assumption(info) = &step.rule else {
-                    panic!("expected normalized fact assumptions");
+                    panic!("expected lowered fact assumptions");
                 };
                 checker.insert_clause(
                     &step.clause,
