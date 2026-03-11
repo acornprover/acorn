@@ -565,6 +565,32 @@ impl fmt::Display for ProofStep {
 }
 
 impl ProofStep {
+    #[track_caller]
+    fn new_with_normalized_clause(
+        mut clause: Clause,
+        truthiness: Truthiness,
+        rule: Rule,
+        proof_size: u32,
+        depth: u32,
+        premise_map: PremiseMap,
+    ) -> ProofStep {
+        let pinned = clause.get_local_context().len();
+        clause.normalize_with_pinned(pinned);
+        debug_assert!(
+            clause.is_normalized_with_pinned(pinned),
+            "ProofStep clauses must normalize at construction time: {}",
+            clause
+        );
+        ProofStep {
+            clause,
+            truthiness,
+            rule,
+            proof_size,
+            depth,
+            premise_map,
+        }
+    }
+
     /// Construct a new assumption ProofStep that is not dependent on any other steps.
     /// Assumptions are always depth zero, but eventually we may have to revisit that.
     pub fn assumption(source: &Source, clause: Clause) -> ProofStep {
@@ -578,14 +604,7 @@ impl ProofStep {
             context,
         });
 
-        ProofStep {
-            clause,
-            truthiness,
-            rule,
-            proof_size: 0,
-            depth: 0,
-            premise_map: PremiseMap::empty(),
-        }
+        Self::new_with_normalized_clause(clause, truthiness, rule, 0, 0, PremiseMap::empty())
     }
 
     /// Construct a new ProofStep that is a direct implication of a single activated step,
@@ -599,14 +618,14 @@ impl ProofStep {
         // Direct implication does not add to depth.
         let depth = activated_step.depth;
 
-        ProofStep {
+        Self::new_with_normalized_clause(
             clause,
-            truthiness: activated_step.truthiness,
+            activated_step.truthiness,
             rule,
-            proof_size: activated_step.proof_size + 1,
+            activated_step.proof_size + 1,
             depth,
             premise_map,
-        }
+        )
     }
 
     /// Construct a ProofStep that is a specialization of a general pattern.
@@ -621,14 +640,14 @@ impl ProofStep {
             pattern_id,
             inspiration_id,
         };
-        ProofStep {
+        Self::new_with_normalized_clause(
             clause,
-            truthiness: pattern_step.truthiness,
-            rule: Rule::Specialization(info),
-            proof_size: pattern_step.proof_size + 1,
-            depth: pattern_step.depth,
+            pattern_step.truthiness,
+            Rule::Specialization(info),
+            pattern_step.proof_size + 1,
+            pattern_step.depth,
             premise_map,
-        }
+        )
     }
 
     /// Construct a new ProofStep via resolution.
@@ -660,14 +679,7 @@ impl ProofStep {
             long_step.depth
         };
 
-        ProofStep {
-            clause,
-            truthiness,
-            rule,
-            proof_size,
-            depth,
-            premise_map,
-        }
+        Self::new_with_normalized_clause(clause, truthiness, rule, proof_size, depth, premise_map)
     }
 
     /// Construct a new ProofStep via rewriting.
@@ -735,14 +747,7 @@ impl ProofStep {
             dependency_depth + 1
         };
 
-        ProofStep {
-            clause,
-            truthiness,
-            rule,
-            proof_size,
-            depth,
-            premise_map,
-        }
+        Self::new_with_normalized_clause(clause, truthiness, rule, proof_size, depth, premise_map)
     }
 
     /// A proof step for finding a contradiction via a series of rewrites.
@@ -760,14 +765,14 @@ impl ProofStep {
         });
 
         // proof size is wrong but we don't use it for a contradiction.
-        ProofStep {
-            clause: Clause::impossible(),
+        Self::new_with_normalized_clause(
+            Clause::impossible(),
             truthiness,
             rule,
-            proof_size: 0,
+            0,
             depth,
-            premise_map: PremiseMap::empty(),
-        }
+            PremiseMap::empty(),
+        )
     }
 
     /// Assumes the provided steps are indexed by passive id, and that we use all of them.
@@ -782,14 +787,14 @@ impl ProofStep {
             proof_size += step.proof_size;
         }
 
-        ProofStep {
-            clause: Clause::impossible(),
+        Self::new_with_normalized_clause(
+            Clause::impossible(),
             truthiness,
             rule,
             proof_size,
             depth,
-            premise_map: PremiseMap::empty(),
-        }
+            PremiseMap::empty(),
+        )
     }
 
     /// Construct a ProofStep with fake heuristic data for testing/profiling.
@@ -826,14 +831,7 @@ impl ProofStep {
             literals,
             context,
         });
-        ProofStep {
-            clause,
-            truthiness,
-            rule,
-            proof_size: 0,
-            depth: 0,
-            premise_map: PremiseMap::empty(),
-        }
+        Self::new_with_normalized_clause(clause, truthiness, rule, 0, 0, PremiseMap::empty())
     }
 
     /// The ids of the other clauses that this clause depends on.
@@ -904,6 +902,8 @@ impl ProofStep {
 mod tests {
     use super::*;
     use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
 
     /// Test that the rewritten clause has correct variable types in its context.
     ///
@@ -967,5 +967,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_mock_from_clause_normalizes_clause_shape() {
+        let clause = Clause::from_literals_unnormalized(
+            vec![
+                Literal::positive(Term::parse("c0")),
+                Literal::positive(Term::parse("c0")),
+            ],
+            &LocalContext::empty(),
+        );
+
+        let step = ProofStep::mock_from_clause(clause);
+        assert!(step.clause.is_normalized_with_pinned(0));
+        assert_eq!(
+            step.clause,
+            Clause::new(
+                vec![Literal::positive(Term::parse("c0"))],
+                &LocalContext::empty()
+            )
+        );
     }
 }

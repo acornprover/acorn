@@ -61,6 +61,8 @@ impl Clause {
         for literal in &mut output_literals {
             literal.normalize_var_ids_with_context(&mut var_ids, context);
         }
+        output_literals.sort();
+        output_literals.dedup();
 
         let clause = Clause {
             literals: output_literals,
@@ -103,6 +105,19 @@ impl Clause {
         c
     }
 
+    /// Check whether this clause is already in normalized form.
+    pub fn is_normalized(&self) -> bool {
+        self.is_normalized_with_pinned(0)
+    }
+
+    /// Check whether this clause is normalized while keeping the first `pinned`
+    /// variables fixed in place.
+    pub fn is_normalized_with_pinned(&self, pinned: usize) -> bool {
+        let mut normalized = self.clone();
+        normalized.normalize_with_pinned(pinned);
+        *self == normalized
+    }
+
     /// Normalizes literals into a clause, tracking the variable renumbering.
     ///
     /// Returns (clause, var_ids) where var_ids maps new sequential variable IDs
@@ -133,6 +148,8 @@ impl Clause {
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
+        self.literals.sort();
+        self.literals.dedup();
     }
 
     /// Normalizes the variable IDs in the literals.
@@ -2123,6 +2140,55 @@ mod tests {
             reductions.contains(&else_clause),
             "expected reduction to include {}",
             else_clause
+        );
+    }
+
+    #[test]
+    fn test_boolean_reduction_outputs_normalized_clauses() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool")
+            .parse_constant("g1", "(Bool, Bool, Bool, Bool, Bool) -> Bool");
+
+        let x0 = Term::new_variable(0);
+        let x1 = Term::new_variable(1);
+        let x2 = Term::new_variable(2);
+        let x3 = Term::new_variable(3);
+        let x4 = Term::new_variable(4);
+        let nested_ite = Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+            Term::bool_type(),
+            kctx.parse_term("g0").apply(&[x0.clone()]),
+            x1.clone(),
+            Term::atom(Atom::Symbol(Symbol::Ite)).apply(&[
+                Term::bool_type(),
+                kctx.parse_term("g0").apply(&[x2.clone()]),
+                x3,
+                x4.clone(),
+            ]),
+        ]);
+        let target = kctx.parse_term("g1").apply(&[
+            x0.clone(),
+            x1,
+            x2.clone(),
+            Term::new_variable(3),
+            x4.clone(),
+        ]);
+
+        let clause = Clause::new(
+            vec![Literal::equals(nested_ite, target.clone())],
+            &LocalContext::from_types(vec![
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+            ]),
+        );
+
+        assert!(
+            clause.boolean_reductions(&kctx).iter().all(|reduction| {
+                reduction.is_normalized_with_pinned(reduction.get_local_context().len())
+            }),
+            "expected all boolean-reduction outputs to be normalized"
         );
     }
 
