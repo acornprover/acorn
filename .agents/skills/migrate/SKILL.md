@@ -10,18 +10,19 @@ Perform a safe rollout for feature-flag migrations and other breaking acornlib/c
 
 ## Workspace Assumptions
 - Run these `cargo run ...` commands from the `acorn` repo.
-- Edit theorem/proof source files under `~/acornlib/src`.
+- Treat the sibling `acornlib` repo as `../acornlib` relative to the `acorn` repo root.
+- Edit theorem/proof source files under `../acornlib/src`.
 - Use the edit tool for proof-file changes (do not use ad-hoc shell text mutation commands).
 - Read-only git commands are allowed (`status`, `log`, `show`, `diff`, etc.).
 - Do not run mutating git commands as part of this workflow (`add`, `commit`, `push`, `pull`, `merge`, `rebase`, `cherry-pick`, `reset`, `checkout`).
 - The human handles commit/push/upstream actions.
-- In sandboxed Codex runs, any command expected to write `~/acornlib/build/*` must be run with escalated permissions.
-- After every cache-writing command, confirm writes actually happened with `git -C ~/acornlib status --short`.
+- In sandboxed Codex runs, any command expected to write `../acornlib/build/*` must be run with escalated permissions.
+- After every cache-writing command, confirm writes actually happened with `git -C ../acornlib status --short`.
 
 ## Write Verification Protocol (Mandatory)
-For any step that is expected to update `~/acornlib/build`:
+For any step that is expected to update `../acornlib/build`:
 1. Run the command (with escalated permissions in sandboxed runs).
-2. Immediately run `git -C ~/acornlib status --short`.
+2. Immediately run `git -C ../acornlib status --short`.
 3. If no expected write evidence appears, treat it as a failed step (usually permissions) and rerun with escalated permissions.
 4. Do not advance state until write evidence is confirmed.
 
@@ -112,7 +113,7 @@ Purpose:
 Actions:
 - Inspect proof detail in default mode only:
   - `cargo run --profile release -- select MODULENAME LINENUMBER`
-- Edit files under `~/acornlib/src` using the edit tool.
+- Edit files under `../acornlib/src` using the edit tool.
 - Add statements only; do not delete existing statements.
 - Good explication sources:
   - definitions
@@ -136,13 +137,13 @@ Required commands:
   - `cargo run --profile release --features <feature>,validate -- verify <module> --ignore-hash --read-only --fail-fast`
 
 Conditional command:
-- If and only if this iteration included explicit edits under `~/acornlib/src` for this module:
+- If and only if this iteration included explicit edits under `../acornlib/src` for this module:
   - `cargo run --profile release -- verify <module> --ignore-hash --fail-fast`
-  - then confirm write evidence with `git -C ~/acornlib status --short`.
+  - then confirm write evidence with `git -C ../acornlib status --short`.
 
 Permission note:
 - In sandboxed Codex runs, run the conditional cache-writing check with escalated permissions.
-- If a cache-writing check is expected to update `~/acornlib/build` but no files change, do not continue; rerun with escalated permissions and re-check write evidence.
+- If a cache-writing check is expected to update `../acornlib/build` but no files change, do not continue; rerun with escalated permissions and re-check write evidence.
 
 Outcomes:
 - If both no-write module checks pass: go to `S3_decide`.
@@ -188,7 +189,7 @@ Required:
 - Stop and hand off for human review before any default flip.
 - Confirm default-mode whole-project verifiability (without writing cache):
   - `cargo run --profile release -- verify --ignore-hash --read-only --fail-fast`
-- If there are `~/acornlib/src` proof changes, human reviews them and then merges/pushes upstream first.
+- If there are `../acornlib/src` proof changes, human reviews them and then merges/pushes upstream first.
 - Human handles all commit/push/upstream communication.
 - In the S4 report, state explicitly:
   - "acornlib is verifiable both with and without the flag"
@@ -213,7 +214,7 @@ Actions:
 
 Permission note:
 - In sandboxed Codex runs, run regeneration with escalated permissions.
-- After regeneration, verify expected cache updates with `git -C ~/acornlib status --short`.
+- After regeneration, verify expected cache updates with `git -C ../acornlib status --short`.
 - If regeneration reports success but write evidence is missing, treat it as failed and rerun regeneration with escalated permissions.
 
 Next state:
