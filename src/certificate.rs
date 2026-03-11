@@ -489,53 +489,10 @@ impl Certificate {
                 }
                 let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
                 let term = normalize_term(&term);
-                if Self::should_preserve_single_literal_claim(&term) {
-                    if let Some(clause) = Self::try_deserialize_single_literal_clause(&term, &[]) {
-                        return Ok(CertificateStep::Claim(
-                            Claim::new(clause, VariableMap::new())
-                                .map_err(CodeGenError::GeneratedBadCode)?,
-                        ));
-                    }
-                }
-                let mut view = Clausifier::new_mut(kernel_context.to_mut(), None);
-                let clauses = view.clausify_term_to_denormalized_clauses(&term)?;
-                if clauses.len() != 1 {
-                    // A claim line may intentionally keep a boolean connective inline
-                    // as a single signed literal term (for example, `a and b`) rather
-                    // than expanding it into multiple CNF clauses.
-                    let simple_term = view.clausify_term_to_simple_term(&term)?;
-                    let clause = crate::kernel::clause::Clause::from_literals_unnormalized(
-                        vec![Literal::positive(simple_term)],
-                        &LocalContext::empty(),
-                    );
-                    return Ok(CertificateStep::Claim(
-                        Claim::new(clause, VariableMap::new())
-                            .map_err(CodeGenError::GeneratedBadCode)?,
-                    ));
-                }
-                let clause = clauses
-                    .into_iter()
-                    .next()
-                    .expect("clauses has exactly one element");
-                if !clause.get_local_context().is_empty()
-                    && !Self::clause_references_local_vars(&clause)
-                {
-                    let simple_term = view.clausify_term_to_simple_term(&term)?;
-                    let literal = Self::try_term_to_single_denormalized_literal(&simple_term)
-                        .unwrap_or_else(|| Literal::positive(simple_term));
-                    let clause = crate::kernel::clause::Clause::from_literals_unnormalized(
-                        vec![literal],
-                        &LocalContext::empty(),
-                    );
-                    return Ok(CertificateStep::Claim(
-                        Claim::new(clause, VariableMap::new())
-                            .map_err(CodeGenError::GeneratedBadCode)?,
-                    ));
-                }
-                Ok(CertificateStep::Claim(
-                    Claim::new(clause, VariableMap::new())
-                        .map_err(CodeGenError::GeneratedBadCode)?,
-                ))
+                Ok(CertificateStep::Claim(Self::claim_from_plain_term(
+                    &term,
+                    kernel_context.to_mut(),
+                )?))
             };
 
         match statement.statement {
@@ -603,6 +560,63 @@ impl Certificate {
 
         Claim::new(claim.clause.clone(), expected_var_map)
             .expect("roundtrip claim should normalize")
+    }
+
+    fn claim_from_clause(clause: Clause) -> Result<Claim, CodeGenError> {
+        Claim::new(clause, VariableMap::new()).map_err(CodeGenError::GeneratedBadCode)
+    }
+
+    fn claim_with_var_map(clause: Clause, var_map: VariableMap) -> Result<Claim, CodeGenError> {
+        Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)
+    }
+
+    fn claim_with_args_from_clause(
+        clause: Clause,
+        type_args: &[AcornType],
+        args: &[AcornValue],
+        kernel_context: &mut KernelContext,
+    ) -> Result<Claim, CodeGenError> {
+        let var_map = Self::build_claim_var_map(type_args, args, kernel_context)?;
+        Self::claim_with_var_map(clause, var_map)
+    }
+
+    fn claim_from_plain_term(
+        term: &Term,
+        kernel_context: &mut KernelContext,
+    ) -> Result<Claim, CodeGenError> {
+        if Self::should_preserve_single_literal_claim(term) {
+            if let Some(clause) = Self::try_deserialize_single_literal_clause(term, &[]) {
+                return Self::claim_from_clause(clause);
+            }
+        }
+
+        let mut view = Clausifier::new_mut(kernel_context, None);
+        let clauses = view.clausify_term_to_denormalized_clauses(term)?;
+        if clauses.len() != 1 {
+            // A claim line may intentionally keep a boolean connective inline
+            // as a single signed literal term (for example, `a and b`) rather
+            // than expanding it into multiple CNF clauses.
+            let simple_term = view.clausify_term_to_simple_term(term)?;
+            let clause = Clause::from_literals_unnormalized(
+                vec![Literal::positive(simple_term)],
+                &LocalContext::empty(),
+            );
+            return Self::claim_from_clause(clause);
+        }
+
+        let clause = clauses
+            .into_iter()
+            .next()
+            .expect("clauses has exactly one element");
+        if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
+            let simple_term = view.clausify_term_to_simple_term(term)?;
+            let literal = Self::try_term_to_single_denormalized_literal(&simple_term)
+                .unwrap_or_else(|| Literal::positive(simple_term));
+            let clause = Clause::from_literals_unnormalized(vec![literal], &LocalContext::empty());
+            return Self::claim_from_clause(clause);
+        }
+
+        Self::claim_from_clause(clause)
     }
 
     fn serialize_claim_with_names(
@@ -967,73 +981,67 @@ impl Certificate {
             type_var_map.as_ref(),
         )?;
         let generic_term = normalize_term(&generic_term);
-        if Self::term_has_inline_clause_shape(&generic_term, true) {
-            let clause = Self::try_deserialize_inline_clause(&generic_term, &type_param_kinds)
+        Self::try_claim_with_args_from_generic_term(
+            &generic_term,
+            &type_param_kinds,
+            type_args.as_slice(),
+            args.as_slice(),
+            kernel_context,
+            &mut kernel_context_clone,
+            type_var_map,
+        )
+    }
+
+    fn try_claim_with_args_from_generic_term(
+        generic_term: &Term,
+        type_param_kinds: &[Term],
+        type_args: &[AcornType],
+        args: &[AcornValue],
+        kernel_context: &mut KernelContext,
+        clausify_kernel_context: &mut KernelContext,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Option<Claim>, CodeGenError> {
+        if Self::term_has_inline_clause_shape(generic_term, true) {
+            let clause = Self::try_deserialize_inline_clause(generic_term, type_param_kinds)
                 .expect("inline clause shape should deserialize");
-            let var_map =
-                Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
-            return Ok(Some(
-                Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
-            ));
+            return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
+                .map(Some);
         }
-        if Self::should_preserve_single_literal_claim(&generic_term) {
+        if Self::should_preserve_single_literal_claim(generic_term) {
             if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(&generic_term, &type_param_kinds)
+                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
             {
-                let var_map = Self::build_claim_var_map(
-                    type_args.as_slice(),
-                    args.as_slice(),
-                    kernel_context,
-                )?;
-                return Ok(Some(
-                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
-                ));
+                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
+                    .map(Some);
             }
         }
 
-        let mut view = Clausifier::new_mut(&mut kernel_context_clone, type_var_map);
-        let clauses = view.clausify_term_to_denormalized_clauses(&generic_term)?;
+        let mut view = Clausifier::new_mut(clausify_kernel_context, type_var_map);
+        let clauses = view.clausify_term_to_denormalized_clauses(generic_term)?;
         if clauses.len() != 1 {
             if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(&generic_term, &type_param_kinds)
+                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
             {
-                let var_map = Self::build_claim_var_map(
-                    type_args.as_slice(),
-                    args.as_slice(),
-                    kernel_context,
-                )?;
-                return Ok(Some(
-                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
-                ));
+                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
+                    .map(Some);
             }
             if let Some(clause) =
-                Self::try_deserialize_single_formula_clause(&generic_term, &type_param_kinds)
+                Self::try_deserialize_single_formula_clause(generic_term, type_param_kinds)
             {
-                let var_map = Self::build_claim_var_map(
-                    type_args.as_slice(),
-                    args.as_slice(),
-                    kernel_context,
-                )?;
-                return Ok(Some(
-                    Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
-                ));
+                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
+                    .map(Some);
             }
             // This lambda form only round-trips to `Claim { clause, var_map }` when
             // the body can be represented as a single inline clause. If it doesn't,
             // let callers fall back to plain claim parsing.
             return Ok(None);
         }
+
         let clause = clauses
             .into_iter()
             .next()
             .expect("clauses has exactly one element");
-
-        let var_map =
-            Self::build_claim_var_map(type_args.as_slice(), args.as_slice(), kernel_context)?;
-
-        Ok(Some(
-            Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)?,
-        ))
+        Self::claim_with_args_from_clause(clause, type_args, args, kernel_context).map(Some)
     }
 
     fn build_claim_var_map(
