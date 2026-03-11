@@ -222,6 +222,123 @@ pub fn normalize_term(term: &Term) -> Term {
     normalize_fully_applied_eq(&normalized).unwrap_or(normalized)
 }
 
+/// Normalize a term for clause normalization while interpreting it under a target boolean polarity.
+///
+/// This is the shared polarity-aware term rewriting used by clause normalization.
+/// It pushes `not` through the built-in boolean connectives and quantifiers, while
+/// preserving the historical clause-normalization behavior.
+pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -> Term {
+    if let Some(args) = split_symbol_application(term, Symbol::Not, 1) {
+        return normalize_clause_term_with_polarity(&args[0], !positive);
+    }
+
+    if let Some(args) = split_symbol_application(term, Symbol::And, 2) {
+        let left = normalize_clause_term_with_polarity(&args[0], positive);
+        let right = normalize_clause_term_with_polarity(&args[1], positive);
+        return if positive {
+            Term::and(left, right)
+        } else {
+            Term::or(left, right)
+        };
+    }
+
+    if let Some(args) = split_symbol_application(term, Symbol::Or, 2) {
+        let left = normalize_clause_term_with_polarity(&args[0], positive);
+        let right = normalize_clause_term_with_polarity(&args[1], positive);
+        return if positive {
+            Term::or(left, right)
+        } else {
+            Term::and(left, right)
+        };
+    }
+
+    match term.as_ref().decompose() {
+        Decomposition::ForAll(binder_type, body) => {
+            let binder_type = normalize_clause_term(&binder_type.to_owned());
+            let body = normalize_clause_term_with_polarity(&body.to_owned(), positive);
+            if positive {
+                Term::forall(binder_type, body)
+            } else {
+                Term::exists(binder_type, body)
+            }
+        }
+        Decomposition::Exists(binder_type, body) => {
+            let binder_type = normalize_clause_term(&binder_type.to_owned());
+            let body = normalize_clause_term_with_polarity(&body.to_owned(), positive);
+            if positive {
+                Term::exists(binder_type, body)
+            } else {
+                Term::forall(binder_type, body)
+            }
+        }
+        Decomposition::Atom(_) => {
+            if positive {
+                term.clone()
+            } else {
+                Term::not(term.clone())
+            }
+        }
+        Decomposition::Application(function, argument) => {
+            let function = normalize_clause_term(&function.to_owned());
+            let argument = normalize_clause_term(&argument.to_owned());
+            let rebuilt = function.apply(&[argument]);
+            let rebuilt = normalize_fully_applied_eq(&rebuilt).unwrap_or(rebuilt);
+            if positive {
+                rebuilt
+            } else {
+                Term::not(rebuilt)
+            }
+        }
+        Decomposition::Pi(input, output) => {
+            let input = normalize_clause_term(&input.to_owned());
+            let output = normalize_clause_term(&output.to_owned());
+            let rebuilt = Term::pi(input, output);
+            if positive {
+                rebuilt
+            } else {
+                Term::not(rebuilt)
+            }
+        }
+        Decomposition::Lambda(input, body) => {
+            let input = normalize_clause_term(&input.to_owned());
+            let body = normalize_clause_term(&body.to_owned());
+            let rebuilt = Term::lambda(input, body);
+            if positive {
+                rebuilt
+            } else {
+                Term::not(rebuilt)
+            }
+        }
+    }
+}
+
+/// Normalize a term for clause normalization under positive polarity.
+pub(crate) fn normalize_clause_term(term: &Term) -> Term {
+    normalize_clause_term_with_polarity(term, true)
+}
+
+/// Normalize a signed boolean term for clause normalization, possibly changing both the term
+/// and its sign.
+pub(crate) fn normalize_signed_clause_term(term: &Term, positive: bool) -> (Term, bool) {
+    if let Some(args) = split_symbol_application(term, Symbol::Not, 1) {
+        return normalize_signed_clause_term(&args[0], !positive);
+    }
+
+    if let Some(args) = split_symbol_application(term, Symbol::Or, 2) {
+        let left = normalize_clause_term_with_polarity(&args[0], false);
+        let right = normalize_clause_term_with_polarity(&args[1], false);
+        return (Term::and(left, right), !positive);
+    }
+
+    if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
+        let binder_type = normalize_clause_term(&binder_type.to_owned());
+        let body = normalize_clause_term_with_polarity(&body.to_owned(), false);
+        return (Term::exists(binder_type, body), !positive);
+    }
+
+    (normalize_clause_term(term), positive)
+}
+
 /// Compatibility wrapper while callers migrate to `normalize_term`.
 pub fn normalize_boolean_subterms(term: &Term) -> Term {
     normalize_term(term)
@@ -229,7 +346,10 @@ pub fn normalize_boolean_subterms(term: &Term) -> Term {
 
 #[cfg(test)]
 mod tests {
-    use super::{beta_reduce_clause_subterms, normalize_boolean_subterms, normalize_term};
+    use super::{
+        beta_reduce_clause_subterms, normalize_boolean_subterms,
+        normalize_clause_term_with_polarity, normalize_signed_clause_term, normalize_term,
+    };
     use crate::kernel::atom::Atom;
     use crate::kernel::clause::Clause;
     use crate::kernel::literal::Literal;
@@ -349,6 +469,27 @@ mod tests {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
         assert_eq!(normalize_term(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_term_with_polarity_pushes_negation_through_or() {
+        let term = Term::or(Term::parse("c0"), Term::parse("c1"));
+        let expected = Term::and(Term::not(Term::parse("c0")), Term::not(Term::parse("c1")));
+        assert_eq!(normalize_clause_term_with_polarity(&term, false), expected);
+    }
+
+    #[test]
+    fn test_normalize_signed_term_rewrites_signed_or() {
+        let term = Term::or(Term::parse("c0"), Term::parse("c1"));
+        let expected = Term::and(Term::not(Term::parse("c0")), Term::not(Term::parse("c1")));
+        assert_eq!(normalize_signed_clause_term(&term, true), (expected, false));
+    }
+
+    #[test]
+    fn test_normalize_term_with_polarity_orders_fully_applied_eq() {
+        let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
+        let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
+        assert_eq!(normalize_clause_term_with_polarity(&term, true), expected);
     }
 
     #[test]

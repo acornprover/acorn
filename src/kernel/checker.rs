@@ -359,7 +359,7 @@ impl Checker {
         trace!("inserting goal {} (line {})", goal.name, goal.first_line);
 
         let source = &goal.proposition.source;
-        let normalized = crate::elaborator::normalization::normalize_goal(kernel_context, goal)
+        let normalized = crate::elaborator::lowering::normalize_goal(kernel_context, goal)
             .map_err(|e| e.message)?;
         // Get kernel_context after normalizing, since normalize_goal may create new synthetics
         let kernel_context = kernel_context;
@@ -384,7 +384,7 @@ impl Checker {
     /// Uses the provided normalized goal (including its kernel context state).
     pub fn insert_normalized_goal(
         &mut self,
-        normalized: &crate::elaborator::normalization::NormalizedGoal,
+        normalized: &crate::elaborator::lowering::NormalizedGoal,
     ) -> Result<(), Error> {
         trace!(
             "inserting normalized goal {} (line {})",

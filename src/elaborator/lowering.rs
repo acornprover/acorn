@@ -1,3 +1,12 @@
+//! Elaborator-side lowering from user propositions to kernel proof inputs.
+//!
+//! This module orchestrates:
+//! `AcornValue -> Term -> kernel term normalization -> theorem/clause lowering`.
+//!
+//! The elaborator does not define the normalization policy. Kernel term normalization
+//! lives in `kernel::term_normalization`, and clause/theorem lowering lives in the
+//! kernel clause/clausifier layers.
+
 use crate::builder::BuildError;
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
@@ -89,10 +98,10 @@ impl KernelContext {
 }
 
 impl KernelContext {
-    /// Normalize a term-level proposition into clauses.
+    /// Lower a term-level proposition into clauses.
     ///
-    /// This is the term-native backend for proposition normalization.
-    fn normalize_term(
+    /// This is the term-native backend for proposition lowering.
+    fn lower_term_to_clauses(
         &mut self,
         term: &Term,
         _ctype: NewConstantType,
@@ -120,9 +129,9 @@ impl KernelContext {
         Ok(clauses)
     }
 
-    /// Converts a value proposition to CNF clauses via:
-    /// `AcornValue --elaborate--> Term --normalize_term--> Vec<Clause>`.
-    fn normalize_value(
+    /// Lowers a value proposition to clauses via:
+    /// `AcornValue --elaborate--> Term --kernel normalize--> clauses`.
+    fn lower_value_to_clauses(
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
@@ -139,7 +148,7 @@ impl KernelContext {
 
         let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        self.normalize_term(&term, ctype, source, type_var_map)
+        self.lower_term_to_clauses(&term, ctype, source, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.
@@ -211,7 +220,7 @@ impl KernelContext {
                     NewConstantType::Local
                 };
                 let clauses = self
-                    .normalize_value(&value, ctype, &source, type_var_map_opt.clone())
+                    .lower_value_to_clauses(&value, ctype, &source, type_var_map_opt.clone())
                     .map_err(|msg| BuildError::new(range, msg))?;
                 for clause in &clauses {
                     trace!(clause = %clause, "normalized to clause");
@@ -344,7 +353,7 @@ impl KernelContext {
             panic!("denormalized clause should validate: {:?}", e);
         }
         let renormalized = self
-            .normalize_value(
+            .lower_value_to_clauses(
                 &denormalized,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
@@ -450,7 +459,7 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .normalize_value(
+            .lower_value_to_clauses(
                 value,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),

@@ -6,7 +6,7 @@ use crate::elaborator::block::Block;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::normalization::{NormalizedFact, NormalizedGoal};
+use crate::elaborator::lowering::{NormalizedFact, NormalizedGoal};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
