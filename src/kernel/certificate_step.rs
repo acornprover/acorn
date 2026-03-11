@@ -16,6 +16,9 @@ pub struct Claim {
 impl Claim {
     /// Build a certificate claim pair in its canonical certificate form.
     ///
+    /// The stored `clause` is the normalized generic theorem/pattern clause, and each mapped
+    /// term in the `var_map` is term-normalized.
+    ///
     /// Unlike full clause normalization, this keeps all existing local-variable slots fixed in
     /// place so `(clause, var_map)` round-trips remain stable for certificates.
     pub fn new(mut clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {

@@ -20,7 +20,6 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
-use crate::kernel::clausifier::Clausifier;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -590,15 +589,14 @@ impl Certificate {
             }
         }
 
-        let mut view = Clausifier::new_mut(kernel_context, None);
-        let clauses = view.clausify_term_to_denormalized_clauses(term)?;
+        let clauses = kernel_context.term_to_checker_clauses(term, None)?;
         if clauses.len() != 1 {
             // A claim line may intentionally keep a boolean connective inline
             // as a single signed literal term (for example, `a and b`) rather
             // than expanding it into multiple CNF clauses.
-            let simple_term = view.clausify_term_to_simple_term(term)?;
+            let checker_term = kernel_context.term_to_checker_term(term, None)?;
             let clause = Clause::from_literals_unnormalized(
-                vec![Literal::positive(simple_term)],
+                vec![Literal::positive(checker_term)],
                 &LocalContext::empty(),
             );
             return Self::claim_from_clause(clause);
@@ -609,9 +607,9 @@ impl Certificate {
             .next()
             .expect("clauses has exactly one element");
         if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
-            let simple_term = view.clausify_term_to_simple_term(term)?;
-            let literal = Self::try_term_to_single_denormalized_literal(&simple_term)
-                .unwrap_or_else(|| Literal::positive(simple_term));
+            let checker_term = kernel_context.term_to_checker_term(term, None)?;
+            let literal = Self::try_term_to_single_checker_literal(&checker_term)
+                .unwrap_or_else(|| Literal::positive(checker_term));
             let clause = Clause::from_literals_unnormalized(vec![literal], &LocalContext::empty());
             return Self::claim_from_clause(clause);
         }
@@ -1016,8 +1014,8 @@ impl Certificate {
             }
         }
 
-        let mut view = Clausifier::new_mut(clausify_kernel_context, type_var_map);
-        let clauses = view.clausify_term_to_denormalized_clauses(generic_term)?;
+        let clauses =
+            clausify_kernel_context.term_to_checker_clauses(generic_term, type_var_map)?;
         if clauses.len() != 1 {
             if let Some(clause) =
                 Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
@@ -1083,8 +1081,7 @@ impl Certificate {
                     type_var_map.as_ref(),
                 )?;
                 let term = normalize_term(&term);
-                let mut term_view = Clausifier::new_mut(kernel_context, None);
-                term_view.clausify_term_for_claim_arg(&term)?
+                kernel_context.term_to_claim_arg(&term)?
             };
             var_map.set((value_offset + var_id) as AtomId, term);
         }
@@ -1102,7 +1099,7 @@ impl Certificate {
         }
     }
 
-    fn try_term_to_single_denormalized_literal(term: &Term) -> Option<Literal> {
+    fn try_term_to_single_checker_literal(term: &Term) -> Option<Literal> {
         if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
             if let Some(eq_args) = Self::split_symbol_application(&args[0], Symbol::Eq, 3) {
                 return Some(Literal::not_equals(eq_args[1].clone(), eq_args[2].clone()));
@@ -1143,7 +1140,7 @@ impl Certificate {
                 .substitute_bound(0, &Term::new_variable(fresh_var))
                 .shift_bound(0, -1);
         }
-        let literal = Self::try_term_to_single_denormalized_literal(&body)?;
+        let literal = Self::try_term_to_single_checker_literal(&body)?;
         Some(Clause::from_literals_unnormalized(
             vec![literal],
             &local_context,
@@ -1254,7 +1251,7 @@ impl Certificate {
         }
 
         if positive {
-            if let Some(literal) = Self::try_term_to_single_denormalized_literal(term) {
+            if let Some(literal) = Self::try_term_to_single_checker_literal(term) {
                 return Some(vec![literal]);
             }
             return Some(vec![Literal::positive(term.clone())]);

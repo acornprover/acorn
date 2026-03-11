@@ -17,18 +17,10 @@ enum TermBinding {
     Free,
 }
 
-/// Inner enum for Clausifier to support both ref and mut access to kernel state.
-enum ClausifierContext<'a> {
-    Ref(&'a KernelContext),
-    Mut(&'a mut KernelContext),
-}
-
 /// A Clausifier holds state for a single clausification operation.
-/// It combines a reference to the KernelContext with operation-scoped state like
-/// type_var_map. This lets us share methods between mutable and non-mutable kernel
-/// access while keeping per-operation state separate from persistent kernel state.
-pub struct Clausifier<'a> {
-    inner: ClausifierContext<'a>,
+/// It combines mutable kernel access with operation-scoped state like `type_var_map`.
+struct Clausifier<'a> {
+    kernel_context: &'a mut KernelContext,
 
     /// Type variable mapping for polymorphic normalization.
     /// Maps type parameter names to (variable id, kind).
@@ -47,30 +39,19 @@ pub enum TermLoweringMode {
 }
 
 impl<'a> Clausifier<'a> {
-    /// Create a new Clausifier with immutable access.
-    pub fn new_ref(
-        kernel_context: &'a KernelContext,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Self {
-        Clausifier {
-            inner: ClausifierContext::Ref(kernel_context),
-            type_var_map,
-        }
-    }
-
     /// Create a new Clausifier with mutable access.
-    pub fn new_mut(
+    fn new_mut(
         kernel_context: &'a mut KernelContext,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Self {
         Clausifier {
-            inner: ClausifierContext::Mut(kernel_context),
+            kernel_context,
             type_var_map,
         }
     }
 
     /// Lower a normalized term into initial clause form using the selected top-level policy.
-    pub fn lower_normalized_term_to_clauses(
+    fn lower_normalized_term_to_clauses(
         &mut self,
         term: &Term,
         mode: TermLoweringMode,
@@ -89,19 +70,12 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    fn as_ref(&self) -> &KernelContext {
-        match &self.inner {
-            ClausifierContext::Ref(kernel_context) => kernel_context,
-            ClausifierContext::Mut(kernel_context) => kernel_context,
-        }
-    }
-
     fn symbol_table(&self) -> &crate::kernel::symbol_table::SymbolTable {
-        &self.kernel_context().symbol_table
+        &self.kernel_context.symbol_table
     }
 
     fn kernel_context(&self) -> &KernelContext {
-        self.as_ref()
+        self.kernel_context
     }
 
     /// Get the type variable map for polymorphic normalization.
@@ -109,40 +83,6 @@ impl<'a> Clausifier<'a> {
     /// In non-polymorphic mode, this always returns None.
     fn type_var_map(&self) -> Option<&HashMap<String, (AtomId, Term)>> {
         self.type_var_map.as_ref()
-    }
-
-    /// Term-native normalization path.
-    ///
-    /// This normalizes an elaborated kernel `Term` directly to clauses.
-    pub fn clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
-        let mut stack = vec![];
-        let mut local_context = LocalContext::empty();
-
-        let (mut next_var_id, num_type_params) = if let Some(type_var_map) = self.type_var_map() {
-            let mut entries: Vec<_> = type_var_map.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            for (_, var_type) in entries {
-                local_context.push_type(var_type.clone());
-            }
-            (type_var_map.len() as AtomId, type_var_map.len())
-        } else {
-            (0, 0)
-        };
-
-        let cnf = self.term_to_cnf(
-            term,
-            false,
-            &mut stack,
-            &mut next_var_id,
-            &mut local_context,
-        )?;
-        let clauses = cnf.into_clauses_with_pinned(&local_context, num_type_params);
-
-        if self.has_uninhabited_dropped_variable(&local_context, &clauses, num_type_params) {
-            return Ok(vec![]);
-        }
-
-        Ok(clauses)
     }
 
     fn initial_clause_context(&self) -> (LocalContext, AtomId, usize) {
@@ -347,7 +287,7 @@ impl<'a> Clausifier<'a> {
             .into_clauses_with_pinned(context, pinned))
     }
 
-    pub fn shallow_clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
+    fn shallow_clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
         let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
@@ -366,7 +306,8 @@ impl<'a> Clausifier<'a> {
     /// Leading foralls are opened as free variables. At the top level we collect only
     /// disjunctive literals, so formulas like `a or b` or `not (a and b)` become one
     /// clause, while formulas that are not clause-shaped stay inline as one signed literal.
-    pub fn clausify_term_to_single_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
+    #[cfg_attr(not(feature = "nocnf"), allow(dead_code))]
+    fn clausify_term_to_single_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
         let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
@@ -394,7 +335,7 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    pub fn preserve_term_as_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
+    fn preserve_term_as_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
         let literal =
@@ -1287,62 +1228,13 @@ impl<'a> Clausifier<'a> {
     }
 
     /// Checks if any forall variables dropped during normalization have uninhabited types.
-    /// This is specifically for detecting vacuous quantification over unconstrained type parameters.
     ///
-    /// For example, `forall(x: T) { P }` where T is an unconstrained type parameter and x
-    /// doesn't appear in P. If T is empty, this is vacuously true; if T is inhabited, it's
-    /// equivalent to P. We can't represent this ambiguity in CNF, so we return empty clauses.
-    fn has_uninhabited_dropped_variable(
-        &self,
-        original_context: &LocalContext,
-        clauses: &[Clause],
-        skip_vars: usize,
-    ) -> bool {
-        use std::collections::HashSet;
-
-        // Collect all types that appear in ANY clause's context.
-        let mut all_clause_types: HashSet<&Term> = HashSet::new();
-        for clause in clauses {
-            let clause_ctx = clause.get_local_context();
-            for i in 0..clause_ctx.len() {
-                if let Some(var_type) = clause_ctx.get_var_type(i) {
-                    all_clause_types.insert(var_type);
-                }
-            }
-        }
-
-        // Build a context for the type parameters (first skip_vars entries)
-        let mut type_param_context = LocalContext::empty();
-        for i in 0..skip_vars {
-            if let Some(t) = original_context.get_var_type(i) {
-                type_param_context.push_type(t.clone());
-            }
-        }
-
-        // Check each variable type in the original context, skipping type parameters
-        for var_id in skip_vars..original_context.len() {
-            if let Some(var_type) = original_context.get_var_type(var_id) {
-                // If this type doesn't appear in ANY clause context, variables of this type were dropped
-                if !all_clause_types.contains(var_type) {
-                    // Check if this type is provably inhabited
-                    if !self
-                        .kernel_context()
-                        .provably_inhabited(var_type, Some(&type_param_context))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
-    }
-
-    /// This returns clauses that are denormalized in the sense that they sort literals,
-    /// but don't filter out redundant or tautological literals.
-    /// This is the format that the Checker uses.
-    /// If you call normalize() on the clause afterwards, you should get the normalized one.
-    pub fn clausify_term_to_denormalized_clauses(
+    /// This returns the checker's pre-normalized clause form: literals are sorted and the
+    /// clause context is built, but redundant or tautological literals are not removed and
+    /// variable IDs are not canonicalized yet.
+    ///
+    /// Calling `Clause::normalized()` afterwards should produce the fully normalized clause.
+    fn clausify_term_to_denormalized_clauses(
         &mut self,
         term: &Term,
     ) -> Result<Vec<Clause>, String> {
@@ -1374,7 +1266,7 @@ impl<'a> Clausifier<'a> {
     /// Convert a term expression into a simple kernel term.
     ///
     /// This only succeeds for terms that are representable in simple-term form.
-    pub fn clausify_term_to_simple_term(&mut self, term: &Term) -> Result<Term, String> {
+    fn clausify_term_to_simple_term(&mut self, term: &Term) -> Result<Term, String> {
         match self.try_simple_term_to_signed_term(term)? {
             Some((term, true)) => Ok(term),
             // `false` is represented as `not true` in signed-term form.
@@ -1402,7 +1294,7 @@ impl<'a> Clausifier<'a> {
     /// Prefer simple-term encoding when available (to preserve existing certificate shape),
     /// but allow richer closed terms (for example lambdas) so cert parsing can round-trip
     /// generated witnesses.
-    pub fn clausify_term_for_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
+    fn clausify_term_for_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
         match self.clausify_term_to_simple_term(term) {
             Ok(simple) => Ok(simple),
             Err(_) if !term.has_free_variable() => Ok(term.clone()),
@@ -1479,6 +1371,32 @@ impl KernelContext {
     ) -> Result<Vec<Clause>, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
         view.lower_normalized_term_to_clauses(term, mode)
+    }
+
+    /// Kernel-owned entry point for converting a term to the checker's pre-normalized clause form.
+    pub fn term_to_checker_clauses(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Vec<Clause>, String> {
+        let mut view = Clausifier::new_mut(self, type_var_map);
+        view.clausify_term_to_denormalized_clauses(term)
+    }
+
+    /// Kernel-owned entry point for converting a term to the checker's single-term inline form.
+    pub fn term_to_checker_term(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Term, String> {
+        let mut view = Clausifier::new_mut(self, type_var_map);
+        view.clausify_term_to_simple_term(term)
+    }
+
+    /// Kernel-owned entry point for converting a term to claim-argument form.
+    pub fn term_to_claim_arg(&mut self, term: &Term) -> Result<Term, String> {
+        let mut view = Clausifier::new_mut(self, None);
+        view.clausify_term_for_claim_arg(term)
     }
 }
 
