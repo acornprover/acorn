@@ -382,8 +382,8 @@ impl Certificate {
                         ) =>
                 {
                     let specialized_clause = claim
-                        .var_map
-                        .specialize_clause(&claim.clause, &generation_kernel_context);
+                        .specialize_clause(&generation_kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
                     match Self::serialize_claim_with_names(
                         claim,
                         &generation_kernel_context,
@@ -798,8 +798,8 @@ impl Certificate {
         if value_decl_codes.is_empty() {
             if type_param_decl_codes.is_empty() {
                 let specialized = claim
-                    .var_map
-                    .specialize_clause(&claim.clause, kernel_context);
+                    .specialize_clause(kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
                 let specialized_value = kernel_context.denormalize(&specialized, None, None, true);
                 let code = generator.value_to_code(&specialized_value)?;
                 return Self::ensure_claim_code_parses_as_claim(code);
@@ -2003,8 +2003,8 @@ mod tests {
 
         let CertificateStep::Claim(claim) = step;
         let specialized = claim
-            .var_map
-            .specialize_clause(&claim.clause, kernel_context_cow.as_ref());
+            .specialize_clause(kernel_context_cow.as_ref())
+            .expect("claim specialization should succeed");
         assert!(
             checker
                 .check_clause(&claim.clause, kernel_context_cow.as_ref())
