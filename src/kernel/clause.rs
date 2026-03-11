@@ -92,7 +92,7 @@ impl Clause {
     ///
     /// This is useful for synthetic keys where type variables need to stay consistent
     /// across all clauses in a definition.
-    pub fn new_with_pinned_vars(
+    pub(crate) fn new_with_pinned_vars(
         literals: Vec<Literal>,
         context: &LocalContext,
         pinned: usize,
@@ -131,19 +131,11 @@ impl Clause {
         *self == self.normalized_preserving_locals()
     }
 
-    /// Check whether this clause is normalized while keeping the first `pinned`
-    /// variables fixed in place.
-    pub fn is_normalized_with_pinned(&self, pinned: usize) -> bool {
-        let mut normalized = self.clone();
-        normalized.normalize_with_pinned(pinned);
-        *self == normalized
-    }
-
     /// Normalizes literals into a clause, tracking the variable renumbering.
     ///
     /// Returns (clause, var_ids) where var_ids maps new sequential variable IDs
     /// to original variable IDs: var_ids[new_id] = old_id.
-    pub fn normalize_with_var_ids(
+    pub(crate) fn normalize_with_var_ids(
         literals: Vec<Literal>,
         context: &LocalContext,
     ) -> (Clause, Vec<AtomId>) {
@@ -153,13 +145,13 @@ impl Clause {
     /// Sorts literals.
     /// Removes any duplicate or impossible literals.
     /// An empty clause indicates an impossible clause.
-    pub fn normalize(&mut self) {
+    fn normalize(&mut self) {
         self.normalize_with_pinned(0);
     }
 
     /// Normalizes the clause, keeping the first `pinned` variables at their
     /// original positions (x0, x1, ..., x_{pinned-1}).
-    pub fn normalize_with_pinned(&mut self, pinned: usize) {
+    fn normalize_with_pinned(&mut self, pinned: usize) {
         self.literals = self
             .literals
             .drain(..)
@@ -176,7 +168,7 @@ impl Clause {
     /// Normalizes the variable IDs in the literals.
     /// This may flip literals, so keep in mind it will break any trace.
     /// Also rebuilds the context to match the renumbered variables.
-    pub fn normalize_var_ids(&mut self) {
+    fn normalize_var_ids(&mut self) {
         self.normalize_var_ids_with_pinned(0);
     }
 
@@ -185,7 +177,7 @@ impl Clause {
     ///
     /// This is useful for synthetic keys where type variables need to stay consistent
     /// across all clauses in a definition.
-    pub fn normalize_var_ids_with_pinned(&mut self, pinned: usize) {
+    fn normalize_var_ids_with_pinned(&mut self, pinned: usize) {
         // Pre-populate with pinned variable IDs (0, 1, ..., pinned-1)
         let mut var_ids: Vec<AtomId> = (0..pinned as AtomId).collect();
         let input_context = self.context.clone();
