@@ -928,6 +928,36 @@ impl Clause {
         Some(body.substitute_bound(0, &choose_term).shift_bound(0, -1))
     }
 
+    /// Reduce a top-level function inequality `f != g` to
+    /// `exists(x: A) { f(x) != g(x) }`.
+    ///
+    /// Repeated applications of boolean reduction can then expose concrete
+    /// witness applications via the existing `exists` machinery.
+    fn reduce_function_inequality_to_exists(
+        literal: &Literal,
+        context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Option<Term> {
+        if literal.positive {
+            return None;
+        }
+
+        let left_type = literal.left.get_type_with_context(context, kernel_context);
+        let right_type = literal.right.get_type_with_context(context, kernel_context);
+        if left_type != right_type {
+            return None;
+        }
+
+        let (binder_type, output_type) = left_type.as_ref().split_pi()?;
+        let bound = Term::atom(Atom::BoundVariable(0));
+        let body = Term::not(Term::eq(
+            output_type.to_owned(),
+            literal.left.clone().apply(&[bound.clone()]),
+            literal.right.clone().apply(&[bound]),
+        ));
+        Some(Term::exists(binder_type.to_owned(), body))
+    }
+
     /// Reduce `not forall(T => body)` to `exists(T => not body)`.
     fn reduce_negated_forall(term: &Term) -> Option<Term> {
         let (binder_type, body) = term.as_ref().split_forall()?;
@@ -1200,6 +1230,16 @@ impl Clause {
                 answer.extend(self.with_replaced_literal_and_context(
                     i,
                     replacements,
+                    &self.context,
+                ));
+            }
+
+            if let Some(reduced) =
+                Self::reduce_function_inequality_to_exists(literal, &self.context, kernel_context)
+            {
+                answer.extend(self.with_replaced_literal_and_context(
+                    i,
+                    vec![vec![Literal::positive(reduced)]],
                     &self.context,
                 ));
             }
@@ -1992,6 +2032,87 @@ mod tests {
             &LocalContext::empty(),
         );
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
+    }
+
+    #[test]
+    fn test_boolean_reduction_function_inequality_becomes_exists() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["g0", "g1"], "Bool -> Bool");
+
+        let clause = Clause::new(
+            vec![Literal::not_equals(
+                kctx.parse_term("g0"),
+                kctx.parse_term("g1"),
+            )],
+            &LocalContext::empty(),
+        );
+        let expected = Clause::new(
+            vec![Literal::positive(Term::exists(
+                Term::bool_type(),
+                Term::not(Term::eq(
+                    Term::bool_type(),
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                    kctx.parse_term("g1")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                )),
+            ))],
+            &LocalContext::empty(),
+        );
+
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+    }
+
+    #[test]
+    fn test_boolean_reduction_function_inequality_composes_with_exists() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["g0", "g1"], "Bool -> Bool");
+
+        let start = Clause::new(
+            vec![Literal::not_equals(
+                kctx.parse_term("g0"),
+                kctx.parse_term("g1"),
+            )],
+            &LocalContext::empty(),
+        );
+        let first = start.boolean_reductions(&kctx);
+        assert_eq!(first.len(), 1, "expected function inequality -> exists");
+
+        let second = first[0].boolean_reductions(&kctx);
+        assert_eq!(second.len(), 1, "expected exists -> choose witness");
+
+        let choose = Term::choose(
+            Term::bool_type(),
+            Term::lambda(
+                Term::bool_type(),
+                Term::not(Term::eq(
+                    Term::bool_type(),
+                    kctx.parse_term("g0")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                    kctx.parse_term("g1")
+                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
+                )),
+            ),
+        );
+        let expected_second = Clause::new(
+            vec![Literal::negative(Term::eq(
+                Term::bool_type(),
+                kctx.parse_term("g0").apply(&[choose.clone()]),
+                kctx.parse_term("g1").apply(&[choose.clone()]),
+            ))],
+            &LocalContext::empty(),
+        );
+        assert_eq!(second, vec![expected_second.clone()]);
+
+        let third = expected_second.boolean_reductions(&kctx);
+        let expected_third = Clause::new(
+            vec![Literal::not_equals(
+                kctx.parse_term("g0").apply(&[choose.clone()]),
+                kctx.parse_term("g1").apply(&[choose]),
+            )],
+            &LocalContext::empty(),
+        );
+        assert_eq!(third, vec![expected_third]);
     }
 
     #[test]
