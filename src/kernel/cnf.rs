@@ -125,9 +125,10 @@ impl Cnf {
     /// Converts CNF to clauses, keeping the first `pinned` variables at their
     /// original positions (x0, x1, ..., x_{pinned-1}).
     ///
-    /// This is used for synthetic definitions where type variables need to stay
-    /// consistent across all clauses - variable renumbering during normalization
-    /// could otherwise swap type variable references in function types.
+    /// This is used when the first locals are pinned type parameters and must stay
+    /// consistent across all clauses from one polymorphic statement. Variable
+    /// renumbering during normalization could otherwise swap type-parameter
+    /// references inside function types.
     pub fn into_clauses_with_pinned(
         self,
         local_context: &LocalContext,
