@@ -309,6 +309,22 @@ impl SymbolTable {
         self.polymorphic_info.get(name)
     }
 
+    /// Record the source-level generic shape used when denormalizing a polymorphic constant.
+    pub fn set_polymorphic_info(
+        &mut self,
+        name: ConstantName,
+        generic_type: AcornType,
+        type_param_names: Vec<String>,
+    ) {
+        self.polymorphic_info.insert(
+            name,
+            PolymorphicInfo {
+                generic_type,
+                type_param_names,
+            },
+        );
+    }
+
     /// Get match-eliminator metadata for a datatype `match` constant, if known.
     pub fn get_match_eliminator_info(&self, match_symbol: Symbol) -> Option<&MatchEliminatorInfo> {
         self.match_eliminator_info.get(&match_symbol)

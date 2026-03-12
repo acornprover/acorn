@@ -4,6 +4,7 @@ use super::proof::ProofResolver;
 #[cfg(any(test, feature = "validate"))]
 use super::proof::{reconstruct_step, ConcreteStep, ConcreteStepId};
 use super::rewrite_tree::{Rewrite, RewriteTree};
+use super::synthetic::WitnessRegistry;
 use crate::code_generator::Error;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
@@ -21,6 +22,7 @@ use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::VariableMap;
 use crate::kernel::{EqualityGraph, StepId};
+use crate::module::ModuleId;
 
 /// Result of evaluating whether a literal can be eliminated during simplification.
 enum LiteralElimination {
@@ -1000,14 +1002,49 @@ impl ActiveSet {
         &self,
         activated_id: usize,
         activated_step: &ProofStep,
-        kernel_context: &KernelContext,
+        kernel_context: &mut KernelContext,
+        witness_registry: &mut WitnessRegistry,
+        module_id: ModuleId,
     ) -> Vec<ProofStep> {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
-        for reduction in clause.find_boolean_reductions(kernel_context) {
+        for reduction in
+            clause.find_boolean_reductions_with_options(kernel_context, !cfg!(feature = "nwit"))
+        {
             if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
                 continue;
+            }
+            let premise_map = PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            );
+            let step = ProofStep::direct(
+                activated_step,
+                Rule::BooleanReduction(SingleSourceInfo { id: activated_id }),
+                reduction.clause,
+                premise_map,
+            );
+            answer.push(step);
+        }
+
+        #[cfg(not(feature = "nwit"))]
+        let _ = (witness_registry, module_id);
+
+        #[cfg(feature = "nwit")]
+        // Positive existentials are the one boolean-reduction case where the prover now
+        // introduces a named witness instead of opening a raw `choose(...)` term.
+        if let Some(exists_reduction) = clause.positive_exists_reduction(kernel_context) {
+            let opening = witness_registry.open_positive_exists(
+                kernel_context,
+                module_id,
+                clause,
+                &exists_reduction,
+            );
+            let reduction = opening.reduction;
+            if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
+                return answer;
             }
             let premise_map = PremiseMap::new(
                 vec![VariableMap::new()],
@@ -1532,7 +1569,9 @@ impl ActiveSet {
     pub fn activate(
         &mut self,
         activated_step: ProofStep,
-        kernel_context: &KernelContext,
+        kernel_context: &mut KernelContext,
+        synthetic_witnesses: &mut WitnessRegistry,
+        module_id: ModuleId,
     ) -> (usize, Vec<ProofStep>) {
         let mut output = vec![];
         let activated_id = self.next_id();
@@ -1555,7 +1594,13 @@ impl ActiveSet {
             output.push(proof_step);
         }
 
-        for proof_step in self.boolean_reduction(activated_id, &activated_step, kernel_context) {
+        for proof_step in self.boolean_reduction(
+            activated_id,
+            &activated_step,
+            kernel_context,
+            synthetic_witnesses,
+            module_id,
+        ) {
             output.push(proof_step);
         }
 
@@ -1604,10 +1649,28 @@ impl ActiveSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::ModuleId;
+    use crate::prover::synthetic::WitnessRegistry;
+
+    /// Test helper that activates a step with the default module id.
+    fn activate_test(
+        set: &mut ActiveSet,
+        step: ProofStep,
+        kernel_context: &mut KernelContext,
+        synthetic_witnesses: &mut WitnessRegistry,
+    ) -> (usize, Vec<ProofStep>) {
+        set.activate(
+            step,
+            kernel_context,
+            synthetic_witnesses,
+            ModuleId::default(),
+        )
+    }
 
     #[test]
     fn test_activate_rewrite_pattern() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "(Bool, Bool) -> Bool")
             .parse_constants(&["c1", "c2", "c3", "c4"], "Bool");
 
@@ -1616,7 +1679,7 @@ mod tests {
         let clause = kctx.parse_clause("g0(c3, c4) = c2", &[]);
         let mut step = ProofStep::mock_from_clause(clause);
         step.truthiness = Truthiness::Hypothetical;
-        set.activate(step, &kctx);
+        activate_test(&mut set, step, &mut kctx, &mut synthetic_witnesses);
 
         // We should be able to replace c3 with c1 in "g0(c3, c4) = c2"
         let pattern_clause = kctx.parse_clause("c1 = c3", &[]);
@@ -1632,13 +1695,19 @@ mod tests {
     #[test]
     fn test_activate_rewrite_target() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "(Bool, Bool) -> Bool")
             .parse_constants(&["c1", "c2", "c3", "c4"], "Bool");
 
         // Create an active set that knows c1 = c3
         let mut set = ActiveSet::new();
         let clause = kctx.parse_clause("c1 = c3", &[]);
-        set.activate(ProofStep::mock_from_clause(clause), &kctx);
+        activate_test(
+            &mut set,
+            ProofStep::mock_from_clause(clause),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         // We want to use g0(c3, c4) = c2 to get g0(c1, c4) = c2.
         let target_clause = kctx.parse_clause("g0(c3, c4) = c2", &[]);
@@ -1729,6 +1798,7 @@ mod tests {
     #[test]
     fn test_matching_entire_literal() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "(Bool, Bool) -> Bool")
             .parse_constant("g2", "(Bool, Bool) -> Bool")
             .parse_constants(&["c3", "c4", "c5", "c6", "c7"], "Bool");
@@ -1743,12 +1813,12 @@ mod tests {
         );
         let mut step = ProofStep::mock_from_clause(clause1);
         step.truthiness = Truthiness::Factual;
-        set.activate(step, &kctx);
+        activate_test(&mut set, step, &mut kctx, &mut synthetic_witnesses);
 
         let clause2 = kctx.parse_clause("g0(c3, c7) = c3", &[]);
         let mut step = ProofStep::mock_from_clause(clause2);
         step.truthiness = Truthiness::Counterfactual;
-        let (_, new_clauses) = set.activate(step, &kctx);
+        let (_, new_clauses) = activate_test(&mut set, step, &mut kctx, &mut synthetic_witnesses);
 
         // Find the expected clause in results
         let expected = "not g0_2(g0_0(g0_0(c3, c4), c5), c6)";
@@ -1769,6 +1839,7 @@ mod tests {
     fn test_equality_factoring_variable_numbering() {
         // This is a bug we ran into
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_datatype("Foo");
         kctx.parse_constant("g1", "(Foo, Foo) -> Foo");
         kctx.parse_constant("c0", "Foo");
@@ -1777,7 +1848,12 @@ mod tests {
 
         // Nonreflexive rule of less-than
         let clause1 = kctx.parse_clause("g1(x0, x0) != c0", &["Foo"]);
-        set.activate(ProofStep::mock_from_clause(clause1), &kctx);
+        activate_test(
+            &mut set,
+            ProofStep::mock_from_clause(clause1),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         // Trichotomy
         let clause2 = kctx.parse_clause(
@@ -1794,13 +1870,19 @@ mod tests {
     fn test_self_referential_resolution() {
         // This is a bug we ran into. These things should not unify
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g1", "(Bool, Bool) -> Bool")
             .parse_constant("g2", "(Bool, Bool) -> Bool")
             .parse_constant("c0", "Bool");
 
         let mut set = ActiveSet::new();
         let clause1 = kctx.parse_clause("g2(x0, x0) = c0", &["Bool"]);
-        set.activate(ProofStep::mock_from_clause(clause1), &kctx);
+        activate_test(
+            &mut set,
+            ProofStep::mock_from_clause(clause1),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let clause2 = kctx.parse_clause(
             "g2(g2(g1(c0, x0), x0), g2(x1, x1)) != c0",
@@ -1829,6 +1911,7 @@ mod tests {
     #[test]
     fn test_resolution_rejects_function_variable_with_polymorphic_type_argument() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_datatype("Real");
 
         // g2: (T: Type) -> T (polymorphic constant returning a value of type T)
@@ -1866,7 +1949,7 @@ mod tests {
         );
         let mut long_step = ProofStep::mock_from_clause(long_clause);
         long_step.truthiness = Truthiness::Factual;
-        set.activate(long_step, &kctx);
+        activate_test(&mut set, long_step, &mut kctx, &mut synthetic_witnesses);
 
         // Short clause: g7(x0, Real, g236(c1), x1) != g2(Real)
         // Context: x0: Type, x1: x0 (value of type x0)
@@ -1922,6 +2005,7 @@ mod tests {
     #[test]
     fn test_polymorphic_backwards_rewrite_type_consistency() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         // Use names that don't start with 'T' to avoid collision with type variable syntax
         kctx.parse_datatype("Foo");
         kctx.parse_datatype("Bar");
@@ -1948,7 +2032,7 @@ mod tests {
         );
         let mut first_step = ProofStep::mock_from_clause(first_axiom);
         first_step.truthiness = Truthiness::Factual;
-        set.activate(first_step, &kctx);
+        activate_test(&mut set, first_step, &mut kctx, &mut synthetic_witnesses);
 
         // Add the polymorphic axiom for second: g2(x0, x1, g0(x0, x1, x2, x3)) = x3
         // This is: Pair.second(T, U, Pair.new(T, U, t, u)) = u
@@ -1958,7 +2042,7 @@ mod tests {
         );
         let mut second_step = ProofStep::mock_from_clause(second_axiom);
         second_step.truthiness = Truthiness::Factual;
-        set.activate(second_step, &kctx);
+        activate_test(&mut set, second_step, &mut kctx, &mut synthetic_witnesses);
 
         // Now activate a concrete target: Pair.first(Foo, Bar, Pair.new(Foo, Bar, c1, c2)) = c1
         // This triggers backwards rewriting which produces ill-typed clauses
@@ -1967,7 +2051,7 @@ mod tests {
         target_step.truthiness = Truthiness::Counterfactual;
 
         // Use full activate which also does simplification
-        let (_, result) = set.activate(target_step, &kctx);
+        let (_, result) = activate_test(&mut set, target_step, &mut kctx, &mut synthetic_witnesses);
 
         // Validate all generated clauses - this will catch type mismatches
         for ps in &result {
@@ -1986,6 +2070,7 @@ mod tests {
     #[test]
     fn test_resolution_rejects_eliminated_variable_with_uninhabited_type() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
 
         // g1: (T: Type) -> T -> Bool (polymorphic predicate)
         kctx.parse_polymorphic_constant("g1", "T: Type", "T -> Bool");
@@ -1998,7 +2083,12 @@ mod tests {
         // Short clause: g1(x0, x1)
         // Context: x0: Type (the type variable T), x1: x0 (value of type T)
         let short_clause = kctx.parse_clause("g1(x0, x1)", &["Type", "x0"]);
-        set.activate(ProofStep::mock_from_clause(short_clause), &kctx);
+        activate_test(
+            &mut set,
+            ProofStep::mock_from_clause(short_clause),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         // Long clause: not g1(x0, x1) or c0
         // Context: x0: Type, x1: x0
@@ -2027,6 +2117,7 @@ mod tests {
     #[test]
     fn test_resolution_rejects_eliminated_long_variable_with_concrete_uninhabited_type() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
 
         // Uninterpreted concrete types.
         kctx.parse_type_constructor("SetType", 0);
@@ -2043,7 +2134,12 @@ mod tests {
 
         // Short clause: not g0(x0), context x0: SetType.
         let short_clause = kctx.parse_clause("not g0(x0)", &["SetType"]);
-        set.activate(ProofStep::mock_from_clause(short_clause), &kctx);
+        activate_test(
+            &mut set,
+            ProofStep::mock_from_clause(short_clause),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         // Long clause: g0(g1(x0)), context x0: FiniteSetType.
         // Mark as non-factual so resolution is actually attempted.

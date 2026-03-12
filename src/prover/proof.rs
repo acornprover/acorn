@@ -11,6 +11,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
+use crate::prover::synthetic::WitnessRegistry;
 
 /// Trait for types that can resolve proof step IDs to clauses.
 /// Used by reconstruct_step to look up premises.
@@ -33,6 +34,8 @@ pub trait ProofResolver {
 /// previous steps.
 pub struct Proof<'a> {
     kernel_context: &'a KernelContext,
+    #[cfg_attr(not(feature = "nwit"), allow(dead_code))]
+    witness_registry: Option<&'a WitnessRegistry>,
 
     // Steps of the proof that can be directly verified.
     // Represents a proof by contradiction, with each step depending only on
@@ -46,8 +49,17 @@ pub struct Proof<'a> {
 impl<'a> Proof<'a> {
     /// Creates a new proof.
     pub fn new(kernel_context: &'a KernelContext) -> Proof<'a> {
+        Self::new_with_witnesses(kernel_context, None)
+    }
+
+    /// Create a proof that can optionally remember prover-generated witness metadata for certs.
+    pub fn new_with_witnesses(
+        kernel_context: &'a KernelContext,
+        witness_registry: Option<&'a WitnessRegistry>,
+    ) -> Proof<'a> {
         Proof {
             kernel_context,
+            witness_registry,
             steps: vec![],
             step_map: HashMap::new(),
         }
@@ -160,7 +172,17 @@ impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        Certificate::from_concrete_steps(goal, &concrete_steps, self.kernel_context, bindings)
+        #[cfg(feature = "nwit")]
+        let witness_registry = self.witness_registry;
+        #[cfg(not(feature = "nwit"))]
+        let witness_registry = None;
+        Certificate::from_concrete_steps_with_witnesses(
+            goal,
+            &concrete_steps,
+            self.kernel_context,
+            bindings,
+            witness_registry,
+        )
     }
 
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
@@ -419,9 +441,26 @@ mod tests {
     use crate::kernel::proof_step::{SimplificationInfo, SingleSourceInfo};
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
+    use crate::module::ModuleId;
     use crate::prover::active_set::ActiveSet;
     use crate::prover::proof::{add_var_map, Proof, ProofResolver};
+    use crate::prover::synthetic::WitnessRegistry;
     use std::collections::HashMap;
+
+    /// Test helper that threads synthetic witness state through active-set activation.
+    fn activate_test(
+        active_set: &mut ActiveSet,
+        step: ProofStep,
+        kernel_context: &mut KernelContext,
+        synthetic_witnesses: &mut WitnessRegistry,
+    ) -> (usize, Vec<ProofStep>) {
+        active_set.activate(
+            step,
+            kernel_context,
+            synthetic_witnesses,
+            ModuleId::default(),
+        )
+    }
 
     /// Test that resolution followed by simplification produces correct results.
     ///
@@ -434,6 +473,7 @@ mod tests {
     #[test]
     fn test_resolution_with_simplification() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "Bool -> Bool")
             .parse_constant("g1", "Bool -> Bool")
             .parse_constant("g2", "Bool -> Bool")
@@ -451,12 +491,27 @@ mod tests {
         let simp_step = ProofStep::mock_from_clause(simp_clause);
 
         let mut active_set = ActiveSet::new();
-        active_set.activate(long_step.clone(), &kctx);
-        active_set.activate(simp_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            long_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        activate_test(
+            &mut active_set,
+            simp_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let mut resolution_results = vec![];
         active_set.find_resolutions(&short_step, &mut resolution_results, &kctx);
-        active_set.activate(short_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            short_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         assert!(!resolution_results.is_empty());
 
@@ -685,6 +740,7 @@ mod tests {
     #[test]
     fn test_resolution_simplification_with_polymorphic_flip() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "Bool -> Bool")
             .parse_constant("g1", "(Bool, Bool) -> Bool")
             .parse_constant("g2", "Bool -> Bool")
@@ -702,12 +758,27 @@ mod tests {
         short_step.truthiness = Truthiness::Hypothetical;
 
         let mut active_set = ActiveSet::new();
-        active_set.activate(long_step.clone(), &kctx);
-        active_set.activate(simp_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            long_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        activate_test(
+            &mut active_set,
+            simp_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let mut resolution_results = vec![];
         active_set.find_resolutions(&short_step, &mut resolution_results, &kctx);
-        active_set.activate(short_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            short_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         assert!(!resolution_results.is_empty());
 
@@ -744,6 +815,7 @@ mod tests {
     #[test]
     fn test_simplification_multiple_eliminated_literals() {
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_constant("g0", "(Bool, Bool) -> Bool")
             .parse_constant("g1", "Bool -> Bool")
             .parse_constant("c0", "Bool")
@@ -766,13 +838,28 @@ mod tests {
         let simp_step = ProofStep::mock_from_clause(simp_clause);
 
         let mut active_set = ActiveSet::new();
-        active_set.activate(long_step.clone(), &kctx);
-        active_set.activate(simp_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            long_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        activate_test(
+            &mut active_set,
+            simp_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         // Find resolution between long and short
         let mut resolution_results = vec![];
         active_set.find_resolutions(&short_step, &mut resolution_results, &kctx);
-        active_set.activate(short_step.clone(), &kctx);
+        activate_test(
+            &mut active_set,
+            short_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         assert!(
             !resolution_results.is_empty(),
@@ -813,7 +900,7 @@ mod tests {
         );
     }
 
-    /// Regression test for certificate generation with explicit witnesses:
+    /// Regression test for certificate generation with named witnesses:
     /// a replacement-context witness for `Bool -> Bool` is lambda-shaped (identity),
     /// so cert generation must compute lambda types without panicking.
     #[test]
@@ -906,6 +993,7 @@ mod tests {
         use crate::kernel::proof_step::Truthiness;
 
         let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
         kctx.parse_type_constructor("Foo", 0);
         kctx.parse_constant("c0", "Foo")
             .parse_constant("g0", "Foo -> Bool")
@@ -952,17 +1040,42 @@ mod tests {
         };
 
         let mut active = ActiveSet::new();
-        let (_neg_goal_id, _) = active.activate(neg_goal.clone(), &kctx);
-        let (_axiom1_id, _) = active.activate(axiom1.clone(), &kctx);
-        let (_axiom2_id, _) = active.activate(axiom2.clone(), &kctx);
-        let (_hyp_id, hyp_outputs) = active.activate(hyp.clone(), &kctx);
+        let (_neg_goal_id, _) = activate_test(
+            &mut active,
+            neg_goal.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        let (_axiom1_id, _) = activate_test(
+            &mut active,
+            axiom1.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        let (_axiom2_id, _) = activate_test(
+            &mut active,
+            axiom2.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
+        let (_hyp_id, hyp_outputs) = activate_test(
+            &mut active,
+            hyp.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let g_clause = kctx.parse_clause("g1(c0)", &[]);
         let g_step = hyp_outputs
             .into_iter()
             .find(|step| step.clause == g_clause)
             .expect("expected g0(c0) to resolve to g1(c0)");
-        let (_g_id, g_outputs) = active.activate(g_step.clone(), &kctx);
+        let (_g_id, g_outputs) = activate_test(
+            &mut active,
+            g_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let foo_type = kctx.parse_type("Foo");
         let exists_body = Term::and(kctx.parse_term("g2(c0, b1)"), kctx.parse_term("g3(b1, b0)"));
@@ -977,22 +1090,36 @@ mod tests {
             .into_iter()
             .find(|step| step.clause == exists_clause)
             .expect("expected g(a) to resolve to existential");
-        let (exists_id, exists_outputs) = active.activate(exists_step.clone(), &kctx);
+        let (exists_id, exists_outputs) = activate_test(
+            &mut active,
+            exists_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
         assert_eq!(exists_id, 5);
 
         let inner_exists_step = exists_outputs
             .into_iter()
-            .find(|step| step.clause.to_string().contains("choose"))
-            .expect("expected existential boolean reduction output");
-        let (_inner_exists_id, inner_exists_outputs) =
-            active.activate(inner_exists_step.clone(), &kctx);
+            .find(|step| step.clause.to_string().starts_with("exists("))
+            .expect("expected inner existential after the first witness reduction");
+        let (_inner_exists_id, inner_exists_outputs) = activate_test(
+            &mut active,
+            inner_exists_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let conjunction_step = inner_exists_outputs
-            .into_iter()
+            .iter()
             .find(|step| step.clause.to_string().starts_with("and("))
-            .expect("expected conjunction after second exists reduction");
-        let (_conjunction_id, conjunction_outputs) =
-            active.activate(conjunction_step.clone(), &kctx);
+            .cloned()
+            .expect("expected conjunction after the second witness reduction");
+        let (_conjunction_id, conjunction_outputs) = activate_test(
+            &mut active,
+            conjunction_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let h1_step = conjunction_outputs
             .iter()
@@ -1005,16 +1132,31 @@ mod tests {
             .cloned()
             .expect("expected second conjunct");
 
-        let (_h1_id, h1_outputs) = active.activate(h1_step.clone(), &kctx);
+        let (_h1_id, h1_outputs) = activate_test(
+            &mut active,
+            h1_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
-        let (_h2_id, _h2_outputs) = active.activate(h2_step.clone(), &kctx);
+        let (_h2_id, _h2_outputs) = activate_test(
+            &mut active,
+            h2_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
 
         let not_h2_step = h1_outputs
             .iter()
             .find(|step| step.clause.to_string().starts_with("not g0_3("))
             .cloned()
             .expect("expected negative g3 clause");
-        let (not_h2_id, _not_h2_outputs) = active.activate(not_h2_step.clone(), &kctx);
+        let (not_h2_id, _not_h2_outputs) = activate_test(
+            &mut active,
+            not_h2_step.clone(),
+            &mut kctx,
+            &mut synthetic_witnesses,
+        );
         assert_eq!(not_h2_id, 10);
 
         let simplified_h2 = active

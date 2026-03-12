@@ -877,6 +877,7 @@ impl CodeGenerator<'_> {
                 let value = kernel_context.denormalize(&clause, None, None, true);
                 self.value_to_code(&value)
             }
+            CertificateStep::Satisfy(step) => self.satisfy_step_to_code(step),
         }
     }
 
@@ -902,6 +903,68 @@ impl CodeGenerator<'_> {
     fn type_to_code(&self, acorn_type: &AcornType) -> Result<String> {
         let expr = self.type_to_expr(acorn_type)?;
         Ok(expr.to_string())
+    }
+
+    /// Render the optional `[T, U: Trait]` prefix used by witness declarations.
+    fn format_type_params(
+        &self,
+        type_params: &[crate::elaborator::acorn_type::TypeParam],
+    ) -> Result<String> {
+        if type_params.is_empty() {
+            return Ok(String::new());
+        }
+        let mut rendered = Vec::with_capacity(type_params.len());
+        for param in type_params {
+            if let Some(typeclass) = &param.typeclass {
+                rendered.push(format!(
+                    "{}: {}",
+                    param.name,
+                    self.type_to_code(&AcornType::TypeclassConstraint(typeclass.clone()))?
+                ));
+            } else {
+                rendered.push(param.name.clone());
+            }
+        }
+        Ok(format!("[{}]", rendered.join(", ")))
+    }
+
+    /// Render a structured `let ... satisfy` certificate step back to source code.
+    fn satisfy_step_to_code(
+        &mut self,
+        step: &crate::kernel::certificate_step::SatisfyStep,
+    ) -> Result<String> {
+        let type_params = self.format_type_params(&step.type_params)?;
+        if let Some(return_name) = &step.return_name {
+            let args: Result<Vec<String>> = step
+                .arguments
+                .iter()
+                .map(|(name, arg_type)| Ok(format!("{}: {}", name, self.type_to_code(arg_type)?)))
+                .collect();
+            let mut initial_vars: Vec<String> = step
+                .arguments
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            initial_vars.push(return_name.clone());
+            let condition = self.value_to_code_with_initial_vars(&step.condition, &initial_vars)?;
+            return Ok(format!(
+                "let {}{}({}) -> {}: {} satisfy {{ {} }}",
+                step.name,
+                type_params,
+                args?.join(", "),
+                return_name,
+                self.type_to_code(&step.return_type)?,
+                condition,
+            ));
+        }
+
+        Ok(format!(
+            "let {}{}: {} satisfy {{ {} }}",
+            step.name,
+            type_params,
+            self.type_to_code(&step.return_type)?,
+            self.value_to_code(&step.condition)?,
+        ))
     }
 
     /// Check if we can infer a function's type parameters from its argument types.
@@ -1841,6 +1904,7 @@ mod tests {
             .iter()
             .find_map(|step| match step {
                 CertificateStep::Claim(claim) => Some(claim),
+                CertificateStep::Satisfy(_) => None,
             })
             .expect("expected claim step");
         let mapped_x1 = claim

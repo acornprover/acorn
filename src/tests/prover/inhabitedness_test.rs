@@ -433,7 +433,7 @@ fn test_polymorphic_structure_with_function_if_then_else() {
 }
 
 // Reproduces a bug where the prover needs to instantiate a polymorphic axiom
-// with an arbitrary type, resulting in certificate code like "let s2: x0 satisfy { true }"
+// with an arbitrary type, resulting in certificate code like "let w2: x0 satisfy { true }"
 // which is invalid because x0 is not a valid type name.
 #[test]
 fn test_polymorphic_axiom_chain_needs_arbitrary_type() {

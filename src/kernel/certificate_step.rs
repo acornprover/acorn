@@ -1,3 +1,5 @@
+use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_value::AcornValue;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::term_normalization::{normalize_clause_subterms, normalize_term};
@@ -87,6 +89,28 @@ impl Claim {
     }
 }
 
+/// A `let ... satisfy` declaration step in a certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SatisfyStep {
+    pub name: String,
+    pub type_params: Vec<TypeParam>,
+    pub arguments: Vec<(String, AcornType)>,
+    pub return_name: Option<String>,
+    pub return_type: AcornType,
+    pub condition: AcornValue,
+    /// The implicit `exists` / `forall ... exists` claim justified by this line.
+    pub justification: Claim,
+    /// The clauses made available after naming the witness.
+    pub witness_clauses: Vec<Clause>,
+}
+
+impl SatisfyStep {
+    /// Distinguish function witnesses from plain value witnesses.
+    pub fn is_function(&self) -> bool {
+        self.return_name.is_some()
+    }
+}
+
 /// A single kernel-level step in certificate generation/checking.
 ///
 /// Parsing and generation both use this representation. Each step corresponds to one
@@ -95,6 +119,9 @@ impl Claim {
 pub enum CertificateStep {
     /// A claim statement with a generic clause plus specialization map.
     Claim(Claim),
+
+    /// A witness declaration that introduces a named synthetic value/function.
+    Satisfy(SatisfyStep),
 }
 
 #[cfg(test)]

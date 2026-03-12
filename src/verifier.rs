@@ -345,7 +345,7 @@ mod tests {
         CertificateStore {
             certs: vec![Certificate::new(
                 "simple_truth".to_string(),
-                vec!["let s0: Bool satisfy { true }".to_string()],
+                vec!["let w0: Bool satisfy { true }".to_string()],
             )],
         }
         .save(cert_path.path())
@@ -388,7 +388,7 @@ mod tests {
         CertificateStore {
             certs: vec![Certificate::new(
                 "simple_truth".to_string(),
-                vec!["let s0: Bool satisfy { true }".to_string()],
+                vec!["let w0: Bool satisfy { true }".to_string()],
             )],
         }
         .save(cert_path.path())
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(loaded.certs[0].goal, "simple_truth");
         assert_eq!(
             loaded.certs[0].proof,
-            Some(vec!["let s0: Bool satisfy { true }".to_string()])
+            Some(vec!["let w0: Bool satisfy { true }".to_string()])
         );
     }
 

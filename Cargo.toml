@@ -46,6 +46,8 @@ default = []
 validate = []
 # Keep existential quantifiers inline in clausification instead of introducing witnesses early.
 iet = []
+# Emit named witness declarations in generated certificates instead of raw choose(...) terms.
+nwit = []
 # Keep normalization/clausification to at most one initial clause per fact.
 nocnf = []
 

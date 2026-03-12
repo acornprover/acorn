@@ -10,6 +10,7 @@ pub mod rewrite_tree;
 pub mod score;
 pub mod scorer;
 pub mod scoring_model;
+pub(crate) mod synthetic;
 
 // Re-export the main public types
 pub use prover::Prover;

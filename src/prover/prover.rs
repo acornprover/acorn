@@ -6,6 +6,7 @@ use tracing::trace;
 use super::active_set::ActiveSet;
 use super::passive_set::PassiveSet;
 use super::proof::Proof;
+use super::synthetic::WitnessRegistry;
 use crate::certificate::Certificate;
 use crate::code_generator::{CodeGenerator, Error};
 use crate::elaborator::acorn_type::TypeParam;
@@ -57,6 +58,13 @@ pub struct Prover {
     /// The goal of the prover.
     /// If this is None, the goal hasn't been set yet.
     goal: Option<Goal>,
+
+    /// Prover-owned search context, including any named witness symbols introduced
+    /// during existential activation.
+    kernel_context: Option<KernelContext>,
+
+    /// Metadata for prover-generated existential witnesses.
+    witness_registry: WitnessRegistry,
 }
 
 impl Prover {
@@ -109,6 +117,8 @@ impl Prover {
             useful_passive: vec![],
             nonfactual_activations: 0,
             goal: None,
+            kernel_context: None,
+            witness_registry: WitnessRegistry::new(),
         }
     }
 
@@ -337,7 +347,7 @@ impl Prover {
             self.active_set
                 .find_upstream(step, include_inspiration, &mut useful_active);
         }
-        let mut proof = Proof::new(kernel_context);
+        let mut proof = Proof::new_with_witnesses(kernel_context, Some(&self.witness_registry));
         let mut active_ids: Vec<_> = useful_active.iter().collect();
         active_ids.sort();
         for i in active_ids {
@@ -367,13 +377,14 @@ impl Prover {
             .ok_or_else(|| Error::internal("no goal set"))?;
         let goal_name = goal.name.clone();
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
+        let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
 
         let proof = self
-            .get_proof(kernel_context, false)
+            .get_proof(effective_kernel_context, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
         if print {
-            self.print_proof(&proof, cert_bindings.as_ref(), kernel_context);
+            self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }
 
         proof.make_cert(goal_name, cert_bindings.as_ref())
@@ -516,7 +527,7 @@ impl Prover {
 
     /// Activates the next clause from the queue, unless we're already done.
     /// Returns whether the prover finished.
-    fn activate_next(&mut self, kernel_context: &KernelContext) -> bool {
+    fn activate_next(&mut self, kernel_context: &mut KernelContext) -> bool {
         if self.final_step.is_some() {
             return true;
         }
@@ -579,7 +590,7 @@ impl Prover {
     /// respect to every active clause.
     ///
     /// Returns whether the prover finished.
-    fn activate(&mut self, activated_step: ProofStep, kernel_context: &KernelContext) -> bool {
+    fn activate(&mut self, activated_step: ProofStep, kernel_context: &mut KernelContext) -> bool {
         // Use the step for simplification
         let activated_id = self.active_set.next_id();
         if activated_step.clause.literals.len() == 1 {
@@ -592,8 +603,17 @@ impl Prover {
         }
 
         // Generate new clauses
-        let (alt_activated_id, generated_steps) =
-            self.active_set.activate(activated_step, kernel_context);
+        let module_id = self
+            .goal
+            .as_ref()
+            .map(|goal| goal.module_id)
+            .unwrap_or_default();
+        let (alt_activated_id, generated_steps) = self.active_set.activate(
+            activated_step,
+            kernel_context,
+            &mut self.witness_registry,
+            module_id,
+        );
         assert_eq!(activated_id, alt_activated_id);
 
         let mut new_steps = vec![];
@@ -645,6 +665,9 @@ impl Prover {
     /// Add proof steps to the prover.
     /// These can be used as initial facts for starting the proof.
     pub fn add_steps(&mut self, steps: Vec<ProofStep>, kernel_context: &KernelContext) {
+        if self.kernel_context.is_none() {
+            self.kernel_context = Some(kernel_context.clone());
+        }
         self.passive_set.push_batch(steps, kernel_context);
     }
 
@@ -653,6 +676,21 @@ impl Prover {
     ///   Going over the time limit, in seconds
     ///   Activating all shallow steps, if shallow_only is set
     pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
+        let mut search_kernel_context = self
+            .kernel_context
+            .take()
+            .unwrap_or_else(|| kernel_context.clone());
+        let outcome = self.search_with_context(mode, &mut search_kernel_context);
+        self.kernel_context = Some(search_kernel_context);
+        outcome
+    }
+
+    /// Run proof search against the prover-owned mutable kernel context snapshot.
+    fn search_with_context(
+        &mut self,
+        mode: ProverMode,
+        kernel_context: &mut KernelContext,
+    ) -> Outcome {
         // Convert mode to actual parameters
         let (activation_limit, seconds, shallow_only) = match mode {
             ProverMode::Interactive {
@@ -727,6 +765,7 @@ impl Prover {
 
     pub fn set_goal(&mut self, goal: Goal, steps: Vec<ProofStep>, kernel_context: &KernelContext) {
         assert!(self.goal.is_none());
+        self.kernel_context = Some(kernel_context.clone());
         self.add_steps(steps, kernel_context);
         self.goal = Some(goal);
     }

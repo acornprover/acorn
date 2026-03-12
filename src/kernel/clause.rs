@@ -30,6 +30,13 @@ pub struct NormalizedClauseTrace {
     pub pre_norm_context: LocalContext,
 }
 
+/// A positive existential literal that can be opened by introducing a witness term.
+pub struct PositiveExistsReduction {
+    pub literal_index: usize,
+    pub binder_type: Term,
+    pub body: Term,
+}
+
 impl Clause {
     fn normalize_with_var_ids_prefilled(
         literals: Vec<Literal>,
@@ -990,9 +997,73 @@ impl Clause {
         Some((reduced, output_context))
     }
 
+    /// Return the one top-level positive existential that may be opened as a named witness.
+    pub fn positive_exists_reduction(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Option<PositiveExistsReduction> {
+        if self.literals.len() != 1 {
+            return None;
+        }
+
+        let bool_type = Term::bool_type();
+        let literal = self
+            .literals
+            .first()
+            .expect("single-literal clause should have one literal");
+        if literal
+            .left
+            .get_type_with_context(&self.context, kernel_context)
+            != bool_type
+        {
+            return None;
+        }
+        if !literal.right.is_true() || !literal.positive {
+            return None;
+        }
+        if Self::reduce_exists_with_obvious_witness(&literal.left).is_some() {
+            return None;
+        }
+        let (binder_type, body) = literal.left.as_ref().split_exists()?;
+        Some(PositiveExistsReduction {
+            literal_index: 0,
+            binder_type: binder_type.to_owned(),
+            body: body.to_owned(),
+        })
+    }
+
+    /// Apply a chosen witness term to one positive-existential reduction candidate.
+    pub fn instantiate_positive_exists_reduction(
+        &self,
+        reduction: &PositiveExistsReduction,
+        witness: Term,
+    ) -> NormalizedClauseTrace {
+        let reduced = reduction
+            .body
+            .substitute_bound(0, &witness)
+            .shift_bound(0, -1);
+        self.with_replaced_literal_and_context(
+            reduction.literal_index,
+            vec![vec![Literal::positive(reduced)]],
+            &self.context,
+        )
+        .into_iter()
+        .next()
+        .expect("positive exists reduction produces exactly one clause")
+    }
+
     pub fn find_boolean_reductions(
         &self,
         kernel_context: &KernelContext,
+    ) -> Vec<NormalizedClauseTrace> {
+        self.find_boolean_reductions_with_options(kernel_context, true)
+    }
+
+    /// Enumerate boolean reductions while letting callers choose whether generic existentials open.
+    pub fn find_boolean_reductions_with_options(
+        &self,
+        kernel_context: &KernelContext,
+        allow_positive_exists_witness: bool,
     ) -> Vec<NormalizedClauseTrace> {
         let bool_type = Term::bool_type();
 
@@ -1148,13 +1219,15 @@ impl Clause {
                         ));
                         continue;
                     }
-                    if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
-                        answer.extend(self.with_replaced_literal_and_context(
-                            i,
-                            vec![vec![Literal::positive(reduced)]],
-                            &self.context,
-                        ));
-                        continue;
+                    if allow_positive_exists_witness {
+                        if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
+                            answer.extend(self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &self.context,
+                            ));
+                            continue;
+                        }
                     }
                 } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
                     answer.extend(self.with_replaced_literal_and_context(

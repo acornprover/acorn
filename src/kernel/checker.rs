@@ -24,6 +24,12 @@ pub enum StepReason {
     /// The source points to the location of the assumption.
     Assumption(Source),
 
+    /// A let...satisfy statement that skolemizes an exists statement.
+    /// The source points to where the exists was originally defined.
+    Skolemization(Source),
+
+    /// A witness declaration accepted from a previously proven existential.
+    WitnessDeclaration,
     /// The checker already had a contradiction, so everything is trivially true.
     Contradiction,
 
@@ -53,7 +59,10 @@ impl StepReason {
     pub fn description(&self) -> String {
         match self {
             StepReason::EqualityGraph => "simplification".to_string(),
-            StepReason::Assumption(source) => source.description(),
+            StepReason::Assumption(source) | StepReason::Skolemization(source) => {
+                source.description()
+            }
+            StepReason::WitnessDeclaration => "witness declaration".to_string(),
             StepReason::Contradiction => "ex falso".to_string(),
             StepReason::PreviousClaim => "previous claim".to_string(),
             StepReason::Testing => "testing".to_string(),
@@ -88,6 +97,9 @@ pub struct CheckedStep {
 
     /// The original certificate code line for this step, when available.
     pub code_line: Option<String>,
+
+    /// Prefer the original code line over reconstructed code for display.
+    pub prefer_code_line: bool,
 }
 
 /// The checker quickly checks if a clause can be proven in a single step from known clauses.
@@ -472,10 +484,55 @@ impl Checker {
                         clause: clause.clone(),
                         reason,
                         code_line: code_lines.and_then(|lines| lines.get(step_index)).cloned(),
+                        prefer_code_line: false,
                     });
 
                     self.insert_clause(&generic_clause, StepReason::PreviousClaim, &kernel_context);
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
+                }
+                CertificateStep::Satisfy(step) => {
+                    let generic_clause = step.justification.normalized_generic_clause();
+                    let justification_clause =
+                        Self::instantiate_claim_clause(&step.justification, kernel_context)?;
+                    let justification_ok = self
+                        .check_clause(&generic_clause, kernel_context)
+                        .or_else(|| self.check_clause(&justification_clause, kernel_context))
+                        .is_some();
+                    if !justification_ok {
+                        let cert_line_context = code_lines
+                            .and_then(|lines| lines.get(step_index))
+                            .map(|line| {
+                                format!("; certificate line {}: {:?}", step_index + 1, line)
+                            })
+                            .unwrap_or_default();
+                        return Err(Error::GeneratedBadCode(format!(
+                            "Witness declaration at step {} is not obviously true{} (missing implicit existential {:?})",
+                            step_index + 1,
+                            cert_line_context,
+                            justification_clause,
+                        )));
+                    }
+
+                    self.insert_clause(
+                        &generic_clause,
+                        StepReason::WitnessDeclaration,
+                        kernel_context,
+                    );
+                    self.insert_clause(
+                        &justification_clause,
+                        StepReason::WitnessDeclaration,
+                        kernel_context,
+                    );
+                    for clause in &step.witness_clauses {
+                        self.insert_clause(clause, StepReason::WitnessDeclaration, kernel_context);
+                    }
+
+                    checked_steps.push(CheckedStep {
+                        clause: justification_clause,
+                        reason: StepReason::WitnessDeclaration,
+                        code_line: code_lines.and_then(|lines| lines.get(step_index)).cloned(),
+                        prefer_code_line: true,
+                    });
                 }
             }
         }
@@ -1083,7 +1140,7 @@ mod tests {
         let Error::GeneratedBadCode(msg) = err else {
             panic!("expected GeneratedBadCode");
         };
-        assert!(msg.contains("certificate `let ... satisfy` steps are no longer supported"));
+        assert!(msg.contains("only supports a single declaration"));
     }
 
     #[test]
