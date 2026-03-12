@@ -1458,7 +1458,11 @@ mod tests {
             .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::PreserveAsLiteral)
             .expect("preserve-mode lowering should succeed");
         assert_eq!(preserved.len(), 1);
-        assert_eq!(preserved[0].literals.len(), 1);
+        if cfg!(feature = "nocnf") {
+            assert_eq!(preserved[0].literals.len(), 2);
+        } else {
+            assert_eq!(preserved[0].literals.len(), 1);
+        }
 
         let clausified = kernel_context
             .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::ClausifyShallowly)

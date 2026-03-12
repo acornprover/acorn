@@ -2194,6 +2194,8 @@ mod tests {
 
     #[test]
     fn test_check_cert_accepts_lambda_valued_claim_argument() {
+        use crate::prover::{Outcome, ProverMode};
+
         let code = r#"
             type Nat: axiom
             let rel: (Nat, Nat) -> Bool = axiom
@@ -2217,15 +2219,29 @@ mod tests {
             }
         "#;
 
-        let (processor, bindings, normalized_goal) = Processor::test_goal(code);
+        let (mut processor, bindings, normalized_goal) = Processor::test_goal(code);
         let mut project = Project::new_mock();
         project.mock("/mock/main.ac", code);
 
-        let cert = Certificate::new(
-            "goal".to_string(),
-            vec![
-                "function[T0](x0: (T0, T0) -> Bool) { exists(k0: T0, k1: T0, k2: T0) { x0(k0, k1) and x0(k1, k2) and not x0(k0, k2) } or is_transitive[T0](x0) }[Nat](function(a: Nat, b: Nat) { rel(a, b) })".to_string(),
-            ],
+        let outcome = processor.search(
+            ProverMode::Interactive {
+                timeout_secs: 5.0,
+                activation_limit: 100_000,
+            },
+            &normalized_goal.kernel_context,
+        );
+        assert_eq!(outcome, Outcome::Success);
+
+        let cert = processor
+            .prover()
+            .make_cert(&bindings, &normalized_goal.kernel_context, false)
+            .expect("lambda-valued cert should be generated");
+        let proof = cert.proof.as_ref().expect("proof should exist");
+        assert!(
+            proof.iter().any(|line| {
+                line.contains("is_transitive") && line.contains("}[Nat](function(")
+            }),
+            "expected a proof step to preserve the lambda-valued claim argument: {proof:?}"
         );
 
         processor
