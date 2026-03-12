@@ -201,6 +201,34 @@ impl ActiveSet {
         }
     }
 
+    /// Rewrites should preserve the type of the subterm they replace.
+    fn rewrite_preserves_subterm_type(
+        old_subterm: &Term,
+        new_subterm: &Term,
+        new_subterm_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let old_type =
+            old_subterm.checked_type_with_context(LocalContext::empty_ref(), kernel_context);
+        let new_type = new_subterm.checked_type_with_context(new_subterm_context, kernel_context);
+        matches!((old_type, new_type), (Ok(old_type), Ok(new_type)) if old_type == new_type)
+    }
+
+    /// Filters out derived rewrite steps whose literals are not type-correct.
+    fn rewrite_step_is_well_typed(step: &ProofStep, kernel_context: &KernelContext) -> bool {
+        Self::clause_is_well_typed(&step.clause, kernel_context)
+    }
+
+    /// Every literal in a derived clause should compare terms of the same type.
+    fn clause_is_well_typed(clause: &Clause, kernel_context: &KernelContext) -> bool {
+        let ctx = clause.get_local_context();
+        clause.literals.iter().all(|lit| {
+            let left_type = lit.left.checked_type_with_context(ctx, kernel_context);
+            let right_type = lit.right.checked_type_with_context(ctx, kernel_context);
+            matches!((left_type, right_type), (Ok(left_type), Ok(right_type)) if left_type == right_type)
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.steps.len()
     }
@@ -480,33 +508,8 @@ impl ActiveSet {
             normalized.pre_norm_context,
         );
         let clause = normalized.clause;
-
-        // Debug: validate resolution output before creating step
-        // Note: use clause.get_local_context() because literals have been renormalized
-        #[cfg(feature = "validate")]
-        for (i, literal) in clause.literals.iter().enumerate() {
-            let left_type = literal
-                .left
-                .get_type_with_context(clause.get_local_context(), kernel_context);
-            let right_type = literal
-                .right
-                .get_type_with_context(clause.get_local_context(), kernel_context);
-            if left_type != right_type {
-                eprintln!("RESOLUTION PRODUCED TYPE MISMATCH:");
-                eprintln!("  Short clause (id={}): {}", short_id, short_clause);
-                eprintln!("  Short context: {:?}", short_clause.get_local_context());
-                eprintln!("  Long clause (id={}): {}", long_id, long_clause);
-                eprintln!("  Long context: {:?}", long_clause.get_local_context());
-                eprintln!("  Long index (eliminated): {}", long_index);
-                eprintln!("  Short index (eliminated): {}", short_index);
-                eprintln!("  Flipped: {}", flipped);
-                eprintln!("  Pre-normalization context: {:?}", context);
-                eprintln!("  Result clause: {}", clause);
-                eprintln!("  Result context: {:?}", clause.get_local_context());
-                eprintln!("  Literal {}: {}", i, literal);
-                eprintln!("  Left type: {:?}", left_type);
-                eprintln!("  Right type: {:?}", right_type);
-            }
+        if !Self::clause_is_well_typed(&clause, kernel_context) {
+            return None;
         }
 
         let step = ProofStep::resolution(
@@ -686,10 +689,8 @@ impl ActiveSet {
                         continue;
                     }
 
-                    // Apply the unifier to the replacement term to create mappings for all
-                    // pattern variables. This is needed for proof reconstruction - without it,
-                    // variables that only appear in the replacement side won't have mappings.
-                    let _ = unifier.apply(Scope::LEFT, t);
+                    let new_subterm = unifier.apply(Scope::LEFT, t);
+                    let new_subterm_context = unifier.output_context().clone();
 
                     // Extract the pattern's variable map for reconstruction
                     let (all_maps, _) = unifier.into_maps_with_context();
@@ -699,6 +700,15 @@ impl ActiveSet {
                         .map(|(_, map)| map)
                         .unwrap_or_else(VariableMap::new);
 
+                    if !Self::rewrite_preserves_subterm_type(
+                        &u_subterm,
+                        &new_subterm,
+                        &new_subterm_context,
+                        kernel_context,
+                    ) {
+                        continue;
+                    }
+
                     let ps = ProofStep::rewrite(
                         rewrite.pattern_id,
                         &pattern_step,
@@ -706,44 +716,12 @@ impl ActiveSet {
                         target_step,
                         target_left,
                         &path,
-                        &rewrite.term,
-                        &rewrite.context,
+                        &new_subterm,
+                        &new_subterm_context,
                         pattern_var_map,
                     );
-
-                    // Debug: validate rewrite step types
-                    #[cfg(any(test, feature = "validate"))]
-                    for (i, lit) in ps.clause.literals.iter().enumerate() {
-                        let ctx = ps.clause.get_local_context();
-                        let left_type = lit.left.get_type_with_context(ctx, kernel_context);
-                        let right_type = lit.right.get_type_with_context(ctx, kernel_context);
-                        if left_type != right_type {
-                            eprintln!("Type mismatch in rewrite step (activate_rewrite_target):");
-                            eprintln!("  Pattern id: {}", rewrite.pattern_id);
-                            eprintln!("  Pattern step: {}", pattern_step.clause);
-                            eprintln!(
-                                "  Pattern context: {:?}",
-                                pattern_step.clause.get_local_context()
-                            );
-                            eprintln!("  Target id: {}", target_id);
-                            eprintln!("  Target step: {}", target_step.clause);
-                            eprintln!(
-                                "  Target context: {:?}",
-                                target_step.clause.get_local_context()
-                            );
-                            eprintln!("  Target left: {}", target_left);
-                            eprintln!("  Path: {:?}", path);
-                            eprintln!("  Subterm being rewritten: {}", u_subterm);
-                            eprintln!("  Forwards: {}", rewrite.forwards);
-                            eprintln!("  New subterm: {}", rewrite.term);
-                            eprintln!("  Rewrite context: {:?}", rewrite.context);
-                            eprintln!("  Result clause: {}", ps.clause);
-                            eprintln!("  Result context: {:?}", ps.clause.get_local_context());
-                            eprintln!("  Literal {}: {}", i, lit);
-                            eprintln!("  Left type: {:?}", left_type);
-                            eprintln!("  Right type: {:?}", right_type);
-                            panic!("Type mismatch in rewrite");
-                        }
+                    if !Self::rewrite_step_is_well_typed(&ps, kernel_context) {
+                        continue;
                     }
 
                     output.push(ps);
@@ -801,6 +779,15 @@ impl ActiveSet {
                 let new_subterm = unifier.apply(Scope::LEFT, t);
                 let new_subterm_context = unifier.output_context().clone();
 
+                if !Self::rewrite_preserves_subterm_type(
+                    subterm,
+                    &new_subterm,
+                    &new_subterm_context,
+                    kernel_context,
+                ) {
+                    continue;
+                }
+
                 // Extract the pattern's variable map for reconstruction
                 let (all_maps, _) = unifier.into_maps_with_context();
                 let pattern_var_map = all_maps
@@ -835,6 +822,9 @@ impl ActiveSet {
                         &new_subterm_context,
                         pattern_var_map.clone(),
                     );
+                    if !Self::rewrite_step_is_well_typed(&ps, kernel_context) {
+                        continue;
+                    }
                     output.push(ps);
                 }
 
@@ -1238,26 +1228,6 @@ impl ActiveSet {
         let initial_num_literals = step.clause.literals.len();
         let mut output_literals = vec![];
         let local_context = step.clause.get_local_context().clone();
-
-        // Debug: validate all literals before processing
-        #[cfg(any(test, feature = "validate"))]
-        for (i, literal) in step.clause.literals.iter().enumerate() {
-            let left_type = literal
-                .left
-                .get_type_with_context(&local_context, kernel_context);
-            let right_type = literal
-                .right
-                .get_type_with_context(&local_context, kernel_context);
-            if left_type != right_type {
-                eprintln!("Type mismatch in step being simplified:");
-                eprintln!("  Step rule: {}", step.rule.name());
-                eprintln!("  Step clause: {}", step.clause);
-                eprintln!("  Literal {}: {}", i, literal);
-                eprintln!("  Left type: {:?}", left_type);
-                eprintln!("  Right type: {:?}", right_type);
-                eprintln!("  Context: {:?}", local_context.get_var_types());
-            }
-        }
 
         // Clone the literals before consuming them, so we can restore the original step
         // if simplification happens (the original step is stored inline in Rule::Simplification).
@@ -1677,6 +1647,32 @@ mod tests {
         let mut result = vec![];
         set.activate_rewrite_target(1, &target_step, &mut result, &kctx);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_subterm_type() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Foo")
+            .parse_constant("c0", "Foo")
+            .parse_constant("c1", "Foo")
+            .parse_constant("c2", "Bool");
+
+        let c0 = Term::parse("c0");
+        let c1 = Term::parse("c1");
+        let c2 = Term::parse("c2");
+
+        assert!(ActiveSet::rewrite_preserves_subterm_type(
+            &c0,
+            &c1,
+            LocalContext::empty_ref(),
+            &kctx,
+        ));
+        assert!(!ActiveSet::rewrite_preserves_subterm_type(
+            &c0,
+            &c2,
+            LocalContext::empty_ref(),
+            &kctx,
+        ));
     }
 
     #[test]

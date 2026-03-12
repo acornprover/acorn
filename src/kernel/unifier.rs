@@ -101,6 +101,79 @@ impl<'a> Unifier<'a> {
         &self.output_context
     }
 
+    /// Returns whether `type_expr` is a fully-formed type expression that a `TypeSort`
+    /// variable may bind to. This rejects type-level values like `Type`, higher-kinded
+    /// applications, and unsaturated type constructors.
+    fn is_proper_type_expr(&self, type_expr: TermRef) -> bool {
+        match type_expr.decompose() {
+            Decomposition::Atom(Atom::Symbol(Symbol::Bool)) => true,
+            Decomposition::Atom(Atom::Symbol(Symbol::Type(ground_id))) => {
+                self.kernel_context.type_store.get_arity(*ground_id) == 0
+            }
+            Decomposition::Atom(Atom::FreeVariable(var_id)) => self
+                .output_context
+                .get_var_type(*var_id as usize)
+                .is_some_and(|var_type| {
+                    !matches!(
+                        resolve_type_constraint_kind(var_type.as_ref(), &self.output_context),
+                        TypeConstraintKind::Other
+                    )
+                }),
+            Decomposition::Application(_, _) => {
+                let Some((head, args)) = type_expr.split_application_multi() else {
+                    return false;
+                };
+                let Some(ground_id) = head.as_ref().as_type_atom() else {
+                    return false;
+                };
+                if args.len() != self.kernel_context.type_store.get_arity(ground_id) as usize {
+                    return false;
+                }
+                args.iter()
+                    .all(|arg| self.is_proper_type_expr(arg.as_ref()))
+            }
+            Decomposition::Pi(input, _) => !input.is_type_param_kind(),
+            _ => false,
+        }
+    }
+
+    /// Checks whether binding a variable with type `var_type` to `term` is type-correct.
+    /// This is used before creating/remapping substitutions so we can reject invalid
+    /// `TypeSort` and typeclass bindings without mutating the unifier state.
+    fn binding_type_is_compatible(
+        &mut self,
+        var_scope: Scope,
+        var_type: TermRef,
+        term: &Term,
+        allow_typesort_term: bool,
+    ) -> bool {
+        if matches!(
+            var_type.decompose(),
+            Decomposition::Atom(Atom::Symbol(Symbol::Type0))
+        ) {
+            if term.as_ref().is_type0() {
+                return allow_typesort_term;
+            }
+            if !self.is_proper_type_expr(term.as_ref()) {
+                return false;
+            }
+        }
+
+        if let Some(typeclass_id) = var_type.as_typeclass() {
+            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
+            let type_expr =
+                if term_type.as_ref().is_type0() || term_type.as_ref().as_typeclass().is_some() {
+                    term.as_ref()
+                } else {
+                    term_type.as_ref()
+                };
+            self.enforce_typeclass_constraint_on_type_expr(var_type, typeclass_id, type_expr)
+        } else {
+            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
+            self.unify_internal(var_scope, var_type, Scope::OUTPUT, term_type.as_ref())
+        }
+    }
+
     fn enforce_typeclass_constraint_on_type_expr(
         &mut self,
         required_type: TermRef,
@@ -483,18 +556,8 @@ impl<'a> Unifier<'a> {
                 return false;
             }
 
-            // Type check for OUTPUT variables: verify types are compatible before remapping.
-            // This catches cases like trying to unify a function variable (type A -> B)
-            // with a polymorphic constant (type Type -> T) that have incompatible signatures.
             if let Some(var_type) = self.output_context.get_var_type(var_id as usize).cloned() {
-                let term_type =
-                    term.get_type_with_context(&self.output_context, self.kernel_context);
-                if !self.unify_internal(
-                    Scope::OUTPUT,
-                    var_type.as_ref(),
-                    Scope::OUTPUT,
-                    term_type.as_ref(),
-                ) {
+                if !self.binding_type_is_compatible(Scope::OUTPUT, var_type.as_ref(), term, true) {
                     return false;
                 }
             }
@@ -518,63 +581,8 @@ impl<'a> Unifier<'a> {
             return false;
         }
 
-        // Universe level check: when var_type is TypeSort (meaning this is a type variable
-        // that should be bound to types like Foo, Nat), we should only accept proper types,
-        // not value-level expressions that happen to return Type.
-        //
-        // Valid: Type symbols (Foo, Bool), type variables (FreeVariable)
-        // Invalid: TypeSort itself, function applications (GlobalConstant, ScopedConstant)
-        if matches!(
-            var_type.as_ref().decompose(),
-            Decomposition::Atom(Atom::Symbol(Symbol::Type0))
-        ) {
-            match term.as_ref().get_head_atom() {
-                // Accept: proper types and type variables
-                Atom::Symbol(Symbol::Type(_))
-                | Atom::Symbol(Symbol::Bool)
-                | Atom::FreeVariable(_) => {
-                    // OK - these are proper types
-                }
-                Atom::Symbol(Symbol::Type0) => {
-                    // Reject: TypeSort itself shouldn't match a type variable
-                    return false;
-                }
-                _ => {
-                    // Reject: value-level expressions (GlobalConstant, ScopedConstant, etc.)
-                    return false;
-                }
-            }
-        }
-
-        // Check if this variable has a typeclass constraint.
-        // If its type is a typeclass (e.g., Bar), the term must be a TYPE that
-        // is an instance of that typeclass.
-        if let Some(typeclass_id) = var_type.as_ref().as_typeclass() {
-            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
-            let type_expr =
-                if term_type.as_ref().is_type0() || term_type.as_ref().as_typeclass().is_some() {
-                    term.as_ref()
-                } else {
-                    term_type.as_ref()
-                };
-            if !self.enforce_typeclass_constraint_on_type_expr(
-                var_type.as_ref(),
-                typeclass_id,
-                type_expr,
-            ) {
-                return false;
-            }
-        } else {
-            // Normal type unification (no typeclass constraint)
-            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
-            if !self.unify_internal(
-                var_scope,
-                var_type.as_ref(),
-                Scope::OUTPUT,
-                term_type.as_ref(),
-            ) {
-                return false;
-            }
+        if !self.binding_type_is_compatible(var_scope, var_type.as_ref(), term, false) {
+            return false;
         }
 
         // After type unification, apply any output substitutions to get the final term.
@@ -2051,6 +2059,57 @@ mod tests {
     }
 
     #[test]
+    fn test_type_variable_should_not_unify_with_higher_kinded_application() {
+        let ctx = KernelContext::new();
+        let type_sort = Term::type_sort();
+        let type_to_type = Term::pi(type_sort.clone(), type_sort.clone());
+
+        // Left x0 is a proper type variable. Right x0 is a type constructor variable.
+        let left_ctx = LocalContext::from_types(vec![type_sort.clone()]);
+        let right_ctx = LocalContext::from_types(vec![type_to_type]);
+
+        let expected_type = Term::atom(Atom::FreeVariable(0));
+        let higher_kinded_app = Term::new(Atom::FreeVariable(0), vec![Term::bool_type()]);
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_ctx)));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_ctx)));
+
+        let result = u.unify(
+            Scope::LEFT,
+            &expected_type,
+            Scope::RIGHT,
+            &higher_kinded_app,
+        );
+        assert!(
+            !result,
+            "Type variable x0: TypeSort should NOT unify with higher-kinded application x0(Bool)"
+        );
+    }
+
+    #[test]
+    fn test_type_variable_should_not_unify_with_unsaturated_type_constructor() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_type_constructor("List", 1);
+
+        let type_sort = Term::type_sort();
+        let left_ctx = LocalContext::from_types(vec![type_sort.clone()]);
+        let list_id = ctx.type_store.get_ground_id_by_name("List").unwrap();
+        let list_constructor = Term::ground_type(list_id);
+        let expected_type = Term::atom(Atom::FreeVariable(0));
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_ctx)));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(LocalContext::empty())));
+
+        let result = u.unify(Scope::LEFT, &expected_type, Scope::RIGHT, &list_constructor);
+        assert!(
+            !result,
+            "Type variable x0: TypeSort should NOT unify with unsaturated type constructor List"
+        );
+    }
+
+    #[test]
     fn test_unify_typeclass_variable_rejects_bool() {
         // Test: x0 with type Monoid should NOT unify with Bool
         // Bool is a built-in type that doesn't implement any typeclasses.
@@ -2231,6 +2290,46 @@ mod tests {
         assert!(
             !result,
             "OUTPUT x0: (Bool -> Bool) should NOT unify with c5: Bool - types are incompatible"
+        );
+    }
+
+    #[test]
+    fn test_output_typeclass_constraint_propagates_before_remap() {
+        use crate::elaborator::acorn_type::Typeclass;
+        use crate::module::ModuleId;
+
+        let mut ctx = KernelContext::new();
+        ctx.parse_type_constructor("Box", 1);
+
+        let mul = Typeclass {
+            module_id: ModuleId(0),
+            name: "Mul".to_string(),
+        };
+        let mul_id = ctx.type_store.add_typeclass(&mul);
+        let mul_type = Term::typeclass(mul_id);
+        let box_id = ctx.type_store.get_ground_id_by_name("Box").unwrap();
+        let box_bool = Term::new(Atom::Symbol(Symbol::Type(box_id)), vec![Term::bool_type()]);
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(LocalContext::empty())));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(LocalContext::empty())));
+        u.set_output_var_types(vec![mul_type.clone(), Term::type_sort()]);
+
+        let output_x1 = Term::atom(Atom::FreeVariable(1));
+        assert!(
+            u.unify_variable(Scope::OUTPUT, 0, Scope::OUTPUT, &output_x1),
+            "Typeclass-constrained output variables should unify with unconstrained output variables"
+        );
+        assert_eq!(
+            u.output_context.get_var_type(1),
+            Some(&mul_type),
+            "Remapping x0: Mul to x1: Type should strengthen x1 to Mul"
+        );
+
+        let result = u.unify_variable(Scope::OUTPUT, 1, Scope::OUTPUT, &box_bool);
+        assert!(
+            !result,
+            "After constraint propagation, x1 should reject Box[Bool] because it is not a Mul instance"
         );
     }
 
