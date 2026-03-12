@@ -1,5 +1,5 @@
-use super::common::*;
 use crate::prover::Outcome;
+use crate::tests::support::*;
 
 // This file tests that the attributes feature works correctly in the prover.
 

@@ -1,4 +1,4 @@
-use super::common::*;
+use crate::tests::support::*;
 
 // This file tests that normalization works correctly, by proving statements that require normalization to prove.
 

@@ -183,6 +183,14 @@ pub fn verify_fails(text: &str) {
     }
 }
 
+pub fn assert_proof_lines(actual: Vec<String>, expected: &[&str]) {
+    let expected = expected
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
 /// Verifies a single goal by name in the provided text.
 /// Returns the outcome of the search, and panics if cert generation/checking fails.
 pub const THING: &str = r#"

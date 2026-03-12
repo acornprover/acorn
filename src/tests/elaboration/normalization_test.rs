@@ -1061,7 +1061,7 @@ fn test_code_generator_omits_type_params_when_arity_changes() {
 /// because Bool doesn't satisfy the typeclass.
 #[test]
 fn test_polymorphic_axiom_chain_with_typeclass() {
-    use crate::tests::common::verify_succeeds;
+    use crate::tests::support::verify_succeeds;
 
     verify_succeeds(
         r#"
@@ -1109,7 +1109,7 @@ fn test_polymorphic_axiom_chain_with_typeclass() {
 /// declaration order `[K, I]`, or the replayed claim no longer matches.
 #[test]
 fn test_polymorphic_generated_witness_type_var_ordering() {
-    use crate::tests::common::verify_succeeds;
+    use crate::tests::support::verify_succeeds;
 
     // This test mimics the and_family pattern from set.ac which triggers the bug.
     // Key: and_family[K, I](f, x) has params in order [K, I] but uses I first in the

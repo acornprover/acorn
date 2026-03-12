@@ -1,0 +1,9 @@
+mod attributes_test;
+mod basics_test;
+mod equality_test;
+mod inhabitedness_test;
+mod language_test;
+mod normalization_test;
+mod proof_generation_test;
+mod search_test;
+mod typeclasses_test;
