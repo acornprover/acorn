@@ -3447,7 +3447,7 @@ mod tests {
         assert_eq!(
             proof,
             vec![
-                "function[T0](x0: (T0, T0) -> Bool, x1: T0, x2: T0) { x0(x1, x2) }[Bool](function(x3: Bool, x4: Bool) { x3 = x4 }, false, true)"
+                "function[T0](x0: (T0, T0) -> Bool, x1: T0, x2: T0) { x0(x1, x2) }[Bool]((=), false, true)"
             ]
         );
     }
@@ -3497,8 +3497,8 @@ mod tests {
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert!(
-            proof[0].contains("function(x3: Bool, x4: Bool) { x3 = x4 }"),
-            "expected partial eq to serialize in lambda form, got: {}",
+            proof[0].contains("(=)"),
+            "expected partial eq to serialize as an operator ref, got: {}",
             proof[0]
         );
 

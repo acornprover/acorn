@@ -39,6 +39,10 @@ impl Stack {
         i
     }
 
+    pub fn len(&self) -> usize {
+        self.vars.len()
+    }
+
     pub fn remove(&mut self, name: &str) {
         self.vars.remove(name);
     }

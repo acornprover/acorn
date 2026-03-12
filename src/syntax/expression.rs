@@ -506,6 +506,15 @@ impl Expression {
         Expression::generate_grouping(exprs, TokenType::LeftBracket, TokenType::RightBracket)
     }
 
+    pub fn generate_operator_ref(op: TokenType) -> Expression {
+        assert!(op.is_operator_ref());
+        Expression::Grouping(
+            TokenType::LeftParen.generate(),
+            Box::new(Expression::Singleton(op.generate())),
+            TokenType::RightParen.generate(),
+        )
+    }
+
     // Generates a unary expression, parenthesizing if necessary according to precedence.
     pub fn generate_unary(op: TokenType, mut expr: Expression) -> Expression {
         if expr.top_level_precedence(true) < op.unary_precedence() {
@@ -940,6 +949,27 @@ fn parse_partial_expressions(
         }
         match token.token_type {
             TokenType::LeftParen => {
+                if expected_type == ExpressionType::Value {
+                    if let Some(operator_token) = tokens.peek().cloned() {
+                        if operator_token.token_type.is_operator_ref()
+                            && tokens.peek_n(1).map(|t| t.token_type) == Some(TokenType::RightParen)
+                        {
+                            if matches!(partials.back(), Some(PartialExpression::Expression(_))) {
+                                partials.push_back(PartialExpression::Implicit(token.clone()));
+                            }
+                            let operator_token = tokens.next().unwrap();
+                            let right_paren = tokens.next().unwrap();
+                            let group = Expression::Grouping(
+                                token,
+                                Box::new(Expression::Singleton(operator_token)),
+                                right_paren,
+                            );
+                            partials.push_back(PartialExpression::Expression(group));
+                            continue;
+                        }
+                    }
+                }
+
                 let (subexpression, last_token) = Expression::parse(
                     tokens,
                     expected_type,
@@ -1683,6 +1713,10 @@ mod tests {
         check_value("foo(x, y)");
         check_value("foo(x)(y)");
         check_value("foo(x, y + z, w)");
+        check_value("(not)(x)");
+        check_value("(and)(x, y)");
+        check_value("(or)(x, y)");
+        check_value("(=)(x, y)");
     }
 
     #[test]
@@ -1804,6 +1838,7 @@ mod tests {
     fn test_bad_partials() {
         check_not_value("(1 +)");
         check_not_value("(!)");
+        check_not_value("(+)");
         check_not_value("{ 1 }");
         check_not_value("forall(x: Nat)");
         check_not_value("forall(x: Nat) { x = x } { x }");
@@ -1894,5 +1929,13 @@ mod tests {
         expect_concatenation("function[T] { true }[Nat]");
         // Backward-compatibility with previous encoding
         expect_concatenation("function[T]() { true }[Nat]");
+    }
+
+    #[test]
+    fn test_operator_ref_parsing() {
+        check_value("(=)");
+        check_value("(not)");
+        check_value("(and)");
+        check_value("(or)");
     }
 }

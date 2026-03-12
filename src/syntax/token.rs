@@ -173,6 +173,13 @@ const INFIX_MAGIC_METHODS: &[(&str, TokenType)] = &[
 const PREFIX_MAGIC_METHODS: &[(&str, TokenType)] = &[("neg", TokenType::Minus)];
 
 impl TokenType {
+    pub fn is_operator_ref(&self) -> bool {
+        matches!(
+            self,
+            TokenType::Equals | TokenType::Not | TokenType::And | TokenType::Or
+        )
+    }
+
     pub fn is_unary(&self) -> bool {
         match self {
             TokenType::Not => true,
@@ -902,6 +909,10 @@ impl TokenIter {
 
     pub fn peek_type(&self) -> Option<TokenType> {
         self.peek().map(|t| t.token_type)
+    }
+
+    pub fn peek_n(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.position + offset)
     }
 
     pub fn next(&mut self) -> Option<Token> {

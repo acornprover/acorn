@@ -3,7 +3,7 @@ use std::fmt;
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
 use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, Typeclass};
-use crate::elaborator::acorn_value::{AcornValue, ConstantInstance};
+use crate::elaborator::acorn_value::{AcornValue, BinaryOp, ConstantInstance};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
@@ -1188,6 +1188,59 @@ impl CodeGenerator<'_> {
     }
 
     /// If use_x is true we use x-variables; otherwise we use k-variables.
+    fn operator_ref_expr(&self, value: &AcornValue) -> Option<Expression> {
+        let first_arg = self.var_names.len() as AtomId;
+        let second_arg = first_arg + 1;
+
+        let matches_var = |value: &AcornValue, index: AtomId, expected_type: &AcornType| matches!(value, AcornValue::Variable(i, actual_type) if *i == index && actual_type == expected_type);
+
+        match value {
+            AcornValue::Lambda(args, body)
+                if args == &[AcornType::Bool] && matches!(body.as_ref(), AcornValue::Not(_)) =>
+            {
+                let AcornValue::Not(inner) = body.as_ref() else {
+                    unreachable!();
+                };
+                matches_var(inner, first_arg, &AcornType::Bool)
+                    .then(|| Expression::generate_operator_ref(TokenType::Not))
+            }
+            AcornValue::Lambda(args, body)
+                if args == &[AcornType::Bool, AcornType::Bool]
+                    && matches!(body.as_ref(), AcornValue::Binary(BinaryOp::And, _, _)) =>
+            {
+                let AcornValue::Binary(BinaryOp::And, left, right) = body.as_ref() else {
+                    unreachable!();
+                };
+                (matches_var(left, first_arg, &AcornType::Bool)
+                    && matches_var(right, second_arg, &AcornType::Bool))
+                .then(|| Expression::generate_operator_ref(TokenType::And))
+            }
+            AcornValue::Lambda(args, body)
+                if args == &[AcornType::Bool, AcornType::Bool]
+                    && matches!(body.as_ref(), AcornValue::Binary(BinaryOp::Or, _, _)) =>
+            {
+                let AcornValue::Binary(BinaryOp::Or, left, right) = body.as_ref() else {
+                    unreachable!();
+                };
+                (matches_var(left, first_arg, &AcornType::Bool)
+                    && matches_var(right, second_arg, &AcornType::Bool))
+                .then(|| Expression::generate_operator_ref(TokenType::Or))
+            }
+            AcornValue::Lambda(args, body)
+                if args.len() == 2
+                    && args[0] == args[1]
+                    && matches!(body.as_ref(), AcornValue::Binary(BinaryOp::Equals, _, _)) =>
+            {
+                let AcornValue::Binary(BinaryOp::Equals, left, right) = body.as_ref() else {
+                    unreachable!();
+                };
+                (matches_var(left, first_arg, &args[0]) && matches_var(right, second_arg, &args[1]))
+                    .then(|| Expression::generate_operator_ref(TokenType::Equals))
+            }
+            _ => None,
+        }
+    }
+
     fn generate_quantifier_expr(
         &mut self,
         token_type: TokenType,
@@ -1531,8 +1584,11 @@ impl CodeGenerator<'_> {
                     )
                 }
             }
-            AcornValue::Lambda(quants, value) => {
-                self.generate_quantifier_expr(TokenType::Function, quants, value, true)
+            AcornValue::Lambda(quants, body) => {
+                if let Some(expr) = self.operator_ref_expr(value) {
+                    return Ok(expr);
+                }
+                self.generate_quantifier_expr(TokenType::Function, quants, body, true)
             }
             AcornValue::Bool(b) => {
                 let token = if *b {
@@ -2746,5 +2802,20 @@ instance Foo: Mul {
         );
         // Zero.0[Bar] should codegen to "Bar.0" since Bar has its own 0 attribute
         p.check_goal_code("main", "goal", "Bar.0 = Bar.bar");
+    }
+
+    #[test]
+    fn test_codegen_operator_refs() {
+        let mut p = Project::new_mock();
+        p.mock(
+            "/mock/main.ac",
+            r#"
+            type Nat: axiom
+            "#,
+        );
+        p.check_code("main", "(not)");
+        p.check_code("main", "(and)");
+        p.check_code("main", "(or)");
+        p.check_code_into("main", "function(x0: Nat, x1: Nat) { x0 = x1 }", "(=)");
     }
 }

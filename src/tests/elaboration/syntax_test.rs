@@ -956,3 +956,40 @@ fn test_env_destructuring_with_polymorphic_constructor() {
         "#,
     );
 }
+
+#[test]
+fn test_operator_ref_values() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        type Nat: axiom
+        let zero: Nat = axiom
+        let one: Nat = axiom
+
+        let negate: Bool -> Bool = (not)
+        let both: (Bool, Bool) -> Bool = (and)
+        let either: (Bool, Bool) -> Bool = (or)
+        let eq_nat: (Nat, Nat) -> Bool = (=)
+        let is_zero: Nat -> Bool = (=)(zero)
+
+        define apply_binary[T](op: (T, T) -> Bool, a: T, b: T) -> Bool {
+            op(a, b)
+        }
+
+        let b1: Bool = negate(false)
+        let b2: Bool = both(true, false)
+        let b3: Bool = either(true, false)
+        let b4: Bool = eq_nat(zero, one)
+        let b5: Bool = (=)(zero, one)
+        let b6: Bool = apply_binary[Nat]((=), zero, one)
+        let b7: Bool = is_zero(one)
+        "#,
+    );
+
+    env.bad(
+        r#"
+        type Nat: axiom
+        let eq = (=)
+        "#,
+    );
+}

@@ -8,6 +8,7 @@ use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
+use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -114,6 +115,144 @@ impl<'a> Evaluator<'a> {
 
     fn inference(&self) -> InferenceEngine<'_> {
         InferenceEngine::new(self.bindings)
+    }
+
+    fn operator_ref_token<'expr>(expression: &'expr Expression) -> Option<&'expr Token> {
+        match expression {
+            Expression::Grouping(_, inner, _)
+                if matches!(inner.as_ref(), Expression::Singleton(_)) =>
+            {
+                let Expression::Singleton(token) = inner.as_ref() else {
+                    unreachable!();
+                };
+                token.token_type.is_operator_ref().then_some(token)
+            }
+            _ => None,
+        }
+    }
+
+    fn equality_operator_arg_type(
+        &self,
+        token: &Token,
+        expected_type: Option<&AcornType>,
+        allow_generic: bool,
+    ) -> error::Result<AcornType> {
+        if let Some(expected_type) = expected_type {
+            let AcornType::Function(function_type) = expected_type else {
+                return Err(token.error("'(=)' requires a function type"));
+            };
+            if function_type.arg_types.len() != 2 {
+                return Err(token.error("'(=)' requires a binary function type"));
+            }
+            function_type
+                .return_type
+                .check_eq(Some(&AcornType::Bool), token)?;
+            function_type.arg_types[0].check_eq(Some(&function_type.arg_types[1]), token)?;
+            return Ok(function_type.arg_types[0].clone());
+        }
+
+        if allow_generic {
+            return Ok(AcornType::Arbitrary(TypeParam {
+                name: format!("T_op_{}_{}", token.line_number, token.start),
+                typeclass: None,
+            }));
+        }
+
+        Err(token.error("cannot use '(=)' without a function type context"))
+    }
+
+    fn operator_ref_value(
+        &mut self,
+        token: &Token,
+        stack_len: usize,
+        expected_type: Option<&AcornType>,
+        allow_generic_equality: bool,
+    ) -> error::Result<AcornValue> {
+        let stack_len = stack_len as AtomId;
+        let value = match token.token_type {
+            TokenType::Not => {
+                let arg = AcornValue::Variable(stack_len, AcornType::Bool);
+                AcornValue::Lambda(
+                    vec![AcornType::Bool],
+                    Box::new(AcornValue::Not(Box::new(arg))),
+                )
+            }
+            TokenType::And | TokenType::Or => {
+                let left = AcornValue::Variable(stack_len, AcornType::Bool);
+                let right = AcornValue::Variable(stack_len + 1, AcornType::Bool);
+                let body = if token.token_type == TokenType::And {
+                    AcornValue::and(left, right)
+                } else {
+                    AcornValue::or(left, right)
+                };
+                AcornValue::Lambda(vec![AcornType::Bool, AcornType::Bool], Box::new(body))
+            }
+            TokenType::Equals => {
+                let arg_type =
+                    self.equality_operator_arg_type(token, expected_type, allow_generic_equality)?;
+                let left = AcornValue::Variable(stack_len, arg_type.clone());
+                let right = AcornValue::Variable(stack_len + 1, arg_type.clone());
+                AcornValue::Lambda(
+                    vec![arg_type.clone(), arg_type],
+                    Box::new(AcornValue::equals(left, right)),
+                )
+            }
+            _ => return Err(token.error("not a supported operator reference")),
+        };
+        value.check_type(expected_type, token)?;
+        self.track_token(token, &NamedEntity::Value(value.clone()));
+        Ok(value)
+    }
+
+    fn try_operator_ref_application(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        function_expr: &Expression,
+        arg_exprs: &[&Expression],
+        expected_type: Option<&AcornType>,
+    ) -> Option<error::Result<AcornValue>> {
+        let token = Self::operator_ref_token(function_expr)?;
+        if token.token_type != TokenType::Equals {
+            return None;
+        }
+
+        Some(match arg_exprs.len() {
+            0 => self.operator_ref_value(token, stack.len(), expected_type, false),
+            1 => {
+                let left_value = match self.evaluate_value_with_stack(stack, arg_exprs[0], None) {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                let arg_type = left_value.get_type();
+                let right_value = AcornValue::Variable(stack.len() as AtomId, arg_type.clone());
+                let value = AcornValue::Lambda(
+                    vec![arg_type.clone()],
+                    Box::new(AcornValue::equals(left_value, right_value)),
+                );
+                if let Err(err) = value.check_type(expected_type, expression) {
+                    return Some(Err(err));
+                }
+                Ok(value)
+            }
+            2 => {
+                let (left_value, right_value) = match self.evaluate_equality_operands(
+                    stack,
+                    arg_exprs[0],
+                    arg_exprs[1],
+                    None,
+                ) {
+                    Ok(values) => values,
+                    Err(err) => return Some(Err(err)),
+                };
+                let value = AcornValue::equals(left_value, right_value);
+                if let Err(err) = value.check_type(expected_type, expression) {
+                    return Some(Err(err));
+                }
+                Ok(value)
+            }
+            _ => Err(expression.error("expected <= 2 arguments for '(=)'")),
+        })
     }
 
     /// Creates a sibling evaluator that shares the current evaluation mode.
@@ -1057,6 +1196,9 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         expression: &Expression,
     ) -> error::Result<AcornValue> {
+        if let Some(token) = Self::operator_ref_token(expression) {
+            return self.operator_ref_value(token, stack.len(), None, true);
+        }
         let potential = self.evaluate_potential_value(stack, expression, None)?;
         Ok(potential.to_generic_value())
     }
@@ -1315,6 +1457,21 @@ impl<'a> Evaluator<'a> {
                 },
             },
             Expression::Concatenation(function_expr, args_expr) => {
+                if let Expression::Grouping(left_delimiter, e, _) = args_expr.as_ref() {
+                    if left_delimiter.token_type == TokenType::LeftParen {
+                        let arg_exprs = e.flatten_comma_separated_list();
+                        if let Some(result) = self.try_operator_ref_application(
+                            stack,
+                            expression,
+                            function_expr,
+                            &arg_exprs,
+                            expected_type,
+                        ) {
+                            return Ok(PotentialValue::Resolved(result?));
+                        }
+                    }
+                }
+
                 // Special case: generic lambda instantiation
                 // function[T](x: T) { body }[Nat] is parsed as
                 // Concatenation(GenericBinder([T], (x: T), body), Grouping([Nat]))
@@ -1460,7 +1617,15 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expression::Grouping(_, e, _) => {
-                self.evaluate_value_with_stack(stack, e, expected_type)?
+                if let Expression::Singleton(token) = e.as_ref() {
+                    if token.token_type.is_operator_ref() {
+                        self.operator_ref_value(token, stack.len(), expected_type, false)?
+                    } else {
+                        self.evaluate_value_with_stack(stack, e, expected_type)?
+                    }
+                } else {
+                    self.evaluate_value_with_stack(stack, e, expected_type)?
+                }
             }
             Expression::Binder(token, args, body, _) => {
                 if args.len() < 1 {
