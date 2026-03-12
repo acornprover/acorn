@@ -24,10 +24,6 @@ pub enum StepReason {
     /// The source points to the location of the assumption.
     Assumption(Source),
 
-    /// A let...satisfy statement that skolemizes an exists statement.
-    /// The source points to where the exists was originally defined.
-    Skolemization(Source),
-
     /// The checker already had a contradiction, so everything is trivially true.
     Contradiction,
 
@@ -57,9 +53,7 @@ impl StepReason {
     pub fn description(&self) -> String {
         match self {
             StepReason::EqualityGraph => "simplification".to_string(),
-            StepReason::Assumption(source) | StepReason::Skolemization(source) => {
-                source.description()
-            }
+            StepReason::Assumption(source) => source.description(),
             StepReason::Contradiction => "ex falso".to_string(),
             StepReason::PreviousClaim => "previous claim".to_string(),
             StepReason::Testing => "testing".to_string(),

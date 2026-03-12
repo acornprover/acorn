@@ -459,7 +459,7 @@ fn test_unwrapping_new_option() {
 }
 
 #[test]
-fn test_skolem_should_not_demonstrate_inhabitedness() {
+fn test_exists_normalization_should_not_demonstrate_inhabitedness() {
     let text = r#"
 
     inductive Option[T] {

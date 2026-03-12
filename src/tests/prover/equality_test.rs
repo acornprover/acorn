@@ -236,7 +236,7 @@ fn test_proving_of_conjunction_existence() {
 }
 
 #[test]
-fn test_proving_with_skolem() {
+fn test_proving_with_existential_witness() {
     let mut p = Project::new_mock();
     p.mock(
         "/mock/main.ac",
@@ -428,7 +428,7 @@ fn test_proving_with_duplicate_literals() {
 }
 
 #[test]
-fn test_proving_with_long_skolem_definition() {
+fn test_proving_with_long_existential_definition() {
     let mut p = Project::new_mock();
     p.mock(
         "/mock/main.ac",

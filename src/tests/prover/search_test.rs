@@ -158,7 +158,7 @@ fn test_verify_rewrite_trap() {
 }
 
 #[test]
-fn test_prove_with_imported_skolem() {
+fn test_prove_with_imported_existential() {
     let text = r#"
         type Nat: axiom
 

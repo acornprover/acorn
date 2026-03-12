@@ -1580,16 +1580,15 @@ impl Project {
                         .source_index
                         .and_then(|i| certificate_steps.get(i))
                         .and_then(|cert_step| match &cert_step.reason {
-                            StepReason::Assumption(source) | StepReason::Skolemization(source) => {
-                                self.path_from_module_id(source.module_id)
-                                    .and_then(|path| {
-                                        tower_lsp::lsp_types::Url::from_file_path(path).ok()
-                                    })
-                                    .map(|uri| Location {
-                                        uri,
-                                        range: source.range,
-                                    })
-                            }
+                            StepReason::Assumption(source) => self
+                                .path_from_module_id(source.module_id)
+                                .and_then(|path| {
+                                    tower_lsp::lsp_types::Url::from_file_path(path).ok()
+                                })
+                                .map(|uri| Location {
+                                    uri,
+                                    range: source.range,
+                                }),
                             _ => None,
                         });
 

@@ -538,7 +538,7 @@ impl<'a> Clausifier<'a> {
                     )
                 } else {
                     // Keep negated universals inline so later boolean reductions can
-                    // open them via exists/choose without skolemizing.
+                    // open them via exists/choose without introducing witnesses here.
                     let literal = Literal::from_signed_term(term.clone(), false);
                     Ok(Cnf::from_literal(literal))
                 }
@@ -546,7 +546,7 @@ impl<'a> Clausifier<'a> {
             crate::kernel::term::Decomposition::Exists(_, _) => {
                 if !negate {
                     // Keep positive existential formulas inline as signed terms.
-                    // This avoids introducing skolem witnesses during clausification.
+                    // This avoids introducing choose-style witnesses during clausification.
                     let literal = Literal::from_signed_term(term.clone(), true);
                     Ok(Cnf::from_literal(literal))
                 } else {

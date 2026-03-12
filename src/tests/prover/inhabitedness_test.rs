@@ -253,7 +253,7 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
         add: (M, M) -> M
     }
 
-    // A function with Monoid constraint that has a forall (creates skolem)
+    // A function with Monoid constraint that has a forall (introduces a witness term)
     theorem monoid_thm[T: Monoid](f: T -> T, x: T) {
         (forall(y: T) { f(y) = y }) implies f(x) = x
     }

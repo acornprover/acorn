@@ -17,7 +17,7 @@ fn test_proof_generation_with_forall_goal() {
 }
 
 #[test]
-fn test_proof_generation_with_intermediate_skolem() {
+fn test_proof_generation_with_intermediate_existential() {
     let text = r#"
         type Nat: axiom
         let b: Bool = axiom

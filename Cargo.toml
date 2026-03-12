@@ -44,7 +44,7 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Keep existential quantifiers inline in clausification instead of skolemizing.
+# Keep existential quantifiers inline in clausification instead of introducing witnesses early.
 iet = []
 # Keep normalization/clausification to at most one initial clause per fact.
 nocnf = []
