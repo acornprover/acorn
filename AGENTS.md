@@ -40,6 +40,10 @@
 - If we find errors during a "check" or "reprove" operation, we should add a unit test that catches
   this case.
 
+- If we change normalization, clausification, claim serialization, or claim parsing, we must
+  continue to satisfy the normalization contract in `docs/normalization.md`. In particular, exact
+  normalized certificate `(clause, var_map)` roundtrips are a requirement, not a best-effort goal.
+
 ## Project Structure
 
 - `/src` - Core Rust implementation
