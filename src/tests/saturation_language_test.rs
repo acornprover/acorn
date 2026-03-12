@@ -1710,15 +1710,14 @@ fn test_inhabited_const() {
 /// typeclass BY NAME, the code generator should use lib(module).TypeclassName syntax.
 ///
 /// This mirrors the real bug in binomial.ac where:
-/// - CommRing extends AddCommMonoid (through the hierarchy)
-/// - binomial.ac imports CommRing but not AddCommMonoid by name
-/// - The prover creates a synthetic with AddCommMonoid constraint
-/// - Verification fails because AddCommMonoid isn't in name_to_typeclass
+/// - a module imports a theorem that mentions `Monoid` only indirectly
+/// - proof search introduces a generated witness with a `Monoid` constraint
+/// - certificate replay must still print that constraint with a qualified name
 ///
 /// The fix is for the code generator to substitute type variables that aren't valid
 /// type names with concrete types that implement the required typeclass.
 #[test]
-fn test_synthetic_with_unimported_typeclass_constraint() {
+fn test_generated_witness_with_unimported_typeclass_constraint() {
     let mut p = Project::new_mock();
 
     // Base typeclass
@@ -1770,7 +1769,7 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
     from wrapper import monoid_thm
 
     // This goal uses monoid_thm with Ring (which extends Monoid).
-    // The prover creates a skolem with [T: Monoid] constraint.
+    // Proof search introduces a generated witness with [T: Monoid] constraint.
     // The code generator must use lib(monoid).Monoid format.
     theorem goal[R: Ring](f: R -> R, x: R) {
         (forall(y: R) { f(y) = y }) implies f(x) = x
@@ -1827,9 +1826,9 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
         .expect("check_cert should succeed");
 }
 
-/// Regression test: when a synthetic has multiple type parameters and a function type
-/// between them (like `G -> H`), the code generator must preserve the correct order
-/// of type parameters in all foralls within the synthetic definition.
+/// Regression test: when a generated witness has multiple type parameters and a
+/// function type between them (like `G -> H`), certificate emission must preserve
+/// the same type-parameter order in every forall it prints.
 ///
 /// This reproduces a bug in group.ac where `trivial_hom_is_hom[G: Group, H: Group]`
 /// generates a certificate with swapped type parameters in one of the foralls:
@@ -1838,7 +1837,7 @@ fn test_synthetic_with_unimported_typeclass_constraint() {
 ///
 /// This causes type mismatch errors during certificate verification.
 #[test]
-fn test_synthetic_with_multiple_type_params_function_type() {
+fn test_generated_witness_with_multiple_type_params_function_type() {
     verify_succeeds(
         r#"
     typeclass M: Monoid {
@@ -1865,8 +1864,8 @@ fn test_synthetic_with_multiple_type_params_function_type() {
     // The trivial homomorphism - maps everything to identity
     let trivial_hom[G: Monoid, H: Monoid]: G -> H = function(a: G) { H.1 }
 
-    // This theorem creates a synthetic with two type parameters and a function type
-    // The bug: type parameters get swapped in one of the foralls
+    // This theorem forces proof search to emit a generated witness with two type
+    // parameters and a function type. The bug was that one forall swapped them.
     theorem trivial_hom_is_hom[G: Monoid, H: Monoid](a: G, b: G) {
         is_hom[G, H](trivial_hom[G, H])
     }
@@ -1876,8 +1875,8 @@ fn test_synthetic_with_multiple_type_params_function_type() {
 
 // Regression test for a bug where polymorphic structures containing functions with
 // if-then-else expressions returning non-Bool types would cause a type mismatch
-// during clause validation. The issue was with how synthetic atoms were typed when
-// normalizing function definitions inside define statements.
+// during clause validation. The issue was with how normalization tracked the local
+// type-parameter slots inside function definitions in `define` statements.
 #[test]
 fn test_polymorphic_structure_with_function_if_then_else() {
     let text = r#"

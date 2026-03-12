@@ -1100,17 +1100,15 @@ fn test_polymorphic_axiom_chain_with_typeclass() {
     );
 }
 
-/// Reproduces a bug where polymorphic synthetic definitions don't match during
-/// certificate verification due to type variable ordering differences.
+/// Reproduces a bug where certificate replay disagreed about the type-parameter
+/// ordering for a polymorphic generated witness.
 ///
-/// The issue is that when a polymorphic synthetic (skolem function) is created
-/// with 2+ type parameters, the type variable ordering may differ between:
-/// 1. When the definition is stored in synthetic_map
-/// 2. When it's looked up during certificate checking
-///
-/// This causes "does not match any synthetic definition" errors.
+/// Negating `all_contain[K, I](f, x)` produces a witness shape whose clauses keep
+/// the type parameters in scope as pinned locals. Even when the function type uses
+/// `I` before `K`, every normalized clause for that witness must preserve the
+/// declaration order `[K, I]`, or the replayed claim no longer matches.
 #[test]
-fn test_polymorphic_synthetic_type_var_ordering() {
+fn test_polymorphic_generated_witness_type_var_ordering() {
     use crate::tests::common::verify_succeeds;
 
     // This test mimics the and_family pattern from set.ac which triggers the bug.
@@ -1133,7 +1131,7 @@ fn test_polymorphic_synthetic_type_var_ordering() {
         type Nat: axiom
         type Item: axiom
 
-        // This axiom creates the skolem function pattern
+        // This axiom forces proof search into the generated witness pattern
         // When negated: not all_contain[K,I](f,x) creates exists(i:I) { not f(i).member(x) }
         axiom all_contain_witness[K, I](f: I -> Container[K], x: K) {
             not all_contain[K, I](f, x) implies exists(i: I) { not f(i).member(x) }
@@ -1143,7 +1141,8 @@ fn test_polymorphic_synthetic_type_var_ordering() {
         let x: Item = axiom
 
         // For this theorem, prover must use the all_contain_witness axiom
-        // This requires matching the polymorphic synthetic definition
+        // This requires replaying the generated witness clauses with the same
+        // pinned type-parameter order.
         theorem goal {
             not all_contain[Item, Nat](f, x) implies exists(n: Nat) { not f(n).member(x) }
         }

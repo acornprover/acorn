@@ -95,8 +95,8 @@ impl Clause {
     /// Creates a new normalized clause, keeping the first `pinned` variables at their
     /// original positions (x0, x1, ..., x_{pinned-1}).
     ///
-    /// This is useful for synthetic keys where type variables need to stay consistent
-    /// across all clauses in a definition.
+    /// This is useful when the first locals are pinned type parameters and must stay
+    /// consistent across all clauses from one polymorphic statement.
     pub(crate) fn new_with_pinned_vars(
         literals: Vec<Literal>,
         context: &LocalContext,
@@ -187,8 +187,8 @@ impl Clause {
     /// Normalizes the variable IDs in the literals, keeping the first `pinned` variables
     /// at their original positions (x0, x1, ..., x_{pinned-1}).
     ///
-    /// This is useful for synthetic keys where type variables need to stay consistent
-    /// across all clauses in a definition.
+    /// This is useful when the first locals are pinned type parameters and must stay
+    /// consistent across all clauses from one polymorphic statement.
     fn normalize_var_ids_with_pinned(&mut self, pinned: usize) {
         // Pre-populate with pinned variable IDs (0, 1, ..., pinned-1)
         let mut var_ids: Vec<AtomId> = (0..pinned as AtomId).collect();
@@ -747,7 +747,7 @@ impl Clause {
     /// a closed witness term `t`, reduce it to the instantiated body.
     ///
     /// This captures the obvious existential-introduction case in `iet` mode
-    /// without introducing synthetic skolems.
+    /// without introducing a fresh `choose(...)` witness.
     fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
         let (_binder_type, body) = term.as_ref().split_exists()?;
         let body = body.to_owned();

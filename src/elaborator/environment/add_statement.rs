@@ -2713,7 +2713,7 @@ impl Environment {
             .add_instance_of(instance_datatype.clone(), typeclass);
 
         for (public_attr, instance_impl) in pairs {
-            // This synthetic definition is the only place where the temporary instance-only
+            // This bridge definition is the only place where the temporary instance-only
             // implementation symbol escapes the `instance` block. It is added strictly after the
             // instance fact so that the public spelling `Typeclass.attr[Datatype]` is only usable
             // once the datatype really is known to implement the typeclass.

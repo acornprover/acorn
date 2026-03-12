@@ -541,7 +541,8 @@ impl<'a> TermRef<'a> {
     }
 
     /// Counts the number of leading Pi types where the input is a type parameter kind.
-    /// This is used to detect polymorphic functions/synthetics.
+    /// This is used to detect how many leading type arguments a polymorphic constant
+    /// or eliminator expects.
     /// For example: Pi(TypeSort, Pi(Typeclass, X)) has 2 type parameters.
     pub fn count_type_params(&self) -> usize {
         match self.split_pi() {
