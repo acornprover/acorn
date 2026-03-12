@@ -33,7 +33,6 @@ impl BuildCache {
     /// Returns an error if the manifest version is too new (user must update Acorn).
     pub fn load(build_dir: PathBuf) -> Result<Self, ManifestError> {
         let mut cache = HashMap::new();
-
         if build_dir.exists() {
             for entry in WalkDir::new(&build_dir).into_iter().filter_map(Result::ok) {
                 let path = entry.path();

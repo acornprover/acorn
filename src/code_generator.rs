@@ -1512,12 +1512,25 @@ impl CodeGenerator<'_> {
             AcornValue::Exists(quants, value) => {
                 self.generate_quantifier_expr(TokenType::Exists, quants, value, false)
             }
-            AcornValue::Choose(choice_type, value) => self.generate_quantifier_expr(
-                TokenType::Choose,
-                std::slice::from_ref(choice_type),
-                value,
-                false,
-            ),
+            AcornValue::Choose(choice_type, value) => {
+                #[cfg(feature = "nwit")]
+                {
+                    let _ = (choice_type, value);
+                    return Err(Error::GeneratedBadCode(
+                        "choose expressions are not supported with feature \"nwit\"".to_string(),
+                    ));
+                }
+
+                #[cfg(not(feature = "nwit"))]
+                {
+                    self.generate_quantifier_expr(
+                        TokenType::Choose,
+                        std::slice::from_ref(choice_type),
+                        value,
+                        false,
+                    )
+                }
+            }
             AcornValue::Lambda(quants, value) => {
                 self.generate_quantifier_expr(TokenType::Function, quants, value, true)
             }

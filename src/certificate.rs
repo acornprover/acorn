@@ -114,6 +114,11 @@ pub struct Certificate {
 }
 
 impl Certificate {
+    /// Named-witness mode rejects legacy `choose(...)` certificate syntax.
+    fn certificate_allows_choose() -> bool {
+        !cfg!(feature = "nwit")
+    }
+
     fn claim_with_args_roundtrip_error() -> &'static str {
         "claim-with-args serialization did not roundtrip"
     }
@@ -571,7 +576,12 @@ impl Certificate {
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
-        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
+        let mut evaluator = Evaluator::new_with_allow_choose(
+            project,
+            bindings,
+            None,
+            Self::certificate_allows_choose(),
+        );
         let mut claim_step_from_expr =
             |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
                 let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
@@ -734,7 +744,12 @@ impl Certificate {
 
         let bindings = bindings.to_mut();
         let kernel_context = kernel_context.to_mut();
-        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
+        let mut evaluator = Evaluator::new_with_allow_choose(
+            project,
+            bindings,
+            None,
+            Self::certificate_allows_choose(),
+        );
         let type_params = evaluator.evaluate_type_params(&vss.type_params)?;
         for param in &type_params {
             bindings.add_arbitrary_type(param.clone());
@@ -742,7 +757,12 @@ impl Certificate {
         }
 
         let mut stack = Stack::new();
-        let mut general_evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
+        let mut general_evaluator = Evaluator::new_with_allow_choose(
+            project,
+            bindings,
+            None,
+            Self::certificate_allows_choose(),
+        );
         let (quant_names, quant_types) =
             general_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
         let Some(return_type) = quant_types.first().cloned() else {
@@ -768,8 +788,12 @@ impl Certificate {
             code,
         )?;
 
-        let mut specific_evaluator =
-            Evaluator::new_with_allow_choose(project, bindings, None, true);
+        let mut specific_evaluator = Evaluator::new_with_allow_choose(
+            project,
+            bindings,
+            None,
+            Self::certificate_allows_choose(),
+        );
         let specific_condition =
             specific_evaluator.evaluate_value(&vss.condition, Some(&AcornType::Bool))?;
 
@@ -994,8 +1018,16 @@ impl Certificate {
         if expected.get_local_context() != actual.get_local_context() {
             return false;
         }
-        Self::roundtrip_clause_formula(expected, kernel_context)
+        if Self::roundtrip_clause_formula(expected, kernel_context)
             == Self::roundtrip_clause_formula(actual, kernel_context)
+        {
+            return true;
+        }
+
+        // Denormalization canonicalizes partial logical builtins like `eq(T)` into the
+        // lambda form that claim-with-args parsing reconstructs.
+        kernel_context.denormalize(expected, None, None, true)
+            == kernel_context.denormalize(actual, None, None, true)
     }
 
     fn claims_roundtrip_equivalent(
@@ -1402,7 +1434,12 @@ impl Certificate {
             ));
         };
 
-        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, true);
+        let mut evaluator = Evaluator::new_with_allow_choose(
+            project,
+            bindings,
+            None,
+            Self::certificate_allows_choose(),
+        );
         let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
         let mut kernel_context_clone = kernel_context.clone();
         Self::try_deserialize_claim_with_args_value(evaluated, bindings, &mut kernel_context_clone)?
@@ -2617,6 +2654,23 @@ mod tests {
         let (project, bindings, kernel_context) = setup_claim_codec_env(code);
         let line = "function(x0: Nat) { not if a = zero { x0 = zero } else { suc(x0) = a } }(choose(k0: Nat) { a = suc(k0) })";
 
+        if cfg!(feature = "nwit") {
+            let err = Certificate::deserialize_claim_with_args(
+                line,
+                &project,
+                &bindings,
+                &kernel_context,
+            )
+            .expect_err("nwit should reject choose in claim-with-args deserialization");
+            assert!(
+                err.to_string()
+                    .contains("choose expressions are not allowed here"),
+                "unexpected error: {}",
+                err
+            );
+            return;
+        }
+
         let claim =
             Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
                 .expect("deserialization should preserve a single not-if literal");
@@ -2903,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_code_line_accepts_choose_claim_shape() {
+    fn test_parse_code_line_handles_choose_claim_shape() {
         let code = r#"
             theorem goal {
                 true = true
@@ -2913,20 +2967,35 @@ mod tests {
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-        let step = Certificate::parse_code_line(
+        let result = Certificate::parse_code_line(
             "choose(x0: Bool) { x0 } = true",
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
-        )
-        .expect("choose claim parsing should succeed for certificate parsing");
+        );
+
+        if cfg!(feature = "nwit") {
+            let err = match result {
+                Ok(_) => panic!("nwit should reject choose claims"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string()
+                    .contains("choose expressions are not allowed here"),
+                "unexpected error: {}",
+                err
+            );
+            return;
+        }
+
+        let step = result.expect("choose claim parsing should succeed for certificate parsing");
 
         let claim = expect_claim(step);
         assert_eq!(claim.var_map().len(), 0);
     }
 
     #[test]
-    fn test_parse_code_line_keeps_closed_binder_claims_specialized() {
+    fn test_parse_code_line_handles_closed_binder_claims_with_choose() {
         let code = r#"
             let identity: Bool -> Bool = axiom
 
@@ -2938,13 +3007,28 @@ mod tests {
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-        let step = Certificate::parse_code_line(
+        let result = Certificate::parse_code_line(
             "identity(choose(k0: Bool) { forall(x0: Bool) { not identity(x0) = k0 } }) = choose(k1: Bool) { forall(x1: Bool) { not identity(x1) = k1 } }",
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
-        )
-        .expect("closed binder-heavy claim should parse");
+        );
+
+        if cfg!(feature = "nwit") {
+            let err = match result {
+                Ok(_) => panic!("nwit should reject choose in closed binder-heavy claims"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string()
+                    .contains("choose expressions are not allowed here"),
+                "unexpected error: {}",
+                err
+            );
+            return;
+        }
+
+        let step = result.expect("closed binder-heavy claim should parse");
 
         let claim = expect_claim(step);
         assert_eq!(claim.var_map().len(), 0);
@@ -2962,13 +3046,28 @@ mod tests {
 
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-        let step = Certificate::parse_code_line(
+        let result = Certificate::parse_code_line(
             "choose(x0: Bool) { x0 } = true",
             &project,
             &mut bindings_cow,
             &mut kernel_context_cow,
-        )
-        .expect("choose claim parsing should succeed for certificate parsing");
+        );
+
+        if cfg!(feature = "nwit") {
+            let err = match result {
+                Ok(_) => panic!("nwit should reject choose claims before checking"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string()
+                    .contains("choose expressions are not allowed here"),
+                "unexpected error: {}",
+                err
+            );
+            return;
+        }
+
+        let step = result.expect("choose claim parsing should succeed for certificate parsing");
 
         let mut checker = Checker::new();
         let err = checker
@@ -3113,7 +3212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_concrete_steps_serializes_binder_claim_args() {
+    fn test_from_concrete_steps_handles_binder_claim_args() {
         let code = r#"
             theorem goal {
                 true
@@ -3136,13 +3235,25 @@ mod tests {
             var_maps: vec![(var_map, generic.get_local_context().clone())],
         }];
 
-        let cert = Certificate::from_concrete_steps(
+        let result = Certificate::from_concrete_steps(
             "goal".to_string(),
             &concrete_steps,
             &kernel_context,
             &bindings,
-        )
-        .expect("certificate generation should succeed");
+        );
+
+        if cfg!(feature = "nwit") {
+            let err = result.expect_err("nwit should reject choose during certificate generation");
+            assert!(
+                err.to_string()
+                    .contains("choose expressions are not supported with feature \"nwit\""),
+                "unexpected error: {}",
+                err
+            );
+            return;
+        }
+
+        let cert = result.expect("certificate generation should succeed");
         let proof = cert.proof.expect("proof should exist");
         assert_eq!(proof.len(), 1);
         assert_eq!(
@@ -3339,6 +3450,77 @@ mod tests {
                 "function[T0](x0: (T0, T0) -> Bool, x1: T0, x2: T0) { x0(x1, x2) }[Bool](function(x3: Bool, x4: Bool) { x3 = x4 }, false, true)"
             ]
         );
+    }
+
+    #[test]
+    fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
+        let code = r#"
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+        let kernel = &kernel_context;
+        let generic = kernel.parse_clause(
+            "x0(x1) = x1(false, true)",
+            &["(Bool -> Bool -> Bool) -> Bool", "Bool -> Bool -> Bool"],
+        );
+
+        let mut var_map = VariableMap::new();
+        let predicate_type = kernel.type_store.to_type_term_with_vars(
+            &crate::elaborator::acorn_type::AcornType::functional(
+                vec![
+                    crate::elaborator::acorn_type::AcornType::Bool,
+                    crate::elaborator::acorn_type::AcornType::Bool,
+                ],
+                crate::elaborator::acorn_type::AcornType::Bool,
+            ),
+            None,
+        );
+        let predicate = Term::atom(Atom::BoundVariable(0));
+        let predicate_application = predicate.apply(&[Term::new_false(), Term::new_true()]);
+        var_map.set(0, Term::lambda(predicate_type, predicate_application));
+        var_map.set(1, kernel.parse_term("eq(Bool)"));
+
+        let concrete_steps = vec![ConcreteStep {
+            generic,
+            var_maps: vec![(var_map, LocalContext::empty())],
+        }];
+
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &kernel_context,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof.len(), 1);
+        assert!(
+            proof[0].contains("function(x3: Bool, x4: Bool) { x3 = x4 }"),
+            "expected partial eq to serialize in lambda form, got: {}",
+            proof[0]
+        );
+
+        let reparsed = Certificate::deserialize_claim_with_args(
+            &proof[0],
+            &project,
+            &bindings,
+            &kernel_context,
+        )
+        .expect("serialized claim should parse back");
+        let expected_claim = Claim::new(
+            concrete_steps[0].generic.clone(),
+            concrete_steps[0].var_maps[0].0.clone(),
+        )
+        .expect("expected claim should normalize");
+        let expected_clause = expected_claim
+            .normalized_specialized_clause(&kernel_context)
+            .expect("expected claim should specialize");
+        let reparsed_clause = reparsed
+            .normalized_specialized_clause(&kernel_context)
+            .expect("reparsed claim should specialize");
+        assert_eq!(reparsed_clause, expected_clause);
     }
 
     #[test]
