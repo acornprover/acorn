@@ -10,6 +10,7 @@ use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
+use std::io::{self, Write};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use walkdir::WalkDir;
 
@@ -391,6 +392,9 @@ enum Command {
         #[clap(value_name = "MODULE")]
         module: Option<String>,
     },
+
+    /// Print every citation statement in the library
+    Citations,
 
     /// List all module names in the library
     List,
@@ -883,6 +887,54 @@ async fn main() {
             }
         }
 
+        Some(Command::Citations) => {
+            let mut project = Project::new_local(
+                &current_dir,
+                ProjectConfig {
+                    use_filesystem: true,
+                    read_cache: false,
+                    write_cache: false,
+                },
+            )
+            .unwrap_or_else(|e| {
+                println!("Error loading project: {}", e);
+                std::process::exit(1);
+            });
+
+            project.add_src_targets();
+            let errors = project.errors();
+            if !errors.is_empty() {
+                for (module_id, error) in errors {
+                    let module_name = project
+                        .get_module_name_by_id(module_id)
+                        .or_else(|| {
+                            project
+                                .get_module_descriptor(module_id)
+                                .map(|descriptor| descriptor.to_string())
+                        })
+                        .unwrap_or_else(|| module_id.to_string());
+                    println!("Error loading {}: {}", module_name, error);
+                }
+                std::process::exit(1);
+            }
+
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            for citation in project.citation_statements() {
+                if let Err(err) = writeln!(
+                    stdout,
+                    "{}:{}: {}",
+                    citation.path, citation.line, citation.text
+                ) {
+                    if err.kind() == io::ErrorKind::BrokenPipe {
+                        return;
+                    }
+                    println!("Error writing output: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Some(Command::List) => {
             let (src_dir, build_dir) = Project::find_local_acorn_library(&current_dir)
                 .unwrap_or_else(|| {
@@ -1076,5 +1128,12 @@ mod tests {
     fn test_reprove_rejects_legacy_save_flag() {
         let error = Args::try_parse_from(["acorn", "reprove", "--write-cache"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn test_citations_command_parses() {
+        let args =
+            Args::try_parse_from(["acorn", "citations"]).expect("citations command should parse");
+        assert!(matches!(args.command, Some(Command::Citations)));
     }
 }

@@ -24,6 +24,13 @@ use crate::syntax::statement::{Body, Statement};
 use crate::syntax::token::{Token, TokenIter};
 use crate::syntax::token_map::{TokenInfo, TokenKey, TokenMap};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CitationStatement {
+    /// 1-based line number in the source file.
+    pub line: u32,
+    pub statement: String,
+}
+
 /// The Environment takes Statements as input and processes them.
 /// It does not prove anything directly, but it is responsible for determining which
 /// things need to be proved, and which statements are usable in which proofs.
@@ -93,6 +100,9 @@ pub struct Environment {
 
     /// Stores lowered facts from this module's nodes.
     pub lowered_module_facts: Vec<LoweredFact>,
+
+    /// Statements in this environment that are direct citations of existing theorems.
+    citation_statements: Vec<CitationStatement>,
 }
 
 impl Environment {
@@ -116,6 +126,7 @@ impl Environment {
             lowered_imports: Vec::new(),
             kernel_context: None,
             lowered_module_facts: Vec::new(),
+            citation_statements: Vec::new(),
         }
     }
 
@@ -140,6 +151,7 @@ impl Environment {
             lowered_imports: Vec::new(),
             kernel_context: None,
             lowered_module_facts: Vec::new(),
+            citation_statements: Vec::new(),
         }
     }
 
@@ -211,6 +223,22 @@ impl Environment {
             Some(self.line_types[index])
         } else {
             None
+        }
+    }
+
+    pub fn record_citation_statement(&mut self, statement: &Statement) {
+        self.citation_statements.push(CitationStatement {
+            line: statement.first_line() + 1,
+            statement: statement.to_string(),
+        });
+    }
+
+    pub fn append_citation_statements<'a>(&'a self, citations: &mut Vec<&'a CitationStatement>) {
+        citations.extend(self.citation_statements.iter());
+        for node in &self.nodes {
+            if let Some(block) = node.get_block() {
+                block.env.append_citation_statements(citations);
+            }
         }
     }
 

@@ -8,7 +8,7 @@ use crate::builder::{BuildEvent, BuildStatus, Builder};
 use crate::elaborator::environment::LineType;
 use crate::elaborator::names::ConstantName;
 use crate::module::{ModuleDescriptor, ModuleId};
-use crate::project::{localize_mock_filename, Project, ProjectConfig};
+use crate::project::{localize_mock_filename, LibraryCitation, Project, ProjectConfig};
 use indoc::indoc;
 
 fn expect_build_ok(project: &mut Project) -> i32 {
@@ -156,6 +156,45 @@ fn test_basic_import() {
     p.mock("/mock/foo.ac", FOO_AC);
     p.mock("/mock/main.ac", "from foo import Foo");
     p.expect_ok("main");
+}
+
+#[test]
+fn test_citation_statements_collect_nested_citations() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/base.ac", "theorem helper { true }\n");
+    p.mock(
+        "/mock/main.ac",
+        indoc! {"
+            from base import helper
+
+            theorem top_level {
+                helper
+            }
+
+            theorem outer {
+                true
+            } by {
+                helper
+            }
+        "},
+    );
+    p.expect_ok("main");
+
+    assert_eq!(
+        p.citation_statements(),
+        vec![
+            LibraryCitation {
+                path: "main.ac".to_string(),
+                line: 3,
+                text: "theorem top_level { helper }".to_string(),
+            },
+            LibraryCitation {
+                path: "main.ac".to_string(),
+                line: 10,
+                text: "helper".to_string(),
+            },
+        ]
+    );
 }
 
 #[test]

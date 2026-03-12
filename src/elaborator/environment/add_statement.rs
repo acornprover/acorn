@@ -612,6 +612,9 @@ impl Environment {
 
         let index = self.add_node(node);
         self.add_node_lines(index, &statement.range());
+        if is_citation {
+            self.record_citation_statement(statement);
+        }
         if let Some(name_token) = &ts.name_token {
             let name = ConstantName::unqualified(self.module_id, name_token.text());
             self.bindings.mark_as_theorem(&name);
@@ -2779,6 +2782,7 @@ impl Environment {
             let prop = Proposition::new(claim, vec![], source);
             let prop = self.bindings.expand_citation(prop, project);
             self.add_node(Node::structural(project, self, prop));
+            self.record_citation_statement(statement);
             self.add_other_lines(statement);
         } else {
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);

@@ -28,6 +28,13 @@ use crate::proof_display::display_certificate_lines;
 use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryCitation {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
+}
+
 // The Project is responsible for importing different files and assigning them module ids.
 pub struct Project {
     // Flags that affect project behavior
@@ -959,6 +966,53 @@ impl Project {
             }
         }
         errors
+    }
+
+    pub fn citation_statements(&self) -> Vec<LibraryCitation> {
+        let mut citations = Vec::new();
+        let display_root = if self.src_dir.file_name().and_then(|name| name.to_str()) == Some("src")
+        {
+            self.src_dir.parent().unwrap_or(&self.src_dir)
+        } else {
+            &self.src_dir
+        };
+
+        for (index, module) in self.modules.iter().enumerate() {
+            let LoadState::Ok(env) = &module.state else {
+                continue;
+            };
+
+            let module_id = ModuleId(index as u16);
+            let path = self
+                .path_from_module_id(module_id)
+                .and_then(|path| {
+                    path.strip_prefix(display_root)
+                        .ok()
+                        .map(|path| path.display().to_string())
+                })
+                .unwrap_or_else(|| module.descriptor.to_string());
+
+            let mut env_citations = Vec::new();
+            env.append_citation_statements(&mut env_citations);
+            for citation in env_citations {
+                citations.push(LibraryCitation {
+                    path: path.clone(),
+                    line: citation.line,
+                    text: citation
+                        .statement
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                });
+            }
+        }
+        citations.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then(a.line.cmp(&b.line))
+                .then(a.text.cmp(&b.text))
+        });
+        citations
     }
 
     pub fn read_file(&self, path: &PathBuf) -> Result<String, ProjectError> {
