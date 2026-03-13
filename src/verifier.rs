@@ -483,9 +483,9 @@ instance Nat: Two
         assert!(error.contains("out of range"));
     }
 
-    #[cfg(all(feature = "iet", feature = "validate"))]
+    #[cfg(feature = "validate")]
     #[test]
-    fn test_iet_validate_handles_exists_conjunction_in_generated_cert() {
+    fn test_validate_handles_exists_conjunction_in_generated_cert() {
         let (acornlib, src, _build) = setup();
 
         let bug_ac = src.child("bug.ac");
@@ -521,14 +521,14 @@ instance Nat: Two
         .unwrap();
         verifier.builder.check_hashes = false;
         let output = verifier.run().expect(
-            "iet+validate verify should not panic/check-cert-fail on exists conjunction certificates",
+            "validate verify should not panic/check-cert-fail on exists conjunction certificates",
         );
         assert_eq!(output.status, BuildStatus::Good);
     }
 
-    #[cfg(all(feature = "iet", feature = "validate"))]
+    #[cfg(feature = "validate")]
     #[test]
-    fn test_iet_validate_handles_is_constant_goal_with_explicit_witness() {
+    fn test_validate_handles_is_constant_goal_with_explicit_witness() {
         let (acornlib, src, _build) = setup();
 
         let bug_ac = src.child("bug.ac");
@@ -575,9 +575,9 @@ instance Nat: Two
         )
         .unwrap();
         verifier.builder.check_hashes = false;
-        let output = verifier.run().expect(
-            "iet+validate verify should not panic/check-cert-fail on is_constant certificates",
-        );
+        let output = verifier
+            .run()
+            .expect("validate verify should not panic/check-cert-fail on is_constant certificates");
         assert_eq!(output.status, BuildStatus::Good);
     }
 

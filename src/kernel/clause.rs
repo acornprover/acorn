@@ -222,6 +222,9 @@ impl Clause {
         let right = normalize_clause_term(&literal.right);
         if right.is_true() {
             let (left, positive) = normalize_signed_clause_term(&literal.left, literal.positive);
+            if let Some(args) = Self::split_symbol_application(&left, Symbol::Eq, 3) {
+                return vec![Literal::new(positive, args[1].clone(), args[2].clone())];
+            }
             return vec![Literal::from_signed_term(left, positive)];
         }
 
@@ -765,7 +768,7 @@ impl Clause {
     /// If `term` has shape `exists(T => b0 = t)` or `exists(T => t = b0)` with
     /// a closed witness term `t`, reduce it to the instantiated body.
     ///
-    /// This captures the obvious existential-introduction case in `iet` mode
+    /// This captures the obvious existential-introduction case
     /// without introducing a fresh `choose(...)` witness.
     fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
         let (_binder_type, body) = term.as_ref().split_exists()?;
@@ -788,7 +791,7 @@ impl Clause {
 
     /// Reduce `exists(T => body)` to `body[choose(T, function(x:T){body})/x]`.
     ///
-    /// This is the generic existential-activation path for `iet` mode.
+    /// This is the generic existential-activation path.
     fn reduce_exists_with_choose(term: &Term) -> Option<Term> {
         let (binder_type, body) = term.as_ref().split_exists()?;
         let binder_type = binder_type.to_owned();
@@ -1748,28 +1751,18 @@ mod tests {
             vec![Literal::positive(eq_term.clone())],
             &LocalContext::empty(),
         );
-        let positive_reductions = positive_clause.boolean_reductions(&kctx);
         let expected_positive = Clause::new(
             vec![Literal::equals(left.clone(), right.clone())],
             &LocalContext::empty(),
         );
-        assert!(
-            positive_reductions.contains(&expected_positive),
-            "expected reduction to include {}",
-            expected_positive
-        );
+        assert_eq!(positive_clause, expected_positive);
 
         let negative_clause = Clause::new(vec![Literal::negative(eq_term)], &LocalContext::empty());
-        let negative_reductions = negative_clause.boolean_reductions(&kctx);
         let expected_negative = Clause::new(
             vec![Literal::not_equals(left, right)],
             &LocalContext::empty(),
         );
-        assert!(
-            negative_reductions.contains(&expected_negative),
-            "expected reduction to include {}",
-            expected_negative
-        );
+        assert_eq!(negative_clause, expected_negative);
     }
 
     #[test]
@@ -2031,24 +2024,32 @@ mod tests {
             ),
         );
         let expected_second = Clause::new(
-            vec![Literal::negative(Term::eq(
-                Term::bool_type(),
+            vec![Literal::not_equals(
                 kctx.parse_term("g0").apply(&[choose.clone()]),
                 kctx.parse_term("g1").apply(&[choose.clone()]),
-            ))],
+            )],
             &LocalContext::empty(),
         );
         assert_eq!(second, vec![expected_second.clone()]);
 
         let third = expected_second.boolean_reductions(&kctx);
-        let expected_third = Clause::new(
-            vec![Literal::not_equals(
-                kctx.parse_term("g0").apply(&[choose.clone()]),
-                kctx.parse_term("g1").apply(&[choose]),
-            )],
-            &LocalContext::empty(),
-        );
-        assert_eq!(third, vec![expected_third]);
+        let expected_third = vec![
+            Clause::new(
+                vec![
+                    Literal::negative(kctx.parse_term("g1").apply(&[choose.clone()])),
+                    Literal::negative(kctx.parse_term("g0").apply(&[choose.clone()])),
+                ],
+                &LocalContext::empty(),
+            ),
+            Clause::new(
+                vec![
+                    Literal::positive(kctx.parse_term("g1").apply(&[choose.clone()])),
+                    Literal::positive(kctx.parse_term("g0").apply(&[choose.clone()])),
+                ],
+                &LocalContext::empty(),
+            ),
+        ];
+        assert_eq!(third, expected_third);
     }
 
     #[test]

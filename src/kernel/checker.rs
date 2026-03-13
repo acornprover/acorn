@@ -453,6 +453,10 @@ impl Checker {
                 return Ok((checked_steps, step_index));
             }
 
+            #[cfg(feature = "validate")]
+            step.validate_normalized_shape(kernel_context)
+                .map_err(Error::GeneratedBadCode)?;
+
             match step {
                 CertificateStep::Claim(claim) => {
                     let generic_clause = claim.normalized_generic_clause();

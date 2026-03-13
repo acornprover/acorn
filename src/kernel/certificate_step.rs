@@ -101,6 +101,45 @@ impl Claim {
                 .normalized(),
         )
     }
+
+    #[cfg(any(test, feature = "validate"))]
+    pub fn validate_normalized_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        let _ = kernel_context;
+        if self.clause != self.clause.normalized_preserving_locals() {
+            return Err(format!(
+                "claim generic clause is not normalized-preserving-locals: {}",
+                self.clause
+            ));
+        }
+
+        for (var_id, term) in self.var_map.iter() {
+            let normalized = normalize_term(term);
+            if *term != normalized {
+                return Err(format!(
+                    "claim var_map term x{} is not normalized: {} -> {}",
+                    var_id, term, normalized
+                ));
+            }
+        }
+
+        let specialized = self.normalized_specialized_clause(kernel_context)?;
+        if specialized != specialized.normalized() {
+            return Err(format!(
+                "claim specialized clause is not normalized: {}",
+                specialized
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "validate")]
+    pub fn validate_roundtrip_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.validate_normalized_shape(kernel_context)?;
+        kernel_context.validate_clause_roundtrip(&self.clause)?;
+        let specialized = self.normalized_specialized_clause(kernel_context)?;
+        kernel_context.validate_clause_roundtrip(&specialized)?;
+        Ok(())
+    }
 }
 
 /// A `let ... satisfy` declaration step in a certificate.
@@ -129,13 +168,47 @@ impl SatisfyStep {
 ///
 /// Parsing and generation both use this representation. Each step corresponds to one
 /// line of certificate code.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertificateStep {
     /// A claim statement with a generic clause plus specialization map.
     Claim(Claim),
 
     /// A witness declaration that introduces a named synthetic value/function.
     Satisfy(SatisfyStep),
+}
+
+impl CertificateStep {
+    #[cfg(any(test, feature = "validate"))]
+    pub fn validate_normalized_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        match self {
+            CertificateStep::Claim(claim) => claim.validate_normalized_shape(kernel_context),
+            CertificateStep::Satisfy(step) => {
+                step.justification
+                    .validate_normalized_shape(kernel_context)?;
+                for clause in &step.witness_clauses {
+                    if *clause != clause.normalized() {
+                        return Err(format!("witness clause is not normalized: {}", clause));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "validate")]
+    pub fn validate_roundtrip_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        match self {
+            CertificateStep::Claim(claim) => claim.validate_roundtrip_shape(kernel_context),
+            CertificateStep::Satisfy(step) => {
+                step.justification
+                    .validate_roundtrip_shape(kernel_context)?;
+                for clause in &step.witness_clauses {
+                    kernel_context.validate_clause_roundtrip(clause)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]

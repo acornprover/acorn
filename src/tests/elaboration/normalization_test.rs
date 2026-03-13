@@ -166,7 +166,7 @@ fn test_second_order_binding() {
 }
 
 #[test]
-fn test_iet_normalizes_quantifier_bodies_before_clausification() {
+fn test_normalizes_quantifier_bodies_before_clausification() {
     let mut env = Environment::test();
     env.add(
         r#"
@@ -194,7 +194,7 @@ fn test_iet_normalizes_quantifier_bodies_before_clausification() {
 }
 
 #[test]
-fn test_iet_top_level_negated_and_clausifies_to_disjunction() {
+fn test_top_level_negated_and_clausifies_to_disjunction() {
     let mut env = Environment::test();
     let mut norm = KernelContext::new();
     env.add("theorem goal(a: Bool, b: Bool, c: Bool) { a and b implies c }");
@@ -295,7 +295,7 @@ fn test_functional_equality() {
 }
 
 #[test]
-fn test_normalizing_exists_inline_with_iet() {
+fn test_normalizing_exists_inline() {
     use crate::kernel::term::Decomposition;
 
     let mut env = Environment::test();
@@ -324,6 +324,16 @@ fn test_normalizing_exists_inline_with_iet() {
         "expected inline exists term, got {}",
         lit.left
     );
+}
+
+#[test]
+fn test_clause_roundtrip_with_multiple_type_params() {
+    let kernel_context = KernelContext::new();
+    let clause = kernel_context.parse_clause("x2(x3)", &["Type", "Type", "x1 -> Bool", "x1"]);
+
+    kernel_context
+        .validate_clause_roundtrip(&clause)
+        .expect("quoted generic clause should lower back to the same normalized clause");
 }
 
 #[test]

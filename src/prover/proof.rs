@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn test_iet_exists_conjunction_reconstruction_preserves_concrete_simplifying_instantiation() {
+    fn test_exists_conjunction_reconstruction_preserves_concrete_simplifying_instantiation() {
         use crate::kernel::literal::Literal;
         use crate::kernel::proof_step::Truthiness;
 

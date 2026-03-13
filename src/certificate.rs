@@ -268,14 +268,43 @@ impl Certificate {
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
+        Self::parse_cert_steps_internal(proof, project, bindings, kernel_context, false)
+    }
+
+    fn parse_cert_steps_internal(
+        proof: &[String],
+        project: &Project,
+        bindings: &mut Cow<BindingMap>,
+        kernel_context: &mut Cow<KernelContext>,
+        #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
+    ) -> Result<Vec<CertificateStep>, CodeGenError> {
         let mut steps = Vec::with_capacity(proof.len());
         for code in proof {
-            steps.push(Self::parse_code_line(
-                code,
-                project,
-                bindings,
-                kernel_context,
-            )?);
+            #[cfg(feature = "validate")]
+            let pre_bindings = validate_generated.then(|| bindings.as_ref().clone());
+            #[cfg(feature = "validate")]
+            let pre_kernel_context = validate_generated.then(|| kernel_context.as_ref().clone());
+
+            let step = Self::parse_code_line(code, project, bindings, kernel_context)?;
+
+            #[cfg(feature = "validate")]
+            if validate_generated {
+                Self::validate_certificate_step_roundtrip(
+                    &step,
+                    code,
+                    project,
+                    pre_bindings
+                        .as_ref()
+                        .expect("generated cert validation should capture pre-bindings"),
+                    pre_kernel_context
+                        .as_ref()
+                        .expect("generated cert validation should capture pre-kernel-context"),
+                    bindings.as_ref(),
+                    kernel_context.as_ref(),
+                )?;
+            }
+
+            steps.push(step);
         }
         Ok(steps)
     }
@@ -415,6 +444,46 @@ impl Certificate {
             CertificateStep::Claim(_) => ClaimCodec::ensure_claim_code_parses_as_claim(line),
             CertificateStep::Satisfy(_) => Ok(line),
         }
+    }
+
+    #[cfg(feature = "validate")]
+    fn validate_certificate_step_roundtrip(
+        step: &CertificateStep,
+        original_code: &str,
+        project: &Project,
+        pre_bindings: &BindingMap,
+        pre_kernel_context: &KernelContext,
+        post_bindings: &BindingMap,
+        post_kernel_context: &KernelContext,
+    ) -> Result<(), CodeGenError> {
+        step.validate_roundtrip_shape(post_kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+
+        let mut generator = CodeGenerator::new_for_certificate(post_bindings);
+        let serialized = Self::serialize_certificate_step(
+            step,
+            &mut generator,
+            post_kernel_context,
+            post_bindings,
+        )?;
+
+        let mut roundtrip_bindings = Cow::Owned(pre_bindings.clone());
+        let mut roundtrip_kernel_context = Cow::Owned(pre_kernel_context.clone());
+        let reparsed = Self::parse_code_line(
+            &serialized,
+            project,
+            &mut roundtrip_bindings,
+            &mut roundtrip_kernel_context,
+        )?;
+
+        if &reparsed != step {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "certificate step did not roundtrip in validate mode: original {:?}, serialized {:?}, reparsed {:?}",
+                original_code, serialized, reparsed
+            )));
+        }
+
+        Ok(())
     }
 
     /// Serialize a claim in named form and fail if that form does not round-trip.
@@ -846,10 +915,21 @@ impl Certificate {
     /// Consumes checker/bindings/kernel_context since checking mutates all three.
     pub fn check_with_usage(
         &self,
+        checker: Checker,
+        project: &Project,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<CheckedCertificate, CodeGenError> {
+        self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
+    }
+
+    fn check_with_usage_internal(
+        &self,
         mut checker: Checker,
         project: &Project,
         mut bindings: Cow<BindingMap>,
         mut kernel_context: Cow<KernelContext>,
+        validate_generated: bool,
     ) -> Result<CheckedCertificate, CodeGenError> {
         if checker.has_contradiction() {
             return Ok(CheckedCertificate {
@@ -860,8 +940,13 @@ impl Certificate {
         let Some(proof) = &self.proof else {
             return Err(CodeGenError::NoProof);
         };
-        let cert_steps =
-            Self::parse_cert_steps(proof, project, &mut bindings, &mut kernel_context)?;
+        let cert_steps = Self::parse_cert_steps_internal(
+            proof,
+            project,
+            &mut bindings,
+            &mut kernel_context,
+            validate_generated,
+        )?;
         let (checked_steps, consumed_proof_steps) =
             checker.check_cert_steps(&cert_steps, Some(proof), &kernel_context)?;
         let lines = checked_steps
@@ -887,6 +972,17 @@ impl Certificate {
             lines,
             consumed_proof_steps,
         })
+    }
+
+    #[cfg(feature = "validate")]
+    pub fn check_generated_with_usage(
+        &self,
+        checker: Checker,
+        project: &Project,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<CheckedCertificate, CodeGenError> {
+        self.check_with_usage_internal(checker, project, bindings, kernel_context, true)
     }
 
     /// Remove unneeded steps from this certificate.
@@ -1865,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parsed_claim_matches_definition_clause_under_iet() {
+    fn test_parsed_claim_matches_definition_clause() {
         use crate::kernel::checker::{Checker, StepReason};
         use crate::kernel::proof_step::Rule;
 

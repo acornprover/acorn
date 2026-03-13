@@ -44,8 +44,6 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Keep existential quantifiers inline in clausification instead of introducing witnesses early.
-iet = []
 # Emit named witness declarations in generated certificates instead of raw choose(...) terms.
 nwit = []
 # Keep normalization/clausification to at most one initial clause per fact.

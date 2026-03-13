@@ -188,6 +188,32 @@ impl ProofResolver for ValidationContext<'_> {
 }
 
 impl ActiveSet {
+    #[cfg(any(test, feature = "validate"))]
+    pub(crate) fn validate_step_shape(
+        step: &ProofStep,
+        kernel_context: &KernelContext,
+    ) -> Result<(), Error> {
+        #[cfg(not(feature = "validate"))]
+        {
+            let _ = (step, kernel_context);
+            return Ok(());
+        }
+
+        #[cfg(feature = "validate")]
+        {
+            if step.clause != step.clause.normalized_preserving_locals() {
+                return Err(Error::GeneratedBadCode(format!(
+                    "proof step clause is not normalized-preserving-locals: {}",
+                    step.clause
+                )));
+            }
+            kernel_context
+                .validate_clause_roundtrip(&step.clause)
+                .map_err(Error::GeneratedBadCode)?;
+            Ok(())
+        }
+    }
+
     pub fn new() -> ActiveSet {
         ActiveSet {
             steps: vec![],
@@ -1196,6 +1222,7 @@ impl ActiveSet {
         step: &ProofStep,
         kernel_context: &KernelContext,
     ) -> Result<(), Error> {
+        Self::validate_step_shape(step, kernel_context)?;
         let ctx = ValidationContext::new(self, kernel_context);
         let conclusion_map = VariableMap::new();
         let conclusion_context = step.clause.get_local_context();
@@ -1224,6 +1251,7 @@ impl ActiveSet {
         pending_id: usize,
         pending_clause: &Clause,
     ) -> Result<(), Error> {
+        Self::validate_step_shape(step, kernel_context)?;
         let ctx =
             ValidationContext::with_pending_step(self, kernel_context, pending_id, pending_clause);
         let conclusion_map = VariableMap::new();

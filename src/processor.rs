@@ -183,6 +183,26 @@ impl Processor {
             .lines)
     }
 
+    #[cfg(feature = "validate")]
+    pub fn check_generated_cert(
+        &self,
+        cert: &Certificate,
+        normalized_goal: Option<&LoweredGoal>,
+        kernel_context: &KernelContext,
+        project: &Project,
+        bindings: &BindingMap,
+    ) -> Result<Vec<CertificateLine>, Error> {
+        Ok(self
+            .check_generated_cert_with_usage(
+                cert,
+                normalized_goal,
+                kernel_context,
+                project,
+                bindings,
+            )?
+            .lines)
+    }
+
     /// Checks a certificate and reports how many proof lines were consumed.
     pub fn check_cert_with_usage(
         &self,
@@ -191,6 +211,25 @@ impl Processor {
         kernel_context: &KernelContext,
         project: &Project,
         bindings: &BindingMap,
+    ) -> Result<CheckedCertificate, Error> {
+        self.check_cert_with_usage_internal(
+            cert,
+            normalized_goal,
+            kernel_context,
+            project,
+            bindings,
+            false,
+        )
+    }
+
+    fn check_cert_with_usage_internal(
+        &self,
+        cert: &Certificate,
+        normalized_goal: Option<&LoweredGoal>,
+        kernel_context: &KernelContext,
+        project: &Project,
+        bindings: &BindingMap,
+        #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
     ) -> Result<CheckedCertificate, Error> {
         let mut checker = self.checker.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
@@ -209,7 +248,36 @@ impl Processor {
         }
 
         let kernel_context = Cow::Owned(effective_kernel_context.clone());
+        #[cfg(feature = "validate")]
+        if validate_generated {
+            return cert.check_generated_with_usage(
+                checker,
+                project,
+                cert_bindings,
+                kernel_context,
+            );
+        }
+
         cert.check_with_usage(checker, project, cert_bindings, kernel_context)
+    }
+
+    #[cfg(feature = "validate")]
+    pub fn check_generated_cert_with_usage(
+        &self,
+        cert: &Certificate,
+        normalized_goal: Option<&LoweredGoal>,
+        kernel_context: &KernelContext,
+        project: &Project,
+        bindings: &BindingMap,
+    ) -> Result<CheckedCertificate, Error> {
+        self.check_cert_with_usage_internal(
+            cert,
+            normalized_goal,
+            kernel_context,
+            project,
+            bindings,
+            true,
+        )
     }
 
     /// Cleans a certificate by removing unnecessary steps.

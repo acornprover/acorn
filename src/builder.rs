@@ -921,7 +921,7 @@ impl<'a> Builder<'a> {
                     #[cfg(feature = "validate")]
                     {
                         // Validate the cert immediately after generation.
-                        match processor.check_cert(
+                        match processor.check_generated_cert(
                             &cert,
                             Some(normalized_goal),
                             goal_kernel_context,
@@ -997,6 +997,22 @@ impl<'a> Builder<'a> {
                     self.metrics.certs_created += 1;
                 }
                 Err(e) => {
+                    #[cfg(feature = "validate")]
+                    {
+                        let module_name = self
+                            .current_module
+                            .as_ref()
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let external_line = goal.first_line + 1;
+                        panic!(
+                            "full prover should create a certificate for goal '{}' at {}:{}: {}\n\
+                             Repro command: acorn reprove {} --line {}",
+                            goal.name, module_name, external_line, e, module_name, external_line
+                        );
+                    }
+
+                    #[cfg(not(feature = "validate"))]
                     return Err(BuildError::goal(
                         goal,
                         format!("full prover failed to create certificate: {}", e),

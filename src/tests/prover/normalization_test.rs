@@ -566,7 +566,7 @@ fn test_compose_with_higher_order_result() {
 }
 
 #[test]
-fn test_iet_partial_application_theorem_instantiation() {
+fn test_partial_application_theorem_instantiation() {
     let text = r#"
     type Nat: axiom
 
@@ -587,7 +587,7 @@ fn test_iet_partial_application_theorem_instantiation() {
 }
 
 #[test]
-fn test_iet_cross_module_eta_bridge_for_partial_application_fact() {
+fn test_cross_module_eta_bridge_for_partial_application_fact() {
     let mut project = crate::project::Project::new_mock();
     project.mock(
         "/mock/helper.ac",
@@ -633,7 +633,7 @@ fn test_iet_cross_module_eta_bridge_for_partial_application_fact() {
 }
 
 #[test]
-fn test_iet_verify_partial_application_theorem_citation() {
+fn test_verify_partial_application_theorem_citation() {
     verify_succeeds(
         r#"
         type Ix: axiom
@@ -678,7 +678,7 @@ fn test_iet_verify_partial_application_theorem_citation() {
 }
 
 #[test]
-fn test_iet_citation_line_expands_to_instantiated_theorem_body() {
+fn test_citation_line_expands_to_instantiated_theorem_body() {
     let text = r#"
         type Ix: axiom
         type Val: axiom
@@ -738,7 +738,7 @@ fn test_iet_citation_line_expands_to_instantiated_theorem_body() {
 }
 
 #[test]
-fn test_iet_type_only_theorem_citation_expands() {
+fn test_type_only_theorem_citation_expands() {
     let text = r#"
         type Nat: axiom
 

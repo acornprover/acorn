@@ -655,8 +655,6 @@ fn test_proving_random_bug() {
         proof,
         &[
             "f(y) != z",
-            "f(y) != z",
-            "f(y) != h(y)",
             "h(y) != f(y)",
             "g(y) != f(y)",
             "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
@@ -711,7 +709,6 @@ fn test_proving_with_equality_factoring_basic() {
             &[
                 "function(x0: Foo) { h(x0) = g(x0) }(y)",
                 "not (f(y) != g(y) and f(y) != g(y))",
-                "f(y) = g(y)",
                 "g(y) = f(y)",
                 "function(x0: Foo) { h(x0) != f(x0) }(y)",
             ],
@@ -768,7 +765,6 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
             &[
                 "function(x0: Foo) { h(x0) = g(x0) }(y)",
                 "not (f(y) != g(y) and f(y) != g(y))",
-                "f(y) = g(y)",
                 "g(y) = f(y)",
                 "function(x0: Foo) { h(x0) != f(x0) }(y)",
             ],

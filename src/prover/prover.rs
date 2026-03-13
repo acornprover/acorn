@@ -508,21 +508,46 @@ impl Prover {
         active_ids.sort();
         active_ids.dedup();
 
-        self.final_step = Some(ProofStep::multiple_rewrite(
+        let final_step = ProofStep::multiple_rewrite(
             contradiction.inequality_id,
             active_ids,
             passive_ids,
             truthiness,
             max_depth,
-        ));
+        );
+
+        #[cfg(feature = "validate")]
+        if let Err(e) = ActiveSet::validate_step_shape(&final_step, kernel_context) {
+            panic!(
+                "Invalid multiple-rewrite final step: {}\nStep clause: {}",
+                e, final_step.clause
+            );
+        }
+
+        self.final_step = Some(final_step);
     }
 
-    fn report_passive_contradiction(&mut self, passive_steps: Vec<ProofStep>) {
+    fn report_passive_contradiction(
+        &mut self,
+        passive_steps: Vec<ProofStep>,
+        #[cfg_attr(not(feature = "validate"), allow(unused_variables))]
+        kernel_context: &KernelContext,
+    ) {
         assert!(self.useful_passive.is_empty());
         for passive_step in passive_steps {
             self.useful_passive.push(passive_step);
         }
-        self.final_step = Some(ProofStep::passive_contradiction(&self.useful_passive));
+        let final_step = ProofStep::passive_contradiction(&self.useful_passive);
+
+        #[cfg(feature = "validate")]
+        if let Err(e) = ActiveSet::validate_step_shape(&final_step, kernel_context) {
+            panic!(
+                "Invalid passive-contradiction final step: {}\nStep clause: {}",
+                e, final_step.clause
+            );
+        }
+
+        self.final_step = Some(final_step);
     }
 
     /// Activates the next clause from the queue, unless we're already done.
@@ -539,7 +564,7 @@ impl Prover {
                 passive_count = passive_steps.len(),
                 "found passive contradiction"
             );
-            self.report_passive_contradiction(passive_steps);
+            self.report_passive_contradiction(passive_steps, kernel_context);
             return true;
         }
 

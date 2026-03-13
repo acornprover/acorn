@@ -1452,7 +1452,7 @@ mod tests {
     use crate::kernel::term::{Decomposition, Term};
 
     #[test]
-    fn test_iet_negated_forall_clausification_stays_inline_without_opening_witness() {
+    fn test_negated_forall_clausification_stays_inline_without_opening_witness() {
         let mut kernel_context = KernelContext::new();
         kernel_context.parse_constant("g0", "Bool -> Bool");
 

@@ -379,6 +379,30 @@ impl KernelContext {
 
     /// When you quote a normalized clause and lower it as a clause again,
     /// you should recover that one clause exactly.
+    #[cfg(any(test, feature = "validate"))]
+    fn quoted_clause_type_var_map(clause: &Clause) -> Option<HashMap<String, (AtomId, Term)>> {
+        let mut type_var_map = HashMap::new();
+        for (var_id, maybe_var_type) in clause
+            .get_local_context()
+            .get_var_types()
+            .iter()
+            .enumerate()
+        {
+            let Some(var_type) = maybe_var_type else {
+                continue;
+            };
+            if var_type.as_ref().is_type_param_kind() {
+                // `quote_clause` names preserved type parameters as `T{var_id}`.
+                type_var_map.insert(format!("T{}", var_id), (var_id as AtomId, var_type.clone()));
+            }
+        }
+        if type_var_map.is_empty() {
+            None
+        } else {
+            Some(type_var_map)
+        }
+    }
+
     #[cfg(test)]
     fn check_quote_roundtrip(&mut self, clause: &Clause) {
         let quoted = self.quote_clause(clause, None, None, false);
@@ -388,8 +412,9 @@ impl KernelContext {
             eprintln!("DEBUG: quoted = {}", quoted);
             panic!("quoted clause should validate: {:?}", e);
         }
+        let type_var_map = Self::quoted_clause_type_var_map(clause);
         let lowered_again = self
-            .lower_clause(&quoted, NewConstantType::Local, None)
+            .lower_clause(&quoted, NewConstantType::Local, type_var_map)
             .unwrap();
         if clause != &lowered_again {
             println!("original clause: {}", clause);
@@ -415,6 +440,25 @@ impl KernelContext {
             }
             panic!("lowered-again clause does not match original");
         }
+    }
+
+    #[cfg(any(test, feature = "validate"))]
+    pub fn validate_clause_roundtrip(&self, clause: &Clause) -> Result<(), String> {
+        let quoted = self.quote_clause(clause, None, None, false);
+        quoted
+            .validate()
+            .map_err(|e| format!("quoted clause should validate: {:?}", e))?;
+        let type_var_map = Self::quoted_clause_type_var_map(clause);
+        let mut roundtrip_context = self.clone();
+        let lowered_again =
+            roundtrip_context.lower_clause(&quoted, NewConstantType::Local, type_var_map)?;
+        if &lowered_again != clause {
+            return Err(format!(
+                "quote/lower clause roundtrip mismatch: original '{}' lowered again to '{}'",
+                clause, lowered_again
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
