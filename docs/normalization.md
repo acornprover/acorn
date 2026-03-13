@@ -35,6 +35,7 @@ implementation:
 - `lower_term` is implemented today by `lower_value_to_term(...)`
 - theorem/proposition lowering currently flows through
   `KernelContext::lower_proposition_to_clauses(...)`
+- `lower_clause` is implemented today by `KernelContext::lower_clause(...)`
 - `quote_term` / `quote_clause` are implemented by the `TermBridge`-backed `KernelContext`
   helpers
 
@@ -140,11 +141,6 @@ semantic lowerings, not exact serialization codecs.
 
 The term bridge may still have its own local tests and expectations, but the system-wide exact
 roundtrip requirement in this document is for clauses.
-
-Today the clause contract is exercised through `quote_clause(...)` followed by the existing
-shared lowering path, with the requirement that the quoted clause lowers back to exactly one
-clause. Conceptually this is the role of an exact `lower_clause` operation, even though current
-code still routes through `lower_proposition_to_clauses(...)`.
 
 Example:
 

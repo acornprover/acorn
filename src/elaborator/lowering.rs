@@ -3,7 +3,8 @@
 //! This module owns:
 //!
 //! - `lower_term`: `AcornValue -> Term`
-//! - the current shared lowering path used for theorem/proposition/clause lowering
+//! - `lower_proposition`: boolean propositions to proof-input clauses
+//! - `lower_clause`: quoted clause values back to exactly one normalized clause
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
 //!
 //! The elaborator does not define the normalization policy. Kernel term normalization
@@ -146,6 +147,28 @@ impl KernelContext {
         let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         self.lower_term_to_clauses(&term, source, type_var_map)
+    }
+
+    /// Lowers a quoted clause value to exactly one normalized clause.
+    ///
+    /// This is the exact inverse expected by `quote_clause(...)` on normalized clauses.
+    pub fn lower_clause(
+        &mut self,
+        value: &AcornValue,
+        ctype: NewConstantType,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Clause, String> {
+        if let Err(e) = value.validate() {
+            return Err(format!(
+                "validation error: {} while lowering clause value: {}",
+                e, value
+            ));
+        }
+        assert!(value.is_bool_type());
+
+        let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        let term = normalize_term(&term);
+        self.lower_normalized_term_to_clause(&term, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.
@@ -354,7 +377,7 @@ impl KernelContext {
         )
     }
 
-    /// When you quote a normalized clause and run it back through proposition lowering,
+    /// When you quote a normalized clause and lower it as a clause again,
     /// you should recover that one clause exactly.
     #[cfg(test)]
     fn check_quote_roundtrip(&mut self, clause: &Clause) {
@@ -366,33 +389,23 @@ impl KernelContext {
             panic!("quoted clause should validate: {:?}", e);
         }
         let lowered_again = self
-            .lower_proposition_to_clauses(
-                &quoted,
-                NewConstantType::Local,
-                &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
-                None,
-            )
+            .lower_clause(&quoted, NewConstantType::Local, None)
             .unwrap();
-        if lowered_again.len() != 1 {
-            // For functional equalities, we know this check doesn't work.
-            // So we skip it.
-            return;
-        }
-        if clause != &lowered_again[0] {
+        if clause != &lowered_again {
             println!("original clause: {}", clause);
             println!("original context: {:?}", clause.get_local_context());
             println!("quoted: {}", quoted);
-            println!("lowered again: {}", lowered_again[0]);
+            println!("lowered again: {}", lowered_again);
             println!(
                 "lowered-again context: {:?}",
-                lowered_again[0].get_local_context()
+                lowered_again.get_local_context()
             );
-            if clause.get_local_context() == lowered_again[0].get_local_context() {
+            if clause.get_local_context() == lowered_again.get_local_context() {
                 // Contexts match but clauses don't - might be variable ordering in literals
                 for (i, (orig_lit, renorm_lit)) in clause
                     .literals
                     .iter()
-                    .zip(lowered_again[0].literals.iter())
+                    .zip(lowered_again.literals.iter())
                     .enumerate()
                 {
                     if orig_lit != renorm_lit {

@@ -1227,17 +1227,11 @@ impl<'a> Clausifier<'a> {
         self.extended_term_to_term(ext, context)
     }
 
-    /// Checks if any forall variables dropped during normalization have uninhabited types.
+    /// Lower a normalized clause-shaped term into pre-normalized clauses.
     ///
-    /// This returns the checker's pre-normalized clause form: literals are sorted and the
-    /// clause context is built, but redundant or tautological literals are not removed and
-    /// variable IDs are not canonicalized yet.
-    ///
-    /// Calling `Clause::normalized()` afterwards should produce the fully normalized clause.
-    fn term_to_pre_normalized_checker_clauses(
-        &mut self,
-        term: &Term,
-    ) -> Result<Vec<Clause>, String> {
+    /// This keeps the full clause structure intact: literals are sorted and the clause context
+    /// is built, but tautologies are preserved and variable IDs are not yet canonicalized.
+    fn term_to_pre_normalized_clauses(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let mut output = vec![];
         let mut context = LocalContext::empty();
 
@@ -1261,6 +1255,41 @@ impl<'a> Clausifier<'a> {
             output.push(Clause::from_literals_unnormalized(literals, &context));
         }
         Ok(output)
+    }
+
+    /// Lower a normalized clause-shaped term into exactly one normalized clause.
+    fn lower_normalized_term_to_clause(&mut self, term: &Term) -> Result<Clause, String> {
+        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
+        let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
+        let literals = self.exact_clause_literals_from_term(&opened)?;
+        Ok(Clause::new_with_pinned_vars(literals, &context, pinned))
+    }
+
+    /// Interpret a normalized term as the exact disjunction shape used by quoted clauses.
+    fn exact_clause_literals_from_term(&self, term: &Term) -> Result<Vec<Literal>, String> {
+        if term == &Term::new_false() {
+            return Ok(vec![]);
+        }
+        if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
+            let mut left = self.exact_clause_literals_from_term(&args[0])?;
+            left.extend(self.exact_clause_literals_from_term(&args[1])?);
+            return Ok(left);
+        }
+        Ok(vec![self.exact_clause_literal_from_term(term)])
+    }
+
+    /// Interpret one quoted-clause disjunct as exactly one literal.
+    fn exact_clause_literal_from_term(&self, term: &Term) -> Literal {
+        if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
+            if let Some(eq_args) = self.split_symbol_application(&args[0], Symbol::Eq, 3) {
+                return Literal::not_equals(eq_args[1].clone(), eq_args[2].clone());
+            }
+            return Literal::negative(args[0].clone());
+        }
+        if let Some(args) = self.split_symbol_application(term, Symbol::Eq, 3) {
+            return Literal::equals(args[1].clone(), args[2].clone());
+        }
+        Literal::positive(term.clone())
     }
 
     /// Convert a term expression into the checker's inline single-term form.
@@ -1380,7 +1409,18 @@ impl KernelContext {
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
-        view.term_to_pre_normalized_checker_clauses(term)
+        view.term_to_pre_normalized_clauses(term)
+    }
+
+    /// Kernel-owned entry point for lowering an already-normalized clause-shaped term to
+    /// exactly one normalized clause.
+    pub fn lower_normalized_term_to_clause(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Clause, String> {
+        let mut view = Clausifier::new_mut(self, type_var_map);
+        view.lower_normalized_term_to_clause(term)
     }
 
     /// Kernel-owned entry point for converting a term to the checker's single-term inline form.
@@ -1404,7 +1444,10 @@ impl KernelContext {
 mod tests {
     use super::{Clausifier, TermLoweringMode};
     use crate::kernel::atom::Atom;
+    use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
     use crate::kernel::term::{Decomposition, Term};
 
     #[test]
@@ -1420,7 +1463,7 @@ mod tests {
         );
         let clauses = {
             let mut view = Clausifier::new_mut(&mut kernel_context, None);
-            view.term_to_pre_normalized_checker_clauses(&Term::not(forall_term))
+            view.term_to_pre_normalized_clauses(&Term::not(forall_term))
                 .expect("negated forall should clausify")
         };
 
@@ -1469,5 +1512,55 @@ mod tests {
             .expect("shallow clausification should succeed");
         assert_eq!(clausified.len(), 1);
         assert_eq!(clausified[0].literals.len(), 2);
+    }
+
+    #[test]
+    fn test_lower_normalized_term_to_clause_preserves_boolean_formula_literal_shape() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1", "c2"], "Bool");
+        let term = Term::or(
+            Term::and(
+                kernel_context.parse_term("c0"),
+                kernel_context.parse_term("c1"),
+            ),
+            kernel_context.parse_term("c2"),
+        );
+
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(&term, None)
+            .expect("exact clause lowering should succeed");
+
+        let expected = Clause::new(
+            vec![
+                Literal::positive(Term::and(
+                    kernel_context.parse_term("c0"),
+                    kernel_context.parse_term("c1"),
+                )),
+                Literal::positive(kernel_context.parse_term("c2")),
+            ],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause, expected);
+    }
+
+    #[test]
+    fn test_lower_normalized_term_to_clause_preserves_if_literal_shape() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1", "c2", "c3"], "Bool");
+        let ite = kernel_context.parse_term("ite(Bool, c0, c1, c2)");
+        let term = Term::or(ite.clone(), kernel_context.parse_term("c3"));
+
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(&term, None)
+            .expect("exact clause lowering should succeed");
+
+        let expected = Clause::new(
+            vec![
+                Literal::positive(ite),
+                Literal::positive(kernel_context.parse_term("c3")),
+            ],
+            &LocalContext::empty(),
+        );
+        assert_eq!(clause, expected);
     }
 }
