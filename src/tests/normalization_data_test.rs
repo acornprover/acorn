@@ -424,6 +424,15 @@ fn serialize_claim_line(
     proof.pop().unwrap()
 }
 
+fn serialize_claim_with_args_line(
+    claim: &crate::kernel::certificate_step::Claim,
+    bindings: &BindingMap,
+    kernel_context: &KernelContext,
+) -> String {
+    Certificate::serialize_claim_with_args(claim, kernel_context, bindings)
+        .expect("claim should serialize through direct claim codec")
+}
+
 fn step_from_input(input: &ProverClauseInput, kernel_context: &KernelContext) -> ProofStep {
     let clause = kernel_context.parse_clause(input.clause, input.var_types);
     let mut step = ProofStep::mock_from_clause(clause);
@@ -557,13 +566,21 @@ fn test_claim_roundtrip_normalization_cases() {
         let claim = (case.build)(&kernel_context);
         assert_claim_is_already_normalized(&claim, &kernel_context, case.name, "constructed");
 
-        let serialized = serialize_claim_line(&claim, &bindings, &kernel_context);
+        let serialized = serialize_claim_with_args_line(&claim, &bindings, &kernel_context);
         let (_project2, _bindings2, _kernel2, reparsed) = parse_claim_line(case.code, &serialized);
         assert_claim_is_already_normalized(&reparsed, &kernel_context, case.name, "reparsed");
         assert_eq!(
             reparsed, claim,
             "claim serialization should preserve canonical claim for case `{}`",
             case.name,
+        );
+
+        let serialized_again =
+            serialize_claim_with_args_line(&reparsed, &bindings, &kernel_context);
+        assert_eq!(
+            serialized, serialized_again,
+            "claim roundtrip serialization should be idempotent for case `{}`",
+            case.name
         );
     }
 }
