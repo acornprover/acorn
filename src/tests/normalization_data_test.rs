@@ -1,4 +1,5 @@
 use crate::certificate::Certificate;
+use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
@@ -404,9 +405,23 @@ fn add_named_polymorphic_global_constant(
 ) {
     let constant_name = ConstantName::unqualified(ModuleId(0), name);
     let type_term = kernel_context.parse_pi(binders, body);
-    let generic_type = kernel_context
+    let generated_generic_type = kernel_context
         .type_store
         .type_term_to_acorn_type(&type_term);
+    let renamings: Vec<(String, AcornType)> = type_param_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                format!("T{}", i),
+                AcornType::Variable(TypeParam {
+                    name: (*name).to_string(),
+                    typeclass: None,
+                }),
+            )
+        })
+        .collect();
+    let generic_type = generated_generic_type.instantiate(&renamings);
     kernel_context.symbol_table.add_constant(
         constant_name.clone(),
         NewConstantType::Global,
