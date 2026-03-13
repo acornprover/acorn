@@ -6,6 +6,7 @@ compile_error!("features \"nwit\" and \"nocnf\" are not supported together");
 pub mod build_cache;
 pub mod builder;
 pub mod certificate;
+pub mod claim_codec;
 pub mod cleaner;
 pub mod code_generator;
 pub mod common;

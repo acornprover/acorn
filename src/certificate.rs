@@ -7,30 +7,28 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
+use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::AcornType;
-use crate::elaborator::acorn_type::PotentialType;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::lower_value_to_term;
-use crate::elaborator::to_term::{lower_value_to_term_existing, TypeVarMap};
+use crate::elaborator::to_term::lower_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
-use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
-use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
-use crate::kernel::variable_map::{apply_to_term, VariableMap};
+use crate::kernel::variable_map::VariableMap;
 use crate::module::ModuleDescriptor;
 use crate::project::Project;
 use crate::prover::proof::ConcreteStep;
@@ -39,7 +37,6 @@ use crate::prover::synthetic::{
 };
 use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Statement, StatementInfo};
-use crate::syntax::token::TokenType;
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
@@ -119,10 +116,6 @@ impl Certificate {
         !cfg!(feature = "nwit")
     }
 
-    fn claim_with_args_roundtrip_error() -> &'static str {
-        "claim-with-args serialization did not roundtrip"
-    }
-
     fn references_value_local(
         term: crate::kernel::term::TermRef<'_>,
         local_context: &LocalContext,
@@ -135,15 +128,6 @@ impl Certificate {
         })
     }
 
-    fn clause_references_local_vars(clause: &Clause) -> bool {
-        (0..clause.context.len()).any(|var_id| {
-            clause.literals.iter().any(|literal| {
-                literal.left.has_variable(var_id as AtomId)
-                    || literal.right.has_variable(var_id as AtomId)
-            })
-        })
-    }
-
     /// Detect claim shapes that must stay as specialized expressions rather than generic claims.
     fn claim_requires_specialized_serialization(claim: &Claim) -> bool {
         let local_context = claim.clause().get_local_context();
@@ -153,124 +137,6 @@ impl Certificate {
             .var_map()
             .iter()
             .any(|(_, term)| Self::references_value_local(term.as_ref(), local_context))
-    }
-
-    /// Rebase a quoted claim argument so it can stand alone outside the generic clause's
-    /// local context. Type parameters stay in scope; value locals must disappear.
-    fn rebase_value_to_standalone(
-        value: &AcornValue,
-        scope_len: AtomId,
-    ) -> Result<AcornValue, CodeGenError> {
-        Ok(match value {
-            AcornValue::Variable(var_id, var_type) => {
-                if *var_id < scope_len {
-                    AcornValue::Variable(*var_id, var_type.clone())
-                } else {
-                    AcornValue::Variable(var_id - scope_len, var_type.clone())
-                }
-            }
-            AcornValue::Constant(constant) => AcornValue::Constant(constant.clone()),
-            AcornValue::Application(app) => AcornValue::apply(
-                Self::rebase_value_to_standalone(&app.function, scope_len)?,
-                app.args
-                    .iter()
-                    .map(|arg| Self::rebase_value_to_standalone(arg, scope_len))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            AcornValue::TypeApplication(app) => AcornValue::type_apply(
-                Self::rebase_value_to_standalone(&app.function, scope_len)?,
-                app.type_param_names.clone(),
-                app.type_param_constraints.clone(),
-                app.type_args.clone(),
-            ),
-            AcornValue::Lambda(arg_types, body) => AcornValue::lambda(
-                arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
-            ),
-            AcornValue::Binary(op, left, right) => AcornValue::Binary(
-                *op,
-                Box::new(Self::rebase_value_to_standalone(left, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(right, scope_len)?),
-            ),
-            AcornValue::Not(value) => AcornValue::Not(Box::new(Self::rebase_value_to_standalone(
-                value, scope_len,
-            )?)),
-            AcornValue::Try(value, unwrapped_type) => AcornValue::Try(
-                Box::new(Self::rebase_value_to_standalone(value, scope_len)?),
-                unwrapped_type.clone(),
-            ),
-            AcornValue::ForAll(arg_types, body) => AcornValue::forall(
-                arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
-            ),
-            AcornValue::Exists(arg_types, body) => AcornValue::exists(
-                arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
-            ),
-            AcornValue::Choose(choice_type, body) => AcornValue::choose(
-                choice_type.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + 1)?,
-            ),
-            AcornValue::Bool(value) => AcornValue::Bool(*value),
-            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
-                Box::new(Self::rebase_value_to_standalone(cond, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(if_value, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(else_value, scope_len)?),
-            ),
-            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
-                Box::new(Self::rebase_value_to_standalone(scrutinee, scope_len)?),
-                cases
-                    .iter()
-                    .map(|case| {
-                        let case_scope_len = scope_len + case.new_vars.len() as AtomId;
-                        Ok(crate::elaborator::acorn_value::MatchCase {
-                            new_vars: case.new_vars.clone(),
-                            pattern: Self::rebase_value_to_standalone(
-                                &case.pattern,
-                                case_scope_len,
-                            )?,
-                            result: Self::rebase_value_to_standalone(&case.result, case_scope_len)?,
-                            constructor_index: case.constructor_index,
-                            constructor_total: case.constructor_total,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, CodeGenError>>()?,
-            ),
-        })
-    }
-
-    fn ensure_claim_code_parses_as_claim(code: String) -> Result<String, CodeGenError> {
-        let parses_as_claim = |candidate: &str| -> Result<bool, CodeGenError> {
-            Ok(matches!(
-                Statement::parse_str_with_options(candidate, true)?.statement,
-                StatementInfo::Claim(_)
-            ))
-        };
-
-        let trimmed = code.trim_start();
-        if trimmed.starts_with("forall(")
-            || trimmed.starts_with("if ")
-            || trimmed.starts_with("if(")
-        {
-            let wrapped = format!("({code})");
-            if parses_as_claim(&wrapped)? {
-                return Ok(wrapped);
-            }
-        }
-
-        if parses_as_claim(&code)? {
-            return Ok(code);
-        }
-
-        let wrapped = format!("({code})");
-        if parses_as_claim(&wrapped)? {
-            return Ok(wrapped);
-        }
-
-        Err(CodeGenError::GeneratedBadCode(format!(
-            "generated claim did not parse as a claim: {}",
-            code
-        )))
     }
 
     /// Create a new certificate with proof steps
@@ -546,7 +412,7 @@ impl Certificate {
         };
 
         match step {
-            CertificateStep::Claim(_) => Self::ensure_claim_code_parses_as_claim(line),
+            CertificateStep::Claim(_) => ClaimCodec::ensure_claim_code_parses_as_claim(line),
             CertificateStep::Satisfy(_) => Ok(line),
         }
     }
@@ -560,7 +426,7 @@ impl Certificate {
         let specialized_clause = claim
             .normalized_specialized_clause(kernel_context)
             .map_err(CodeGenError::GeneratedBadCode)?;
-        Self::serialize_claim_with_names(claim, kernel_context, bindings).map_err(|err| {
+        ClaimCodec::serialize_claim_with_args(claim, kernel_context, bindings).map_err(|err| {
             CodeGenError::GeneratedBadCode(format!(
                 "{} [while serializing certificate claim step {}]",
                 err, specialized_clause
@@ -584,17 +450,19 @@ impl Certificate {
         );
         let mut claim_step_from_expr =
             |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
-                let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
-                if let Some(claim) = Self::try_deserialize_claim_with_args_value(
-                    value.clone(),
+                if let Some(claim) = ClaimCodec::try_deserialize_claim_expression(
+                    expr,
+                    project,
                     bindings.as_ref(),
                     kernel_context.to_mut(),
+                    Self::certificate_allows_choose(),
                 )? {
                     return Ok(CertificateStep::Claim(claim));
                 }
+                let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
                 let term = lower_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
                 let term = normalize_term(&term);
-                Ok(CertificateStep::Claim(Self::claim_from_plain_term(
+                Ok(CertificateStep::Claim(ClaimCodec::claim_from_plain_term(
                     &term,
                     kernel_context.to_mut(),
                 )?))
@@ -646,7 +514,7 @@ impl Certificate {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
         let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        Self::claim_from_plain_term(&term, kernel_context)
+        ClaimCodec::claim_from_plain_term(&term, kernel_context)
     }
 
     /// Lower a parsed certificate proposition to the checker clauses introduced by `satisfy`.
@@ -936,480 +804,7 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
-        Self::serialize_claim_with_names(claim, kernel_context, bindings)
-    }
-
-    fn infer_in_scope_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
-        let mut candidates: Vec<(String, AcornType)> = vec![];
-        for (name, potential_type) in bindings.iter_types() {
-            let PotentialType::Resolved(AcornType::Arbitrary(type_param)) = potential_type else {
-                continue;
-            };
-            let compatible = match kind {
-                AcornType::TypeclassConstraint(typeclass) => {
-                    type_param.typeclass.as_ref() == Some(typeclass)
-                }
-                AcornType::Type0 => true,
-                _ => false,
-            };
-            if compatible {
-                candidates.push((name.clone(), AcornType::Arbitrary(type_param.clone())));
-            }
-        }
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        candidates.into_iter().next().map(|(_, ty)| ty)
-    }
-
-    fn expected_roundtrip_claim(claim: &Claim, type_var_map: &VariableMap) -> Claim {
-        let local_context = claim.clause().get_local_context();
-        let mut expected_var_map = VariableMap::new();
-
-        for var_id in 0..local_context.len() {
-            let var_id = var_id as AtomId;
-            if let Some(term) = claim.var_map().get_mapping(var_id) {
-                expected_var_map.set(var_id, apply_to_term(term.as_ref(), type_var_map));
-                continue;
-            }
-            if let Some(type_term) = type_var_map.get_mapping(var_id) {
-                expected_var_map.set(var_id, type_term.clone());
-            }
-        }
-
-        Claim::new(claim.clause().clone(), expected_var_map)
-            .expect("roundtrip claim should normalize")
-    }
-
-    fn roundtrip_clause_formula(clause: &Clause, kernel_context: &KernelContext) -> Option<Term> {
-        let literal = clause.literals.first()?;
-        if clause.literals.len() != 1 {
-            return None;
-        }
-        if literal.is_signed_term() {
-            return Some(if literal.positive {
-                literal.left.clone()
-            } else {
-                Term::not(literal.left.clone())
-            });
-        }
-
-        let equality = Term::eq(
-            literal
-                .left
-                .get_type_with_context(clause.get_local_context(), kernel_context),
-            literal.left.clone(),
-            literal.right.clone(),
-        );
-        Some(if literal.positive {
-            equality
-        } else {
-            Term::not(equality)
-        })
-    }
-
-    /// Treat single-literal equality clauses and their inline `eq(...)` forms as equivalent.
-    fn clauses_roundtrip_equivalent(
-        expected: &Clause,
-        actual: &Clause,
-        kernel_context: &KernelContext,
-    ) -> bool {
-        if expected == actual {
-            return true;
-        }
-        if expected.get_local_context() != actual.get_local_context() {
-            return false;
-        }
-        if Self::roundtrip_clause_formula(expected, kernel_context)
-            == Self::roundtrip_clause_formula(actual, kernel_context)
-        {
-            return true;
-        }
-
-        // Quoting canonicalizes partial logical builtins like `eq(T)` into the
-        // lambda form that claim-with-args parsing reconstructs.
-        kernel_context.quote_clause(expected, None, None, true)
-            == kernel_context.quote_clause(actual, None, None, true)
-    }
-
-    fn claims_roundtrip_equivalent(
-        expected: &Claim,
-        actual: &Claim,
-        kernel_context: &KernelContext,
-    ) -> bool {
-        if expected == actual {
-            return true;
-        }
-        if expected.clause().get_local_context() != actual.clause().get_local_context() {
-            return false;
-        }
-        // Partial logical builtins and typeclass members can canonicalize to a different generic
-        // clause shape when parsed back, so the real invariant is the immediate specialized
-        // clause before checker simplification.
-        match (
-            expected.specialized_clause_for_display(kernel_context).ok(),
-            actual.specialized_clause_for_display(kernel_context).ok(),
-        ) {
-            (Some(expected_clause), Some(actual_clause)) => {
-                if Self::clauses_roundtrip_equivalent(
-                    &expected_clause,
-                    &actual_clause,
-                    kernel_context,
-                ) {
-                    return true;
-                }
-                match (
-                    expected.normalized_specialized_clause(kernel_context).ok(),
-                    actual.normalized_specialized_clause(kernel_context).ok(),
-                ) {
-                    (Some(expected_clause), Some(actual_clause)) => {
-                        Self::clauses_roundtrip_equivalent(
-                            &expected_clause,
-                            &actual_clause,
-                            kernel_context,
-                        )
-                    }
-                    (None, None) => true,
-                    _ => false,
-                }
-            }
-            (None, None) => true,
-            _ => false,
-        }
-    }
-
-    fn claim_from_clause(clause: Clause) -> Result<Claim, CodeGenError> {
-        Claim::new(clause, VariableMap::new()).map_err(CodeGenError::GeneratedBadCode)
-    }
-
-    fn claim_with_var_map(clause: Clause, var_map: VariableMap) -> Result<Claim, CodeGenError> {
-        Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)
-    }
-
-    fn claim_with_args_from_clause(
-        clause: Clause,
-        type_args: &[AcornType],
-        args: &[AcornValue],
-        kernel_context: &mut KernelContext,
-    ) -> Result<Claim, CodeGenError> {
-        let var_map = Self::build_claim_var_map(type_args, args, kernel_context)?;
-        Self::claim_with_var_map(clause, var_map)
-    }
-
-    fn claim_from_plain_term(
-        term: &Term,
-        kernel_context: &mut KernelContext,
-    ) -> Result<Claim, CodeGenError> {
-        if Self::should_preserve_single_literal_claim(term) {
-            if let Some(clause) = Self::try_deserialize_single_literal_clause(term, &[]) {
-                return Self::claim_from_clause(clause);
-            }
-        }
-
-        let clauses = kernel_context.term_to_checker_clauses(term, None)?;
-        if clauses.len() != 1 {
-            // A claim line may intentionally keep a boolean connective inline
-            // as a single signed literal term (for example, `a and b`) rather
-            // than expanding it into multiple CNF clauses.
-            let checker_term = kernel_context.term_to_checker_term(term, None)?;
-            let clause = Clause::from_literals_unnormalized(
-                vec![Literal::positive(checker_term)],
-                &LocalContext::empty(),
-            );
-            return Self::claim_from_clause(clause);
-        }
-
-        let clause = clauses
-            .into_iter()
-            .next()
-            .expect("clauses has exactly one element");
-        if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
-            let checker_term = kernel_context.term_to_checker_term(term, None)?;
-            let literal = Self::try_term_to_single_checker_literal(&checker_term)
-                .unwrap_or_else(|| Literal::positive(checker_term));
-            let clause = Clause::from_literals_unnormalized(vec![literal], &LocalContext::empty());
-            return Self::claim_from_clause(clause);
-        }
-
-        Self::claim_from_clause(clause)
-    }
-
-    fn serialize_claim_with_names(
-        claim: &Claim,
-        kernel_context: &KernelContext,
-        bindings: &BindingMap,
-    ) -> Result<String, CodeGenError> {
-        let local_context = claim.clause().get_local_context();
-        let var_count = local_context.len();
-        if var_count == 0 {
-            return Err(CodeGenError::GeneratedBadCode(
-                "cannot serialize claim-with-args for a clause with no local variables".to_string(),
-            ));
-        }
-
-        let mut generator = CodeGenerator::new_for_certificate(bindings);
-        let generic_value = kernel_context.quote_clause(claim.clause(), None, None, false);
-        let generic_code = generator.value_to_code(&generic_value)?;
-        // Claim arguments are serialized outside the clause's local scope, so only the leading
-        // type parameters stay available while we quote them.
-        let standalone_arg_context = LocalContext::from_types(
-            local_context
-                .get_var_types()
-                .iter()
-                .take_while(|var_type| {
-                    var_type
-                        .as_ref()
-                        .is_some_and(|term| term.as_ref().is_type_param_kind())
-                })
-                .flatten()
-                .cloned()
-                .collect(),
-        );
-        let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
-            let generic_expr = Expression::parse_value_string(&generic_code)?;
-            match generic_expr {
-                Expression::Binder(token, _, body, _) if token.token_type == TokenType::ForAll => {
-                    body.to_string()
-                }
-                _ => {
-                    return Err(CodeGenError::GeneratedBadCode(
-                        "expected quoted generic claim to have forall shape".to_string(),
-                    ));
-                }
-            }
-        } else {
-            generic_code
-        };
-
-        // Use the full local context rather than only variables appearing directly
-        // in the clause literals. Claim argument terms can reference additional
-        // in-scope variables (for example through nested lambdas).
-        let used_var_count = local_context.len();
-
-        let kernel_context = kernel_context;
-
-        let mut type_param_decl_codes: Vec<String> = vec![];
-        let mut type_arg_codes: Vec<String> = vec![];
-        let mut roundtrip_type_param_names: Vec<String> = vec![];
-        let mut roundtrip_type_param_constraints: Vec<
-            Option<crate::elaborator::acorn_type::Typeclass>,
-        > = vec![];
-        let mut roundtrip_type_args: Vec<AcornType> = vec![];
-        let mut resolved_type_var_map = VariableMap::new();
-        let mut value_decl_codes: Vec<String> = vec![];
-        let mut value_arg_codes: Vec<String> = vec![];
-        let mut value_lambda_arg_types: Vec<AcornType> = vec![];
-        let mut value_arg_values: Vec<AcornValue> = vec![];
-        // Keep declaration names aligned with CodeGenerator's own naming strategy so the
-        // lambda body and argument declarations use the same identifiers, even when
-        // lower indices (e.g. x0, x1) are already occupied in bindings.
-        let mut next_value_decl_id: u32 = 0;
-        let mut value_decl_name_by_var: Vec<Option<String>> = vec![None; used_var_count];
-
-        for var_id in 0..used_var_count {
-            let var_type = local_context
-                .get_var_type(var_id)
-                .expect("local context should provide all variable types");
-            if var_type.as_ref().is_type_param_kind() {
-                continue;
-            }
-            if claim.var_map().get_mapping(var_id as AtomId).is_none() {
-                return Err(CodeGenError::GeneratedBadCode(format!(
-                    "missing claim var map entry for x{}",
-                    var_id
-                )));
-            }
-            let var_name = bindings.next_indexed_var('x', &mut next_value_decl_id);
-            value_decl_name_by_var[var_id] = Some(var_name);
-        }
-
-        for var_id in 0..used_var_count {
-            let var_type = local_context
-                .get_var_type(var_id)
-                .expect("local context should provide all variable types")
-                .clone();
-
-            let arg_term = claim.var_map().get_mapping(var_id as AtomId);
-
-            if var_type.as_ref().is_type_param_kind() {
-                let type_param_name = format!("T{}", var_id);
-                let kind = kernel_context.quote_type_with_context(var_type, local_context, false);
-                let roundtrip_constraint = match &kind {
-                    AcornType::Type0 => None,
-                    AcornType::TypeclassConstraint(typeclass) => Some(typeclass.clone()),
-                    _ => {
-                        return Err(CodeGenError::GeneratedBadCode(format!(
-                            "invalid type-parameter kind for x{}",
-                            var_id
-                        )));
-                    }
-                };
-                let decl_code = match kind {
-                    AcornType::Type0 => type_param_name.clone(),
-                    AcornType::TypeclassConstraint(_) => {
-                        let kind_code = generator.type_to_expr(&kind)?.to_string();
-                        format!("{}: {}", type_param_name, kind_code)
-                    }
-                    _ => {
-                        return Err(CodeGenError::GeneratedBadCode(format!(
-                            "invalid type-parameter kind for x{}",
-                            var_id
-                        )));
-                    }
-                };
-                type_param_decl_codes.push(decl_code);
-                roundtrip_type_param_names.push(type_param_name.clone());
-                roundtrip_type_param_constraints.push(roundtrip_constraint.clone());
-
-                let mapped_type = arg_term.map(|term| {
-                    kernel_context.quote_type_with_context(term.clone(), local_context, false)
-                });
-                let (selected_type, type_arg_code) = match mapped_type {
-                    Some(mapped) if !matches!(mapped, AcornType::Variable(_)) => (
-                        Some(mapped.clone()),
-                        generator.type_to_expr(&mapped)?.to_string(),
-                    ),
-                    Some(_) | None => {
-                        if let Some(in_scope_type) = Self::infer_in_scope_type_arg(&kind, bindings)
-                        {
-                            (
-                                Some(in_scope_type.clone()),
-                                generator.type_to_expr(&in_scope_type)?.to_string(),
-                            )
-                        } else {
-                            // No concrete in-scope type to instantiate with. Keep this line
-                            // self-contained by applying the type lambda to its own local type
-                            // parameter (e.g. function[T0: C] { ... }[T0]).
-                            (None, type_param_name.clone())
-                        }
-                    }
-                };
-                if let Some(selected_type) = selected_type {
-                    let selected_term = kernel_context
-                        .type_store
-                        .to_type_term_with_vars(&selected_type, None);
-                    resolved_type_var_map.set(var_id as AtomId, selected_term);
-                    roundtrip_type_args.push(selected_type);
-                } else {
-                    roundtrip_type_args.push(AcornType::Variable(TypeParam {
-                        name: type_param_name.clone(),
-                        typeclass: roundtrip_constraint,
-                    }));
-                }
-                type_arg_codes.push(type_arg_code);
-                continue;
-            }
-
-            let arg_term = arg_term.ok_or_else(|| {
-                CodeGenError::GeneratedBadCode(format!(
-                    "missing claim var map entry for x{}",
-                    var_id
-                ))
-            })?;
-
-            let var_name = value_decl_name_by_var[var_id]
-                .as_ref()
-                .expect("value variable names should be precomputed")
-                .clone();
-            let acorn_type = kernel_context.quote_type_with_context(var_type, local_context, false);
-            value_lambda_arg_types.push(acorn_type.clone());
-            let type_code = generator.type_to_expr(&acorn_type)?.to_string();
-            value_decl_codes.push(format!("{}: {}", var_name, type_code));
-
-            let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
-            let (arg_context, scope_len) = if substituted_arg_term.max_variable().is_none() {
-                (LocalContext::empty(), 0)
-            } else {
-                (
-                    standalone_arg_context.clone(),
-                    standalone_arg_context.len() as AtomId,
-                )
-            };
-            let arg_value =
-                kernel_context.quote_term_with_context(&substituted_arg_term, &arg_context, true);
-            let arg_value =
-                Self::rebase_value_to_standalone(&arg_value, scope_len).map_err(|err| {
-                    CodeGenError::GeneratedBadCode(format!(
-                        "{} [claim arg term: {}; quoted: {}]",
-                        err, substituted_arg_term, arg_value
-                    ))
-                })?;
-            value_arg_values.push(arg_value.clone());
-            if let Decomposition::Atom(Atom::FreeVariable(mapped_var_id)) =
-                substituted_arg_term.as_ref().decompose()
-            {
-                if let Some(Some(mapped_name)) = value_decl_name_by_var.get(*mapped_var_id as usize)
-                {
-                    value_arg_codes.push(mapped_name.clone());
-                    continue;
-                }
-            }
-            value_arg_codes.push(generator.value_to_code(&arg_value)?);
-        }
-
-        if value_decl_codes.is_empty() {
-            if type_param_decl_codes.is_empty() {
-                let specialized = claim
-                    .normalized_specialized_clause(kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                let specialized_value = kernel_context.quote_clause(&specialized, None, None, true);
-                let code = generator.value_to_code(&specialized_value)?;
-                return Self::ensure_claim_code_parses_as_claim(code);
-            }
-
-            return Ok(format!(
-                "function[{}] {{ {} }}[{}]",
-                type_param_decl_codes.join(", "),
-                body_code,
-                type_arg_codes.join(", ")
-            ));
-        }
-
-        if type_param_decl_codes.is_empty() {
-            return Ok(format!(
-                "function({}) {{ {} }}({})",
-                value_decl_codes.join(", "),
-                body_code,
-                value_arg_codes.join(", ")
-            ));
-        }
-
-        let lambda_body_value = match &generic_value {
-            AcornValue::ForAll(_, body) => body.as_ref().clone(),
-            _ => generic_value.clone(),
-        };
-        let roundtrip_function = AcornValue::type_apply(
-            AcornValue::lambda(value_lambda_arg_types, lambda_body_value),
-            roundtrip_type_param_names,
-            roundtrip_type_param_constraints,
-            roundtrip_type_args,
-        );
-        let roundtrip_value = AcornValue::apply(roundtrip_function, value_arg_values);
-        let mut roundtrip_kernel_context = kernel_context.clone();
-        let expected_roundtrip_claim =
-            Self::expected_roundtrip_claim(claim, &resolved_type_var_map);
-        let actual_roundtrip = Self::try_deserialize_claim_with_args_value(
-            roundtrip_value,
-            bindings,
-            &mut roundtrip_kernel_context,
-        )?;
-        if !actual_roundtrip.as_ref().is_some_and(|actual| {
-            Self::claims_roundtrip_equivalent(&expected_roundtrip_claim, actual, kernel_context)
-        }) {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "{}: expected {:?}, got {:?}",
-                Self::claim_with_args_roundtrip_error(),
-                expected_roundtrip_claim,
-                actual_roundtrip
-            )));
-        }
-
-        Ok(format!(
-            "function[{}]({}) {{ {} }}[{}]({})",
-            type_param_decl_codes.join(", "),
-            value_decl_codes.join(", "),
-            body_code,
-            type_arg_codes.join(", "),
-            value_arg_codes.join(", ")
-        ))
+        ClaimCodec::serialize_claim_with_args(claim, kernel_context, bindings)
     }
 
     /// Deserializes a claim produced by `serialize_claim_with_args`.
@@ -1422,395 +817,13 @@ impl Certificate {
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) -> Result<Claim, CodeGenError> {
-        let statement = Statement::parse_str_with_options(code, true)?;
-        let StatementInfo::Claim(claim_statement) = statement.statement else {
-            return Err(CodeGenError::GeneratedBadCode(
-                "expected a claim expression".to_string(),
-            ));
-        };
-
-        let mut evaluator = Evaluator::new_with_allow_choose(
+        ClaimCodec::deserialize_claim_with_args(
+            code,
             project,
             bindings,
-            None,
-            Self::certificate_allows_choose(),
-        );
-        let evaluated = evaluator.evaluate_value(&claim_statement.claim, Some(&AcornType::Bool))?;
-        let mut kernel_context_clone = kernel_context.clone();
-        Self::try_deserialize_claim_with_args_value(evaluated, bindings, &mut kernel_context_clone)?
-            .ok_or_else(|| {
-                CodeGenError::GeneratedBadCode(
-                    "expected a function(...) { ... }(...) claim shape".to_string(),
-                )
-            })
-    }
-
-    fn try_deserialize_claim_with_args_value(
-        value: AcornValue,
-        _bindings: &BindingMap,
-        kernel_context: &mut KernelContext,
-    ) -> Result<Option<Claim>, CodeGenError> {
-        let mut type_param_names: Vec<String> = vec![];
-        let mut type_param_constraints = vec![];
-        let mut type_args = vec![];
-        let (arg_types, body, args) = match value {
-            AcornValue::Application(app) => match *app.function {
-                AcornValue::Lambda(arg_types, body) => (arg_types, *body, app.args),
-                AcornValue::TypeApplication(type_app) => match *type_app.function {
-                    AcornValue::Lambda(arg_types, body) => {
-                        type_param_names = type_app.type_param_names;
-                        type_param_constraints = type_app.type_param_constraints;
-                        type_args = type_app.type_args;
-                        (arg_types, *body, app.args)
-                    }
-                    _ => return Ok(None),
-                },
-                _ => return Ok(None),
-            },
-            AcornValue::TypeApplication(type_app) => match *type_app.function {
-                AcornValue::Lambda(arg_types, body) => {
-                    type_param_names = type_app.type_param_names;
-                    type_param_constraints = type_app.type_param_constraints;
-                    type_args = type_app.type_args;
-                    (arg_types, *body, vec![])
-                }
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
-        };
-
-        if arg_types.is_empty() && type_param_names.is_empty() {
-            return Ok(None);
-        }
-        if args.len() != arg_types.len() {
-            return Err(CodeGenError::GeneratedBadCode(
-                "argument count does not match function declaration".to_string(),
-            ));
-        }
-        if !type_param_names.is_empty()
-            && (type_param_names.len() != type_param_constraints.len()
-                || type_param_names.len() != type_args.len())
-        {
-            return Err(CodeGenError::GeneratedBadCode(
-                "type-argument metadata does not match type argument count".to_string(),
-            ));
-        }
-
-        let mut kernel_context_clone = kernel_context.clone();
-        let mut type_param_kinds = vec![];
-        let type_var_map = if type_param_names.is_empty() {
-            None
-        } else {
-            let mut map = HashMap::new();
-            for (i, (name, constraint)) in type_param_names
-                .iter()
-                .zip(type_param_constraints.iter())
-                .enumerate()
-            {
-                let var_type = if let Some(typeclass) = constraint {
-                    let typeclass_id = kernel_context_clone.type_store.add_typeclass(typeclass);
-                    Term::typeclass(typeclass_id)
-                } else {
-                    Term::type_sort()
-                };
-                type_param_kinds.push(var_type.clone());
-                map.insert(name.clone(), (i as AtomId, var_type));
-            }
-            Some(map)
-        };
-        let generic_value = AcornValue::forall(arg_types, body);
-        let generic_term = lower_value_to_term_existing(
-            &mut kernel_context_clone,
-            &generic_value,
-            type_var_map.as_ref(),
-        )?;
-        let generic_term = normalize_term(&generic_term);
-        Self::try_claim_with_args_from_generic_term(
-            &generic_term,
-            &type_param_kinds,
-            type_args.as_slice(),
-            args.as_slice(),
             kernel_context,
-            &mut kernel_context_clone,
-            type_var_map,
+            Self::certificate_allows_choose(),
         )
-    }
-
-    fn try_claim_with_args_from_generic_term(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-        type_args: &[AcornType],
-        args: &[AcornValue],
-        kernel_context: &mut KernelContext,
-        clausify_kernel_context: &mut KernelContext,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Result<Option<Claim>, CodeGenError> {
-        if Self::term_has_inline_clause_shape(generic_term, true) {
-            let clause = Self::try_deserialize_inline_clause(generic_term, type_param_kinds)
-                .expect("inline clause shape should deserialize");
-            return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
-                .map(Some);
-        }
-        if Self::should_preserve_single_literal_claim(generic_term) {
-            if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
-            {
-                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
-                    .map(Some);
-            }
-        }
-
-        let clauses =
-            clausify_kernel_context.term_to_checker_clauses(generic_term, type_var_map)?;
-        if clauses.len() != 1 {
-            if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
-            {
-                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
-                    .map(Some);
-            }
-            if let Some(clause) =
-                Self::try_deserialize_single_formula_clause(generic_term, type_param_kinds)
-            {
-                return Self::claim_with_args_from_clause(clause, type_args, args, kernel_context)
-                    .map(Some);
-            }
-            // This lambda form only round-trips to `Claim { clause, var_map }` when
-            // the body can be represented as a single inline clause. If it doesn't,
-            // let callers fall back to plain claim parsing.
-            return Ok(None);
-        }
-
-        let clause = clauses
-            .into_iter()
-            .next()
-            .expect("clauses has exactly one element");
-        Self::claim_with_args_from_clause(clause, type_args, args, kernel_context).map(Some)
-    }
-
-    fn build_claim_var_map(
-        type_args: &[AcornType],
-        args: &[AcornValue],
-        kernel_context: &mut KernelContext,
-    ) -> Result<VariableMap, CodeGenError> {
-        let mut var_map = VariableMap::new();
-        let mut type_var_map = TypeVarMap::new();
-        for (var_id, acorn_type) in type_args.iter().enumerate() {
-            let type_term = match acorn_type {
-                AcornType::Variable(type_param) => {
-                    let kind_term = if let Some(typeclass) = &type_param.typeclass {
-                        let typeclass_id = kernel_context.type_store.add_typeclass(typeclass);
-                        Term::typeclass(typeclass_id)
-                    } else {
-                        Term::type_sort()
-                    };
-                    type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
-                    Term::atom(Atom::FreeVariable(var_id as AtomId))
-                }
-                _ => kernel_context
-                    .type_store
-                    .to_type_term_with_vars(acorn_type, None),
-            };
-            var_map.set(var_id as AtomId, type_term);
-        }
-        let type_var_map = (!type_var_map.is_empty()).then_some(type_var_map);
-        let value_offset = var_map.len();
-        for (var_id, arg) in args.iter().enumerate() {
-            let term = {
-                // Supported claim arguments can still mention selected-goal locals such
-                // as `d` or `k`. Elaborate against the live context so those proof-scope locals
-                // are interned before clausifying the argument term.
-                let term = lower_value_to_term(
-                    kernel_context,
-                    arg,
-                    NewConstantType::Local,
-                    type_var_map.as_ref(),
-                )?;
-                let term = normalize_term(&term);
-                kernel_context.term_to_claim_arg(&term)?
-            };
-            var_map.set((value_offset + var_id) as AtomId, term);
-        }
-        Ok(var_map)
-    }
-
-    fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
-        let (head, args) = term.as_ref().split_application_multi()?;
-        if args.len() != arity {
-            return None;
-        }
-        match head.get_head_atom() {
-            crate::kernel::atom::Atom::Symbol(s) if *s == symbol => Some(args),
-            _ => None,
-        }
-    }
-
-    fn try_term_to_single_checker_literal(term: &Term) -> Option<Literal> {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            if let Some(eq_args) = Self::split_symbol_application(&args[0], Symbol::Eq, 3) {
-                return Some(Literal::not_equals(eq_args[1].clone(), eq_args[2].clone()));
-            }
-            return Some(Literal::negative(args[0].clone()));
-        }
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
-            return Some(Literal::equals(args[1].clone(), args[2].clone()));
-        }
-        if Self::split_symbol_application(term, Symbol::And, 2).is_some()
-            || Self::split_symbol_application(term, Symbol::Or, 2).is_some()
-            || matches!(
-                term.as_ref().decompose(),
-                Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _)
-                    | Decomposition::Lambda(_, _)
-            )
-        {
-            return None;
-        }
-        Some(Literal::positive(term.clone()))
-    }
-
-    fn try_deserialize_single_literal_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-        let literal = Self::try_term_to_single_checker_literal(&body)?;
-        Some(Clause::from_literals_unnormalized(
-            vec![literal],
-            &local_context,
-        ))
-    }
-
-    fn strip_foralls(term: &Term) -> Term {
-        let mut body = term.clone();
-        while let Some((_binder_type, binder_body)) = body.as_ref().split_forall() {
-            body = binder_body.to_owned();
-        }
-        body
-    }
-
-    fn should_preserve_single_literal_claim(term: &Term) -> bool {
-        let body = Self::strip_foralls(term);
-        let eq_term = if let Some(args) = Self::split_symbol_application(&body, Symbol::Not, 1) {
-            args[0].clone()
-        } else {
-            body
-        };
-        let Some(args) = Self::split_symbol_application(&eq_term, Symbol::Eq, 3) else {
-            return false;
-        };
-        args[0].as_ref().split_pi().is_some()
-            || args[0]
-                .iter_atoms()
-                .any(|atom| matches!(atom, Atom::FreeVariable(_) | Atom::BoundVariable(_)))
-    }
-
-    fn try_deserialize_single_formula_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-        Some(Clause::from_literals_unnormalized(
-            vec![Literal::positive(body)],
-            &local_context,
-        ))
-    }
-
-    fn try_deserialize_inline_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-
-        let literals = Self::try_term_to_inline_clause_literals(&body, true)?;
-        Some(Clause::from_literals_unnormalized(literals, &local_context))
-    }
-
-    fn term_has_inline_clause_shape(term: &Term, positive: bool) -> bool {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::term_has_inline_clause_shape(&args[0], !positive);
-        }
-
-        if positive {
-            if Self::split_symbol_application(term, Symbol::Or, 2).is_some() {
-                return true;
-            }
-        } else if Self::split_symbol_application(term, Symbol::And, 2).is_some() {
-            return true;
-        }
-
-        if let Some((_binder_type, body)) = term.as_ref().split_forall() {
-            return Self::term_has_inline_clause_shape(&body.to_owned(), positive);
-        }
-
-        false
-    }
-
-    fn try_term_to_inline_clause_literals(term: &Term, positive: bool) -> Option<Vec<Literal>> {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::try_term_to_inline_clause_literals(&args[0], !positive);
-        }
-
-        if positive {
-            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-                let mut literals = Self::try_term_to_inline_clause_literals(&args[0], true)?;
-                literals.extend(Self::try_term_to_inline_clause_literals(&args[1], true)?);
-                return Some(literals);
-            }
-        } else if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
-            let mut literals = Self::try_term_to_inline_clause_literals(&args[0], false)?;
-            literals.extend(Self::try_term_to_inline_clause_literals(&args[1], false)?);
-            return Some(literals);
-        }
-
-        if positive {
-            if let Some(literal) = Self::try_term_to_single_checker_literal(term) {
-                return Some(vec![literal]);
-            }
-            return Some(vec![Literal::positive(term.clone())]);
-        }
-
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
-            return Some(vec![Literal::not_equals(args[1].clone(), args[2].clone())]);
-        }
-
-        Some(vec![Literal::negative(term.clone())])
     }
 
     /// Check this certificate. It is expected that it has a proof.
@@ -2239,7 +1252,8 @@ impl<'a> WitnessEmitter<'a> {
             };
             claim.clone()
         } else {
-            Certificate::claim_from_clause(general_clause.clone())?
+            Claim::new(general_clause.clone(), VariableMap::new())
+                .map_err(CodeGenError::GeneratedBadCode)?
         };
         if let Some(index) = matching_claims.first().copied() {
             if let Some(existing) = self.claim_replacements.insert(index, local_id) {
