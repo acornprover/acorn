@@ -1649,6 +1649,63 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_code_line_canonicalizes_nested_inequality_in_claim_with_args() {
+        let code = r#"
+            inductive Foo {
+                a
+                b
+                c
+            }
+
+            let contains: (Foo, Foo) -> Bool = axiom
+            let has_non: (Foo, Foo) -> Bool = axiom
+
+            theorem goal {
+                true
+            }
+        "#;
+        let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+        let line = "function(x0: Foo, x1: Foo, x2: Foo) { not (contains(x0, x1) and x2 != x1) or has_non(x0, x2) }(Foo.c, Foo.a, Foo.b)";
+
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+        let step = Certificate::parse_code_line(
+            line,
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("claim-with-args parsing should succeed");
+
+        let claim = expect_claim(step);
+        let mut generator = CodeGenerator::new_for_certificate(&bindings);
+        let generic_value =
+            kernel_context.quote_clause(&claim.normalized_generic_clause(), None, None, false);
+        let generic_code = generator
+            .value_to_code(&generic_value)
+            .expect("normalized generic clause should serialize");
+        assert!(
+            generic_code.contains("x1 != x2"),
+            "unexpected generic clause: {generic_code}"
+        );
+        assert!(
+            !generic_code.contains("x2 != x1"),
+            "generic clause should keep the canonical inequality order: {generic_code}"
+        );
+
+        let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
+            .expect("serialization should preserve the canonical nested inequality order");
+        assert!(
+            serialized.contains("x1 != x2"),
+            "unexpected serialization: {serialized}"
+        );
+        assert!(
+            !serialized.contains("x2 != x1"),
+            "serialization should not revert the canonical inequality order: {serialized}"
+        );
+    }
+
+    #[test]
     fn test_deserialize_claim_with_args_preserves_single_not_if_literal() {
         let code = r#"
             type Nat: axiom

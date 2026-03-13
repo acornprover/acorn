@@ -57,12 +57,7 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the build format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build.
-#[cfg(feature = "nwit")]
 const MANIFEST_VERSION: u32 = 12;
-#[cfg(all(not(feature = "nwit"), feature = "nocnf"))]
-const MANIFEST_VERSION: u32 = 12;
-#[cfg(not(any(feature = "nocnf", feature = "nwit")))]
-const MANIFEST_VERSION: u32 = 11;
 
 /// A newtype wrapper for module names, created by joining parts with "."
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

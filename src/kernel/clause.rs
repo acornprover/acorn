@@ -187,6 +187,18 @@ impl Clause {
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
+
+        // Variable renumbering can change the ordering of equality arguments, so rerun the
+        // literal-level normalization once more on the renumbered clause.
+        self.literals = self
+            .literals
+            .drain(..)
+            .flat_map(Self::normalize_literals_for_clause)
+            .collect();
+        self.literals.retain(|lit| !lit.is_impossible());
+        self.literals.sort();
+        self.literals.dedup();
+        self.normalize_var_ids_with_pinned(pinned);
         self.literals.sort();
         self.literals.dedup();
     }
@@ -2261,5 +2273,40 @@ mod tests {
         );
 
         assert_eq!(reduced, expected);
+    }
+
+    #[test]
+    fn test_clause_normalization_rechecks_subterms_after_var_renumbering() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["g0", "g1"], "(Bool, Bool) -> Bool");
+
+        let clause = Clause::from_literals_unnormalized(
+            vec![
+                Literal::negative(Term::and(
+                    kctx.parse_term("g0")
+                        .apply(&[Term::new_variable(0), Term::new_variable(2)]),
+                    Term::not(Term::eq(
+                        Term::bool_type(),
+                        Term::new_variable(1),
+                        Term::new_variable(2),
+                    )),
+                )),
+                Literal::positive(
+                    kctx.parse_term("g1")
+                        .apply(&[Term::new_variable(0), Term::new_variable(1)]),
+                ),
+            ],
+            &LocalContext::from_types(vec![
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+            ]),
+        );
+
+        let normalized = clause.normalized();
+        assert_eq!(
+            normalized,
+            crate::kernel::term_normalization::normalize_clause_subterms(&normalized)
+        );
     }
 }

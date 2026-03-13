@@ -194,7 +194,11 @@ fn normalize_fully_applied_eq(term: &Term) -> Option<Term> {
     let eq_type = args[0].clone();
     let left = args[1].clone();
     let right = args[2].clone();
-    if left <= right {
+    let already_ordered = match (left.atomic_variable(), right.atomic_variable()) {
+        (Some(left_var), Some(right_var)) => left_var <= right_var,
+        _ => left <= right,
+    };
+    if already_ordered {
         return None;
     }
     Some(Term::eq(eq_type, right, left))
@@ -531,6 +535,21 @@ mod tests {
     fn test_normalize_boolean_subterms_orders_fully_applied_eq() {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
+        assert_eq!(normalize_term(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_orders_fully_applied_eq_free_variables() {
+        let term = Term::eq(
+            Term::bool_type(),
+            Term::new_variable(2),
+            Term::new_variable(1),
+        );
+        let expected = Term::eq(
+            Term::bool_type(),
+            Term::new_variable(1),
+            Term::new_variable(2),
+        );
         assert_eq!(normalize_term(&term), expected);
     }
 

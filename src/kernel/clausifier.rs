@@ -1259,10 +1259,10 @@ impl<'a> Clausifier<'a> {
 
     /// Lower a normalized clause-shaped term into exactly one normalized clause.
     fn lower_normalized_term_to_clause(&mut self, term: &Term) -> Result<Clause, String> {
-        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
+        let (mut context, mut next_var_id, _pinned) = self.initial_clause_context();
         let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
         let literals = self.exact_clause_literals_from_term(&opened)?;
-        Ok(Clause::new_with_pinned_vars(literals, &context, pinned))
+        Ok(Clause::from_literals_unnormalized(literals, &context).normalized_preserving_locals())
     }
 
     /// Interpret a normalized term as the exact disjunction shape used by quoted clauses.
@@ -1448,6 +1448,7 @@ mod tests {
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
+    use crate::kernel::symbol_table::NewConstantType;
     use crate::kernel::term::{Decomposition, Term};
 
     #[test]
@@ -1562,5 +1563,65 @@ mod tests {
             &LocalContext::empty(),
         );
         assert_eq!(clause, expected);
+    }
+
+    #[test]
+    fn test_lower_normalized_term_to_clause_preserves_existing_value_local_slots() {
+        let mut kernel_context = KernelContext::new();
+        let local_context = LocalContext::from_types(vec![
+            Term::bool_type(),
+            Term::bool_type(),
+            Term::bool_type(),
+        ]);
+        let x1 = Term::new_variable(1);
+        let x2 = Term::new_variable(2);
+        let clause = Clause::from_literals_unnormalized(
+            vec![
+                Literal::negative(Term::and(
+                    x2.clone(),
+                    Term::not(Term::eq(Term::bool_type(), x1.clone(), x2.clone())),
+                )),
+                Literal::positive(x1.clone()),
+            ],
+            &local_context,
+        )
+        .normalized_preserving_locals();
+
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        let lowered = kernel_context
+            .lower_clause(&quoted, NewConstantType::Local, None)
+            .expect("exact clause lowering should preserve local slot order");
+
+        assert_eq!(lowered, clause);
+    }
+
+    #[test]
+    fn test_lower_normalized_term_to_clause_preserves_nested_equality_order() {
+        let mut kernel_context = KernelContext::new();
+        let local_context = LocalContext::from_types(vec![
+            Term::bool_type(),
+            Term::bool_type(),
+            Term::bool_type(),
+        ]);
+        let x1 = Term::new_variable(1);
+        let x2 = Term::new_variable(2);
+        let clause = Clause::from_literals_unnormalized(
+            vec![
+                Literal::negative(Term::and(
+                    x1.clone(),
+                    Term::not(Term::eq(Term::bool_type(), x2.clone(), x1.clone())),
+                )),
+                Literal::positive(x2.clone()),
+            ],
+            &local_context,
+        )
+        .normalized_preserving_locals();
+
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        let lowered = kernel_context
+            .lower_clause(&quoted, NewConstantType::Local, None)
+            .expect("exact clause lowering should preserve nested equality order");
+
+        assert_eq!(lowered, clause);
     }
 }

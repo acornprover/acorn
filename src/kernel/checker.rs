@@ -11,6 +11,7 @@ use crate::kernel::clause::Clause;
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
+use crate::kernel::term_normalization::normalize_clause_subterms;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
 
@@ -147,7 +148,7 @@ impl Checker {
         clause
             .boolean_reductions(kernel_context)
             .into_iter()
-            .map(|clause| clause.normalized())
+            .map(|clause| normalize_clause_subterms(&clause).normalized())
             .collect()
     }
 
@@ -242,7 +243,7 @@ impl Checker {
         reason: StepReason,
         kernel_context: &KernelContext,
     ) {
-        let clause = clause.normalized();
+        let clause = normalize_clause_subterms(clause).normalized();
         self.insert_clause_internal(&clause, reason, kernel_context);
     }
 
@@ -338,7 +339,7 @@ impl Checker {
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<StepReason> {
-        let clause = clause.normalized();
+        let clause = normalize_clause_subterms(clause).normalized();
         self.check_clause_direct(&clause, kernel_context)
             .or_else(|| self.check_clause_via_boolean_reductions(&clause, kernel_context))
     }
@@ -1272,6 +1273,81 @@ mod tests {
             closure.len(),
             canonical_count,
             display_count
+        );
+    }
+
+    #[test]
+    fn test_checker_accepts_canonicalized_variable_boolean_reduction_clause() {
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["g0", "g1"], "(Bool, Bool) -> Bool");
+        let g0 = context.parse_term("g0");
+        let g1 = context.parse_term("g1");
+        let assumption_context =
+            LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]);
+        let assumption_body = Term::and(
+            g0.apply(&[Term::new_variable(0), Term::atom(Atom::BoundVariable(0))]),
+            Term::not(Term::eq(
+                Term::bool_type(),
+                Term::new_variable(1),
+                Term::atom(Atom::BoundVariable(0)),
+            )),
+        );
+        let assumption = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::or(
+                Term::not(Term::exists(Term::bool_type(), assumption_body)),
+                g1.apply(&[Term::new_variable(0), Term::new_variable(1)]),
+            ))],
+            &assumption_context,
+        );
+        let canonical_reduction = Clause::from_literals_unnormalized(
+            vec![
+                Literal::negative(Term::and(
+                    g0.apply(&[Term::new_variable(0), Term::new_variable(1)]),
+                    Term::not(Term::eq(
+                        Term::bool_type(),
+                        Term::new_variable(2),
+                        Term::new_variable(1),
+                    )),
+                )),
+                Literal::positive(g1.apply(&[Term::new_variable(0), Term::new_variable(2)])),
+            ],
+            &LocalContext::from_types(vec![
+                Term::bool_type(),
+                Term::bool_type(),
+                Term::bool_type(),
+            ]),
+        )
+        .normalized();
+
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        let start = normalize_clause_subterms(&assumption).normalized();
+        seen.insert(start.clone());
+        queue.push_back(start);
+        while let Some(clause) = queue.pop_front() {
+            for next in Checker::checker_boolean_reductions(&clause, &context) {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&canonical_reduction),
+            "checker-normalized boolean-reduction closure should contain the canonical reduction; got {:?}",
+            seen
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&assumption, StepReason::Testing, &context);
+
+        assert!(
+            checker.check_clause(&canonical_reduction, &context).is_some(),
+            "checker should know the canonical boolean-reduction clause after inserting the assumption",
         );
     }
 }

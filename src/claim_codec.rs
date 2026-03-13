@@ -5,8 +5,9 @@ use crate::elaborator::acorn_type::{AcornType, PotentialType, TypeParam, Typecla
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
+use crate::elaborator::stack::Stack;
 use crate::elaborator::to_term::lower_value_to_term;
-use crate::elaborator::to_term::{lower_value_to_term_existing, TypeVarMap};
+use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::Claim;
 use crate::kernel::clause::Clause;
@@ -19,7 +20,7 @@ use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::project::Project;
-use crate::syntax::expression::Expression;
+use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::statement::{Statement, StatementInfo};
 use crate::syntax::token::TokenType;
 
@@ -33,6 +34,15 @@ struct ClaimFunctionValue {
     type_args: Vec<AcornType>,
     arg_types: Vec<AcornType>,
     body: AcornValue,
+}
+
+/// The parsed surface pieces of a `function[...] (...) { ... } [..] (...)` claim expression.
+struct ClaimExpressionShape<'a> {
+    type_params: &'a [TypeParamExpr],
+    declarations: &'a [Declaration],
+    body: &'a Expression,
+    type_args: Vec<&'a Expression>,
+    value_args: Vec<&'a Expression>,
 }
 
 impl ClaimCodec {
@@ -71,7 +81,7 @@ impl ClaimCodec {
         )))
     }
 
-    /// Serialize a claim in clause-plus-arguments form and require an exact roundtrip.
+    /// Serialize a claim in clause-plus-arguments form and require the claim codec roundtrip.
     pub(crate) fn serialize_claim_with_args(
         claim: &Claim,
         kernel_context: &KernelContext,
@@ -267,6 +277,45 @@ impl ClaimCodec {
             value_arg_codes.push(generator.value_to_code(&arg_value)?);
         }
 
+        let lambda_body_value = match &generic_value {
+            AcornValue::ForAll(_, body) => body.as_ref().clone(),
+            _ => generic_value.clone(),
+        };
+        let lambda_value = AcornValue::lambda(value_lambda_arg_types, lambda_body_value);
+        let roundtrip_function = if roundtrip_type_param_names.is_empty() {
+            lambda_value
+        } else {
+            AcornValue::type_apply(
+                lambda_value,
+                roundtrip_type_param_names.clone(),
+                roundtrip_type_param_constraints.clone(),
+                roundtrip_type_args.clone(),
+            )
+        };
+        let mut expected_kernel_context = kernel_context.clone();
+        let expected_roundtrip_claim = Self::expected_roundtrip_claim(
+            &claim,
+            &roundtrip_type_param_names,
+            &roundtrip_type_param_constraints,
+            &roundtrip_type_args,
+            &value_arg_values,
+            &mut expected_kernel_context,
+        )?;
+        let mut roundtrip_kernel_context = kernel_context.clone();
+        let actual_roundtrip = Self::deserialize_claim_with_args_parts(
+            roundtrip_function,
+            value_arg_values,
+            &mut roundtrip_kernel_context,
+        )?;
+        if actual_roundtrip.as_ref() != Some(&expected_roundtrip_claim) {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "{}: expected {:?}, got {:?}",
+                Self::claim_with_args_roundtrip_error(),
+                expected_roundtrip_claim,
+                actual_roundtrip
+            )));
+        }
+
         if value_decl_codes.is_empty() {
             if type_param_decl_codes.is_empty() {
                 let specialized = claim
@@ -292,38 +341,6 @@ impl ClaimCodec {
                 body_code,
                 value_arg_codes.join(", ")
             ));
-        }
-
-        let lambda_body_value = match &generic_value {
-            AcornValue::ForAll(_, body) => body.as_ref().clone(),
-            _ => generic_value.clone(),
-        };
-        let roundtrip_function = AcornValue::type_apply(
-            AcornValue::lambda(value_lambda_arg_types, lambda_body_value),
-            roundtrip_type_param_names.clone(),
-            roundtrip_type_param_constraints.clone(),
-            roundtrip_type_args.clone(),
-        );
-        let mut expected_kernel_context = kernel_context.clone();
-        let expected_roundtrip_claim = Self::expected_roundtrip_claim(
-            claim,
-            &roundtrip_type_args,
-            &value_arg_values,
-            &mut expected_kernel_context,
-        )?;
-        let mut roundtrip_kernel_context = kernel_context.clone();
-        let actual_roundtrip = Self::deserialize_claim_with_args_parts(
-            roundtrip_function,
-            value_arg_values,
-            &mut roundtrip_kernel_context,
-        )?;
-        if actual_roundtrip.as_ref() != Some(&expected_roundtrip_claim) {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "{}: expected {:?}, got {:?}",
-                Self::claim_with_args_roundtrip_error(),
-                expected_roundtrip_claim,
-                actual_roundtrip
-            )));
         }
 
         Ok(format!(
@@ -374,9 +391,12 @@ impl ClaimCodec {
         kernel_context: &mut KernelContext,
         allow_choose: bool,
     ) -> Result<Option<Claim>, CodeGenError> {
-        let mut evaluator = Evaluator::new_with_allow_choose(project, bindings, None, allow_choose);
-        let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
-        Self::try_deserialize_claim_value(value, kernel_context)
+        let Some(shape) = Self::split_claim_expression(expr) else {
+            return Ok(None);
+        };
+        let (function_value, args) =
+            Self::evaluate_claim_expression_shape(shape, project, bindings, allow_choose)?;
+        Self::claim_from_function_value(function_value, args, kernel_context).map(Some)
     }
 
     /// Build a plain claim from an already-lowered boolean term.
@@ -437,39 +457,26 @@ impl ClaimCodec {
         candidates.into_iter().next().map(|(_, ty)| ty)
     }
 
-    /// Rebuild the canonical claim defined by the current clause and argument codecs.
+    /// Rebuild the canonical claim defined by quote-clause plus per-argument lowering.
     fn expected_roundtrip_claim(
         claim: &Claim,
+        type_param_names: &[String],
+        type_param_constraints: &[Option<Typeclass>],
         type_args: &[AcornType],
         args: &[AcornValue],
         kernel_context: &mut KernelContext,
     ) -> Result<Claim, CodeGenError> {
-        let clause = Self::canonicalize_roundtrip_clause(claim.clause());
+        let quoted_clause = kernel_context.quote_clause(claim.clause(), None, None, false);
+        let type_var_map = Self::build_claim_type_var_map(
+            type_param_names,
+            type_param_constraints,
+            kernel_context,
+        );
+        let clause = kernel_context
+            .lower_clause(&quoted_clause, NewConstantType::Local, type_var_map)
+            .map_err(CodeGenError::GeneratedBadCode)?;
         let var_map = Self::build_claim_var_map(type_args, args, kernel_context)?;
         Self::claim_with_var_map(clause, var_map)
-    }
-
-    /// Canonicalize a clause into the exact literal shapes produced by `lower_clause`.
-    fn canonicalize_roundtrip_clause(clause: &Clause) -> Clause {
-        let literals = clause
-            .literals
-            .iter()
-            .map(Self::canonicalize_roundtrip_literal)
-            .collect();
-        Clause::from_literals_unnormalized(literals, clause.get_local_context())
-    }
-
-    /// Canonicalize one literal into the shape the clause codec currently reconstructs.
-    fn canonicalize_roundtrip_literal(literal: &Literal) -> Literal {
-        if literal.is_signed_term() {
-            if let Some(eq_args) = Self::split_symbol_application(&literal.left, Symbol::Eq, 3) {
-                if literal.positive {
-                    return Literal::equals(eq_args[1].clone(), eq_args[2].clone());
-                }
-                return Literal::not_equals(eq_args[1].clone(), eq_args[2].clone());
-            }
-        }
-        literal.clone()
     }
 
     /// Lower the claim function body as an exact quoted clause and combine it with lowered args.
@@ -488,31 +495,23 @@ impl ClaimCodec {
                 "argument count does not match function declaration".to_string(),
             ));
         }
-        if !function_value.type_param_names.is_empty()
-            && (function_value.type_param_names.len()
-                != function_value.type_param_constraints.len()
-                || function_value.type_param_names.len() != function_value.type_args.len())
+        if function_value.type_param_names.len() != function_value.type_param_constraints.len()
+            || function_value.type_param_names.len() != function_value.type_args.len()
         {
             return Err(CodeGenError::GeneratedBadCode(
                 "type-argument metadata does not match type argument count".to_string(),
             ));
         }
 
-        let (type_param_kinds, type_var_map) = Self::build_claim_type_param_kinds_and_map(
+        let type_var_map = Self::build_claim_type_var_map(
             &function_value.type_param_names,
             &function_value.type_param_constraints,
             kernel_context,
         );
         let generic_value = AcornValue::forall(function_value.arg_types, function_value.body);
-        let generic_term =
-            lower_value_to_term_existing(kernel_context, &generic_value, type_var_map.as_ref())?;
-        let generic_term = normalize_term(&generic_term);
-        let clause = Self::deserialize_claim_clause(
-            &generic_term,
-            &type_param_kinds,
-            kernel_context,
-            type_var_map,
-        )?;
+        let clause = kernel_context
+            .lower_clause(&generic_value, NewConstantType::Local, type_var_map)
+            .map_err(CodeGenError::GeneratedBadCode)?;
         Self::claim_with_args_from_clause(clause, &function_value.type_args, &args, kernel_context)
     }
 
@@ -529,30 +528,139 @@ impl ClaimCodec {
         Self::claim_from_function_value(function_shape, args, kernel_context).map(Some)
     }
 
-    /// Split an already-evaluated claim expression into a function half and argument list.
-    fn try_deserialize_claim_value(
-        value: AcornValue,
-        kernel_context: &mut KernelContext,
-    ) -> Result<Option<Claim>, CodeGenError> {
-        match value {
-            AcornValue::Application(app) => {
-                Self::deserialize_claim_with_args_parts(*app.function, app.args, kernel_context)
+    /// Split the surface claim expression into its function body and separately applied args.
+    fn split_claim_expression(expr: &Expression) -> Option<ClaimExpressionShape<'_>> {
+        let mut current = Self::strip_expression_groupings(expr);
+        let mut type_args = None;
+        let mut value_args = None;
+
+        while let Expression::Concatenation(function_expr, args_expr) = current {
+            let Expression::Grouping(left, inner, _) = args_expr.as_ref() else {
+                break;
+            };
+            match left.token_type {
+                TokenType::LeftParen => {
+                    if value_args.is_some() {
+                        return None;
+                    }
+                    value_args = Some(inner.flatten_comma_separated_list());
+                    current = Self::strip_expression_groupings(function_expr);
+                }
+                TokenType::LeftBracket | TokenType::LessThan => {
+                    if type_args.is_some() {
+                        return None;
+                    }
+                    type_args = Some(inner.flatten_comma_separated_list());
+                    current = Self::strip_expression_groupings(function_expr);
+                }
+                _ => break,
             }
-            other => Self::deserialize_claim_with_args_parts(other, vec![], kernel_context),
+        }
+
+        match current {
+            Expression::Binder(token, declarations, body, _)
+                if token.token_type == TokenType::Function && type_args.is_none() =>
+            {
+                Some(ClaimExpressionShape {
+                    type_params: &[],
+                    declarations,
+                    body,
+                    type_args: vec![],
+                    value_args: value_args.unwrap_or_default(),
+                })
+            }
+            Expression::GenericBinder(token, type_params, declarations, body, _)
+                if token.token_type == TokenType::Function =>
+            {
+                Some(ClaimExpressionShape {
+                    type_params,
+                    declarations,
+                    body,
+                    type_args: type_args.unwrap_or_default(),
+                    value_args: value_args.unwrap_or_default(),
+                })
+            }
+            _ => None,
         }
     }
 
-    /// Build both the type-parameter kind list and the lowering map for claim bodies.
-    fn build_claim_type_param_kinds_and_map(
+    /// Evaluate a structurally split claim expression without collapsing body and args together.
+    fn evaluate_claim_expression_shape(
+        shape: ClaimExpressionShape<'_>,
+        project: &Project,
+        bindings: &BindingMap,
+        allow_choose: bool,
+    ) -> Result<(ClaimFunctionValue, Vec<AcornValue>), CodeGenError> {
+        let mut type_param_evaluator =
+            Evaluator::new_with_allow_choose(project, bindings, None, allow_choose);
+        let type_params = type_param_evaluator.evaluate_type_params(shape.type_params)?;
+
+        let mut scoped_bindings = bindings.clone();
+        for type_param in &type_params {
+            scoped_bindings.add_arbitrary_type(type_param.clone());
+        }
+
+        let mut evaluator =
+            Evaluator::new_with_allow_choose(project, &scoped_bindings, None, allow_choose);
+        let type_args = shape
+            .type_args
+            .iter()
+            .map(|expr| evaluator.evaluate_type(expr))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut stack = Stack::new();
+        let (arg_names, arg_types) = evaluator.bind_args(&mut stack, shape.declarations, None)?;
+        let body =
+            evaluator.evaluate_value_with_stack(&mut stack, shape.body, Some(&AcornType::Bool))?;
+        stack.remove_all(&arg_names);
+
+        if shape.value_args.len() != arg_types.len() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "argument count does not match function declaration".to_string(),
+            ));
+        }
+
+        let substitutions: Vec<(String, AcornType)> = type_params
+            .iter()
+            .map(|param| param.name.clone())
+            .zip(type_args.iter().cloned())
+            .collect();
+        let specialized_arg_types: Vec<AcornType> = arg_types
+            .iter()
+            .map(|arg_type| arg_type.instantiate(&substitutions))
+            .collect();
+        let mut arg_evaluator =
+            Evaluator::new_with_allow_choose(project, &scoped_bindings, None, allow_choose);
+        let args = shape
+            .value_args
+            .iter()
+            .zip(specialized_arg_types.iter())
+            .map(|(expr, arg_type)| arg_evaluator.evaluate_value(expr, Some(arg_type)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let function_value = ClaimFunctionValue {
+            type_param_names: type_params.iter().map(|param| param.name.clone()).collect(),
+            type_param_constraints: type_params
+                .iter()
+                .map(|param| param.typeclass.clone())
+                .collect(),
+            type_args,
+            arg_types,
+            body,
+        };
+        Ok((function_value, args))
+    }
+
+    /// Build the lowering map that turns type parameter names into free type variables.
+    fn build_claim_type_var_map(
         type_param_names: &[String],
         type_param_constraints: &[Option<Typeclass>],
         kernel_context: &mut KernelContext,
-    ) -> (Vec<Term>, Option<HashMap<String, (AtomId, Term)>>) {
+    ) -> Option<HashMap<String, (AtomId, Term)>> {
         if type_param_names.is_empty() {
-            return (vec![], None);
+            return None;
         }
 
-        let mut kinds = vec![];
         let mut map = HashMap::new();
         for (i, (name, constraint)) in type_param_names
             .iter()
@@ -565,10 +673,9 @@ impl ClaimCodec {
             } else {
                 Term::type_sort()
             };
-            kinds.push(var_type.clone());
             map.insert(name.clone(), (i as AtomId, var_type));
         }
-        (kinds, Some(map))
+        Some(map)
     }
 
     /// Recover the unevaluated generic lambda structure from the function half of a claim line.
@@ -589,7 +696,13 @@ impl ClaimCodec {
                     arg_types,
                     body: *body,
                 }),
-                _ => None,
+                body => Some(ClaimFunctionValue {
+                    type_param_names: type_app.type_param_names,
+                    type_param_constraints: type_app.type_param_constraints,
+                    type_args: type_app.type_args,
+                    arg_types: vec![],
+                    body,
+                }),
             },
             _ => None,
         }
@@ -732,47 +845,6 @@ impl ClaimCodec {
         Ok(var_map)
     }
 
-    /// Reconstruct the checker-facing claim clause from the lowered generic term.
-    fn deserialize_claim_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-        kernel_context: &mut KernelContext,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Result<Clause, CodeGenError> {
-        if Self::term_has_inline_clause_shape(generic_term, true) {
-            return Ok(
-                Self::try_deserialize_inline_clause(generic_term, type_param_kinds)
-                    .expect("inline clause shape should deserialize"),
-            );
-        }
-        if Self::should_preserve_single_literal_claim(generic_term) {
-            if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
-            {
-                return Ok(clause);
-            }
-        }
-
-        let clauses = kernel_context.term_to_checker_clauses(generic_term, type_var_map)?;
-        if clauses.len() != 1 {
-            if let Some(clause) =
-                Self::try_deserialize_single_literal_clause(generic_term, type_param_kinds)
-            {
-                return Ok(clause);
-            }
-            if let Some(clause) =
-                Self::try_deserialize_single_formula_clause(generic_term, type_param_kinds)
-            {
-                return Ok(clause);
-            }
-            return Err(CodeGenError::GeneratedBadCode(
-                "claim-with-args body did not lower to a single claim clause".to_string(),
-            ));
-        }
-
-        Ok(clauses.into_iter().next().expect("clauses has one element"))
-    }
-
     /// Construct a claim that has no extra argument map entries.
     fn claim_from_clause(clause: Clause) -> Result<Claim, CodeGenError> {
         Claim::new(clause, VariableMap::new()).map_err(CodeGenError::GeneratedBadCode)
@@ -781,6 +853,15 @@ impl ClaimCodec {
     /// Construct a claim from a clause and an explicit variable map.
     fn claim_with_var_map(clause: Clause, var_map: VariableMap) -> Result<Claim, CodeGenError> {
         Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)
+    }
+
+    /// Remove top-level parentheses around a claim expression without touching its internals.
+    fn strip_expression_groupings(expr: &Expression) -> &Expression {
+        let mut current = expr;
+        while let Expression::Grouping(_, inner, _) = current {
+            current = inner;
+        }
+        current
     }
 
     /// Detect when a plain claim must preserve its single-literal shape.
@@ -798,27 +879,6 @@ impl ClaimCodec {
             || args[0]
                 .iter_atoms()
                 .any(|atom| matches!(atom, Atom::FreeVariable(_) | Atom::BoundVariable(_)))
-    }
-
-    /// Detect when the claim body is already an inline clause-shaped boolean formula.
-    fn term_has_inline_clause_shape(term: &Term, positive: bool) -> bool {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::term_has_inline_clause_shape(&args[0], !positive);
-        }
-
-        if positive {
-            if Self::split_symbol_application(term, Symbol::Or, 2).is_some() {
-                return true;
-            }
-        } else if Self::split_symbol_application(term, Symbol::And, 2).is_some() {
-            return true;
-        }
-
-        if let Some((_binder_type, body)) = term.as_ref().split_forall() {
-            return Self::term_has_inline_clause_shape(&body.to_owned(), positive);
-        }
-
-        false
     }
 
     /// Strip leading `forall`s when checking whether a plain claim should stay literal-shaped.
@@ -853,53 +913,6 @@ impl ClaimCodec {
             vec![literal],
             &local_context,
         ))
-    }
-
-    /// Rebuild a single signed formula clause when no finer checker clause form exists.
-    fn try_deserialize_single_formula_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-        Some(Clause::from_literals_unnormalized(
-            vec![Literal::positive(body)],
-            &local_context,
-        ))
-    }
-
-    /// Rebuild an inline disjunction into the exact checker literal list.
-    fn try_deserialize_inline_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-
-        let literals = Self::try_term_to_inline_clause_literals(&body, true)?;
-        Some(Clause::from_literals_unnormalized(literals, &local_context))
     }
 
     /// Detect whether a quoted plain-claim clause still mentions its local variables.
@@ -947,38 +960,6 @@ impl ClaimCodec {
             return None;
         }
         Some(Literal::positive(term.clone()))
-    }
-
-    /// Flatten one inline boolean formula into the checker literal list it represents.
-    fn try_term_to_inline_clause_literals(term: &Term, positive: bool) -> Option<Vec<Literal>> {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            return Self::try_term_to_inline_clause_literals(&args[0], !positive);
-        }
-
-        if positive {
-            if let Some(args) = Self::split_symbol_application(term, Symbol::Or, 2) {
-                let mut literals = Self::try_term_to_inline_clause_literals(&args[0], true)?;
-                literals.extend(Self::try_term_to_inline_clause_literals(&args[1], true)?);
-                return Some(literals);
-            }
-        } else if let Some(args) = Self::split_symbol_application(term, Symbol::And, 2) {
-            let mut literals = Self::try_term_to_inline_clause_literals(&args[0], false)?;
-            literals.extend(Self::try_term_to_inline_clause_literals(&args[1], false)?);
-            return Some(literals);
-        }
-
-        if positive {
-            if let Some(literal) = Self::try_term_to_single_checker_literal(term) {
-                return Some(vec![literal]);
-            }
-            return Some(vec![Literal::positive(term.clone())]);
-        }
-
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
-            return Some(vec![Literal::not_equals(args[1].clone(), args[2].clone())]);
-        }
-
-        Some(vec![Literal::negative(term.clone())])
     }
 
     /// Return the fixed roundtrip error prefix for claim-with-args serialization.

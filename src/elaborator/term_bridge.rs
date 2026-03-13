@@ -914,7 +914,11 @@ impl<'a> TermBridge<'a> {
             .map(|type_term| {
                 self.kernel_context
                     .type_store
-                    .type_term_to_acorn_type(type_term)
+                    .type_term_to_acorn_type_with_context(
+                        type_term,
+                        local_context,
+                        instantiate_type_vars,
+                    )
             })
             .collect();
 
@@ -975,7 +979,7 @@ impl<'a> TermBridge<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elaborator::acorn_type::AcornType;
+    use crate::elaborator::acorn_type::{AcornType, TypeParam};
     use crate::kernel::kernel_context::KernelContext;
 
     #[test]
@@ -1010,6 +1014,46 @@ mod tests {
             ),
         );
         assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_quote_clause_preserves_typeclass_constraints_in_binder_types() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_typeclass("Group");
+        let group = kernel_context
+            .type_store
+            .get_typeclass_by_id(
+                kernel_context
+                    .type_store
+                    .get_typeclass_id_by_name("Group")
+                    .expect("Group typeclass should exist"),
+            )
+            .expect("Group typeclass should resolve")
+            .clone();
+        let clause = kernel_context.parse_clause("x1(x2)", &["Group", "x0 -> Bool", "x0"]);
+
+        let value = kernel_context.quote_clause(&clause, None, None, false);
+        let AcornValue::ForAll(arg_types, _) = value else {
+            panic!("quoted clause should keep value locals in a forall binder");
+        };
+        assert_eq!(arg_types.len(), 2);
+        assert_eq!(
+            arg_types[0],
+            AcornType::functional(
+                vec![AcornType::Variable(TypeParam {
+                    name: "T0".to_string(),
+                    typeclass: Some(group.clone()),
+                })],
+                AcornType::Bool,
+            )
+        );
+        assert_eq!(
+            arg_types[1],
+            AcornType::Variable(TypeParam {
+                name: "T0".to_string(),
+                typeclass: Some(group),
+            })
+        );
     }
 
     #[test]

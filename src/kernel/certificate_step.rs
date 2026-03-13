@@ -1,9 +1,10 @@
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
+use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::term_normalization::{normalize_clause_subterms, normalize_term};
-use crate::kernel::variable_map::VariableMap;
+use crate::kernel::variable_map::{apply_to_term, VariableMap};
 
 /// A certificate claim line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,15 +20,28 @@ impl Claim {
     /// Build a certificate claim pair in its canonical certificate form.
     ///
     /// The stored `clause` is the normalized generic theorem/pattern clause, and each mapped
-    /// term in the `var_map` is term-normalized.
-    ///
-    /// Unlike full clause normalization, this keeps all existing local-variable slots fixed in
-    /// place so `(clause, var_map)` round-trips remain stable for certificates.
-    pub fn new(mut clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {
-        clause = clause.normalized_preserving_locals();
+    /// term in the `var_map` is term-normalized and rewritten to the clause's normalized
+    /// variable numbering.
+    pub fn new(clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {
+        let trace =
+            Clause::normalize_with_trace(clause.literals.clone(), clause.get_local_context());
         var_map.apply_to_all(normalize_term);
+        let renumber_map = VariableMap::from_var_ids(&trace.var_ids);
+        let mut normalized_var_map = VariableMap::new();
+        for (new_id, old_id) in trace.var_ids.iter().enumerate() {
+            let Some(term) = var_map.get_mapping(*old_id) else {
+                continue;
+            };
+            normalized_var_map.set(
+                new_id as AtomId,
+                apply_to_term(term.as_ref(), &renumber_map),
+            );
+        }
 
-        let claim = Claim { clause, var_map };
+        let claim = Claim {
+            clause: trace.clause,
+            var_map: normalized_var_map,
+        };
         claim.validate_var_map_scope()?;
         Ok(claim)
     }
@@ -62,7 +76,7 @@ impl Claim {
     }
 
     pub fn normalized_generic_clause(&self) -> Clause {
-        self.clause.normalized()
+        self.clause.clone()
     }
 
     /// Apply the claim's substitutions without normalizing the resulting clause.
@@ -133,11 +147,11 @@ mod tests {
     use crate::kernel::term::Term;
 
     #[test]
-    fn test_claim_new_preserves_local_slots_and_normalizes_var_map_terms() {
+    fn test_claim_new_normalizes_var_map_terms() {
         let clause = Clause::from_literals_unnormalized(
             vec![Literal::positive(Term::eq(
                 Term::bool_type(),
-                Term::new_variable(1),
+                Term::new_variable(0),
                 Term::new_variable(1),
             ))],
             &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
@@ -152,6 +166,31 @@ mod tests {
         assert_eq!(claim.clause.get_local_context().len(), 2);
         assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_false()));
         assert_eq!(claim.var_map.get_mapping(1), Some(&Term::new_true()));
+    }
+
+    #[test]
+    fn test_claim_new_renumbers_var_map_to_match_normalized_clause() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constant("g0", "(Bool, Bool) -> Bool");
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(
+                kernel_context
+                    .parse_term("g0")
+                    .apply(&[Term::new_variable(1), Term::new_variable(0)]),
+            )],
+            &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
+        );
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_false());
+        var_map.set(1, Term::new_true());
+
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
+
+        let expected = kernel_context.parse_clause("g0(x0, x1)", &["Bool", "Bool"]);
+
+        assert_eq!(claim.normalized_generic_clause(), expected);
+        assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_true()));
+        assert_eq!(claim.var_map.get_mapping(1), Some(&Term::new_false()));
     }
 
     #[test]

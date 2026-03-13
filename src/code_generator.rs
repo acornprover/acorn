@@ -42,6 +42,49 @@ pub struct CodeGenerator<'a> {
 }
 
 impl CodeGenerator<'_> {
+    /// Render a binary expression while preserving the operand grouping required by precedence.
+    fn value_to_binary_expr(
+        &mut self,
+        op: BinaryOp,
+        left: &AcornValue,
+        right: &AcornValue,
+    ) -> Result<Expression> {
+        let mut left_expr = self.value_to_expr(left, false)?;
+        let mut right_expr = self.value_to_expr(right, false)?;
+        let token = op.token_type().generate();
+        let paren = |expr: Expression| {
+            Expression::Grouping(
+                TokenType::LeftParen.generate(),
+                Box::new(expr),
+                TokenType::RightParen.generate(),
+            )
+        };
+
+        if let AcornValue::Binary(left_op, _, _) = left {
+            if left_op.token_type().binary_precedence() < op.token_type().binary_precedence() {
+                left_expr = paren(left_expr);
+            }
+        }
+        if let AcornValue::IfThenElse(_, _, _) = left {
+            left_expr = paren(left_expr);
+        }
+
+        if let AcornValue::Binary(right_op, _, _) = right {
+            if right_op.token_type().binary_precedence() <= op.token_type().binary_precedence() {
+                right_expr = paren(right_expr);
+            }
+        }
+        if let AcornValue::IfThenElse(_, _, _) = right {
+            right_expr = paren(right_expr);
+        }
+
+        Ok(Expression::Binary(
+            Box::new(left_expr),
+            token,
+            Box::new(right_expr),
+        ))
+    }
+
     fn ensure_explicit_inhabitant_for_type(
         kernel_context: &KernelContext,
         concrete_type: &Term,
@@ -1507,51 +1550,11 @@ impl CodeGenerator<'_> {
                     Box::new(grouped_args),
                 ))
             }
-            AcornValue::Binary(op, left, right) => {
-                let mut left_expr = self.value_to_expr(left, false)?;
-                let mut right_expr = self.value_to_expr(right, false)?;
-                let token = op.token_type().generate();
-                let paren = |expr: Expression| {
-                    Expression::Grouping(
-                        TokenType::LeftParen.generate(),
-                        Box::new(expr),
-                        TokenType::RightParen.generate(),
-                    )
-                };
-
-                if let AcornValue::Binary(left_op, _, _) = left.as_ref() {
-                    if left_op.token_type().binary_precedence()
-                        < op.token_type().binary_precedence()
-                    {
-                        // We want the left op to happen first, but its precedence is lower.
-                        // So we wrap the left expression in parentheses.
-                        left_expr = paren(left_expr);
-                    }
-                }
-                if let AcornValue::IfThenElse(_, _, _) = left.as_ref() {
-                    left_expr = paren(left_expr);
-                }
-
-                if let AcornValue::Binary(right_op, _, _) = right.as_ref() {
-                    if right_op.token_type().binary_precedence()
-                        <= op.token_type().binary_precedence()
-                    {
-                        // We want the right op to happen first, but its precedence is not higher.
-                        // So we wrap the right expression in parentheses.
-                        right_expr = paren(right_expr);
-                    }
-                }
-                if let AcornValue::IfThenElse(_, _, _) = right.as_ref() {
-                    right_expr = paren(right_expr);
-                }
-
-                Ok(Expression::Binary(
-                    Box::new(left_expr),
-                    token,
-                    Box::new(right_expr),
-                ))
-            }
+            AcornValue::Binary(op, left, right) => self.value_to_binary_expr(*op, left, right),
             AcornValue::Not(x) => {
+                if let AcornValue::Binary(BinaryOp::Equals, left, right) = x.as_ref() {
+                    return self.value_to_binary_expr(BinaryOp::NotEquals, left, right);
+                }
                 let x = self.value_to_expr(x, false)?;
                 Ok(Expression::generate_unary(TokenType::Not, x))
             }
@@ -2543,6 +2546,22 @@ instance Foo: Mul {
             "#,
         );
         p.check_goal_code("main", "goal", "(if a { b } else { b }) != b");
+    }
+
+    #[test]
+    fn test_codegen_uses_not_equals_for_nested_negative_equality() {
+        let mut p = Project::new_mock();
+        p.mock(
+            "/mock/main.ac",
+            r#"
+            type Nat: axiom
+
+            theorem goal(a: Nat, b: Nat, p: Bool) {
+                not (p and not (a = b))
+            }
+            "#,
+        );
+        p.check_goal_code("main", "goal", "not (p and a != b)");
     }
 
     #[test]
