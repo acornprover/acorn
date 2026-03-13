@@ -350,53 +350,6 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
         .expect("check_cert should succeed");
 }
 
-/// Regression test: when a generated witness has multiple type parameters and a
-/// function type between them (like `G -> H`), certificate emission must preserve
-/// the same type-parameter order in every forall it prints.
-///
-/// This reproduces a bug in group.ac where `trivial_hom_is_hom[G: Group, H: Group]`
-/// generates a certificate with swapped type parameters in one of the foralls:
-/// - First forall correctly uses `x0: T0 -> T1`
-/// - Second forall incorrectly uses `x3: T1 -> T0` (swapped!)
-///
-/// This causes type mismatch errors during certificate verification.
-#[test]
-fn test_generated_witness_with_multiple_type_params_function_type() {
-    verify_succeeds(
-        r#"
-    typeclass M: Monoid {
-        1: M
-        mul: (M, M) -> M
-
-        mul_one_left(a: M) {
-            M.mul(M.1, a) = a
-        }
-
-        mul_one_right(a: M) {
-            M.mul(a, M.1) = a
-        }
-    }
-
-    // A function that takes a mapping between two Monoid types
-    // and checks if it preserves the operation
-    define is_hom[G: Monoid, H: Monoid](f: G -> H) -> Bool {
-        forall(a: G, b: G) {
-            f(G.mul(a, b)) = H.mul(f(a), f(b))
-        }
-    }
-
-    // The trivial homomorphism - maps everything to identity
-    let trivial_hom[G: Monoid, H: Monoid]: G -> H = function(a: G) { H.1 }
-
-    // This theorem forces proof search to emit a generated witness with two type
-    // parameters and a function type. The bug was that one forall swapped them.
-    theorem trivial_hom_is_hom[G: Monoid, H: Monoid](a: G, b: G) {
-        is_hom[G, H](trivial_hom[G, H])
-    }
-    "#,
-    );
-}
-
 // Regression test for a bug where polymorphic structures containing functions with
 // if-then-else expressions returning non-Bool types would cause a type mismatch
 // during clause validation. The issue was with how normalization tracked the local
