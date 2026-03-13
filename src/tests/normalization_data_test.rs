@@ -8,6 +8,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Rule, Truthiness};
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
+use crate::kernel::variable_map::VariableMap;
 use crate::module::{LoadState, ModuleId};
 use crate::project::Project;
 use crate::prover::active_set::ActiveSet;
@@ -28,6 +29,12 @@ struct CertLineCase {
     name: &'static str,
     code: &'static str,
     line: &'static str,
+}
+
+struct ClaimRoundtripCase {
+    name: &'static str,
+    code: &'static str,
+    build: fn(&KernelContext) -> crate::kernel::certificate_step::Claim,
 }
 
 struct ProverClauseInput {
@@ -158,6 +165,26 @@ const CERT_LINE_CASES: &[CertLineCase] = &[
         line: "function(x0: Foo) { g(x0) != f }(a)",
     },
 ];
+
+fn build_claim_with_dependent_value_arg(
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    let clause = kernel_context.parse_clause("x0 = x1", &["Bool", "Bool"]);
+    let mut var_map = VariableMap::new();
+    var_map.set(0, Term::new_false());
+    var_map.set(1, Term::new_variable(0));
+    crate::kernel::certificate_step::Claim::new(clause, var_map).expect("claim should normalize")
+}
+
+const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[ClaimRoundtripCase {
+    name: "dependent_value_arg",
+    code: r#"
+        theorem goal {
+            true
+        }
+    "#,
+    build: build_claim_with_dependent_value_arg,
+}];
 
 fn setup_bool_resolution(kernel_context: &mut KernelContext) {
     kernel_context.parse_constants(&["c0", "c1", "c2"], "Bool");
@@ -519,6 +546,24 @@ fn test_cert_line_normalization_cases() {
             serialized, serialized_again,
             "claim serialization should be idempotent for case `{}`",
             case.name
+        );
+    }
+}
+
+#[test]
+fn test_claim_roundtrip_normalization_cases() {
+    for case in CLAIM_ROUNDTRIP_CASES {
+        let (_project, bindings, kernel_context) = load_mock_module(case.code);
+        let claim = (case.build)(&kernel_context);
+        assert_claim_is_already_normalized(&claim, &kernel_context, case.name, "constructed");
+
+        let serialized = serialize_claim_line(&claim, &bindings, &kernel_context);
+        let (_project2, _bindings2, _kernel2, reparsed) = parse_claim_line(case.code, &serialized);
+        assert_claim_is_already_normalized(&reparsed, &kernel_context, case.name, "reparsed");
+        assert_eq!(
+            reparsed, claim,
+            "claim serialization should preserve canonical claim for case `{}`",
+            case.name,
         );
     }
 }
