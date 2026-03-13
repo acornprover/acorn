@@ -1,19 +1,36 @@
-//! Kernel term normalization is the base normalization layer for semantic terms.
+//! Kernel term normalization is only one part of the surface/kernel contract.
 //!
-//! The normalization model has three distinct operations:
+//! The full model is documented in `docs/normalization.md`. At a high level, the layer
+//! transitions are:
 //!
-//! 1. Term normalization
-//!    This module owns the recursive, structure-preserving normalization of [`Term`]s.
-//!    It must normalize every subterm of a normalized term.
-//! 2. Theorem lowering
-//!    This is a stronger top-level transformation that opens leading universal binders
-//!    and lowers clause-shaped propositions to clauses. It does not belong in this file.
-//! 3. Clause normalization
-//!    This normalizes already-open clauses, including literal ordering, deduplication,
-//!    and best-effort free-variable renumbering. It builds on term normalization but
-//!    does not belong in this file.
+//! - `parse: String -> Expression`
+//! - `elaborate: Expression -> AcornValue`
+//! - `lower_term: AcornValue -> Term`
+//! - `lower_theorem: theorem-shaped AcornValue -> Vec<Clause>`
+//! - `lower_proposition: proposition-shaped AcornValue -> Vec<Clause>`
+//! - `lower_clause: clause-shaped AcornValue -> Clause`
+//! - `quote_term: Term -> AcornValue`
+//! - `quote_clause: Clause -> AcornValue`
 //!
-//! The global normalization requirements are:
+//! This file owns only the recursive, structure-preserving normalization of [`Term`]s.
+//! It must normalize every subterm of a normalized term.
+//!
+//! It does not own:
+//!
+//! - theorem lowering (`lower_theorem`)
+//! - proposition lowering (`lower_proposition`)
+//! - clause lowering (`lower_clause`)
+//! - clause normalization
+//! - surface quoting or code generation
+//!
+//! The system-wide exact roundtrip contract is for normalized clauses:
+//!
+//! - `lower_clause(quote_clause(c)) == c`
+//!
+//! Theorem lowering and proposition lowering are semantic lowerings and are not required to be
+//! exact inverses of quoting.
+//!
+//! The global requirements are:
 //!
 //! - Every `ProofStep` must have its clause normalized.
 //! - In a normalized term or clause, every subterm must also be normalized.
@@ -26,8 +43,6 @@
 //! - Clause normalization may deterministically renumber free variables to a preferred
 //!   numbering, but this is best-effort only.
 //! - Normalization must be idempotent.
-//!
-//! This file is the source of truth for the term-normalization part of that contract.
 use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::literal::Literal;

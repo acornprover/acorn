@@ -184,7 +184,7 @@ pub struct Builder<'a> {
     /// Don't set it from within the language server.
     pub print_proof: bool,
 
-    /// Print every activated clause in denormalized source syntax after a search.
+    /// Print every activated clause in quoted source syntax after a search.
     /// Don't set it from within the language server.
     pub verbose: bool,
 

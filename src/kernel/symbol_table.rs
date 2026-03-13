@@ -83,7 +83,7 @@ pub enum NewConstantType {
 }
 
 /// Info about a polymorphic constant's generic type structure.
-/// Used to properly denormalize constants.
+/// Used to properly quote constants.
 #[derive(Clone, Debug)]
 pub struct PolymorphicInfo {
     /// The generic type with type Variables (not Arbitrary types).
@@ -132,7 +132,7 @@ pub struct SymbolTable {
     instance_to_symbol: ImHashMap<ConstantInstance, Symbol>,
 
     /// Maps polymorphic constant names to their generic type info.
-    /// Used to properly denormalize constants.
+    /// Used to properly quote constants.
     polymorphic_info: ImHashMap<ConstantName, PolymorphicInfo>,
 
     /// Metadata for datatype match eliminators (`Type.match`) used to reconstruct

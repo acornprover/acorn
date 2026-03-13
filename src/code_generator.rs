@@ -70,7 +70,7 @@ impl CodeGenerator<'_> {
         local_context: &LocalContext,
     ) -> Result<Term> {
         let acorn_type =
-            kernel_context.denormalize_type_with_context(var_type.clone(), local_context, true);
+            kernel_context.quote_type_with_context(var_type.clone(), local_context, true);
         kernel_context
             .type_store
             .get_type_term(&acorn_type)
@@ -874,7 +874,7 @@ impl CodeGenerator<'_> {
                 let clause = claim
                     .specialized_clause_for_display(kernel_context)
                     .map_err(Error::GeneratedBadCode)?;
-                let value = kernel_context.denormalize(&clause, None, None, true);
+                let value = kernel_context.quote_clause(&clause, None, None, true);
                 self.value_to_code(&value)
             }
             CertificateStep::Satisfy(step) => self.satisfy_step_to_code(step),

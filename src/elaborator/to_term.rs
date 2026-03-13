@@ -42,12 +42,12 @@ pub fn build_type_var_map(
         .collect()
 }
 
-/// Elaborates an `AcornType` into a kernel `Term`.
+/// Lowers an `AcornType` into a kernel `Term`.
 ///
 /// This handles:
 /// - registering any needed ground/typeclass IDs in `TypeStore`
 /// - converting generic type parameters via `type_var_map` into `FreeVariable`s
-pub fn elaborate_type_to_term(
+pub fn lower_type_to_term(
     kernel_context: &mut KernelContext,
     acorn_type: &AcornType,
     type_var_map: Option<&TypeVarMap>,
@@ -84,16 +84,16 @@ fn register_typeclasses(kernel_context: &mut KernelContext, acorn_type: &AcornTy
     }
 }
 
-/// Elaborates an `AcornValue` into a kernel `Term`.
+/// Lowers an `AcornValue` into a kernel `Term`.
 ///
-/// This is a term-level elaboration pass:
+/// This is a term-level lowering pass:
 /// - registers referenced types/constants in the kernel tables
 /// - lowers logical connectives to built-in logical atoms
 /// - lowers `if` into builtin `ite`
 /// - lowers `match` into datatype eliminator application (`Type.match`)
 ///
 /// The result is intended to be logically lossless, not syntactically identical.
-pub fn elaborate_value_to_term(
+pub fn lower_value_to_term(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
     ctype: NewConstantType,
@@ -103,22 +103,22 @@ pub fn elaborate_value_to_term(
         .symbol_table
         .add_from(value, ctype, &mut kernel_context.type_store);
 
-    elaborate_value_to_term_existing(kernel_context, value, type_var_map)
+    lower_value_to_term_existing(kernel_context, value, type_var_map)
 }
 
-/// Elaborates an `AcornValue` into a kernel `Term` assuming symbols are already registered.
+/// Lowers an `AcornValue` into a kernel `Term` assuming symbols are already registered.
 ///
 /// This does not call `symbol_table.add_from(...)`; unknown constants will fail elaboration.
-pub fn elaborate_value_to_term_existing(
+pub fn lower_value_to_term_existing(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
     type_var_map: Option<&TypeVarMap>,
 ) -> Result<Term, String> {
     let mut stack = vec![];
-    elaborate_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
+    lower_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
 }
 
-fn elaborate_value_to_term_with_stack(
+fn lower_value_to_term_with_stack(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
     type_var_map: Option<&TypeVarMap>,
@@ -150,15 +150,11 @@ fn elaborate_value_to_term_with_stack(
         }
 
         AcornValue::Application(app) => {
-            let function_term = elaborate_value_to_term_with_stack(
-                kernel_context,
-                &app.function,
-                type_var_map,
-                stack,
-            )?;
+            let function_term =
+                lower_value_to_term_with_stack(kernel_context, &app.function, type_var_map, stack)?;
             let mut arg_terms = Vec::with_capacity(app.args.len());
             for arg in &app.args {
-                arg_terms.push(elaborate_value_to_term_with_stack(
+                arg_terms.push(lower_value_to_term_with_stack(
                     kernel_context,
                     arg,
                     type_var_map,
@@ -170,7 +166,7 @@ fn elaborate_value_to_term_with_stack(
 
         AcornValue::TypeApplication(app) => {
             let instantiated = app.instantiated_function();
-            elaborate_value_to_term_with_stack(kernel_context, &instantiated, type_var_map, stack)
+            lower_value_to_term_with_stack(kernel_context, &instantiated, type_var_map, stack)
         }
 
         AcornValue::Lambda(arg_types, body) => elaborate_binder_to_term(
@@ -201,8 +197,7 @@ fn elaborate_value_to_term_with_stack(
         ),
 
         AcornValue::Choose(choice_type, body) => {
-            let choice_type_term =
-                elaborate_type_to_term(kernel_context, choice_type, type_var_map);
+            let choice_type_term = lower_type_to_term(kernel_context, choice_type, type_var_map);
             let predicate = elaborate_binder_to_term(
                 kernel_context,
                 std::slice::from_ref(choice_type),
@@ -216,9 +211,9 @@ fn elaborate_value_to_term_with_stack(
 
         AcornValue::Binary(op, left, right) => {
             let left_term =
-                elaborate_value_to_term_with_stack(kernel_context, left, type_var_map, stack)?;
+                lower_value_to_term_with_stack(kernel_context, left, type_var_map, stack)?;
             let right_term =
-                elaborate_value_to_term_with_stack(kernel_context, right, type_var_map, stack)?;
+                lower_value_to_term_with_stack(kernel_context, right, type_var_map, stack)?;
 
             match op {
                 BinaryOp::And => Ok(logical_head(Symbol::And).apply(&[left_term, right_term])),
@@ -230,13 +225,13 @@ fn elaborate_value_to_term_with_stack(
                 }
                 BinaryOp::Equals => {
                     let eq_type =
-                        elaborate_type_to_term(kernel_context, &left.get_type(), type_var_map);
+                        lower_type_to_term(kernel_context, &left.get_type(), type_var_map);
                     Ok(logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]))
                 }
                 BinaryOp::NotEquals => {
                     // Logically lossless sugar: (a != b) = not (a = b).
                     let eq_type =
-                        elaborate_type_to_term(kernel_context, &left.get_type(), type_var_map);
+                        lower_type_to_term(kernel_context, &left.get_type(), type_var_map);
                     let eq_term = logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]);
                     Ok(logical_head(Symbol::Not).apply(&[eq_term]))
                 }
@@ -245,7 +240,7 @@ fn elaborate_value_to_term_with_stack(
 
         AcornValue::Not(subvalue) => {
             let sub_term =
-                elaborate_value_to_term_with_stack(kernel_context, subvalue, type_var_map, stack)?;
+                lower_value_to_term_with_stack(kernel_context, subvalue, type_var_map, stack)?;
             Ok(logical_head(Symbol::Not).apply(&[sub_term]))
         }
 
@@ -263,21 +258,13 @@ fn elaborate_value_to_term_with_stack(
 
         AcornValue::IfThenElse(cond, then_value, else_value) => {
             let cond_term =
-                elaborate_value_to_term_with_stack(kernel_context, cond, type_var_map, stack)?;
-            let then_term = elaborate_value_to_term_with_stack(
-                kernel_context,
-                then_value,
-                type_var_map,
-                stack,
-            )?;
-            let else_term = elaborate_value_to_term_with_stack(
-                kernel_context,
-                else_value,
-                type_var_map,
-                stack,
-            )?;
+                lower_value_to_term_with_stack(kernel_context, cond, type_var_map, stack)?;
+            let then_term =
+                lower_value_to_term_with_stack(kernel_context, then_value, type_var_map, stack)?;
+            let else_term =
+                lower_value_to_term_with_stack(kernel_context, else_value, type_var_map, stack)?;
             let value_type =
-                elaborate_type_to_term(kernel_context, &then_value.get_type(), type_var_map);
+                lower_type_to_term(kernel_context, &then_value.get_type(), type_var_map);
             Ok(logical_head(Symbol::Ite).apply(&[value_type, cond_term, then_term, else_term]))
         }
 
@@ -304,7 +291,7 @@ fn elaborate_binder_to_term(
 ) -> Result<Term, String> {
     let binder_type_terms: Vec<Term> = binder_types
         .iter()
-        .map(|t| elaborate_type_to_term(kernel_context, t, type_var_map))
+        .map(|t| lower_type_to_term(kernel_context, t, type_var_map))
         .collect();
 
     let num_new = binder_types.len();
@@ -322,7 +309,7 @@ fn elaborate_binder_to_term(
         stack.push(bound);
     }
 
-    let body_term = elaborate_value_to_term_with_stack(kernel_context, body, type_var_map, stack)?;
+    let body_term = lower_value_to_term_with_stack(kernel_context, body, type_var_map, stack)?;
 
     stack.truncate(old_len);
     for existing in stack.iter_mut() {
@@ -376,16 +363,16 @@ fn lower_match_to_term(
 
     let mut type_arg_terms: Vec<Term> = data_type_args
         .iter()
-        .map(|t| elaborate_type_to_term(kernel_context, t, type_var_map))
+        .map(|t| lower_type_to_term(kernel_context, t, type_var_map))
         .collect();
-    type_arg_terms.push(elaborate_type_to_term(
+    type_arg_terms.push(lower_type_to_term(
         kernel_context,
         &result_type,
         type_var_map,
     ));
 
     let scrutinee_term =
-        elaborate_value_to_term_with_stack(kernel_context, scrutinee, type_var_map, stack)?;
+        lower_value_to_term_with_stack(kernel_context, scrutinee, type_var_map, stack)?;
 
     let mut sorted_cases = cases.to_vec();
     sorted_cases.sort_by_key(|case| case.constructor_index);
@@ -488,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_type_to_term_generic_function() {
+    fn test_lower_type_to_term_generic_function() {
         let mut kernel_context = KernelContext::new();
         let params = vec![
             TypeParam {
@@ -505,7 +492,7 @@ mod tests {
         let t = AcornType::Variable(params[0].clone());
         let u = AcornType::Variable(params[1].clone());
         let acorn_type = AcornType::functional(vec![t.clone(), u.clone()], t);
-        let term = elaborate_type_to_term(&mut kernel_context, &acorn_type, Some(&map));
+        let term = lower_type_to_term(&mut kernel_context, &acorn_type, Some(&map));
 
         let expected = Term::pi(
             Term::atom(Atom::FreeVariable(0)),
@@ -518,14 +505,14 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_type_to_term_registers_parameterized_datatype() {
+    fn test_lower_type_to_term_registers_parameterized_datatype() {
         let mut kernel_context = KernelContext::new();
         let list = Datatype {
             module_id: ModuleId(0),
             name: "List".to_string(),
         };
         let acorn_type = AcornType::Data(list.clone(), vec![AcornType::Bool]);
-        let term = elaborate_type_to_term(&mut kernel_context, &acorn_type, None);
+        let term = lower_type_to_term(&mut kernel_context, &acorn_type, None);
 
         let datatype_id = kernel_context
             .type_store
@@ -537,14 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_type_to_term_typeclass_constraint() {
+    fn test_lower_type_to_term_typeclass_constraint() {
         let mut kernel_context = KernelContext::new();
         let monoid = Typeclass {
             module_id: ModuleId(0),
             name: "Monoid".to_string(),
         };
         let acorn_type = AcornType::TypeclassConstraint(monoid);
-        let term = elaborate_type_to_term(&mut kernel_context, &acorn_type, None);
+        let term = lower_type_to_term(&mut kernel_context, &acorn_type, None);
 
         assert!(matches!(
             term.as_ref().get_head_atom(),
@@ -561,18 +548,18 @@ mod tests {
         kernel_context: &mut KernelContext,
         value: AcornValue,
     ) {
-        let term = elaborate_value_to_term(kernel_context, &value, NewConstantType::Local, None)
-            .expect("elaboration should succeed");
-        let denormalized =
-            kernel_context.denormalize_term_with_context(&term, LocalContext::empty_ref(), false);
+        let term = lower_value_to_term(kernel_context, &value, NewConstantType::Local, None)
+            .expect("lowering should succeed");
+        let quoted =
+            kernel_context.quote_term_with_context(&term, LocalContext::empty_ref(), false);
         let roundtripped =
-            elaborate_value_to_term(kernel_context, &denormalized, NewConstantType::Local, None)
-                .expect("re-elaboration should succeed");
+            lower_value_to_term(kernel_context, &quoted, NewConstantType::Local, None)
+                .expect("re-lowering should succeed");
         assert_eq!(term, roundtripped);
     }
 
     #[test]
-    fn test_elaborate_value_to_term_logical_atoms_and_ite() {
+    fn test_lower_value_to_term_logical_atoms_and_ite() {
         let mut kernel_context = KernelContext::new();
         let value = AcornValue::IfThenElse(
             Box::new(AcornValue::and(
@@ -588,9 +575,8 @@ mod tests {
                 AcornValue::Bool(false),
             )),
         );
-        let term =
-            elaborate_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
-                .expect("value elaboration should succeed");
+        let term = lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
+            .expect("value lowering should succeed");
 
         let bool_type = Term::bool_type();
         let and_term =
@@ -609,12 +595,11 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_implies_is_not_or() {
+    fn test_lower_value_to_term_implies_is_not_or() {
         let mut kernel_context = KernelContext::new();
         let value = AcornValue::implies(AcornValue::Bool(true), AcornValue::Bool(false));
-        let term =
-            elaborate_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
-                .expect("value elaboration should succeed");
+        let term = lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
+            .expect("value lowering should succeed");
 
         let expected = Term::atom(Atom::Symbol(Symbol::Or)).apply(&[
             Term::atom(Atom::Symbol(Symbol::Not)).apply(&[Term::new_true()]),
@@ -624,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_binders_use_bound_variables() {
+    fn test_lower_value_to_term_binders_use_bound_variables() {
         let mut kernel_context = KernelContext::new();
         let bool_ty = AcornType::Bool;
         let value = AcornValue::lambda(
@@ -641,9 +626,8 @@ mod tests {
             ),
         );
 
-        let term =
-            elaborate_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
-                .expect("value elaboration should succeed");
+        let term = lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
+            .expect("value lowering should succeed");
 
         let expected = Term::lambda(
             Term::bool_type(),
@@ -662,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_match_lowers_to_match_eliminator() {
+    fn test_lower_value_to_term_match_lowers_to_match_eliminator() {
         let mut kernel_context = KernelContext::new();
         let nat = Datatype {
             module_id: ModuleId(0),
@@ -748,13 +732,13 @@ mod tests {
             ],
         );
 
-        let term = elaborate_value_to_term(
+        let term = lower_value_to_term(
             &mut kernel_context,
             &match_value,
             NewConstantType::Local,
             None,
         )
-        .expect("match elaboration should succeed");
+        .expect("match lowering should succeed");
 
         let match_symbol = kernel_context
             .symbol_table
@@ -775,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_match_uses_constructor_index_order() {
+    fn test_lower_value_to_term_match_uses_constructor_index_order() {
         let mut kernel_context = KernelContext::new();
         let nat = Datatype {
             module_id: ModuleId(0),
@@ -860,13 +844,13 @@ mod tests {
             ],
         );
 
-        let term = elaborate_value_to_term(
+        let term = lower_value_to_term(
             &mut kernel_context,
             &match_value,
             NewConstantType::Local,
             None,
         )
-        .expect("match elaboration should succeed");
+        .expect("match lowering should succeed");
 
         let match_symbol = kernel_context
             .symbol_table
@@ -887,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_match_rejects_duplicate_indices() {
+    fn test_lower_value_to_term_match_rejects_duplicate_indices() {
         let mut kernel_context = KernelContext::new();
         let nat = Datatype {
             module_id: ModuleId(0),
@@ -944,7 +928,7 @@ mod tests {
             ],
         );
 
-        let err = elaborate_value_to_term(
+        let err = lower_value_to_term(
             &mut kernel_context,
             &bad_match,
             NewConstantType::Local,
@@ -959,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elaborate_value_to_term_match_rejects_case_count_mismatch() {
+    fn test_lower_value_to_term_match_rejects_case_count_mismatch() {
         let mut kernel_context = KernelContext::new();
         let nat = Datatype {
             module_id: ModuleId(0),
@@ -1007,7 +991,7 @@ mod tests {
             }],
         );
 
-        let err = elaborate_value_to_term(
+        let err = lower_value_to_term(
             &mut kernel_context,
             &bad_match,
             NewConstantType::Local,
@@ -1126,7 +1110,7 @@ mod tests {
             ),
         );
 
-        let term = elaborate_value_to_term(
+        let term = lower_value_to_term(
             &mut kernel_context,
             &AcornValue::lambda(vec![nat_type.clone()], match_value),
             NewConstantType::Local,
@@ -1283,20 +1267,13 @@ mod tests {
         for (name, value) in cases {
             let mut kernel_context = KernelContext::new();
             let term =
-                elaborate_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
-                    .unwrap_or_else(|e| panic!("{}: initial elaboration failed: {}", name, e));
-            let denormalized = kernel_context.denormalize_term_with_context(
-                &term,
-                LocalContext::empty_ref(),
-                false,
-            );
-            let roundtripped = elaborate_value_to_term(
-                &mut kernel_context,
-                &denormalized,
-                NewConstantType::Local,
-                None,
-            )
-            .unwrap_or_else(|e| panic!("{}: re-elaboration failed: {}", name, e));
+                lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
+                    .unwrap_or_else(|e| panic!("{}: initial lowering failed: {}", name, e));
+            let quoted =
+                kernel_context.quote_term_with_context(&term, LocalContext::empty_ref(), false);
+            let roundtripped =
+                lower_value_to_term(&mut kernel_context, &quoted, NewConstantType::Local, None)
+                    .unwrap_or_else(|e| panic!("{}: re-lowering failed: {}", name, e));
             assert_eq!(
                 term, roundtripped,
                 "{}: AcornValue -> Term -> AcornValue -> Term mismatch",

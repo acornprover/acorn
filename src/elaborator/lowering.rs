@@ -1,10 +1,13 @@
-//! Elaborator-side lowering from user propositions to kernel proof inputs.
+//! Elaborator-side lowering from `AcornValue` to kernel proof inputs.
 //!
-//! This module orchestrates:
-//! `AcornValue -> Term -> kernel term normalization -> theorem/clause lowering`.
+//! This module owns:
+//!
+//! - `lower_term`: `AcornValue -> Term`
+//! - the current shared lowering path used for theorem/proposition/clause lowering
+//! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
 //!
 //! The elaborator does not define the normalization policy. Kernel term normalization
-//! lives in `kernel::term_normalization`, and clause/theorem lowering lives in the
+//! lives in `kernel::term_normalization`, and theorem/proposition/clause lowering lives in the
 //! kernel clause/clausifier layers.
 
 use crate::builder::BuildError;
@@ -18,7 +21,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
-use crate::elaborator::to_term::elaborate_value_to_term;
+use crate::elaborator::to_term::lower_value_to_term;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::clausifier::TermLoweringMode;
@@ -123,9 +126,9 @@ impl KernelContext {
         )
     }
 
-    /// Lowers a value proposition to clauses via:
+    /// Lowers a boolean proposition to clauses via:
     /// `AcornValue --elaborate--> Term --kernel normalize--> clauses`.
-    fn lower_value_to_clauses(
+    fn lower_proposition_to_clauses(
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
@@ -140,7 +143,7 @@ impl KernelContext {
         }
         assert!(value.is_bool_type());
 
-        let term = elaborate_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         self.lower_term_to_clauses(&term, source, type_var_map)
     }
@@ -215,7 +218,7 @@ impl KernelContext {
                     NewConstantType::Local
                 };
                 let clauses = self
-                    .lower_value_to_clauses(&value, ctype, &source, type_var_map_opt.clone())
+                    .lower_proposition_to_clauses(&value, ctype, &source, type_var_map_opt.clone())
                     .map_err(|msg| BuildError::new(range, msg))?;
                 for clause in &clauses {
                     trace!(clause = %clause, "normalized to clause");
@@ -280,25 +283,25 @@ impl KernelContext {
         })
     }
 
-    /// Converts backwards, from a clause to a value.
+    /// Quotes a clause back into an `AcornValue`.
     /// The resulting value may include generated `choose(...)` witnesses or other
     /// normalized boolean structure that did not appear verbatim in the source.
     /// If arbitrary names are provided, any free variables of the keyed types are converted
     /// to constants.
     /// If type_vars is provided, those variable indices are treated as type-level variables
     /// and excluded from the forall quantifier (their indices are remapped in the body).
-    /// If type_param_names is provided, it's used for naming denormalized type params in
+    /// If type_param_names is provided, it's used for naming quoted type params in
     /// polymorphic clauses.
     /// If instantiate_type_vars is true, FreeVariable type atoms become concrete types.
     /// Any remaining free variables are enclosed in a "forall" quantifier.
-    pub fn denormalize(
+    pub fn quote_clause(
         &self,
         clause: &Clause,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         type_param_names: Option<&[String]>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(self).denormalize(
+        TermBridge::new(self).quote_clause(
             clause,
             arbitrary_names,
             type_param_names,
@@ -306,47 +309,44 @@ impl KernelContext {
         )
     }
 
-    /// Convert a type Term to AcornType, looking up typeclass constraints from LocalContext.
+    /// Quotes a kernel type term to `AcornType`, looking up typeclass constraints from
+    /// `LocalContext`.
     /// If `instantiate_type_vars` is true, FreeVariable type atoms become concrete types.
-    pub fn denormalize_type_with_context(
+    pub fn quote_type_with_context(
         &self,
         type_term: Term,
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
-        TermBridge::new(self).denormalize_type_with_context(
+        TermBridge::new(self).quote_type_with_context(
             type_term,
             local_context,
             instantiate_type_vars,
         )
     }
 
-    /// Converts a single term to an AcornValue using the provided LocalContext.
-    /// This is equivalent to the term-level work done by `denormalize(...)`,
+    /// Quotes a single term to an `AcornValue` using the provided `LocalContext`.
+    /// This is equivalent to the term-level work done by `quote_clause(...)`,
     /// but avoids wrapping the term into a temporary one-literal clause first.
-    pub fn denormalize_term_with_context(
+    pub fn quote_term_with_context(
         &self,
         term: &Term,
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(self).denormalize_term_with_context(
-            term,
-            local_context,
-            instantiate_type_vars,
-        )
+        TermBridge::new(self).quote_term_with_context(term, local_context, instantiate_type_vars)
     }
 
-    /// Converts a single term to an AcornValue using the provided LocalContext.
+    /// Quotes a single term to an `AcornValue` using the provided `LocalContext`.
     /// If `arbitrary_names` is provided, matching free variables are converted to constants.
-    pub fn denormalize_term_with_context_and_arbitrary(
+    pub fn quote_term_with_context_and_arbitrary(
         &self,
         term: &Term,
         local_context: &LocalContext,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(self).denormalize_term_with_context_and_arbitrary(
+        TermBridge::new(self).quote_term_with_context_and_arbitrary(
             term,
             local_context,
             arbitrary_names,
@@ -354,44 +354,45 @@ impl KernelContext {
         )
     }
 
-    /// When you denormalize and renormalize a clause, you should get the same thing.
+    /// When you quote a normalized clause and run it back through proposition lowering,
+    /// you should recover that one clause exactly.
     #[cfg(test)]
-    fn check_denormalize_renormalize(&mut self, clause: &Clause) {
-        let denormalized = self.denormalize(clause, None, None, false);
-        if let Err(e) = denormalized.validate() {
+    fn check_quote_roundtrip(&mut self, clause: &Clause) {
+        let quoted = self.quote_clause(clause, None, None, false);
+        if let Err(e) = quoted.validate() {
             eprintln!("DEBUG: clause = {}", clause);
             eprintln!("DEBUG: clause context = {:?}", clause.get_local_context());
-            eprintln!("DEBUG: denormalized = {}", denormalized);
-            panic!("denormalized clause should validate: {:?}", e);
+            eprintln!("DEBUG: quoted = {}", quoted);
+            panic!("quoted clause should validate: {:?}", e);
         }
-        let renormalized = self
-            .lower_value_to_clauses(
-                &denormalized,
+        let lowered_again = self
+            .lower_proposition_to_clauses(
+                &quoted,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
                 None,
             )
             .unwrap();
-        if renormalized.len() != 1 {
+        if lowered_again.len() != 1 {
             // For functional equalities, we know this check doesn't work.
             // So we skip it.
             return;
         }
-        if clause != &renormalized[0] {
+        if clause != &lowered_again[0] {
             println!("original clause: {}", clause);
             println!("original context: {:?}", clause.get_local_context());
-            println!("denormalized: {}", denormalized);
-            println!("renormalized: {}", renormalized[0]);
+            println!("quoted: {}", quoted);
+            println!("lowered again: {}", lowered_again[0]);
             println!(
-                "renormalized context: {:?}",
-                renormalized[0].get_local_context()
+                "lowered-again context: {:?}",
+                lowered_again[0].get_local_context()
             );
-            if clause.get_local_context() == renormalized[0].get_local_context() {
+            if clause.get_local_context() == lowered_again[0].get_local_context() {
                 // Contexts match but clauses don't - might be variable ordering in literals
                 for (i, (orig_lit, renorm_lit)) in clause
                     .literals
                     .iter()
-                    .zip(renormalized[0].literals.iter())
+                    .zip(lowered_again[0].literals.iter())
                     .enumerate()
                 {
                     if orig_lit != renorm_lit {
@@ -399,7 +400,7 @@ impl KernelContext {
                     }
                 }
             }
-            panic!("renormalized clause does not match original");
+            panic!("lowered-again clause does not match original");
         }
     }
 
@@ -471,7 +472,7 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .lower_value_to_clauses(
+            .lower_proposition_to_clauses(
                 value,
                 NewConstantType::Local,
                 &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
@@ -495,7 +496,7 @@ impl KernelContext {
             );
         }
         for clause in &actual {
-            self.check_denormalize_renormalize(clause);
+            self.check_quote_roundtrip(clause);
         }
 
         let actual_strings: Vec<String> = actual

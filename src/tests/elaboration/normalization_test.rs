@@ -1020,15 +1020,15 @@ fn test_code_generator_omits_type_params_when_arity_changes() {
     // This is: forall(x0: Nat) { compose[Nat, Nat, Nat -> Nat](mul, from_nat, one, x0) = ... }
     let mut found_compose_clause = false;
     for clause in &clauses {
-        let denormalized = norm.denormalize(clause, None, None, false);
-        let denorm_code = format!("{}", denormalized);
+        let quoted = norm.quote_clause(clause, None, None, false);
+        let denorm_code = format!("{}", quoted);
 
         if denorm_code.contains("compose[Nat, Nat, Nat -> Nat](mul, from_nat, one, x0)") {
             found_compose_clause = true;
 
             // Generate code using the code generator
             let mut generator = CodeGenerator::new(&env.bindings);
-            let generated_code = generator.value_to_code(&denormalized).unwrap();
+            let generated_code = generator.value_to_code(&quoted).unwrap();
 
             // THE BUG: The code generator omits type params because can_infer_type_params_from_args
             // returns true. But for compose[T, U, V], when V is a function type, the arity changes.
@@ -1150,7 +1150,7 @@ fn test_polymorphic_generated_witness_type_var_ordering() {
     );
 }
 
-/// Test that type variables in denormalized clauses are displayed with proper formatting:
+/// Test that type variables in quoted clauses are displayed with proper formatting:
 /// - Type variables should use "T" prefix (T0, T1) instead of "x" prefix
 /// - Type variables should appear in forall with their kind (Type0 or typeclass name)
 /// - The confusing pattern "x0: x0" should NOT appear
@@ -1178,8 +1178,8 @@ fn test_type_variable_display_format() {
     // Find the clause for ax1 which has a type variable T and a value variable x
     let mut found_target_clause = false;
     for clause in &clauses {
-        let denormalized = norm.denormalize(clause, None, None, false);
-        let display = format!("{}", denormalized);
+        let quoted = norm.quote_clause(clause, None, None, false);
+        let display = format!("{}", quoted);
 
         // Check if this is a clause involving bar and foo
         if display.contains("bar") && display.contains("foo") {
@@ -1197,7 +1197,7 @@ fn test_type_variable_display_format() {
             // Value variables should use "x" prefix
             // The exact format depends on whether type vars are in forall,
             // but at minimum the "x0: x0" pattern should be gone
-            println!("Denormalized clause: {}", display);
+            println!("Quoted clause: {}", display);
         }
     }
 
@@ -1231,8 +1231,8 @@ fn test_typeclass_constrained_type_variable_display() {
     // Find clauses involving the Monoid typeclass
     let mut found_typeclass_clause = false;
     for clause in &clauses {
-        let denormalized = norm.denormalize(clause, None, None, false);
-        let display = format!("{}", denormalized);
+        let quoted = norm.quote_clause(clause, None, None, false);
+        let display = format!("{}", quoted);
 
         if display.contains("Monoid") || display.contains(".identity") {
             found_typeclass_clause = true;

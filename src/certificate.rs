@@ -16,8 +16,8 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::elaborate_value_to_term;
-use crate::elaborator::to_term::{elaborate_value_to_term_existing, TypeVarMap};
+use crate::elaborator::to_term::lower_value_to_term;
+use crate::elaborator::to_term::{lower_value_to_term_existing, TypeVarMap};
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
@@ -44,7 +44,7 @@ use crate::syntax::token::TokenType;
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
 pub struct CertificateLine {
-    /// The structured clause value after denormalization.
+    /// The structured clause value after quoting the checked kernel clause.
     pub value: AcornValue,
 
     /// The statement from the certificate (the code line).
@@ -155,7 +155,7 @@ impl Certificate {
             .any(|(_, term)| Self::references_value_local(term.as_ref(), local_context))
     }
 
-    /// Rebase a denormalized claim argument so it can stand alone outside the generic clause's
+    /// Rebase a quoted claim argument so it can stand alone outside the generic clause's
     /// local context. Type parameters stay in scope; value locals must disappear.
     fn rebase_value_to_standalone(
         value: &AcornValue,
@@ -302,7 +302,7 @@ impl Certificate {
     /// Convert a ConcreteProof to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to denormalize clauses)
+    /// Requires the kernel_context (to quote clauses)
     /// and the bindings (to generate readable names).
     pub fn from_concrete_steps(
         goal: String,
@@ -368,7 +368,7 @@ impl Certificate {
     /// Convert a ConcreteProof to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to denormalize clauses)
+    /// Requires the kernel_context (to quote clauses)
     /// and the bindings (to generate readable names).
     pub fn from_concrete_proof(
         concrete_proof: &ConcreteProof,
@@ -435,7 +435,7 @@ impl Certificate {
             &witness.ambient_context,
             &witness.return_type,
         );
-        let return_type = kernel_context.denormalize_type_with_context(
+        let return_type = kernel_context.quote_type_with_context(
             witness.return_type.clone(),
             &witness.ambient_context,
             false,
@@ -451,7 +451,7 @@ impl Certificate {
             )
             .shift_bound(0, -1);
         let general_condition =
-            kernel_context.denormalize_term_with_context(&opened_body, &local_context, false);
+            kernel_context.quote_term_with_context(&opened_body, &local_context, false);
 
         let (condition, return_name) = if arguments.is_empty() {
             let specialized_body = witness
@@ -462,7 +462,7 @@ impl Certificate {
                 )
                 .shift_bound(0, -1);
             (
-                kernel_context.denormalize_term_with_context(
+                kernel_context.quote_term_with_context(
                     &specialized_body,
                     &witness.ambient_context,
                     false,
@@ -592,7 +592,7 @@ impl Certificate {
                 )? {
                     return Ok(CertificateStep::Claim(claim));
                 }
-                let term = elaborate_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
+                let term = lower_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
                 let term = normalize_term(&term);
                 Ok(CertificateStep::Claim(Self::claim_from_plain_term(
                     &term,
@@ -644,7 +644,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Claim, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term = elaborate_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         Self::claim_from_plain_term(&term, kernel_context)
     }
@@ -656,7 +656,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Vec<Clause>, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term = elaborate_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         kernel_context
             .term_to_checker_clauses(&term, type_var_map)
@@ -1024,10 +1024,10 @@ impl Certificate {
             return true;
         }
 
-        // Denormalization canonicalizes partial logical builtins like `eq(T)` into the
+        // Quoting canonicalizes partial logical builtins like `eq(T)` into the
         // lambda form that claim-with-args parsing reconstructs.
-        kernel_context.denormalize(expected, None, None, true)
-            == kernel_context.denormalize(actual, None, None, true)
+        kernel_context.quote_clause(expected, None, None, true)
+            == kernel_context.quote_clause(actual, None, None, true)
     }
 
     fn claims_roundtrip_equivalent(
@@ -1146,10 +1146,10 @@ impl Certificate {
         }
 
         let mut generator = CodeGenerator::new_for_certificate(bindings);
-        let generic_value = kernel_context.denormalize(claim.clause(), None, None, false);
+        let generic_value = kernel_context.quote_clause(claim.clause(), None, None, false);
         let generic_code = generator.value_to_code(&generic_value)?;
         // Claim arguments are serialized outside the clause's local scope, so only the leading
-        // type parameters stay available while we denormalize them.
+        // type parameters stay available while we quote them.
         let standalone_arg_context = LocalContext::from_types(
             local_context
                 .get_var_types()
@@ -1171,7 +1171,7 @@ impl Certificate {
                 }
                 _ => {
                     return Err(CodeGenError::GeneratedBadCode(
-                        "expected denormalized generic claim to have forall shape".to_string(),
+                        "expected quoted generic claim to have forall shape".to_string(),
                     ));
                 }
             }
@@ -1231,8 +1231,7 @@ impl Certificate {
 
             if var_type.as_ref().is_type_param_kind() {
                 let type_param_name = format!("T{}", var_id);
-                let kind =
-                    kernel_context.denormalize_type_with_context(var_type, local_context, false);
+                let kind = kernel_context.quote_type_with_context(var_type, local_context, false);
                 let roundtrip_constraint = match &kind {
                     AcornType::Type0 => None,
                     AcornType::TypeclassConstraint(typeclass) => Some(typeclass.clone()),
@@ -1261,7 +1260,7 @@ impl Certificate {
                 roundtrip_type_param_constraints.push(roundtrip_constraint.clone());
 
                 let mapped_type = arg_term.map(|term| {
-                    kernel_context.denormalize_type_with_context(term.clone(), local_context, false)
+                    kernel_context.quote_type_with_context(term.clone(), local_context, false)
                 });
                 let (selected_type, type_arg_code) = match mapped_type {
                     Some(mapped) if !matches!(mapped, AcornType::Variable(_)) => (
@@ -1310,8 +1309,7 @@ impl Certificate {
                 .as_ref()
                 .expect("value variable names should be precomputed")
                 .clone();
-            let acorn_type =
-                kernel_context.denormalize_type_with_context(var_type, local_context, false);
+            let acorn_type = kernel_context.quote_type_with_context(var_type, local_context, false);
             value_lambda_arg_types.push(acorn_type.clone());
             let type_code = generator.type_to_expr(&acorn_type)?.to_string();
             value_decl_codes.push(format!("{}: {}", var_name, type_code));
@@ -1325,15 +1323,12 @@ impl Certificate {
                     standalone_arg_context.len() as AtomId,
                 )
             };
-            let arg_value = kernel_context.denormalize_term_with_context(
-                &substituted_arg_term,
-                &arg_context,
-                true,
-            );
+            let arg_value =
+                kernel_context.quote_term_with_context(&substituted_arg_term, &arg_context, true);
             let arg_value =
                 Self::rebase_value_to_standalone(&arg_value, scope_len).map_err(|err| {
                     CodeGenError::GeneratedBadCode(format!(
-                        "{} [claim arg term: {}; denormalized: {}]",
+                        "{} [claim arg term: {}; quoted: {}]",
                         err, substituted_arg_term, arg_value
                     ))
                 })?;
@@ -1355,7 +1350,7 @@ impl Certificate {
                 let specialized = claim
                     .normalized_specialized_clause(kernel_context)
                     .map_err(CodeGenError::GeneratedBadCode)?;
-                let specialized_value = kernel_context.denormalize(&specialized, None, None, true);
+                let specialized_value = kernel_context.quote_clause(&specialized, None, None, true);
                 let code = generator.value_to_code(&specialized_value)?;
                 return Self::ensure_claim_code_parses_as_claim(code);
             }
@@ -1524,7 +1519,7 @@ impl Certificate {
             Some(map)
         };
         let generic_value = AcornValue::forall(arg_types, body);
-        let generic_term = elaborate_value_to_term_existing(
+        let generic_term = lower_value_to_term_existing(
             &mut kernel_context_clone,
             &generic_value,
             type_var_map.as_ref(),
@@ -1625,7 +1620,7 @@ impl Certificate {
                 // Supported claim arguments can still mention selected-goal locals such
                 // as `d` or `k`. Elaborate against the live context so those proof-scope locals
                 // are interned before clausifying the argument term.
-                let term = elaborate_value_to_term(
+                let term = lower_value_to_term(
                     kernel_context,
                     arg,
                     NewConstantType::Local,
@@ -1859,7 +1854,7 @@ impl Certificate {
         let lines = checked_steps
             .into_iter()
             .map(|checked_step| {
-                let value = kernel_context.denormalize(&checked_step.clause, None, None, false);
+                let value = kernel_context.quote_clause(&checked_step.clause, None, None, false);
                 let statement = if checked_step.prefer_code_line {
                     checked_step
                         .code_line

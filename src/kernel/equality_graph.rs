@@ -226,7 +226,7 @@ impl fmt::Display for ApplicationInfo {
 
 // In general, there are two sorts of operations that are performed on the graph.
 //
-// "Integrity" operations are to keep the graph valid. A lot of the data is denormalized,
+// "Integrity" operations are to keep the graph valid. A lot of the data is duplicated,
 // so we have to update it in multiple places to keep it consistent.
 // Integrity operations are performed immediately. Integrity operations should not trigger
 // other integrity operations recursively.

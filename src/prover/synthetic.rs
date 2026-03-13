@@ -202,12 +202,12 @@ pub fn witness_signature(
                 .clone();
             (
                 format!("x{}", var_id - num_type_params),
-                kernel_context.denormalize_type_with_context(arg_type, ambient_context, false),
+                kernel_context.quote_type_with_context(arg_type, ambient_context, false),
             )
         })
         .collect();
     let result_type =
-        kernel_context.denormalize_type_with_context(return_type.clone(), ambient_context, false);
+        kernel_context.quote_type_with_context(return_type.clone(), ambient_context, false);
     let generic_type = if arguments.is_empty() {
         result_type.clone()
     } else {

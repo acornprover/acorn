@@ -11,7 +11,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
 
-/// Bridge for converting kernel terms/clauses back into Acorn surface values/types.
+/// Bridge for quoting kernel terms/clauses back into Acorn surface values/types.
 pub struct TermBridge<'a> {
     kernel_context: &'a KernelContext,
 }
@@ -21,7 +21,7 @@ impl<'a> TermBridge<'a> {
         Self { kernel_context }
     }
 
-    fn denormalize_atom(
+    fn quote_atom(
         &self,
         atom_type: &Term,
         atom: &Atom,
@@ -79,7 +79,7 @@ impl<'a> TermBridge<'a> {
             | Atom::Symbol(Symbol::Eq)
             | Atom::Symbol(Symbol::Ite)
             | Atom::Symbol(Symbol::Choose) => {
-                panic!("logical symbols should be handled in denormalize_term")
+                panic!("logical symbols should be handled in quote_term")
             }
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
                 let name = self
@@ -136,10 +136,9 @@ impl<'a> TermBridge<'a> {
                 let new_i = if let Some(mapping) = var_remapping {
                     match mapping.get(*i as usize) {
                         Some(Some(mapped)) => *mapped,
-                        Some(None) => panic!(
-                            "denormalize_atom saw excluded variable x{} in value position",
-                            i
-                        ),
+                        Some(None) => {
+                            panic!("quote_atom saw excluded variable x{} in value position", i)
+                        }
                         None => *i,
                     }
                 } else {
@@ -159,7 +158,7 @@ impl<'a> TermBridge<'a> {
                 panic!("Typeclass atoms should not appear in open terms")
             }
             Atom::BoundVariable(_) => {
-                panic!("BoundVariable atoms should not appear in denormalize_atom")
+                panic!("BoundVariable atoms should not appear in quote_atom")
             }
         }
     }
@@ -313,7 +312,7 @@ impl<'a> TermBridge<'a> {
         Some(AcornValue::Match(Box::new(scrutinee), cases))
     }
 
-    fn denormalize_term(
+    fn quote_term(
         &self,
         term: &Term,
         local_context: &LocalContext,
@@ -341,7 +340,7 @@ impl<'a> TermBridge<'a> {
         }
 
         if let Some(reduced) = reduce_head_lambda_application(term) {
-            return self.denormalize_term(
+            return self.quote_term(
                 &reduced,
                 local_context,
                 arbitrary_names,
@@ -384,7 +383,7 @@ impl<'a> TermBridge<'a> {
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
                     .shift_bound(0, -1);
-                let body_value = self.denormalize_term(
+                let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
                     arbitrary_names,
@@ -432,7 +431,7 @@ impl<'a> TermBridge<'a> {
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
                     .shift_bound(0, -1);
-                let body_value = self.denormalize_term(
+                let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
                     arbitrary_names,
@@ -480,7 +479,7 @@ impl<'a> TermBridge<'a> {
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
                     .shift_bound(0, -1);
-                let body_value = self.denormalize_term(
+                let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
                     arbitrary_names,
@@ -535,7 +534,7 @@ impl<'a> TermBridge<'a> {
 
         let head = logical_head_symbol.map_or_else(
             || {
-                Some(self.denormalize_atom(
+                Some(self.quote_atom(
                     &head_type,
                     &term.get_head_atom(),
                     local_context,
@@ -640,7 +639,7 @@ impl<'a> TermBridge<'a> {
                 };
                 type_args.push(acorn_type);
             } else {
-                value_args.push(self.denormalize_term(
+                value_args.push(self.quote_term(
                     arg,
                     local_context,
                     arbitrary_names,
@@ -660,7 +659,7 @@ impl<'a> TermBridge<'a> {
             match symbol {
                 Symbol::Not => {
                     if !type_args.is_empty() || value_args.len() > 1 {
-                        panic!("malformed not term during denormalization: {}", term);
+                        panic!("malformed not term during quoting: {}", term);
                     }
                     if value_args.is_empty() {
                         let arg_type = AcornType::Bool;
@@ -673,7 +672,7 @@ impl<'a> TermBridge<'a> {
                 }
                 Symbol::And => {
                     if !type_args.is_empty() || value_args.len() > 2 {
-                        panic!("malformed and term during denormalization: {}", term);
+                        panic!("malformed and term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
                         let mut args = value_args;
@@ -694,7 +693,7 @@ impl<'a> TermBridge<'a> {
                 }
                 Symbol::Or => {
                     if !type_args.is_empty() || value_args.len() > 2 {
-                        panic!("malformed or term during denormalization: {}", term);
+                        panic!("malformed or term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
                         let mut args = value_args;
@@ -715,7 +714,7 @@ impl<'a> TermBridge<'a> {
                 }
                 Symbol::Eq => {
                     if type_args.len() > 1 {
-                        panic!("malformed eq term during denormalization: {}", term);
+                        panic!("malformed eq term during quoting: {}", term);
                     }
                     if type_args.len() == 1 && value_args.len() < 2 {
                         let eq_type = type_args.into_iter().next().unwrap();
@@ -733,14 +732,14 @@ impl<'a> TermBridge<'a> {
                         );
                     }
                     if type_args.len() != 1 || value_args.len() != 2 {
-                        panic!("malformed eq term during denormalization: {}", term);
+                        panic!("malformed eq term during quoting: {}", term);
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::equals(args.next().unwrap(), args.next().unwrap());
                 }
                 Symbol::Ite => {
                     if type_args.len() > 1 || value_args.len() != 3 {
-                        panic!("malformed ite term during denormalization: {}", term);
+                        panic!("malformed ite term during quoting: {}", term);
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::IfThenElse(
@@ -751,19 +750,19 @@ impl<'a> TermBridge<'a> {
                 }
                 Symbol::Choose => {
                     if type_args.len() != 1 || value_args.len() != 1 {
-                        panic!("malformed choose term during denormalization: {}", term);
+                        panic!("malformed choose term during quoting: {}", term);
                     }
                     let choice_type = type_args.into_iter().next().unwrap();
                     let predicate = value_args.into_iter().next().unwrap();
                     let AcornValue::Lambda(arg_types, body) = predicate else {
                         panic!(
-                            "malformed choose predicate during denormalization (expected lambda): {}",
+                            "malformed choose predicate during quoting (expected lambda): {}",
                             term
                         );
                     };
                     if arg_types.len() != 1 || arg_types[0] != choice_type {
                         panic!(
-                            "malformed choose predicate binder type during denormalization: {}",
+                            "malformed choose predicate binder type during quoting: {}",
                             term
                         );
                     }
@@ -773,7 +772,7 @@ impl<'a> TermBridge<'a> {
             }
         }
 
-        let head = head.expect("non-logical terms should have a denormalized head");
+        let head = head.expect("non-logical terms should have a quoted head");
 
         if let Some(match_value) = self.maybe_reconstruct_match(
             &head,
@@ -793,7 +792,7 @@ impl<'a> TermBridge<'a> {
         AcornValue::apply(head, value_args)
     }
 
-    fn denormalize_literal(
+    fn quote_literal(
         &self,
         literal: &Literal,
         local_context: &LocalContext,
@@ -803,7 +802,7 @@ impl<'a> TermBridge<'a> {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        let left = self.denormalize_term(
+        let left = self.quote_term(
             &literal.left,
             local_context,
             arbitrary_names,
@@ -819,7 +818,7 @@ impl<'a> TermBridge<'a> {
                 return AcornValue::Not(Box::new(left));
             }
         }
-        let right = self.denormalize_term(
+        let right = self.quote_term(
             &literal.right,
             local_context,
             arbitrary_names,
@@ -835,7 +834,7 @@ impl<'a> TermBridge<'a> {
         }
     }
 
-    pub fn denormalize(
+    pub fn quote_clause(
         &self,
         clause: &Clause,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
@@ -892,9 +891,9 @@ impl<'a> TermBridge<'a> {
             None
         };
 
-        let mut denormalized_literals = vec![];
+        let mut quoted_literals = vec![];
         for literal in &clause.literals {
-            denormalized_literals.push(self.denormalize_literal(
+            quoted_literals.push(self.quote_literal(
                 literal,
                 local_context,
                 arbitrary_names,
@@ -904,7 +903,7 @@ impl<'a> TermBridge<'a> {
                 instantiate_type_vars,
             ));
         }
-        let disjunction = AcornValue::reduce(BinaryOp::Or, denormalized_literals);
+        let disjunction = AcornValue::reduce(BinaryOp::Or, quoted_literals);
 
         let var_types: Vec<AcornType> = var_types_raw
             .iter()
@@ -922,7 +921,7 @@ impl<'a> TermBridge<'a> {
         AcornValue::forall(var_types, disjunction)
     }
 
-    pub fn denormalize_type_with_context(
+    pub fn quote_type_with_context(
         &self,
         type_term: Term,
         local_context: &LocalContext,
@@ -933,13 +932,13 @@ impl<'a> TermBridge<'a> {
             .type_term_to_acorn_type_with_context(&type_term, local_context, instantiate_type_vars)
     }
 
-    pub fn denormalize_term_with_context(
+    pub fn quote_term_with_context(
         &self,
         term: &Term,
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        self.denormalize_term(
+        self.quote_term(
             term,
             local_context,
             None,
@@ -950,14 +949,14 @@ impl<'a> TermBridge<'a> {
         )
     }
 
-    pub fn denormalize_term_with_context_and_arbitrary(
+    pub fn quote_term_with_context_and_arbitrary(
         &self,
         term: &Term,
         local_context: &LocalContext,
         arbitrary_names: Option<&HashMap<Term, ConstantName>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        self.denormalize_term(
+        self.quote_term(
             term,
             local_context,
             arbitrary_names,
@@ -980,11 +979,11 @@ mod tests {
     use crate::kernel::kernel_context::KernelContext;
 
     #[test]
-    fn test_denormalize_partial_eq_becomes_lambda() {
+    fn test_quote_partial_eq_becomes_lambda() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("eq(Bool)");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool, AcornType::Bool],
@@ -997,11 +996,11 @@ mod tests {
     }
 
     #[test]
-    fn test_denormalize_partially_applied_eq_with_one_value_arg() {
+    fn test_quote_partially_applied_eq_with_one_value_arg() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("eq(Bool, true)");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool],
@@ -1014,11 +1013,11 @@ mod tests {
     }
 
     #[test]
-    fn test_denormalize_partial_not_becomes_lambda() {
+    fn test_quote_partial_not_becomes_lambda() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("not");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool],
@@ -1028,11 +1027,11 @@ mod tests {
     }
 
     #[test]
-    fn test_denormalize_partial_and_becomes_lambda() {
+    fn test_quote_partial_and_becomes_lambda() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("and");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool, AcornType::Bool],
@@ -1045,11 +1044,11 @@ mod tests {
     }
 
     #[test]
-    fn test_denormalize_partial_and_with_one_value_arg_becomes_lambda() {
+    fn test_quote_partial_and_with_one_value_arg_becomes_lambda() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("and(true)");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool],
@@ -1062,11 +1061,11 @@ mod tests {
     }
 
     #[test]
-    fn test_denormalize_partial_or_becomes_lambda() {
+    fn test_quote_partial_or_becomes_lambda() {
         let kernel_context = KernelContext::new();
         let bridge = TermBridge::new(&kernel_context);
         let term = kernel_context.parse_term("or");
-        let value = bridge.denormalize_term_with_context(&term, &LocalContext::empty(), true);
+        let value = bridge.quote_term_with_context(&term, &LocalContext::empty(), true);
 
         let expected = AcornValue::lambda(
             vec![AcornType::Bool, AcornType::Bool],

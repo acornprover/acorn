@@ -218,9 +218,9 @@ impl Prover {
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) -> String {
-        let denormalized = kernel_context.denormalize(clause, None, None, false);
+        let quoted = kernel_context.quote_clause(clause, None, None, false);
         CodeGenerator::new(bindings)
-            .value_to_code(&denormalized)
+            .value_to_code(&quoted)
             .unwrap_or_else(|_| {
                 format!(
                     "{}",
