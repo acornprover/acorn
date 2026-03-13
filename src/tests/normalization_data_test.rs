@@ -1,11 +1,13 @@
 use crate::certificate::Certificate;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::names::ConstantName;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::to_term::lower_value_to_term_existing;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Rule, Truthiness};
+use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
@@ -377,6 +379,49 @@ fn load_target_clause(code: &str) -> (KernelContext, AcornValue) {
     load_target_value(code)
 }
 
+fn add_named_global_constant(kernel_context: &mut KernelContext, name: &str, type_str: &str) {
+    let constant_name = ConstantName::unqualified(ModuleId(0), name);
+    let type_term = kernel_context.parse_type(type_str);
+    kernel_context
+        .symbol_table
+        .add_constant(constant_name, NewConstantType::Global, type_term);
+}
+
+fn add_named_local_constant(kernel_context: &mut KernelContext, name: &str, type_str: &str) {
+    let constant_name = ConstantName::unqualified(ModuleId(0), name);
+    let type_term = kernel_context.parse_type(type_str);
+    kernel_context
+        .symbol_table
+        .add_constant(constant_name, NewConstantType::Local, type_term);
+}
+
+fn add_named_polymorphic_global_constant(
+    kernel_context: &mut KernelContext,
+    name: &str,
+    binders: &str,
+    body: &str,
+    type_param_names: &[&str],
+) {
+    let constant_name = ConstantName::unqualified(ModuleId(0), name);
+    let type_term = kernel_context.parse_pi(binders, body);
+    let generic_type = kernel_context
+        .type_store
+        .type_term_to_acorn_type(&type_term);
+    kernel_context.symbol_table.add_constant(
+        constant_name.clone(),
+        NewConstantType::Global,
+        type_term,
+    );
+    kernel_context.symbol_table.set_polymorphic_info(
+        constant_name,
+        generic_type,
+        type_param_names
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+    );
+}
+
 fn parse_claim_line(
     code: &str,
     line: &str,
@@ -598,4 +643,70 @@ fn test_prover_generated_steps_are_normalized() {
             );
         }
     }
+}
+
+#[test]
+fn test_internal_clause_roundtrip_parametric_bool_symbolic_shape() {
+    let mut kernel_context = KernelContext::new();
+    kernel_context.parse_type_constructor("Box", 1);
+    add_named_polymorphic_global_constant(
+        &mut kernel_context,
+        "g0",
+        "T: Type",
+        "Box[T] -> T -> Bool",
+        &["T"],
+    );
+    add_named_polymorphic_global_constant(
+        &mut kernel_context,
+        "g1",
+        "T: Type",
+        "Box[T] -> T -> Box[T]",
+        &["T"],
+    );
+    add_named_local_constant(&mut kernel_context, "c0", "Bool");
+    add_named_local_constant(&mut kernel_context, "c1", "Bool");
+
+    let clause = kernel_context
+        .parse_clause(
+            "not g0(Bool, x0, c0) or g0(Bool, g1(Bool, x0, c1), c0)",
+            &["Box[Bool]"],
+        )
+        .normalized_preserving_locals();
+    assert_clause_is_already_normalized(
+        &clause,
+        "parametric_bool_symbolic_shape",
+        "internal clause",
+    );
+    kernel_context.validate_clause_roundtrip(&clause).expect(
+        "quoted parametric symbolic clause should lower back to the same normalized clause",
+    );
+}
+
+#[test]
+fn test_extensionality_roundtrip_parametric_constructor_head() {
+    let mut kernel_context = KernelContext::new();
+    kernel_context.parse_type_constructor("Box", 1);
+    add_named_polymorphic_global_constant(
+        &mut kernel_context,
+        "g0",
+        "T: Type",
+        "T -> Box[T]",
+        &["T"],
+    );
+    add_named_global_constant(&mut kernel_context, "g1", "Bool -> Box[Bool]");
+
+    let clause = kernel_context.parse_clause("g0(Bool, x0) = g1(x0)", &["Bool"]);
+    let literals = clause
+        .find_extensionality(&kernel_context)
+        .expect("expected parametric constructor clause to admit extensionality");
+    let clause = crate::kernel::clause::Clause::new(literals, clause.get_local_context())
+        .normalized_preserving_locals();
+    assert_clause_is_already_normalized(
+        &clause,
+        "parametric_constructor_head",
+        "extensionality clause",
+    );
+    kernel_context
+        .validate_clause_roundtrip(&clause)
+        .expect("quoted extensionality clause should lower back to the same normalized clause");
 }
