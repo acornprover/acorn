@@ -161,6 +161,8 @@ The system-wide normalization requirements are:
 - in a normalized term or clause, every subterm must also be normalized
 - for certificates, the generic clause in a `(clause, var_map)` claim must be normalized
 - for certificates, each mapped term in a claim `var_map` must be term-normalized
+- parsing a non-normalized certificate claim must normalize into that canonical `(clause, var_map)`
+  object rather than preserving a merely display-equivalent surface shape
 - serializing a certificate `(clause, var_map)` pair and deserializing it must recover the exact
   same normalized generic `(clause, var_map)` pair
 - normalization canonicalizes the built-in commutative operators `=`, `and`, and `or` up to
@@ -177,8 +179,16 @@ For certificate claims:
 
 - the stored generic clause is the canonical object
 - the `var_map` is part of the canonical object
+- `claim-with-args` syntax is only a surface serialization of that canonical `(clause, var_map)`
+  object
 - “display shape” is not a substitute for canonical normalization
 - parser or codegen conveniences should not introduce a second, fuzzier notion of normalized form
+- serializing a `claim-with-args` must use the normal quote/lower bridge:
+  the generic body comes from `quote_clause`, and each mapped value argument uses the usual
+  quoted-term form
+- parsing a `claim-with-args` must use the normal normalization path on each part:
+  the generic function body must lower and normalize to the canonical generic clause, and each
+  supplied argument must lower and normalize before it is stored in `var_map`
 - claim-with-args roundtripping should be expressed in terms of the normal body-clause roundtrip
   plus the normal argument-term roundtrip, not checker-specific equivalence notions
 

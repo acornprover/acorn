@@ -36,8 +36,13 @@
 //! - In a normalized term or clause, every subterm must also be normalized.
 //! - For certificates, the generic clause in a `(clause, var_map)` claim must be normalized.
 //! - For certificates, each mapped term in a claim `var_map` must be term-normalized.
+//! - Parsing a non-normalized certificate claim must normalize into that canonical
+//!   `(clause, var_map)` object rather than preserving a merely display-equivalent surface shape.
 //! - For certificates, serializing a `(clause, var_map)` pair and then deserializing it
 //!   must recover the exact same normalized generic `(clause, var_map)` pair.
+//! - `claim-with-args` is only surface syntax for that canonical certificate object:
+//!   its generic body must follow `quote_clause`, and its mapped value arguments must
+//!   follow the usual quoted-term form.
 //! - Normalization canonicalizes the built-in commutative operators `=`, `and`, and `or`
 //!   up to commutativity only.
 //! - Clause normalization may deterministically renumber free variables to a preferred
