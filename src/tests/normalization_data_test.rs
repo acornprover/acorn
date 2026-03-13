@@ -262,6 +262,51 @@ const PROVER_PAIR_CASES: &[ProverPairCase] = &[
     },
 ];
 
+fn assert_term_is_already_normalized(term: &Term, case_name: &str, label: &str) {
+    assert_eq!(
+        *term,
+        normalize_term(term),
+        "{label} should already be term-normalized for case `{case_name}`"
+    );
+}
+
+fn assert_clause_is_already_normalized(
+    clause: &crate::kernel::clause::Clause,
+    case_name: &str,
+    label: &str,
+) {
+    assert_eq!(
+        *clause,
+        clause.normalized(),
+        "{label} should already be clause-normalized for case `{case_name}`"
+    );
+}
+
+fn assert_claim_is_already_normalized(
+    claim: &crate::kernel::certificate_step::Claim,
+    kernel_context: &KernelContext,
+    case_name: &str,
+    label: &str,
+) {
+    assert_eq!(
+        claim.clause().clone(),
+        claim.clause().normalized_preserving_locals(),
+        "{label} generic clause should preserve normalized local slots for case `{case_name}`"
+    );
+    for (var_id, term) in claim.var_map().iter() {
+        assert_term_is_already_normalized(term, case_name, &format!("{label} claim arg x{var_id}"));
+    }
+
+    let specialized = claim
+        .normalized_specialized_clause(kernel_context)
+        .expect("claim specialization should succeed");
+    assert_clause_is_already_normalized(
+        &specialized,
+        case_name,
+        &format!("{label} specialized clause"),
+    );
+}
+
 fn load_mock_module(code: &str) -> (Project, BindingMap, KernelContext) {
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", code);
@@ -405,12 +450,7 @@ fn test_term_normalization_cases() {
     for case in TERM_CASES {
         let (kernel_context, term) = load_target_term(case.code);
         let normalized = normalize_term(&term);
-        let renormalized = normalize_term(&normalized);
-        assert_eq!(
-            normalized, renormalized,
-            "term normalization should be idempotent for case `{}`",
-            case.name
-        );
+        assert_term_is_already_normalized(&normalized, case.name, "normalized term");
 
         let quoted =
             kernel_context.quote_term_with_context(&normalized, &LocalContext::empty(), false);
@@ -421,6 +461,7 @@ fn test_term_normalization_cases() {
         let mut roundtrip_context = kernel_context.clone();
         let lowered_again = lower_value_to_term_existing(&mut roundtrip_context, &quoted, None)
             .expect("quoted normalized term should lower again");
+        assert_term_is_already_normalized(&lowered_again, case.name, "roundtripped term");
         assert_eq!(
             normalized, lowered_again,
             "quoted normalized term should roundtrip exactly for case `{}`",
@@ -442,23 +483,14 @@ fn test_clause_normalization_cases() {
             .lower_clause(&value, NewConstantType::Local, None)
             .expect("target should lower to a clause");
 
-        assert!(
-            clause.is_normalized(),
-            "lowered clause should already be normalized for case `{}`",
-            case.name
-        );
-        assert_eq!(
-            clause,
-            clause.normalized(),
-            "clause normalization should be idempotent for case `{}`",
-            case.name
-        );
+        assert_clause_is_already_normalized(&clause, case.name, "lowered clause");
 
         let quoted = kernel_context.quote_clause(&clause, None, None, false);
         quoted.validate().expect("quoted clause should validate");
         let lowered_again = kernel_context
             .lower_clause(&quoted, NewConstantType::Local, None)
             .expect("quoted clause should lower again");
+        assert_clause_is_already_normalized(&lowered_again, case.name, "roundtripped clause");
         assert_eq!(
             clause, lowered_again,
             "normalized clause should satisfy quote/lower roundtrip for case `{}`",
@@ -471,24 +503,11 @@ fn test_clause_normalization_cases() {
 fn test_cert_line_normalization_cases() {
     for case in CERT_LINE_CASES {
         let (_project, bindings, kernel_context, claim) = parse_claim_line(case.code, case.line);
-
-        assert!(
-            claim.clause().is_normalized_preserving_locals(),
-            "claim clause should preserve normalized local slots for case `{}`",
-            case.name
-        );
-        for (var_id, term) in claim.var_map().iter() {
-            assert_eq!(
-                *term,
-                normalize_term(term),
-                "claim arg x{} should be term-normalized for case `{}`",
-                var_id,
-                case.name
-            );
-        }
+        assert_claim_is_already_normalized(&claim, &kernel_context, case.name, "parsed");
 
         let serialized = serialize_claim_line(&claim, &bindings, &kernel_context);
         let (_project2, _bindings2, _kernel2, reparsed) = parse_claim_line(case.code, &serialized);
+        assert_claim_is_already_normalized(&reparsed, &kernel_context, case.name, "reparsed");
         assert_eq!(
             claim, reparsed,
             "serialized claim should parse back to the same canonical claim for case `{}`",
@@ -525,8 +544,9 @@ fn test_prover_generated_steps_are_normalized() {
         }
 
         for step in &generated {
-            assert!(
-                step.clause.is_normalized_preserving_locals(),
+            assert_eq!(
+                step.clause,
+                step.clause.normalized_preserving_locals(),
                 "generated step from case `{}` should have a normalized clause: {}",
                 case.name,
                 step.clause
