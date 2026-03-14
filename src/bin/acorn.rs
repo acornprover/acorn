@@ -157,7 +157,7 @@ fn filter_selected_goals(
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[clap(
     name = "acorn",
     about = "A theorem prover and programming language",
@@ -179,7 +179,7 @@ struct Args {
 }
 
 // Note that we cannot use flags named "--update" or "--clean" because those get intercepted by the JS wrapper.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Run the language server for IDE integration
     Serve {
@@ -354,6 +354,13 @@ enum Command {
         /// Save reproved results to the cache
         #[clap(long = "save-results", help = "Save reproved results to the cache.")]
         save_results: bool,
+
+        /// Visit modules in reverse alphabetical order during a whole-project reprove
+        #[clap(
+            long,
+            help = "Visit modules in reverse alphabetical order during a whole-project reprove."
+        )]
+        reverse: bool,
 
         /// Print every activated proof step for a single selected goal
         #[clap(
@@ -622,6 +629,7 @@ async fn main() {
             timeout,
             activations,
             save_results,
+            reverse,
             verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
@@ -687,6 +695,7 @@ async fn main() {
             verifier.goal_index = goal;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
+            verifier.builder.reverse_targets = reverse;
             verifier.builder.operation_verb = "reproved";
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -1120,6 +1129,16 @@ mod tests {
             .expect("renamed reprove flag should parse");
         match args.command {
             Some(Command::Reprove { save_results, .. }) => assert!(save_results),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_reprove_accepts_reverse_flag() {
+        let args =
+            Args::try_parse_from(["acorn", "reprove", "--reverse"]).expect("flag should parse");
+        match args.command {
+            Some(Command::Reprove { reverse, .. }) => assert!(reverse),
             _ => panic!("unexpected command"),
         }
     }
