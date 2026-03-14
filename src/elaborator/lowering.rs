@@ -23,6 +23,8 @@ use crate::elaborator::source::Source;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::lower_value_to_term;
+#[cfg(any(test, feature = "validate"))]
+use crate::elaborator::to_term::lower_value_to_term_preserving_alias_spelling;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::clausifier::TermLoweringMode;
@@ -167,6 +169,32 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        let term = normalize_term(&term);
+        self.lower_normalized_term_to_clause(&term, type_var_map)
+    }
+
+    #[cfg(any(test, feature = "validate"))]
+    /// Lowers a quoted clause while preserving original alias spelling for exact roundtrip checks.
+    fn lower_clause_preserving_alias_spelling(
+        &mut self,
+        value: &AcornValue,
+        ctype: NewConstantType,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Clause, String> {
+        if let Err(e) = value.validate() {
+            return Err(format!(
+                "validation error: {} while lowering clause value: {}",
+                e, value
+            ));
+        }
+        assert!(value.is_bool_type());
+
+        let term = lower_value_to_term_preserving_alias_spelling(
+            self,
+            value,
+            ctype,
+            type_var_map.as_ref(),
+        )?;
         let term = normalize_term(&term);
         self.lower_normalized_term_to_clause(&term, type_var_map)
     }
@@ -414,7 +442,7 @@ impl KernelContext {
         }
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let lowered_again = self
-            .lower_clause(&quoted, NewConstantType::Local, type_var_map)
+            .lower_clause_preserving_alias_spelling(&quoted, NewConstantType::Local, type_var_map)
             .unwrap();
         if clause != &lowered_again {
             println!("original clause: {}", clause);
@@ -450,8 +478,11 @@ impl KernelContext {
             .map_err(|e| format!("quoted clause should validate: {:?}", e))?;
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let mut roundtrip_context = self.clone();
-        let lowered_again =
-            roundtrip_context.lower_clause(&quoted, NewConstantType::Local, type_var_map)?;
+        let lowered_again = roundtrip_context.lower_clause_preserving_alias_spelling(
+            &quoted,
+            NewConstantType::Local,
+            type_var_map,
+        )?;
         if &lowered_again != clause {
             return Err(format!(
                 "quote/lower clause roundtrip mismatch: original '{}' lowered again to '{}'",

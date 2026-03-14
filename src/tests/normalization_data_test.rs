@@ -1,9 +1,12 @@
 use crate::certificate::Certificate;
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::names::ConstantName;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::to_term::lower_value_to_term_existing;
+use crate::kernel::atom::Atom;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Rule, Truthiness};
 use crate::kernel::term::Term;
@@ -35,6 +38,11 @@ struct ClaimRoundtripCase {
     name: &'static str,
     code: &'static str,
     build: fn(&KernelContext) -> crate::kernel::certificate_step::Claim,
+}
+
+struct KernelClauseRoundtripCase {
+    name: &'static str,
+    build: fn(&mut KernelContext) -> crate::kernel::clause::Clause,
 }
 
 struct ProverClauseInput {
@@ -185,6 +193,179 @@ const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[ClaimRoundtripCase {
     "#,
     build: build_claim_with_dependent_value_arg,
 }];
+
+/// Builds a normalized clause whose preserved type parameter sits in a non-prefix slot, which
+/// exercises the sparse-local roundtrip bug seen in `finite_set`.
+fn build_clause_with_nonprefix_type_param(
+    kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    let (_project, bindings, loaded_context) = load_mock_module(
+        r#"
+            type Foo: axiom
+            type Bar: axiom
+
+            structure Box[T] {
+                value: T
+            }
+
+            let g0[U]: (Bar, Foo) -> Bool = axiom
+            let g1[T]: (T, Bar) -> Box[T] = axiom
+            let g2[T]: (T, T, Foo) -> Bool = axiom
+
+            theorem goal {
+                true
+            }
+        "#,
+    );
+    *kernel_context = loaded_context;
+    let module_id = bindings.module_id();
+
+    let g0 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "g0"))
+        .expect("g0 should be registered");
+    let g1 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "g1"))
+        .expect("g1 should be registered");
+    let g2 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "g2"))
+        .expect("g2 should be registered");
+    let g0_type = kernel_context
+        .symbol_table
+        .get_symbol_type(g0, &kernel_context.type_store);
+    let (_, g0_after_type) = g0_type
+        .as_ref()
+        .split_pi()
+        .expect("g0 should take a leading type argument");
+    let (bar_type, g0_after_bar) = g0_after_type
+        .split_pi()
+        .expect("g0 should take a Bar argument");
+    let (foo_type, _) = g0_after_bar
+        .split_pi()
+        .expect("g0 should take a Foo argument");
+
+    // x0 is a value local of fixed type Foo, but x1 is a preserved type parameter
+    // that appears later in the local context. This mirrors the finite_set panic:
+    // quote/lower must preserve the sparse local ordering exactly even when an inline
+    // boolean literal nests polymorphic applications under eq/and/not.
+    let context = LocalContext::from_types(vec![
+        foo_type.to_owned(),
+        Term::type_sort(),
+        kernel_context.parse_type("x1"),
+        kernel_context.parse_type("x1"),
+        bar_type.to_owned(),
+    ]);
+    let x0 = Term::new_variable(0);
+    let x1 = Term::new_variable(1);
+    let x2 = Term::new_variable(2);
+    let x3 = Term::new_variable(3);
+    let x4 = Term::new_variable(4);
+
+    let left = Term::atom(Atom::Symbol(g0)).apply(&[foo_type.to_owned(), x4.clone(), x0.clone()]);
+    let right_left = Term::atom(Atom::Symbol(g1)).apply(&[x1.clone(), x2.clone(), x4.clone()]);
+    let right_right = Term::atom(Atom::Symbol(g1)).apply(&[x1.clone(), x3.clone(), x4.clone()]);
+    let boxed_eq_type = right_left
+        .checked_type_with_context(&context, kernel_context)
+        .expect("g1 application should have a type");
+    let boxed_eq = Term::eq(boxed_eq_type, right_left, right_right);
+    let guard = Term::and(left, Term::not(boxed_eq));
+    let conclusion = Term::atom(Atom::Symbol(g2)).apply(&[x1, x2, x3, x0]);
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::negative(guard), Literal::positive(conclusion)],
+        &context,
+    )
+    .normalized_preserving_locals()
+}
+
+/// Builds the fully-peeled polymorphic equality that extensionality can emit so normalization
+/// tests cover bare generic heads without value arguments.
+fn build_clause_with_bare_polymorphic_constant_equality(
+    kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    let (_project, bindings, loaded_context) = load_mock_module(
+        r#"
+            let f[T]: T -> T = axiom
+            let g[T]: T -> T = axiom
+
+            theorem goal {
+                true
+            }
+        "#,
+    );
+    *kernel_context = loaded_context;
+    let module_id = bindings.module_id();
+
+    let f = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "f"))
+        .expect("f should be registered");
+    let g = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "g"))
+        .expect("g should be registered");
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::equals(
+            Term::atom(Atom::Symbol(f)),
+            Term::atom(Atom::Symbol(g)),
+        )],
+        &LocalContext::empty(),
+    )
+    .normalized_preserving_locals()
+}
+
+/// Builds a clause with a partially applied builtin `and` under another binder so quote/lower
+/// validation checks the partial-builtin path instead of only full applications.
+fn build_clause_with_partial_and_under_outer_binder(
+    kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    let (_project, bindings, loaded_context) = load_mock_module(
+        r#"
+            let g[T]: (T, T -> Bool) -> Bool = axiom
+
+            theorem goal {
+                true
+            }
+        "#,
+    );
+    *kernel_context = loaded_context;
+    let module_id = bindings.module_id();
+    let g = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(module_id, "g"))
+        .expect("g should be registered");
+    let x0 = Term::new_variable(0);
+    let partial_and = Term::atom(Atom::Symbol(crate::kernel::symbol::Symbol::And))
+        .apply(std::slice::from_ref(&x0));
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::positive(Term::atom(Atom::Symbol(g)).apply(&[
+            Term::bool_type(),
+            x0,
+            partial_and,
+        ]))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+    .normalized_preserving_locals()
+}
+
+const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
+    KernelClauseRoundtripCase {
+        name: "partial_and_argument_under_outer_binder",
+        build: build_clause_with_partial_and_under_outer_binder,
+    },
+    KernelClauseRoundtripCase {
+        name: "bare_polymorphic_constant_equality",
+        build: build_clause_with_bare_polymorphic_constant_equality,
+    },
+    KernelClauseRoundtripCase {
+        name: "nonprefix_type_param_local",
+        build: build_clause_with_nonprefix_type_param,
+    },
+];
 
 fn setup_bool_resolution(kernel_context: &mut KernelContext) {
     kernel_context.parse_constants(&["c0", "c1", "c2"], "Bool");
@@ -565,6 +746,25 @@ fn test_claim_roundtrip_normalization_cases() {
             "claim serialization should preserve canonical claim for case `{}`",
             case.name,
         );
+    }
+}
+
+#[test]
+/// Verifies the exact normalized `(clause, locals)` roundtrip contract on hand-built kernel
+/// clauses that previously only showed up during project-wide check/reprove runs.
+fn test_kernel_clause_roundtrip_cases() {
+    for case in KERNEL_CLAUSE_ROUNDTRIP_CASES {
+        let mut kernel_context = KernelContext::new();
+        let clause = (case.build)(&mut kernel_context);
+        assert_eq!(
+            clause,
+            clause.normalized_preserving_locals(),
+            "constructed clause should already be normalized-preserving-locals for case `{}`",
+            case.name
+        );
+        kernel_context
+            .validate_clause_roundtrip(&clause)
+            .expect("kernel clause should satisfy quote/lower roundtrip");
     }
 }
 

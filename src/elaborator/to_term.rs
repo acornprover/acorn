@@ -84,6 +84,197 @@ fn register_typeclasses(kernel_context: &mut KernelContext, acorn_type: &AcornTy
     }
 }
 
+/// Computes the kernel type term for a value, including bare polymorphic constants whose
+/// quoted form omits explicit type arguments during exact clause roundtrips.
+fn lower_value_type_to_term(
+    kernel_context: &mut KernelContext,
+    value: &AcornValue,
+    type_var_map: Option<&TypeVarMap>,
+) -> Result<Term, String> {
+    if let AcornValue::Constant(c) = value {
+        if c.params.is_empty() && c.has_generic() && !c.type_param_names.is_empty() {
+            let Some(symbol) = kernel_context.symbol_table.get_symbol(&c.name) else {
+                return Err(format!("constant {} not found in symbol table", c));
+            };
+            return Ok(kernel_context
+                .symbol_table
+                .get_symbol_type(symbol, &kernel_context.type_store));
+        }
+    }
+
+    Ok(lower_type_to_term(
+        kernel_context,
+        &value.get_type(),
+        type_var_map,
+    ))
+}
+
+/// Recognizes quoted lambdas that represent partial applications of builtin logical terms so
+/// exact quote/lower validation can recover the original builtin head instead of a fresh lambda.
+fn try_lower_partial_logical_lambda(
+    kernel_context: &mut KernelContext,
+    arg_types: &[AcornType],
+    body: &AcornValue,
+    type_var_map: Option<&TypeVarMap>,
+    prefer_instance_aliases: bool,
+    stack: &mut Vec<Term>,
+) -> Result<Option<Term>, String> {
+    let first_new_var = stack.len() as u16;
+    let is_new_var = |value: &AcornValue, offset: usize| matches!(value, AcornValue::Variable(i, _) if *i == first_new_var + offset as u16);
+    let mut stack_with_new_vars = stack.clone();
+    stack_with_new_vars.resize(stack.len() + arg_types.len(), Term::new_true());
+    // Rejects partial-builtin rewrites that would accidentally capture one of the lambda vars
+    // we are about to synthesize for the missing arguments.
+    fn references_stack_range(value: &AcornValue, start: AtomId, end: AtomId) -> bool {
+        match value {
+            AcornValue::Variable(index, _) => *index >= start && *index < end,
+            AcornValue::Application(app) => {
+                references_stack_range(&app.function, start, end)
+                    || app
+                        .args
+                        .iter()
+                        .any(|arg| references_stack_range(arg, start, end))
+            }
+            AcornValue::TypeApplication(app) => references_stack_range(&app.function, start, end),
+            AcornValue::Lambda(_, value)
+            | AcornValue::ForAll(_, value)
+            | AcornValue::Exists(_, value)
+            | AcornValue::Choose(_, value)
+            | AcornValue::Not(value)
+            | AcornValue::Try(value, _) => references_stack_range(value, start, end),
+            AcornValue::Binary(_, left, right) => {
+                references_stack_range(left, start, end)
+                    || references_stack_range(right, start, end)
+            }
+            AcornValue::IfThenElse(cond, if_value, else_value) => {
+                references_stack_range(cond, start, end)
+                    || references_stack_range(if_value, start, end)
+                    || references_stack_range(else_value, start, end)
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                references_stack_range(scrutinee, start, end)
+                    || cases.iter().any(|case| {
+                        references_stack_range(&case.pattern, start, end)
+                            || references_stack_range(&case.result, start, end)
+                    })
+            }
+            AcornValue::Constant(_) | AcornValue::Bool(_) => false,
+        }
+    }
+    let new_var_end = first_new_var + arg_types.len() as u16;
+
+    match body {
+        AcornValue::Not(inner) if arg_types.len() == 1 && is_new_var(inner, 0) => {
+            return Ok(Some(logical_head(Symbol::Not)));
+        }
+        AcornValue::Binary(BinaryOp::And, left, right) if arg_types.len() == 2 => {
+            if is_new_var(left, 0) && is_new_var(right, 1) {
+                return Ok(Some(logical_head(Symbol::And)));
+            }
+        }
+        AcornValue::Binary(BinaryOp::And, left, right) if arg_types.len() == 1 => {
+            if is_new_var(right, 0) && !references_stack_range(left, first_new_var, new_var_end) {
+                let left_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    left,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                return Ok(Some(logical_head(Symbol::And).apply(&[left_term])));
+            }
+        }
+        AcornValue::Binary(BinaryOp::Or, left, right) if arg_types.len() == 2 => {
+            if is_new_var(left, 0) && is_new_var(right, 1) {
+                return Ok(Some(logical_head(Symbol::Or)));
+            }
+        }
+        AcornValue::Binary(BinaryOp::Or, left, right) if arg_types.len() == 1 => {
+            if is_new_var(right, 0) && !references_stack_range(left, first_new_var, new_var_end) {
+                let left_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    left,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                return Ok(Some(logical_head(Symbol::Or).apply(&[left_term])));
+            }
+        }
+        AcornValue::Binary(BinaryOp::Equals, left, right) if arg_types.len() == 2 => {
+            if is_new_var(left, 0) && is_new_var(right, 1) {
+                let eq_type = lower_type_to_term(kernel_context, &arg_types[0], type_var_map);
+                return Ok(Some(logical_head(Symbol::Eq).apply(&[eq_type])));
+            }
+        }
+        AcornValue::Binary(BinaryOp::Equals, left, right) if arg_types.len() == 1 => {
+            if is_new_var(right, 0) && !references_stack_range(left, first_new_var, new_var_end) {
+                let eq_type = lower_type_to_term(kernel_context, &arg_types[0], type_var_map);
+                let left_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    left,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                return Ok(Some(logical_head(Symbol::Eq).apply(&[eq_type, left_term])));
+            }
+        }
+        AcornValue::IfThenElse(cond, then_value, else_value) if arg_types.len() == 3 => {
+            if is_new_var(cond, 0) && is_new_var(then_value, 1) && is_new_var(else_value, 2) {
+                let value_type = lower_type_to_term(kernel_context, &arg_types[1], type_var_map);
+                return Ok(Some(logical_head(Symbol::Ite).apply(&[value_type])));
+            }
+        }
+        AcornValue::IfThenElse(cond, then_value, else_value) if arg_types.len() == 2 => {
+            if is_new_var(then_value, 0)
+                && is_new_var(else_value, 1)
+                && !references_stack_range(cond, first_new_var, new_var_end)
+            {
+                let value_type = lower_type_to_term(kernel_context, &arg_types[0], type_var_map);
+                let cond_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    cond,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                return Ok(Some(
+                    logical_head(Symbol::Ite).apply(&[value_type, cond_term]),
+                ));
+            }
+        }
+        AcornValue::IfThenElse(cond, then_value, else_value) if arg_types.len() == 1 => {
+            if is_new_var(else_value, 0)
+                && !references_stack_range(cond, first_new_var, new_var_end)
+                && !references_stack_range(then_value, first_new_var, new_var_end)
+            {
+                let value_type = lower_type_to_term(kernel_context, &arg_types[0], type_var_map);
+                let cond_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    cond,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                let then_term = lower_value_to_term_with_stack(
+                    kernel_context,
+                    then_value,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    &mut stack_with_new_vars,
+                )?;
+                return Ok(Some(
+                    logical_head(Symbol::Ite).apply(&[value_type, cond_term, then_term]),
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}
+
 /// Lowers an `AcornValue` into a kernel `Term`.
 ///
 /// This is a term-level lowering pass:
@@ -106,6 +297,21 @@ pub fn lower_value_to_term(
     lower_value_to_term_existing(kernel_context, value, type_var_map)
 }
 
+/// Like `lower_value_to_term`, but keeps unspecialized instance heads instead of preferring
+/// alias symbols so quoted clauses can roundtrip exactly in validation.
+pub fn lower_value_to_term_preserving_alias_spelling(
+    kernel_context: &mut KernelContext,
+    value: &AcornValue,
+    ctype: NewConstantType,
+    type_var_map: Option<&TypeVarMap>,
+) -> Result<Term, String> {
+    kernel_context
+        .symbol_table
+        .add_from(value, ctype, &mut kernel_context.type_store);
+
+    lower_value_to_term_existing_preserving_alias_spelling(kernel_context, value, type_var_map)
+}
+
 /// Lowers an `AcornValue` into a kernel `Term` assuming symbols are already registered.
 ///
 /// This does not call `symbol_table.add_from(...)`; unknown constants will fail elaboration.
@@ -115,13 +321,25 @@ pub fn lower_value_to_term_existing(
     type_var_map: Option<&TypeVarMap>,
 ) -> Result<Term, String> {
     let mut stack = vec![];
-    lower_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
+    lower_value_to_term_with_stack(kernel_context, value, type_var_map, true, &mut stack)
+}
+
+/// Like `lower_value_to_term_existing`, but preserves original instance spelling for exact
+/// clause roundtrip checks after symbol registration has already happened.
+pub fn lower_value_to_term_existing_preserving_alias_spelling(
+    kernel_context: &mut KernelContext,
+    value: &AcornValue,
+    type_var_map: Option<&TypeVarMap>,
+) -> Result<Term, String> {
+    let mut stack = vec![];
+    lower_value_to_term_with_stack(kernel_context, value, type_var_map, false, &mut stack)
 }
 
 fn lower_value_to_term_with_stack(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
     type_var_map: Option<&TypeVarMap>,
+    prefer_instance_aliases: bool,
     stack: &mut Vec<Term>,
 ) -> Result<Term, String> {
     match value {
@@ -141,23 +359,32 @@ fn lower_value_to_term_with_stack(
                 };
                 Ok(Term::atom(Atom::Symbol(symbol)))
             } else {
-                kernel_context.symbol_table.term_from_instance_with_vars(
-                    c,
-                    &kernel_context.type_store,
-                    type_var_map,
-                )
+                kernel_context
+                    .symbol_table
+                    .term_from_instance_with_vars_and_aliases(
+                        c,
+                        &kernel_context.type_store,
+                        type_var_map,
+                        prefer_instance_aliases,
+                    )
             }
         }
 
         AcornValue::Application(app) => {
-            let function_term =
-                lower_value_to_term_with_stack(kernel_context, &app.function, type_var_map, stack)?;
+            let function_term = lower_value_to_term_with_stack(
+                kernel_context,
+                &app.function,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
             let mut arg_terms = Vec::with_capacity(app.args.len());
             for arg in &app.args {
                 arg_terms.push(lower_value_to_term_with_stack(
                     kernel_context,
                     arg,
                     type_var_map,
+                    prefer_instance_aliases,
                     stack,
                 )?);
             }
@@ -166,23 +393,44 @@ fn lower_value_to_term_with_stack(
 
         AcornValue::TypeApplication(app) => {
             let instantiated = app.instantiated_function();
-            lower_value_to_term_with_stack(kernel_context, &instantiated, type_var_map, stack)
+            lower_value_to_term_with_stack(
+                kernel_context,
+                &instantiated,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )
         }
 
-        AcornValue::Lambda(arg_types, body) => elaborate_binder_to_term(
-            kernel_context,
-            arg_types,
-            body,
-            type_var_map,
-            stack,
-            BinderKind::Lambda,
-        ),
+        AcornValue::Lambda(arg_types, body) => {
+            if let Some(partial) = try_lower_partial_logical_lambda(
+                kernel_context,
+                arg_types,
+                body,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )? {
+                Ok(partial)
+            } else {
+                elaborate_binder_to_term(
+                    kernel_context,
+                    arg_types,
+                    body,
+                    type_var_map,
+                    prefer_instance_aliases,
+                    stack,
+                    BinderKind::Lambda,
+                )
+            }
+        }
 
         AcornValue::ForAll(arg_types, body) => elaborate_binder_to_term(
             kernel_context,
             arg_types,
             body,
             type_var_map,
+            prefer_instance_aliases,
             stack,
             BinderKind::ForAll,
         ),
@@ -192,6 +440,7 @@ fn lower_value_to_term_with_stack(
             arg_types,
             body,
             type_var_map,
+            prefer_instance_aliases,
             stack,
             BinderKind::Exists,
         ),
@@ -203,6 +452,7 @@ fn lower_value_to_term_with_stack(
                 std::slice::from_ref(choice_type),
                 body,
                 type_var_map,
+                prefer_instance_aliases,
                 stack,
                 BinderKind::Lambda,
             )?;
@@ -210,10 +460,20 @@ fn lower_value_to_term_with_stack(
         }
 
         AcornValue::Binary(op, left, right) => {
-            let left_term =
-                lower_value_to_term_with_stack(kernel_context, left, type_var_map, stack)?;
-            let right_term =
-                lower_value_to_term_with_stack(kernel_context, right, type_var_map, stack)?;
+            let left_term = lower_value_to_term_with_stack(
+                kernel_context,
+                left,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
+            let right_term = lower_value_to_term_with_stack(
+                kernel_context,
+                right,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
 
             match op {
                 BinaryOp::And => Ok(logical_head(Symbol::And).apply(&[left_term, right_term])),
@@ -224,14 +484,12 @@ fn lower_value_to_term_with_stack(
                     Ok(logical_head(Symbol::Or).apply(&[not_left, right_term]))
                 }
                 BinaryOp::Equals => {
-                    let eq_type =
-                        lower_type_to_term(kernel_context, &left.get_type(), type_var_map);
+                    let eq_type = lower_value_type_to_term(kernel_context, left, type_var_map)?;
                     Ok(logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]))
                 }
                 BinaryOp::NotEquals => {
                     // Logically lossless sugar: (a != b) = not (a = b).
-                    let eq_type =
-                        lower_type_to_term(kernel_context, &left.get_type(), type_var_map);
+                    let eq_type = lower_value_type_to_term(kernel_context, left, type_var_map)?;
                     let eq_term = logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]);
                     Ok(logical_head(Symbol::Not).apply(&[eq_term]))
                 }
@@ -239,8 +497,13 @@ fn lower_value_to_term_with_stack(
         }
 
         AcornValue::Not(subvalue) => {
-            let sub_term =
-                lower_value_to_term_with_stack(kernel_context, subvalue, type_var_map, stack)?;
+            let sub_term = lower_value_to_term_with_stack(
+                kernel_context,
+                subvalue,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
             Ok(logical_head(Symbol::Not).apply(&[sub_term]))
         }
 
@@ -257,20 +520,39 @@ fn lower_value_to_term_with_stack(
         }
 
         AcornValue::IfThenElse(cond, then_value, else_value) => {
-            let cond_term =
-                lower_value_to_term_with_stack(kernel_context, cond, type_var_map, stack)?;
-            let then_term =
-                lower_value_to_term_with_stack(kernel_context, then_value, type_var_map, stack)?;
-            let else_term =
-                lower_value_to_term_with_stack(kernel_context, else_value, type_var_map, stack)?;
-            let value_type =
-                lower_type_to_term(kernel_context, &then_value.get_type(), type_var_map);
+            let cond_term = lower_value_to_term_with_stack(
+                kernel_context,
+                cond,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
+            let then_term = lower_value_to_term_with_stack(
+                kernel_context,
+                then_value,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
+            let else_term = lower_value_to_term_with_stack(
+                kernel_context,
+                else_value,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            )?;
+            let value_type = lower_value_type_to_term(kernel_context, then_value, type_var_map)?;
             Ok(logical_head(Symbol::Ite).apply(&[value_type, cond_term, then_term, else_term]))
         }
 
-        AcornValue::Match(scrutinee, cases) => {
-            lower_match_to_term(kernel_context, scrutinee, cases, type_var_map, stack)
-        }
+        AcornValue::Match(scrutinee, cases) => lower_match_to_term(
+            kernel_context,
+            scrutinee,
+            cases,
+            type_var_map,
+            prefer_instance_aliases,
+            stack,
+        ),
     }
 }
 
@@ -286,6 +568,7 @@ fn elaborate_binder_to_term(
     binder_types: &[AcornType],
     body: &AcornValue,
     type_var_map: Option<&TypeVarMap>,
+    prefer_instance_aliases: bool,
     stack: &mut Vec<Term>,
     kind: BinderKind,
 ) -> Result<Term, String> {
@@ -309,7 +592,13 @@ fn elaborate_binder_to_term(
         stack.push(bound);
     }
 
-    let body_term = lower_value_to_term_with_stack(kernel_context, body, type_var_map, stack)?;
+    let body_term = lower_value_to_term_with_stack(
+        kernel_context,
+        body,
+        type_var_map,
+        prefer_instance_aliases,
+        stack,
+    )?;
 
     stack.truncate(old_len);
     for existing in stack.iter_mut() {
@@ -330,6 +619,7 @@ fn lower_match_to_term(
     scrutinee: &AcornValue,
     cases: &[MatchCase],
     type_var_map: Option<&TypeVarMap>,
+    prefer_instance_aliases: bool,
     stack: &mut Vec<Term>,
 ) -> Result<Term, String> {
     let scrutinee_type = scrutinee.get_type();
@@ -365,14 +655,19 @@ fn lower_match_to_term(
         .iter()
         .map(|t| lower_type_to_term(kernel_context, t, type_var_map))
         .collect();
-    type_arg_terms.push(lower_type_to_term(
+    type_arg_terms.push(lower_value_type_to_term(
         kernel_context,
-        &result_type,
+        &cases[0].result,
         type_var_map,
-    ));
+    )?);
 
-    let scrutinee_term =
-        lower_value_to_term_with_stack(kernel_context, scrutinee, type_var_map, stack)?;
+    let scrutinee_term = lower_value_to_term_with_stack(
+        kernel_context,
+        scrutinee,
+        type_var_map,
+        prefer_instance_aliases,
+        stack,
+    )?;
 
     let mut sorted_cases = cases.to_vec();
     sorted_cases.sort_by_key(|case| case.constructor_index);
@@ -407,6 +702,7 @@ fn lower_match_to_term(
             &case.new_vars,
             &case.result,
             type_var_map,
+            prefer_instance_aliases,
             stack,
             BinderKind::Lambda,
         )?);

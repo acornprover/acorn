@@ -597,6 +597,29 @@ impl<'a> TermBridge<'a> {
             go(term.as_ref())
         }
 
+        // Picks a fresh local index after any remapped locals so synthesized partial lambdas
+        // do not capture or collide with existing quoted variables.
+        fn next_lambda_var_index(
+            local_context: &LocalContext,
+            var_remapping: Option<&[Option<u16>]>,
+        ) -> u16 {
+            var_remapping
+                .and_then(|mapping| mapping.iter().filter_map(|mapped| *mapped).max())
+                .map_or(local_context.len() as u16, |max| max + 1)
+        }
+
+        // Shifts existing quoted args upward when we need to insert missing lambda binders
+        // ahead of them for partially applied logical builtins.
+        fn shift_for_inserted_lambda(
+            args: Vec<AcornValue>,
+            first_arg_index: AtomId,
+            missing: usize,
+        ) -> Vec<AcornValue> {
+            args.into_iter()
+                .map(|arg| arg.insert_stack(first_arg_index, missing as AtomId))
+                .collect()
+        }
+
         for arg in term.args().iter() {
             let expected_input_type = remaining_head_type
                 .as_ref()
@@ -663,9 +686,10 @@ impl<'a> TermBridge<'a> {
                     }
                     if value_args.is_empty() {
                         let arg_type = AcornType::Bool;
+                        let arg_index = next_lambda_var_index(local_context, var_remapping);
                         return AcornValue::lambda(
                             vec![arg_type.clone()],
-                            AcornValue::Not(Box::new(AcornValue::Variable(0, arg_type))),
+                            AcornValue::Not(Box::new(AcornValue::Variable(arg_index, arg_type))),
                         );
                     }
                     return AcornValue::Not(Box::new(value_args.into_iter().next().unwrap()));
@@ -675,10 +699,13 @@ impl<'a> TermBridge<'a> {
                         panic!("malformed and term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
-                        let mut args = value_args;
+                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let missing = 2 - value_args.len();
+                        let mut args =
+                            shift_for_inserted_lambda(value_args, first_arg_index, missing);
                         let mut lambda_args = vec![];
                         while args.len() < 2 {
-                            let arg_index = lambda_args.len() as AtomId;
+                            let arg_index = first_arg_index + lambda_args.len() as AtomId;
                             lambda_args.push(AcornType::Bool);
                             args.push(AcornValue::Variable(arg_index, AcornType::Bool));
                         }
@@ -696,10 +723,13 @@ impl<'a> TermBridge<'a> {
                         panic!("malformed or term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
-                        let mut args = value_args;
+                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let missing = 2 - value_args.len();
+                        let mut args =
+                            shift_for_inserted_lambda(value_args, first_arg_index, missing);
                         let mut lambda_args = vec![];
                         while args.len() < 2 {
-                            let arg_index = lambda_args.len() as AtomId;
+                            let arg_index = first_arg_index + lambda_args.len() as AtomId;
                             lambda_args.push(AcornType::Bool);
                             args.push(AcornValue::Variable(arg_index, AcornType::Bool));
                         }
@@ -718,10 +748,13 @@ impl<'a> TermBridge<'a> {
                     }
                     if type_args.len() == 1 && value_args.len() < 2 {
                         let eq_type = type_args.into_iter().next().unwrap();
-                        let mut args = value_args;
+                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let missing = 2 - value_args.len();
+                        let mut args =
+                            shift_for_inserted_lambda(value_args, first_arg_index, missing);
                         let mut lambda_args = vec![];
                         while args.len() < 2 {
-                            let arg_index = lambda_args.len() as AtomId;
+                            let arg_index = first_arg_index + lambda_args.len() as AtomId;
                             lambda_args.push(eq_type.clone());
                             args.push(AcornValue::Variable(arg_index, eq_type.clone()));
                         }
@@ -738,8 +771,35 @@ impl<'a> TermBridge<'a> {
                     return AcornValue::equals(args.next().unwrap(), args.next().unwrap());
                 }
                 Symbol::Ite => {
-                    if type_args.len() > 1 || value_args.len() != 3 {
+                    if type_args.len() > 1 || value_args.len() > 3 {
                         panic!("malformed ite term during quoting: {}", term);
+                    }
+                    if type_args.len() == 1 && value_args.len() < 3 {
+                        let ite_type = type_args.into_iter().next().unwrap();
+                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let missing = 3 - value_args.len();
+                        let mut args =
+                            shift_for_inserted_lambda(value_args, first_arg_index, missing);
+                        let mut lambda_args = vec![];
+                        while args.len() < 3 {
+                            let arg_index = first_arg_index + lambda_args.len() as AtomId;
+                            let arg_type = if args.is_empty() {
+                                AcornType::Bool
+                            } else {
+                                ite_type.clone()
+                            };
+                            lambda_args.push(arg_type.clone());
+                            args.push(AcornValue::Variable(arg_index, arg_type));
+                        }
+                        let mut args = args.into_iter();
+                        return AcornValue::lambda(
+                            lambda_args,
+                            AcornValue::IfThenElse(
+                                Box::new(args.next().unwrap()),
+                                Box::new(args.next().unwrap()),
+                                Box::new(args.next().unwrap()),
+                            ),
+                        );
                     }
                     let mut args = value_args.into_iter();
                     return AcornValue::IfThenElse(

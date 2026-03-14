@@ -100,6 +100,37 @@ impl<'a> Clausifier<'a> {
         (context, pinned as AtomId, pinned)
     }
 
+    /// Builds the sparse local context expected by exact clause roundtrips, keeping preserved
+    /// type parameters in their original slots instead of repacking them densely.
+    fn initial_exact_clause_context(&self) -> (LocalContext, AtomId) {
+        let mut context = LocalContext::empty();
+        if let Some(type_var_map) = self.type_var_map() {
+            let mut entries: Vec<_> = type_var_map.values().collect();
+            entries.sort_by_key(|(id, _)| *id);
+            for (var_id, var_type) in entries {
+                context.set_type(*var_id as usize, var_type.clone());
+            }
+        }
+        (context, 0)
+    }
+
+    /// Reserves the next unused local id in a sparse context so newly opened binders do not
+    /// overwrite preserved type-variable slots during exact clausification.
+    fn allocate_next_open_local_slot(
+        &self,
+        context: &mut LocalContext,
+        next_var_id: &mut AtomId,
+        var_type: Term,
+    ) -> AtomId {
+        let mut var_id = *next_var_id as usize;
+        while context.get_var_type(var_id).is_some() {
+            var_id += 1;
+        }
+        context.set_type(var_id, var_type);
+        *next_var_id = (var_id + 1) as AtomId;
+        var_id as AtomId
+    }
+
     fn open_leading_foralls_as_free_vars(
         &self,
         term: &Term,
@@ -111,6 +142,23 @@ impl<'a> Clausifier<'a> {
             let var_id = *next_var_id;
             *next_var_id += 1;
             context.push_type(binder_type.to_owned());
+            body = self.open_binder_body(&binder_body.to_owned(), &Term::new_variable(var_id));
+        }
+        body
+    }
+
+    /// Opens leading foralls without compacting local ids, which keeps quote/clausify/lower
+    /// roundtrips stable when type parameters already occupy non-prefix slots.
+    fn open_leading_foralls_preserving_local_slots(
+        &self,
+        term: &Term,
+        context: &mut LocalContext,
+        next_var_id: &mut AtomId,
+    ) -> Term {
+        let mut body = term.clone();
+        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
+            let var_id =
+                self.allocate_next_open_local_slot(context, next_var_id, binder_type.to_owned());
             body = self.open_binder_body(&binder_body.to_owned(), &Term::new_variable(var_id));
         }
         body
@@ -1259,8 +1307,9 @@ impl<'a> Clausifier<'a> {
 
     /// Lower a normalized clause-shaped term into exactly one normalized clause.
     fn lower_normalized_term_to_clause(&mut self, term: &Term) -> Result<Clause, String> {
-        let (mut context, mut next_var_id, _pinned) = self.initial_clause_context();
-        let opened = self.open_leading_foralls_as_free_vars(term, &mut context, &mut next_var_id);
+        let (mut context, mut next_var_id) = self.initial_exact_clause_context();
+        let opened =
+            self.open_leading_foralls_preserving_local_slots(term, &mut context, &mut next_var_id);
         let literals = self.exact_clause_literals_from_term(&opened)?;
         Ok(Clause::from_literals_unnormalized(literals, &context).normalized_preserving_locals())
     }

@@ -875,10 +875,24 @@ impl SymbolTable {
         type_store: &TypeStore,
         type_var_map: Option<&StdHashMap<String, (AtomId, Term)>>,
     ) -> Result<Term, String> {
-        // Check for an alias first - instance definitions create aliases
-        // where Arf.foo[Foo] = Foo.foo makes them the same symbol
-        if let Some(&symbol) = self.instance_to_symbol.get(c) {
-            return Ok(Term::atom(Atom::Symbol(symbol)));
+        self.term_from_instance_with_vars_and_aliases(c, type_store, type_var_map, true)
+    }
+
+    /// Builds a term for a constant instance while optionally bypassing alias collapse so exact
+    /// quote/lower roundtrips can preserve the original polymorphic head spelling.
+    pub fn term_from_instance_with_vars_and_aliases(
+        &self,
+        c: &ConstantInstance,
+        type_store: &TypeStore,
+        type_var_map: Option<&StdHashMap<String, (AtomId, Term)>>,
+        prefer_aliases: bool,
+    ) -> Result<Term, String> {
+        if prefer_aliases {
+            // Instance definitions create aliases where `Attr.foo[Foo]` and `Foo.foo`
+            // are interchangeable during ordinary elaboration.
+            if let Some(&symbol) = self.instance_to_symbol.get(c) {
+                return Ok(Term::atom(Atom::Symbol(symbol)));
+            }
         }
 
         // Get the base constant symbol
