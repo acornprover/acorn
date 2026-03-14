@@ -346,7 +346,7 @@ pub fn lower_value_to_term_existing_with_stack(
     initial_stack: &[Term],
 ) -> Result<Term, String> {
     let mut stack = initial_stack.to_vec();
-    lower_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
+    lower_value_to_term_with_stack(kernel_context, value, type_var_map, true, &mut stack)
 }
 
 fn lower_value_to_term_with_stack(
@@ -866,6 +866,61 @@ mod tests {
             lower_value_to_term(kernel_context, &quoted, NewConstantType::Local, None)
                 .expect("re-lowering should succeed");
         assert_eq!(term, roundtripped);
+    }
+
+    #[test]
+    fn test_lower_value_to_term_existing_with_stack_prefers_instance_aliases() {
+        let mut kernel_context = KernelContext::new();
+        let type_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let generic_type = AcornType::functional(
+            vec![AcornType::Variable(type_param.clone())],
+            AcornType::Variable(type_param),
+        );
+        let instance_type = AcornType::functional(vec![AcornType::Bool], AcornType::Bool);
+        let base_name = ConstantName::unqualified(ModuleId(0), "id");
+        let alias_name = ConstantName::unqualified(ModuleId(0), "bool_id");
+        let constant = AcornValue::constant(
+            base_name.clone(),
+            vec![AcornType::Bool],
+            instance_type.clone(),
+            generic_type,
+            vec!["T".to_string()],
+        );
+        kernel_context.symbol_table.add_from(
+            &constant,
+            NewConstantType::Global,
+            &mut kernel_context.type_store,
+        );
+        let AcornValue::Constant(instance) = &constant else {
+            panic!("expected constant instance");
+        };
+        kernel_context.symbol_table.alias_instance(
+            instance.clone(),
+            &alias_name,
+            &instance_type,
+            false,
+            &mut kernel_context.type_store,
+        );
+
+        let seeded_var = Term::new_variable(7);
+        let applied = AcornValue::apply(constant, vec![AcornValue::Variable(0, AcornType::Bool)]);
+        let term = lower_value_to_term_existing_with_stack(
+            &mut kernel_context,
+            &applied,
+            None,
+            &[seeded_var.clone()],
+        )
+        .expect("lowering with seeded stack should succeed");
+
+        let alias_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&alias_name)
+            .expect("alias symbol should be registered");
+        let expected = Term::atom(Atom::Symbol(alias_symbol)).apply(&[seeded_var]);
+        assert_eq!(term, expected);
     }
 
     #[test]
