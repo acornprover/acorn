@@ -1269,6 +1269,56 @@ instance Nat: Two
     }
 
     #[test]
+    fn test_reprove_reverse_order_visits_modules_backwards() {
+        let (acornlib, src, _) = setup();
+
+        src.child("module_a.ac")
+            .write_str(
+                r#"
+                theorem a_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("module_b.ac")
+            .write_str(
+                r#"
+                theorem b_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: false,
+        };
+        let mut verifier = Verifier::new(acornlib.path().to_path_buf(), reprove_config, None)
+            .expect("whole-project reprove verifier should construct");
+        verifier.builder.check_hashes = false;
+        verifier.builder.check_mode = false;
+        verifier.builder.reverse_targets = true;
+        verifier.builder.operation_verb = "reproved";
+
+        let output = verifier.run().expect("reverse reprove should run");
+        assert_eq!(output.status, BuildStatus::Good);
+
+        let reprove_logs: Vec<&str> = output
+            .events
+            .iter()
+            .filter_map(|event| event.log_message.as_deref())
+            .filter(|message| message.starts_with("reproving: "))
+            .collect();
+        assert_eq!(
+            reprove_logs,
+            vec!["reproving: module_b", "reproving: module_a"]
+        );
+    }
+
+    #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
 

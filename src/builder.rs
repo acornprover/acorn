@@ -159,6 +159,9 @@ pub struct Builder<'a> {
     /// should be reverted, so there's no point continuing verification.
     pub exit_on_warning: bool,
 
+    /// Visit targets in reverse sorted order.
+    pub reverse_targets: bool,
+
     /// The current module we are proving.
     current_module: Option<ModuleDescriptor>,
 
@@ -407,6 +410,7 @@ impl<'a> Builder<'a> {
             clean_certs: false,
             strict: false,
             exit_on_warning: false,
+            reverse_targets: false,
             current_module: None,
             single_line_goal_count: 0,
             current_module_good: true,
@@ -1233,6 +1237,9 @@ impl<'a> Builder<'a> {
         // Build in alphabetical order by module name for consistency.
         let mut targets = self.project.targets.iter().collect::<Vec<_>>();
         targets.sort();
+        if self.reverse_targets {
+            targets.reverse();
+        }
 
         let verification_message = if targets.len() > 5 {
             format!("verifying {} modules...", targets.len())
