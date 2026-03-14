@@ -6,7 +6,7 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::lower_value_to_term;
+use crate::elaborator::to_term::lower_value_to_term_existing_with_stack;
 use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::Claim;
@@ -98,19 +98,15 @@ impl ClaimCodec {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let generic_value = kernel_context.quote_clause(claim.clause(), None, None, false);
         let generic_code = generator.value_to_code(&generic_value)?;
-        let standalone_arg_context = LocalContext::from_types(
-            local_context
-                .get_var_types()
-                .iter()
-                .take_while(|var_type| {
-                    var_type
-                        .as_ref()
-                        .is_some_and(|term| term.as_ref().is_type_param_kind())
-                })
-                .flatten()
-                .cloned()
-                .collect(),
-        );
+        let num_type_params = local_context
+            .get_var_types()
+            .iter()
+            .take_while(|var_type| {
+                var_type
+                    .as_ref()
+                    .is_some_and(|term| term.as_ref().is_type_param_kind())
+            })
+            .count();
         let body_code = if matches!(generic_value, AcornValue::ForAll(_, _)) {
             let generic_expr = Expression::parse_value_string(&generic_code)?;
             match generic_expr {
@@ -156,6 +152,10 @@ impl ClaimCodec {
             value_decl_name_by_var[var_id] =
                 Some(bindings.next_indexed_var('x', &mut next_value_decl_id));
         }
+        let initial_value_var_names: Vec<String> = value_decl_name_by_var
+            .iter()
+            .filter_map(|name| name.clone())
+            .collect();
 
         for var_id in 0..local_context.len() {
             let var_type = local_context
@@ -247,34 +247,37 @@ impl ClaimCodec {
             ));
 
             let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
-            let (arg_context, scope_len) = if substituted_arg_term.max_variable().is_none() {
-                (LocalContext::empty(), 0)
+            let arg_value = if substituted_arg_term.max_variable().is_some() {
+                let quoted = kernel_context.quote_term_with_context(
+                    &substituted_arg_term,
+                    local_context,
+                    true,
+                );
+                Self::rebase_value_to_standalone(&quoted, num_type_params as AtomId).map_err(
+                    |err| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "{} [claim arg term: {}; quoted: {}]",
+                            err, substituted_arg_term, quoted
+                        ))
+                    },
+                )?
             } else {
-                (
-                    standalone_arg_context.clone(),
-                    standalone_arg_context.len() as AtomId,
-                )
+                let quoted = kernel_context.quote_term_with_context(
+                    &substituted_arg_term,
+                    &LocalContext::empty(),
+                    true,
+                );
+                Self::shift_value_variables(&quoted, initial_value_var_names.len() as AtomId)
             };
-            let arg_value =
-                kernel_context.quote_term_with_context(&substituted_arg_term, &arg_context, true);
-            let arg_value =
-                Self::rebase_value_to_standalone(&arg_value, scope_len).map_err(|err| {
-                    CodeGenError::GeneratedBadCode(format!(
-                        "{} [claim arg term: {}; quoted: {}]",
-                        err, substituted_arg_term, arg_value
-                    ))
-                })?;
             value_arg_values.push(arg_value.clone());
-            if let Decomposition::Atom(Atom::FreeVariable(mapped_var_id)) =
-                substituted_arg_term.as_ref().decompose()
-            {
-                if let Some(Some(mapped_name)) = value_decl_name_by_var.get(*mapped_var_id as usize)
-                {
-                    value_arg_codes.push(mapped_name.clone());
-                    continue;
-                }
+            if Self::value_has_variable(&arg_value) {
+                value_arg_codes.push(
+                    generator
+                        .value_to_code_with_initial_vars(&arg_value, &initial_value_var_names)?,
+                );
+            } else {
+                value_arg_codes.push(generator.value_to_code(&arg_value)?);
             }
-            value_arg_codes.push(generator.value_to_code(&arg_value)?);
         }
 
         let lambda_body_value = match &generic_value {
@@ -612,7 +615,6 @@ impl ClaimCodec {
         let (arg_names, arg_types) = evaluator.bind_args(&mut stack, shape.declarations, None)?;
         let body =
             evaluator.evaluate_value_with_stack(&mut stack, shape.body, Some(&AcornType::Bool))?;
-        stack.remove_all(&arg_names);
 
         if shape.value_args.len() != arg_types.len() {
             return Err(CodeGenError::GeneratedBadCode(
@@ -629,14 +631,15 @@ impl ClaimCodec {
             .iter()
             .map(|arg_type| arg_type.instantiate(&substitutions))
             .collect();
-        let mut arg_evaluator =
-            Evaluator::new_with_allow_choose(project, &scoped_bindings, None, allow_choose);
         let args = shape
             .value_args
             .iter()
             .zip(specialized_arg_types.iter())
-            .map(|(expr, arg_type)| arg_evaluator.evaluate_value(expr, Some(arg_type)))
+            .map(|(expr, arg_type)| {
+                evaluator.evaluate_value_with_stack(&mut stack, expr, Some(arg_type))
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        stack.remove_all(&arg_names);
 
         let function_value = ClaimFunctionValue {
             type_param_names: type_params.iter().map(|param| param.name.clone()).collect(),
@@ -708,80 +711,96 @@ impl ClaimCodec {
         }
     }
 
-    /// Rebase a quoted claim argument so it can stand alone outside the clause's local scope.
+    /// Remove the leading type-parameter slots from a quoted claim arg's variable numbering.
+    ///
+    /// Claim args are serialized with all generic value binders preloaded as initial vars, so we
+    /// only compact away the local-context type-parameter prefix. Binder vars remain offset by the
+    /// number of generic value binders and must not be renumbered relative to inner scopes.
     fn rebase_value_to_standalone(
         value: &AcornValue,
-        scope_len: AtomId,
+        removed_prefix_len: AtomId,
     ) -> Result<AcornValue, CodeGenError> {
         Ok(match value {
             AcornValue::Variable(var_id, var_type) => {
-                if *var_id < scope_len {
+                if *var_id < removed_prefix_len {
                     AcornValue::Variable(*var_id, var_type.clone())
                 } else {
-                    AcornValue::Variable(var_id - scope_len, var_type.clone())
+                    AcornValue::Variable(var_id - removed_prefix_len, var_type.clone())
                 }
             }
             AcornValue::Constant(constant) => AcornValue::Constant(constant.clone()),
             AcornValue::Application(app) => AcornValue::apply(
-                Self::rebase_value_to_standalone(&app.function, scope_len)?,
+                Self::rebase_value_to_standalone(&app.function, removed_prefix_len)?,
                 app.args
                     .iter()
-                    .map(|arg| Self::rebase_value_to_standalone(arg, scope_len))
+                    .map(|arg| Self::rebase_value_to_standalone(arg, removed_prefix_len))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             AcornValue::TypeApplication(app) => AcornValue::type_apply(
-                Self::rebase_value_to_standalone(&app.function, scope_len)?,
+                Self::rebase_value_to_standalone(&app.function, removed_prefix_len)?,
                 app.type_param_names.clone(),
                 app.type_param_constraints.clone(),
                 app.type_args.clone(),
             ),
             AcornValue::Lambda(arg_types, body) => AcornValue::lambda(
                 arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
+                Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
-                Box::new(Self::rebase_value_to_standalone(left, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(right, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(left, removed_prefix_len)?),
+                Box::new(Self::rebase_value_to_standalone(right, removed_prefix_len)?),
             ),
             AcornValue::Not(value) => AcornValue::Not(Box::new(Self::rebase_value_to_standalone(
-                value, scope_len,
+                value,
+                removed_prefix_len,
             )?)),
             AcornValue::Try(value, unwrapped_type) => AcornValue::Try(
-                Box::new(Self::rebase_value_to_standalone(value, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(value, removed_prefix_len)?),
                 unwrapped_type.clone(),
             ),
             AcornValue::ForAll(arg_types, body) => AcornValue::forall(
                 arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
+                Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
             AcornValue::Exists(arg_types, body) => AcornValue::exists(
                 arg_types.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + arg_types.len() as AtomId)?,
+                Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
             AcornValue::Choose(choice_type, body) => AcornValue::choose(
                 choice_type.clone(),
-                Self::rebase_value_to_standalone(body, scope_len + 1)?,
+                Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
             AcornValue::Bool(value) => AcornValue::Bool(*value),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
-                Box::new(Self::rebase_value_to_standalone(cond, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(if_value, scope_len)?),
-                Box::new(Self::rebase_value_to_standalone(else_value, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(cond, removed_prefix_len)?),
+                Box::new(Self::rebase_value_to_standalone(
+                    if_value,
+                    removed_prefix_len,
+                )?),
+                Box::new(Self::rebase_value_to_standalone(
+                    else_value,
+                    removed_prefix_len,
+                )?),
             ),
             AcornValue::Match(scrutinee, cases) => AcornValue::Match(
-                Box::new(Self::rebase_value_to_standalone(scrutinee, scope_len)?),
+                Box::new(Self::rebase_value_to_standalone(
+                    scrutinee,
+                    removed_prefix_len,
+                )?),
                 cases
                     .iter()
                     .map(|case| {
-                        let case_scope_len = scope_len + case.new_vars.len() as AtomId;
                         Ok(crate::elaborator::acorn_value::MatchCase {
                             new_vars: case.new_vars.clone(),
                             pattern: Self::rebase_value_to_standalone(
                                 &case.pattern,
-                                case_scope_len,
+                                removed_prefix_len,
                             )?,
-                            result: Self::rebase_value_to_standalone(&case.result, case_scope_len)?,
+                            result: Self::rebase_value_to_standalone(
+                                &case.result,
+                                removed_prefix_len,
+                            )?,
                             constructor_index: case.constructor_index,
                             constructor_total: case.constructor_total,
                         })
@@ -789,6 +808,107 @@ impl ClaimCodec {
                     .collect::<Result<Vec<_>, CodeGenError>>()?,
             ),
         })
+    }
+
+    /// Shift a standalone quoted arg into the namespace where claim value vars are preloaded.
+    fn shift_value_variables(value: &AcornValue, amount: AtomId) -> AcornValue {
+        match value {
+            AcornValue::Variable(var_id, var_type) => {
+                AcornValue::Variable(var_id + amount, var_type.clone())
+            }
+            AcornValue::Constant(constant) => AcornValue::Constant(constant.clone()),
+            AcornValue::Application(app) => AcornValue::apply(
+                Self::shift_value_variables(&app.function, amount),
+                app.args
+                    .iter()
+                    .map(|arg| Self::shift_value_variables(arg, amount))
+                    .collect::<Vec<_>>(),
+            ),
+            AcornValue::TypeApplication(app) => AcornValue::type_apply(
+                Self::shift_value_variables(&app.function, amount),
+                app.type_param_names.clone(),
+                app.type_param_constraints.clone(),
+                app.type_args.clone(),
+            ),
+            AcornValue::Lambda(arg_types, body) => {
+                AcornValue::lambda(arg_types.clone(), Self::shift_value_variables(body, amount))
+            }
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                *op,
+                Box::new(Self::shift_value_variables(left, amount)),
+                Box::new(Self::shift_value_variables(right, amount)),
+            ),
+            AcornValue::Not(value) => {
+                AcornValue::Not(Box::new(Self::shift_value_variables(value, amount)))
+            }
+            AcornValue::Try(value, unwrapped_type) => AcornValue::Try(
+                Box::new(Self::shift_value_variables(value, amount)),
+                unwrapped_type.clone(),
+            ),
+            AcornValue::ForAll(arg_types, body) => {
+                AcornValue::forall(arg_types.clone(), Self::shift_value_variables(body, amount))
+            }
+            AcornValue::Exists(arg_types, body) => {
+                AcornValue::exists(arg_types.clone(), Self::shift_value_variables(body, amount))
+            }
+            AcornValue::Choose(choice_type, body) => AcornValue::choose(
+                choice_type.clone(),
+                Self::shift_value_variables(body, amount),
+            ),
+            AcornValue::Bool(value) => AcornValue::Bool(*value),
+            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(Self::shift_value_variables(cond, amount)),
+                Box::new(Self::shift_value_variables(if_value, amount)),
+                Box::new(Self::shift_value_variables(else_value, amount)),
+            ),
+            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                Box::new(Self::shift_value_variables(scrutinee, amount)),
+                cases
+                    .iter()
+                    .map(|case| crate::elaborator::acorn_value::MatchCase {
+                        new_vars: case.new_vars.clone(),
+                        pattern: Self::shift_value_variables(&case.pattern, amount),
+                        result: Self::shift_value_variables(&case.result, amount),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Detect whether a quoted arg still depends on the claim's preloaded value-variable namespace.
+    fn value_has_variable(value: &AcornValue) -> bool {
+        match value {
+            AcornValue::Variable(_, _) => true,
+            AcornValue::Constant(_) | AcornValue::Bool(_) => false,
+            AcornValue::Application(app) => {
+                Self::value_has_variable(&app.function)
+                    || app.args.iter().any(Self::value_has_variable)
+            }
+            AcornValue::TypeApplication(app) => Self::value_has_variable(&app.function),
+            AcornValue::Lambda(_, body)
+            | AcornValue::ForAll(_, body)
+            | AcornValue::Exists(_, body)
+            | AcornValue::Choose(_, body)
+            | AcornValue::Not(body)
+            | AcornValue::Try(body, _) => Self::value_has_variable(body),
+            AcornValue::Binary(_, left, right) => {
+                Self::value_has_variable(left) || Self::value_has_variable(right)
+            }
+            AcornValue::IfThenElse(cond, then_value, else_value) => {
+                Self::value_has_variable(cond)
+                    || Self::value_has_variable(then_value)
+                    || Self::value_has_variable(else_value)
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                Self::value_has_variable(scrutinee)
+                    || cases.iter().any(|case| {
+                        Self::value_has_variable(&case.pattern)
+                            || Self::value_has_variable(&case.result)
+                    })
+            }
+        }
     }
 
     /// Build a claim from a quoted clause and its separately lowered argument list.
@@ -831,12 +951,20 @@ impl ClaimCodec {
 
         let type_var_map = (!type_var_map.is_empty()).then_some(type_var_map);
         let value_offset = var_map.len();
+        let initial_stack: Vec<Term> = (0..args.len())
+            .map(|i| Term::new_variable((value_offset + i) as AtomId))
+            .collect();
         for (var_id, arg) in args.iter().enumerate() {
-            let term = lower_value_to_term(
-                kernel_context,
+            kernel_context.symbol_table.add_from(
                 arg,
                 NewConstantType::Local,
+                &mut kernel_context.type_store,
+            );
+            let term = lower_value_to_term_existing_with_stack(
+                kernel_context,
+                arg,
                 type_var_map.as_ref(),
+                &initial_stack,
             )?;
             let term = normalize_term(&term);
             let term = kernel_context.term_to_claim_arg(&term)?;

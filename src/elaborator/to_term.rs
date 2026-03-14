@@ -335,6 +335,20 @@ pub fn lower_value_to_term_existing_preserving_alias_spelling(
     lower_value_to_term_with_stack(kernel_context, value, type_var_map, false, &mut stack)
 }
 
+/// Lower an `AcornValue` with a pre-populated stack of already-in-scope free variables.
+///
+/// This is used by claim serialization, where value arguments may refer to the claim's generic
+/// value binders by name even though they are serialized outside the binder body.
+pub fn lower_value_to_term_existing_with_stack(
+    kernel_context: &mut KernelContext,
+    value: &AcornValue,
+    type_var_map: Option<&TypeVarMap>,
+    initial_stack: &[Term],
+) -> Result<Term, String> {
+    let mut stack = initial_stack.to_vec();
+    lower_value_to_term_with_stack(kernel_context, value, type_var_map, &mut stack)
+}
+
 fn lower_value_to_term_with_stack(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
