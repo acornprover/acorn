@@ -354,6 +354,19 @@ fn build_clause_with_partial_and_under_outer_binder(
     .normalized_preserving_locals()
 }
 
+fn build_clause_with_head_lambda_application(
+    _kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    let applied_lambda = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)))
+        .apply(&[Term::new_variable(0)]);
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::positive(applied_lambda)],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+    .normalized_preserving_locals()
+}
+
 const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "partial_and_argument_under_outer_binder",
@@ -366,6 +379,10 @@ const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "nonprefix_type_param_local",
         build: build_clause_with_nonprefix_type_param,
+    },
+    KernelClauseRoundtripCase {
+        name: "head_lambda_application",
+        build: build_clause_with_head_lambda_application,
     },
 ];
 

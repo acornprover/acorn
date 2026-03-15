@@ -1,7 +1,7 @@
 //! Kernel term normalization is only one part of the surface/kernel contract.
 //!
-//! The full model is documented in `docs/normalization.md`. At a high level, the layer
-//! transitions are:
+//! The full model is documented in `docs/normalization.md`. At a high level, the conceptual
+//! layer transitions are:
 //!
 //! - `parse: String -> Expression`
 //! - `elaborate: Expression -> AcornValue`
@@ -11,6 +11,8 @@
 //! - `lower_clause: clause-shaped AcornValue -> Clause`
 //! - `quote_term: Term -> AcornValue`
 //! - `quote_clause: Clause -> AcornValue`
+//!
+//! These names describe contracts, not necessarily one public Rust function per line.
 //!
 //! This file owns only the recursive, structure-preserving normalization of [`Term`]s.
 //! It must normalize every subterm of a normalized term.

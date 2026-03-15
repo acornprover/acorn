@@ -18,7 +18,7 @@ The system moves between these representations:
 
 ## Operations Between Layers
 
-These are the intended names for the layer transitions:
+These are the conceptual names for the layer transitions:
 
 - `parse: String -> Expression`
 - `elaborate: Expression -> AcornValue`
@@ -29,15 +29,18 @@ These are the intended names for the layer transitions:
 - `quote_term: Term -> AcornValue`
 - `quote_clause: Clause -> AcornValue`
 
-The current code already has all of these behaviors, even if some of them still share
-implementation:
+These names describe contracts, not necessarily one public Rust function per line.
+The current code already has all of these behaviors, even if some of them are implemented
+by differently named or distributed APIs:
 
 - `lower_term` is implemented today by `lower_value_to_term(...)`
-- theorem/proposition lowering currently flows through
+- theorem lowering is not one public function today; it is distributed across
+  `lower_fact(...)` / `lower_goal(...)` and their `KernelContext` methods
+- proposition lowering currently flows through
   `KernelContext::lower_proposition_to_clauses(...)`
 - `lower_clause` is implemented today by `KernelContext::lower_clause(...)`
-- `quote_term` / `quote_clause` are implemented by the `TermBridge`-backed `KernelContext`
-  helpers
+- `quote_term` is implemented today by `KernelContext::quote_term_with_context(...)`
+- `quote_clause` is implemented today by `KernelContext::quote_clause(...)`
 
 The important point is conceptual, not just API naming: theorem lowering, proposition lowering,
 and clause lowering are not the same contract.
@@ -81,6 +84,7 @@ reuses the same internal machinery as proposition lowering, but it is still a di
 
 - it starts from a quoted clause-shaped `AcornValue`
 - it reconstructs exactly one `Clause`
+- it does not first apply the semantic term-normalization pass used by `lower_proposition`
 - it is not merely “any proposition that happens to lower to clauses”
 - this is the only lowering operation with an exact quote/lower roundtrip requirement
 
@@ -88,7 +92,12 @@ So:
 
 - `lower_term` is the faithful surface-to-kernel term bridge
 - `lower_theorem` and `lower_proposition` are semantic/logical lowerings
-- `lower_clause` is the exact inverse of `quote_clause`
+- `lower_clause` is the exact inverse of `quote_clause` for normalized clauses
+
+Likewise, `quote_term` and `quote_clause` are related but not identical contracts:
+
+- `quote_term` is general term-to-surface reconstruction
+- `quote_clause` is the exact clause codec that must satisfy the clause roundtrip contract
 
 ## Term Normalization
 

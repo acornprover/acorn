@@ -1391,7 +1391,7 @@ impl ActiveSet {
             #[cfg(any(test, feature = "validate"))]
             if let Err(e) = self.validate_step(&step, kernel_context) {
                 panic!(
-                    "Invalid proof step (unchanged): {}\nStep clause: {}\nStep rule: {}",
+                    "Invalid proof step (unchanged): {}\nStep clause: {:?}\nStep rule: {}",
                     e,
                     step.clause,
                     step.rule.name()
@@ -1450,7 +1450,7 @@ impl ActiveSet {
         #[cfg(any(test, feature = "validate"))]
         if let Err(e) = self.validate_step(&result, kernel_context) {
             panic!(
-                "Invalid proof step after simplification: {}\nStep clause: {}\nStep rule: {}",
+                "Invalid proof step after simplification: {}\nStep clause: {:?}\nStep rule: {}",
                 e,
                 result.clause,
                 result.rule.name()

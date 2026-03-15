@@ -1,11 +1,13 @@
 //! Elaborator-side lowering from `AcornValue` to kernel proof inputs.
 //!
-//! This module owns:
+//! This module owns the implementation of these conceptual operations:
 //!
 //! - `lower_term`: `AcornValue -> Term`
 //! - `lower_proposition`: boolean propositions to proof-input clauses
 //! - `lower_clause`: quoted clause values back to exactly one normalized clause
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
+//!
+//! These are contract names, not necessarily one public Rust function per bullet.
 //!
 //! The elaborator does not define the normalization policy. Kernel term normalization
 //! lives in `kernel::term_normalization`, and theorem/proposition/clause lowering lives in the
@@ -169,7 +171,6 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
-        let term = normalize_term(&term);
         self.lower_normalized_term_to_clause(&term, type_var_map)
     }
 
@@ -195,7 +196,6 @@ impl KernelContext {
             ctype,
             type_var_map.as_ref(),
         )?;
-        let term = normalize_term(&term);
         self.lower_normalized_term_to_clause(&term, type_var_map)
     }
 
@@ -485,7 +485,7 @@ impl KernelContext {
         )?;
         if &lowered_again != clause {
             return Err(format!(
-                "quote/lower clause roundtrip mismatch: original '{}' lowered again to '{}'",
+                "quote/lower clause roundtrip mismatch: original {:?} lowered again to {:?}",
                 clause, lowered_again
             ));
         }
