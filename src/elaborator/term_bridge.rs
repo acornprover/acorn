@@ -189,6 +189,20 @@ impl<'a> TermBridge<'a> {
         })
     }
 
+    fn visible_stack_size(
+        local_context: &LocalContext,
+        var_remapping: Option<&[Option<u16>]>,
+    ) -> AtomId {
+        match var_remapping {
+            Some(mapping) => mapping
+                .iter()
+                .filter_map(|mapped| *mapped)
+                .max()
+                .map_or(0, |max| max as AtomId + 1),
+            None => local_context.len() as AtomId,
+        }
+    }
+
     fn instantiate_symbol_for_match(
         &self,
         symbol: Symbol,
@@ -270,7 +284,7 @@ impl<'a> TermBridge<'a> {
 
         let scrutinee = value_args[0].clone();
         let constructor_total = u16::try_from(info.constructor_symbols.len()).ok()?;
-        let first_new_var_id = local_context.len() as AtomId;
+        let first_new_var_id = Self::visible_stack_size(local_context, var_remapping);
         let mut cases = vec![];
 
         for (constructor_index, (constructor_symbol, branch_value)) in info
@@ -290,12 +304,8 @@ impl<'a> TermBridge<'a> {
             } else {
                 let mut pattern_args = vec![];
                 for (i, var_type) in new_vars.iter().enumerate() {
-                    let original_var_id = first_new_var_id + i as AtomId;
-                    let remapped_id = var_remapping
-                        .and_then(|mapping| mapping.get(original_var_id as usize))
-                        .and_then(|mapped| *mapped)
-                        .unwrap_or(original_var_id);
-                    pattern_args.push(AcornValue::Variable(remapped_id, var_type.clone()));
+                    let var_id = first_new_var_id + i as AtomId;
+                    pattern_args.push(AcornValue::Variable(var_id, var_type.clone()));
                 }
                 AcornValue::apply(constructor, pattern_args)
             };
@@ -653,7 +663,6 @@ impl<'a> TermBridge<'a> {
                 None => local_context.len() as u16,
             }
         }
-
         // Shifts existing quoted args upward when we need to insert missing lambda binders
         // ahead of them for partially applied logical builtins.
         fn shift_for_inserted_lambda(
@@ -733,7 +742,7 @@ impl<'a> TermBridge<'a> {
                     }
                     if value_args.is_empty() {
                         let arg_type = AcornType::Bool;
-                        let arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let arg_index = Self::visible_stack_size(local_context, var_remapping);
                         return AcornValue::lambda(
                             vec![arg_type.clone()],
                             AcornValue::Not(Box::new(AcornValue::Variable(arg_index, arg_type))),
@@ -746,7 +755,8 @@ impl<'a> TermBridge<'a> {
                         panic!("malformed and term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
-                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let first_arg_index =
+                            Self::visible_stack_size(local_context, var_remapping);
                         let missing = 2 - value_args.len();
                         let mut args =
                             shift_for_inserted_lambda(value_args, first_arg_index, missing);
@@ -770,7 +780,8 @@ impl<'a> TermBridge<'a> {
                         panic!("malformed or term during quoting: {}", term);
                     }
                     if value_args.len() < 2 {
-                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let first_arg_index =
+                            Self::visible_stack_size(local_context, var_remapping);
                         let missing = 2 - value_args.len();
                         let mut args =
                             shift_for_inserted_lambda(value_args, first_arg_index, missing);
@@ -795,7 +806,8 @@ impl<'a> TermBridge<'a> {
                     }
                     if type_args.len() == 1 && value_args.len() < 2 {
                         let eq_type = type_args.into_iter().next().unwrap();
-                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let first_arg_index =
+                            Self::visible_stack_size(local_context, var_remapping);
                         let missing = 2 - value_args.len();
                         let mut args =
                             shift_for_inserted_lambda(value_args, first_arg_index, missing);
@@ -823,7 +835,8 @@ impl<'a> TermBridge<'a> {
                     }
                     if type_args.len() == 1 && value_args.len() < 3 {
                         let ite_type = type_args.into_iter().next().unwrap();
-                        let first_arg_index = next_lambda_var_index(local_context, var_remapping);
+                        let first_arg_index =
+                            Self::visible_stack_size(local_context, var_remapping);
                         let missing = 3 - value_args.len();
                         let mut args =
                             shift_for_inserted_lambda(value_args, first_arg_index, missing);
@@ -978,11 +991,10 @@ impl<'a> TermBridge<'a> {
         let local_context = clause.get_local_context();
 
         let var_types_raw = local_context.get_var_types();
-        let num_vars = var_types_raw.len();
 
         let mut var_remapping: Vec<Option<u16>> = Vec::new();
         let mut new_index: u16 = 0;
-        for i in 0..num_vars {
+        for i in 0..var_types_raw.len() {
             let Some(type_term) = &var_types_raw[i] else {
                 var_remapping.push(None);
                 continue;
@@ -1000,11 +1012,9 @@ impl<'a> TermBridge<'a> {
             }
         }
 
-        let var_remapping_ref = if var_remapping.iter().any(|x| x.is_none()) {
-            Some(var_remapping.as_slice())
-        } else {
-            None
-        };
+        // Even an identity mapping matters so synthesized inner binders allocate against the
+        // quoted visible stack, including exact preservation of unused value locals.
+        let var_remapping_ref = Some(var_remapping.as_slice());
 
         let mut quoted_literals = vec![];
         for literal in &clause.literals {
@@ -1022,7 +1032,6 @@ impl<'a> TermBridge<'a> {
 
         let var_types: Vec<AcornType> = var_types_raw
             .iter()
-            .take(num_vars)
             .enumerate()
             .filter(|(i, _)| var_remapping.get(*i).copied().flatten().is_some())
             .filter_map(|(_, type_term)| type_term.as_ref())

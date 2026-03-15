@@ -367,10 +367,41 @@ fn build_clause_with_head_lambda_application(
     .normalized_preserving_locals()
 }
 
+/// Builds a clause whose local context still carries an unused trailing variable while a bare
+/// logical builtin is passed as a value. This mirrors a reverse-reprove validate panic where the
+/// quote path synthesized lambda variables past the actually visible outer binders.
+fn build_clause_with_unused_trailing_local_and_bare_and_value(
+    kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    add_named_global_constant(
+        kernel_context,
+        "g0",
+        "Bool -> ((Bool, Bool) -> Bool) -> Bool",
+    );
+    let g0 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(ModuleId(0), "g0"))
+        .expect("g0 should be registered");
+    let x0 = Term::new_variable(0);
+    let bare_and = Term::atom(Atom::Symbol(crate::kernel::symbol::Symbol::And));
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::positive(
+            Term::atom(Atom::Symbol(g0)).apply(&[x0, bare_and]),
+        )],
+        &LocalContext::from_types(vec![Term::bool_type(), Term::bool_type()]),
+    )
+    .normalized_preserving_locals()
+}
+
 const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "partial_and_argument_under_outer_binder",
         build: build_clause_with_partial_and_under_outer_binder,
+    },
+    KernelClauseRoundtripCase {
+        name: "bare_and_value_with_unused_trailing_local",
+        build: build_clause_with_unused_trailing_local_and_bare_and_value,
     },
     KernelClauseRoundtripCase {
         name: "bare_polymorphic_constant_equality",
