@@ -96,8 +96,107 @@ impl ClaimCodec {
         }
 
         let mut generator = CodeGenerator::new_for_certificate(bindings);
+        let local_type_params = Self::local_type_param_infos(local_context, kernel_context);
         let generic_value = kernel_context.quote_clause(claim.clause(), None, None, false);
         let generic_code = generator.value_to_code(&generic_value)?;
+        if claim.var_map().iter().next().is_none() {
+            let mut arbitrary_params = vec![];
+            for var_id in 0..local_context.len() {
+                let var_type = local_context
+                    .get_var_type(var_id)
+                    .expect("local context should provide all variable types")
+                    .clone();
+                kernel_context
+                    .quote_type_with_context(var_type, local_context, false)
+                    .collect_arbitrary_params(&mut arbitrary_params);
+            }
+
+            if arbitrary_params.is_empty() {
+                if !local_type_params.is_empty() {
+                    let local_type_param_names: Vec<String> = local_type_params
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    let named_generic_code = generator.value_to_code(&kernel_context.quote_clause(
+                        claim.clause(),
+                        None,
+                        Some(local_type_param_names.as_slice()),
+                        false,
+                    ))?;
+                    let mut in_scope_arbitrary = vec![];
+                    for (name, potential_type) in bindings.iter_types() {
+                        let PotentialType::Resolved(AcornType::Arbitrary(type_param)) =
+                            potential_type
+                        else {
+                            continue;
+                        };
+                        in_scope_arbitrary.push((name.clone(), type_param.clone()));
+                    }
+                    in_scope_arbitrary.sort_by(|a, b| a.0.cmp(&b.0));
+                    if in_scope_arbitrary.len() >= local_type_params.len() {
+                        let mut type_param_decl_codes = vec![];
+                        let mut type_arg_codes = vec![];
+                        for (index, (type_param_name, kind)) in local_type_params.iter().enumerate()
+                        {
+                            let (_, type_param) = &in_scope_arbitrary[index];
+                            let decl_code = match &kind {
+                                AcornType::Type0 => type_param_name.clone(),
+                                _ => {
+                                    format!(
+                                        "{}: {}",
+                                        type_param_name,
+                                        generator.type_to_expr(kind)?
+                                    )
+                                }
+                            };
+                            type_param_decl_codes.push(decl_code);
+                            type_arg_codes.push(
+                                generator
+                                    .type_to_expr(&AcornType::Arbitrary(type_param.clone()))?
+                                    .to_string(),
+                            );
+                        }
+                        return Ok(format!(
+                            "function[{}] {{ {} }}[{}]",
+                            type_param_decl_codes.join(", "),
+                            named_generic_code,
+                            type_arg_codes.join(", ")
+                        ));
+                    }
+                }
+                return Self::ensure_claim_code_parses_as_claim(generic_code);
+            }
+
+            arbitrary_params.sort_by(|a, b| a.name.cmp(&b.name));
+            let mut type_param_decl_codes = vec![];
+            let mut type_arg_codes = vec![];
+            for param in &arbitrary_params {
+                let kind = if let Some(typeclass) = &param.typeclass {
+                    AcornType::TypeclassConstraint(typeclass.clone())
+                } else {
+                    AcornType::Type0
+                };
+                let decl_code = match &kind {
+                    AcornType::Type0 => param.name.clone(),
+                    _ => format!("{}: {}", param.name, generator.type_to_expr(&kind)?),
+                };
+                type_param_decl_codes.push(decl_code);
+
+                let arg_code =
+                    if let Some(selected_type) = Self::infer_in_scope_type_arg(&kind, bindings) {
+                        generator.type_to_expr(&selected_type)?.to_string()
+                    } else {
+                        param.name.clone()
+                    };
+                type_arg_codes.push(arg_code);
+            }
+            return Ok(format!(
+                "function[{}] {{ {} }}[{}]",
+                type_param_decl_codes.join(", "),
+                generic_code,
+                type_arg_codes.join(", ")
+            ));
+        }
         let num_type_params = local_context
             .get_var_types()
             .iter()
@@ -412,6 +511,10 @@ impl ClaimCodec {
                 return Self::claim_from_clause(clause);
             }
         }
+        if let Some(clause) = Self::try_deserialize_exists_literal_clause(term, &[], kernel_context)
+        {
+            return Self::claim_from_clause(clause);
+        }
 
         let clauses = kernel_context.term_to_checker_clauses(term, None)?;
         if clauses.len() != 1 {
@@ -458,6 +561,28 @@ impl ClaimCodec {
         }
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
         candidates.into_iter().next().map(|(_, ty)| ty)
+    }
+
+    /// Collect the claim-local type parameters that quote_clause should name explicitly.
+    fn local_type_param_infos(
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Vec<(String, AcornType)> {
+        let mut params = vec![];
+        for var_id in 0..local_context.len() {
+            let Some(var_type) = local_context.get_var_type(var_id) else {
+                continue;
+            };
+            if !var_type.as_ref().is_type_param_kind() {
+                continue;
+            }
+
+            params.push((
+                format!("T{}", var_id),
+                kernel_context.quote_type_with_context(var_type.clone(), local_context, false),
+            ));
+        }
+        params
     }
 
     /// Rebuild the canonical claim defined by quote-clause plus per-argument lowering.
@@ -995,6 +1120,28 @@ impl ClaimCodec {
     /// Detect when a plain claim must preserve its single-literal shape.
     fn should_preserve_single_literal_claim(term: &Term) -> bool {
         let body = Self::strip_foralls(term);
+        if let Some(literal) = Self::try_term_to_single_checker_literal(&body) {
+            let mentions_local = literal
+                .left
+                .iter_atoms()
+                .chain(literal.right.iter_atoms())
+                .any(|atom| matches!(atom, Atom::FreeVariable(_) | Atom::BoundVariable(_)));
+            let contains_inline_binder = matches!(
+                literal.left.as_ref().decompose(),
+                Decomposition::ForAll(_, _)
+                    | Decomposition::Exists(_, _)
+                    | Decomposition::Lambda(_, _)
+            ) || matches!(
+                literal.right.as_ref().decompose(),
+                Decomposition::ForAll(_, _)
+                    | Decomposition::Exists(_, _)
+                    | Decomposition::Lambda(_, _)
+            );
+            if mentions_local && !contains_inline_binder {
+                return true;
+            }
+        }
+
         let eq_term = if let Some(args) = Self::split_symbol_application(&body, Symbol::Not, 1) {
             args[0].clone()
         } else {
@@ -1041,6 +1188,46 @@ impl ClaimCodec {
             vec![literal],
             &local_context,
         ))
+    }
+
+    /// Rebuild a single-literal negated-existential claim as a checker clause.
+    fn try_deserialize_exists_literal_clause(
+        generic_term: &Term,
+        type_param_kinds: &[Term],
+        kernel_context: &KernelContext,
+    ) -> Option<Clause> {
+        let mut local_context = LocalContext::empty();
+        for kind in type_param_kinds {
+            local_context.push_type(kind.clone());
+        }
+
+        let args = Self::split_symbol_application(generic_term, Symbol::Not, 1)?;
+        let negate_literal = true;
+        let mut body = args[0].clone();
+
+        let mut saw_exists = false;
+        while let Some((binder_type, binder_body)) = body.as_ref().split_exists() {
+            saw_exists = true;
+            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
+            body = binder_body
+                .to_owned()
+                .substitute_bound(0, &Term::new_variable(fresh_var))
+                .shift_bound(0, -1);
+        }
+        if !saw_exists {
+            return None;
+        }
+
+        let mut literal = Self::try_term_to_single_checker_literal(&body)?;
+        if negate_literal {
+            literal = literal.negate();
+        }
+        let clause = Clause::from_literals_unnormalized(vec![literal], &local_context);
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        if quoted.has_arbitrary() {
+            return None;
+        }
+        Some(clause)
     }
 
     /// Detect whether a quoted plain-claim clause still mentions its local variables.

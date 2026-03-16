@@ -4,7 +4,9 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::names::DefinedName;
-use crate::elaborator::to_term::lower_value_to_term_existing;
+use crate::elaborator::to_term::{
+    lower_value_to_term_existing, lower_value_to_term_existing_preserving_alias_spelling,
+};
 use crate::kernel::atom::Atom;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -40,6 +42,11 @@ struct ClaimRoundtripCase {
     name: &'static str,
     code: &'static str,
     build: fn(&KernelContext) -> crate::kernel::certificate_step::Claim,
+}
+
+struct KernelTermRoundtripCase {
+    name: &'static str,
+    build: fn(&mut KernelContext) -> Term,
 }
 
 struct KernelClauseRoundtripCase {
@@ -143,6 +150,15 @@ const CERT_LINE_CASES: &[CertLineCase] = &[
         line: "true = false",
     },
     CertLineCase {
+        name: "plain_false_claim",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        line: "false",
+    },
+    CertLineCase {
         name: "claim_with_normalized_argument_term",
         code: r#"
             theorem goal {
@@ -186,14 +202,67 @@ fn build_claim_with_dependent_value_arg(
     crate::kernel::certificate_step::Claim::new(clause, var_map).expect("claim should normalize")
 }
 
-const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[ClaimRoundtripCase {
-    name: "dependent_value_arg",
-    code: r#"
-        theorem goal {
-            true
-        }
-    "#,
-    build: build_claim_with_dependent_value_arg,
+fn build_claim_with_unmapped_bool_local(
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    let clause = kernel_context.parse_clause("x0 = x0", &["Bool"]);
+    crate::kernel::certificate_step::Claim::new(clause, VariableMap::new())
+        .expect("claim should normalize")
+}
+
+fn build_claim_with_unmapped_negated_bool_local(
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    let clause = kernel_context.parse_clause("x0 != true", &["Bool"]);
+    crate::kernel::certificate_step::Claim::new(clause, VariableMap::new())
+        .expect("claim should normalize")
+}
+
+const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
+    ClaimRoundtripCase {
+        name: "dependent_value_arg",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        build: build_claim_with_dependent_value_arg,
+    },
+    ClaimRoundtripCase {
+        name: "unmapped_bool_local",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        build: build_claim_with_unmapped_bool_local,
+    },
+    ClaimRoundtripCase {
+        name: "unmapped_negated_bool_local",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        build: build_claim_with_unmapped_negated_bool_local,
+    },
+];
+
+fn build_applied_function_valued_choose_term(_kernel_context: &mut KernelContext) -> Term {
+    let choice_type = Term::pi(Term::bool_type(), Term::bool_type());
+    Term::choose(
+        choice_type.clone(),
+        Term::lambda(
+            choice_type,
+            Term::atom(Atom::BoundVariable(0)).apply(&[Term::new_true()]),
+        ),
+    )
+    .apply(&[Term::new_true()])
+}
+
+const KERNEL_TERM_ROUNDTRIP_CASES: &[KernelTermRoundtripCase] = &[KernelTermRoundtripCase {
+    name: "applied_function_valued_choose",
+    build: build_applied_function_valued_choose_term,
 }];
 
 /// Builds a normalized clause whose preserved type parameter sits in a non-prefix slot, which
@@ -394,7 +463,44 @@ fn build_clause_with_unused_trailing_local_and_bare_and_value(
     .normalized_preserving_locals()
 }
 
+fn build_clause_with_false_disjunct_literal(
+    kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    add_named_global_constant(kernel_context, "g0", "Bool -> Bool");
+    let g0 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(ModuleId(0), "g0"))
+        .expect("g0 should be registered");
+
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![
+            Literal::negative(Term::atom(Atom::Symbol(g0)).apply(&[Term::new_variable(0)])),
+            Literal::positive(Term::new_false()),
+        ],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+    .normalized_preserving_locals()
+}
+
+fn build_clause_with_single_false_literal(
+    _kernel_context: &mut KernelContext,
+) -> crate::kernel::clause::Clause {
+    crate::kernel::clause::Clause::from_literals_unnormalized(
+        vec![Literal::positive(Term::new_false())],
+        &LocalContext::empty(),
+    )
+    .normalized_preserving_locals()
+}
+
 const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
+    KernelClauseRoundtripCase {
+        name: "false_disjunct_literal",
+        build: build_clause_with_false_disjunct_literal,
+    },
+    KernelClauseRoundtripCase {
+        name: "single_false_literal",
+        build: build_clause_with_single_false_literal,
+    },
     KernelClauseRoundtripCase {
         name: "partial_and_argument_under_outer_binder",
         build: build_clause_with_partial_and_under_outer_binder,
@@ -789,6 +895,33 @@ fn test_term_normalization_cases() {
         assert_eq!(
             normalized, lowered_again,
             "quoted normalized term should roundtrip exactly for case `{}`",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn test_kernel_term_roundtrip_cases() {
+    for case in KERNEL_TERM_ROUNDTRIP_CASES {
+        let mut kernel_context = KernelContext::new();
+        let term = (case.build)(&mut kernel_context);
+        assert_term_is_already_normalized(&term, case.name, "constructed term");
+
+        let quoted = kernel_context.quote_term_with_context(&term, &LocalContext::empty(), false);
+        quoted
+            .validate()
+            .expect("quoted kernel term should validate");
+
+        let roundtripped = lower_value_to_term_existing_preserving_alias_spelling(
+            &mut kernel_context,
+            &quoted,
+            None,
+        )
+        .expect("quoted kernel term should lower again");
+        assert_term_is_already_normalized(&roundtripped, case.name, "roundtripped term");
+        assert_eq!(
+            term, roundtripped,
+            "quoted kernel term should roundtrip exactly for case `{}`",
             case.name
         );
     }

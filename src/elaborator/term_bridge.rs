@@ -869,12 +869,13 @@ impl<'a> TermBridge<'a> {
                     );
                 }
                 Symbol::Choose => {
-                    if type_args.len() != 1 || value_args.len() != 1 {
+                    if type_args.len() != 1 || value_args.is_empty() {
                         panic!("malformed choose term during quoting: {}", term);
                     }
                     let choice_type = type_args.into_iter().next().unwrap();
-                    let predicate = value_args.into_iter().next().unwrap();
-                    return match predicate {
+                    let mut value_args = value_args.into_iter();
+                    let predicate = value_args.next().unwrap();
+                    let choose_value = match predicate {
                         AcornValue::Lambda(arg_types, body) => {
                             if arg_types.len() != 1 || arg_types[0] != choice_type {
                                 panic!(
@@ -909,6 +910,7 @@ impl<'a> TermBridge<'a> {
                             )
                         }
                     };
+                    return AcornValue::apply(choose_value, value_args.collect());
                 }
                 _ => unreachable!("unexpected logical symbol: {}", symbol),
             }
@@ -956,6 +958,9 @@ impl<'a> TermBridge<'a> {
         );
         if literal.right.is_true() {
             if literal.positive {
+                if literal.left == Term::new_false() {
+                    return AcornValue::equals(AcornValue::Bool(false), AcornValue::Bool(true));
+                }
                 return left;
             } else {
                 return AcornValue::Not(Box::new(left));
@@ -1015,6 +1020,30 @@ impl<'a> TermBridge<'a> {
         // Even an identity mapping matters so synthesized inner binders allocate against the
         // quoted visible stack, including exact preservation of unused value locals.
         let var_remapping_ref = Some(var_remapping.as_slice());
+        let type_var_id_to_name_storage = type_param_names.map(|names| {
+            let type_var_ids: Vec<AtomId> = var_types_raw
+                .iter()
+                .enumerate()
+                .filter_map(|(i, type_term)| {
+                    type_term
+                        .as_ref()
+                        .filter(|term| term.as_ref().is_type_param_kind())
+                        .map(|_| i as AtomId)
+                })
+                .collect();
+            assert_eq!(
+                type_var_ids.len(),
+                names.len(),
+                "quote_clause received {} type-param names for {} local type params",
+                names.len(),
+                type_var_ids.len()
+            );
+            type_var_ids
+                .into_iter()
+                .zip(names.iter().cloned())
+                .collect::<HashMap<_, _>>()
+        });
+        let type_var_id_to_name = type_var_id_to_name_storage.as_ref();
 
         let mut quoted_literals = vec![];
         for literal in &clause.literals {
@@ -1024,7 +1053,7 @@ impl<'a> TermBridge<'a> {
                 arbitrary_names,
                 var_remapping_ref,
                 type_param_names,
-                None,
+                type_var_id_to_name,
                 instantiate_type_vars,
             ));
         }
@@ -1036,13 +1065,19 @@ impl<'a> TermBridge<'a> {
             .filter(|(i, _)| var_remapping.get(*i).copied().flatten().is_some())
             .filter_map(|(_, type_term)| type_term.as_ref())
             .map(|type_term| {
-                self.kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_context(
-                        type_term,
-                        local_context,
-                        instantiate_type_vars,
-                    )
+                if let Some(name_map) = type_var_id_to_name {
+                    self.kernel_context
+                        .type_store
+                        .type_term_to_acorn_type_with_var_names(type_term, name_map)
+                } else {
+                    self.kernel_context
+                        .type_store
+                        .type_term_to_acorn_type_with_context(
+                            type_term,
+                            local_context,
+                            instantiate_type_vars,
+                        )
+                }
             })
             .collect();
 
@@ -1107,6 +1142,7 @@ mod tests {
     use super::*;
     use crate::elaborator::acorn_type::{AcornType, TypeParam};
     use crate::elaborator::names::ConstantName;
+    use crate::kernel::atom::Atom;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -1184,6 +1220,37 @@ mod tests {
             AcornType::Variable(TypeParam {
                 name: "T0".to_string(),
                 typeclass: Some(group),
+            })
+        );
+    }
+
+    #[test]
+    fn test_quote_clause_uses_explicit_type_param_names() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_typeclass("Group");
+        let clause = kernel_context.parse_clause("x1(x2)", &["Group", "x0 -> Bool", "x0"]);
+        let type_param_names = ["G".to_string()];
+
+        let value = kernel_context.quote_clause(&clause, None, Some(&type_param_names), false);
+        let AcornValue::ForAll(arg_types, _) = value else {
+            panic!("quoted clause should keep value locals in a forall binder");
+        };
+        assert_eq!(arg_types.len(), 2);
+        assert_eq!(
+            arg_types[0],
+            AcornType::functional(
+                vec![AcornType::Variable(TypeParam {
+                    name: "G".to_string(),
+                    typeclass: None,
+                })],
+                AcornType::Bool,
+            )
+        );
+        assert_eq!(
+            arg_types[1],
+            AcornType::Variable(TypeParam {
+                name: "G".to_string(),
+                typeclass: None,
             })
         );
     }
@@ -1407,6 +1474,41 @@ mod tests {
                     ),
                 ),
                 vec![AcornValue::Variable(0, AcornType::Bool)],
+            )
+        );
+    }
+
+    #[test]
+    fn test_quote_applied_function_valued_choose_stays_applied() {
+        let kernel_context = KernelContext::new();
+        let choice_type_term = Term::pi(Term::bool_type(), Term::bool_type());
+        let choice_type = AcornType::functional(vec![AcornType::Bool], AcornType::Bool);
+        let predicate = Term::lambda(
+            choice_type_term.clone(),
+            Term::atom(Atom::BoundVariable(0)).apply(&[Term::new_true()]),
+        );
+        let term = Term::choose(choice_type_term, predicate).apply(&[Term::new_true()]);
+
+        let value = TermBridge::new(&kernel_context).quote_term_with_context(
+            &term,
+            &LocalContext::empty(),
+            true,
+        );
+        value
+            .validate()
+            .expect("quoted applied choose should validate");
+
+        assert_eq!(
+            value,
+            AcornValue::apply(
+                AcornValue::choose(
+                    choice_type.clone(),
+                    AcornValue::apply(
+                        AcornValue::Variable(0, choice_type),
+                        vec![AcornValue::Bool(true)],
+                    ),
+                ),
+                vec![AcornValue::Bool(true)],
             )
         );
     }

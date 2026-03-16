@@ -1310,15 +1310,18 @@ impl<'a> Clausifier<'a> {
         let (mut context, mut next_var_id) = self.initial_exact_clause_context();
         let opened =
             self.open_leading_foralls_preserving_local_slots(term, &mut context, &mut next_var_id);
+        if opened == Term::new_false() {
+            return Ok(Clause {
+                literals: vec![],
+                context,
+            });
+        }
         let literals = self.exact_clause_literals_from_term(&opened)?;
         Ok(Clause::from_literals_unnormalized(literals, &context).normalized_preserving_locals())
     }
 
     /// Interpret a normalized term as the exact disjunction shape used by quoted clauses.
     fn exact_clause_literals_from_term(&self, term: &Term) -> Result<Vec<Literal>, String> {
-        if term == &Term::new_false() {
-            return Ok(vec![]);
-        }
         if let Some(args) = self.split_symbol_application(term, Symbol::Or, 2) {
             let mut left = self.exact_clause_literals_from_term(&args[0])?;
             left.extend(self.exact_clause_literals_from_term(&args[1])?);

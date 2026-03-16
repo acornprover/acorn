@@ -986,7 +986,7 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
     .expect("certificate generation should succeed");
     let proof = cert.proof.expect("proof should exist");
     assert_eq!(proof.len(), 1);
-    assert_eq!(proof[0], "false");
+    assert_eq!(proof[0], "false = true");
 }
 
 #[test]
