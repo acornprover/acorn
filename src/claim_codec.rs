@@ -117,52 +117,51 @@ impl ClaimCodec {
                         .iter()
                         .map(|(name, _)| name.clone())
                         .collect();
-                    let named_generic_code = generator.value_to_code(&kernel_context.quote_clause(
-                        claim.clause(),
-                        None,
-                        Some(local_type_param_names.as_slice()),
-                        false,
-                    ))?;
-                    let mut in_scope_arbitrary = vec![];
-                    for (name, potential_type) in bindings.iter_types() {
-                        let PotentialType::Resolved(AcornType::Arbitrary(type_param)) =
-                            potential_type
-                        else {
-                            continue;
+                    let named_generic_code =
+                        generator.value_to_code(&kernel_context.quote_clause(
+                            claim.clause(),
+                            None,
+                            Some(local_type_param_names.as_slice()),
+                            false,
+                        ))?;
+                    let mut type_param_decl_codes = vec![];
+                    for (type_param_name, kind) in &local_type_params {
+                        let decl_code = match kind {
+                            AcornType::Type0 => type_param_name.clone(),
+                            _ => {
+                                format!("{}: {}", type_param_name, generator.type_to_expr(kind)?)
+                            }
                         };
-                        in_scope_arbitrary.push((name.clone(), type_param.clone()));
+                        type_param_decl_codes.push(decl_code);
                     }
-                    in_scope_arbitrary.sort_by(|a, b| a.0.cmp(&b.0));
-                    if in_scope_arbitrary.len() >= local_type_params.len() {
-                        let mut type_param_decl_codes = vec![];
-                        let mut type_arg_codes = vec![];
-                        for (index, (type_param_name, kind)) in local_type_params.iter().enumerate()
-                        {
-                            let (_, type_param) = &in_scope_arbitrary[index];
-                            let decl_code = match &kind {
-                                AcornType::Type0 => type_param_name.clone(),
-                                _ => {
-                                    format!(
-                                        "{}: {}",
-                                        type_param_name,
-                                        generator.type_to_expr(kind)?
-                                    )
-                                }
-                            };
-                            type_param_decl_codes.push(decl_code);
-                            type_arg_codes.push(
-                                generator
-                                    .type_to_expr(&AcornType::Arbitrary(type_param.clone()))?
-                                    .to_string(),
-                            );
-                        }
+                    if local_type_params
+                        .iter()
+                        .all(|(_, kind)| matches!(kind, AcornType::Type0))
+                    {
                         return Ok(format!(
-                            "function[{}] {{ {} }}[{}]",
+                            "function[{}] {{ {} }}",
                             type_param_decl_codes.join(", "),
-                            named_generic_code,
-                            type_arg_codes.join(", ")
+                            named_generic_code
                         ));
                     }
+
+                    let mut type_arg_codes = vec![];
+                    for (type_param_name, kind) in &local_type_params {
+                        let arg_code = if let Some(selected_type) =
+                            Self::infer_in_scope_type_arg(kind, bindings)
+                        {
+                            generator.type_to_expr(&selected_type)?.to_string()
+                        } else {
+                            type_param_name.clone()
+                        };
+                        type_arg_codes.push(arg_code);
+                    }
+                    return Ok(format!(
+                        "function[{}] {{ {} }}[{}]",
+                        type_param_decl_codes.join(", "),
+                        named_generic_code,
+                        type_arg_codes.join(", ")
+                    ));
                 }
                 return Self::ensure_claim_code_parses_as_claim(generic_code);
             }
@@ -623,8 +622,16 @@ impl ClaimCodec {
                 "argument count does not match function declaration".to_string(),
             ));
         }
+        let omits_type_args =
+            function_value.type_args.is_empty() && !function_value.type_param_names.is_empty();
+        if omits_type_args && (!function_value.arg_types.is_empty() || !args.is_empty()) {
+            return Err(CodeGenError::GeneratedBadCode(
+                "generic claims with value arguments require explicit type arguments".to_string(),
+            ));
+        }
         if function_value.type_param_names.len() != function_value.type_param_constraints.len()
-            || function_value.type_param_names.len() != function_value.type_args.len()
+            || (!omits_type_args
+                && function_value.type_param_names.len() != function_value.type_args.len())
         {
             return Err(CodeGenError::GeneratedBadCode(
                 "type-argument metadata does not match type argument count".to_string(),

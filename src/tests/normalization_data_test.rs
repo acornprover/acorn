@@ -41,7 +41,7 @@ struct CertLineCase {
 struct ClaimRoundtripCase {
     name: &'static str,
     code: &'static str,
-    build: fn(&KernelContext) -> crate::kernel::certificate_step::Claim,
+    build: fn(&Project, &BindingMap, &KernelContext) -> crate::kernel::certificate_step::Claim,
 }
 
 struct KernelTermRoundtripCase {
@@ -193,6 +193,8 @@ const CERT_LINE_CASES: &[CertLineCase] = &[
 ];
 
 fn build_claim_with_dependent_value_arg(
+    _project: &Project,
+    _bindings: &BindingMap,
     kernel_context: &KernelContext,
 ) -> crate::kernel::certificate_step::Claim {
     let clause = kernel_context.parse_clause("x0 = x1", &["Bool", "Bool"]);
@@ -203,6 +205,8 @@ fn build_claim_with_dependent_value_arg(
 }
 
 fn build_claim_with_unmapped_bool_local(
+    _project: &Project,
+    _bindings: &BindingMap,
     kernel_context: &KernelContext,
 ) -> crate::kernel::certificate_step::Claim {
     let clause = kernel_context.parse_clause("x0 = x0", &["Bool"]);
@@ -211,11 +215,41 @@ fn build_claim_with_unmapped_bool_local(
 }
 
 fn build_claim_with_unmapped_negated_bool_local(
+    _project: &Project,
+    _bindings: &BindingMap,
     kernel_context: &KernelContext,
 ) -> crate::kernel::certificate_step::Claim {
     let clause = kernel_context.parse_clause("x0 != true", &["Bool"]);
     crate::kernel::certificate_step::Claim::new(clause, VariableMap::new())
         .expect("claim should normalize")
+}
+
+fn build_claim_with_unmapped_type_local(
+    project: &Project,
+    bindings: &BindingMap,
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    Certificate::deserialize_claim_with_args(
+        "function[T0] { foo[T0] }",
+        project,
+        bindings,
+        kernel_context,
+    )
+    .expect("claim should deserialize")
+}
+
+fn build_claim_with_concrete_type_local(
+    project: &Project,
+    bindings: &BindingMap,
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    Certificate::deserialize_claim_with_args(
+        "function[T0] { foo[T0] }[Bool]",
+        project,
+        bindings,
+        kernel_context,
+    )
+    .expect("claim should deserialize")
 }
 
 const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
@@ -245,6 +279,28 @@ const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
             }
         "#,
         build: build_claim_with_unmapped_negated_bool_local,
+    },
+    ClaimRoundtripCase {
+        name: "unmapped_type_local",
+        code: r#"
+            let foo[T]: Bool = axiom
+
+            theorem goal {
+                foo[Bool]
+            }
+        "#,
+        build: build_claim_with_unmapped_type_local,
+    },
+    ClaimRoundtripCase {
+        name: "concrete_type_local",
+        code: r#"
+            let foo[T]: Bool = axiom
+
+            theorem goal {
+                foo[Bool]
+            }
+        "#,
+        build: build_claim_with_concrete_type_local,
     },
 ];
 
@@ -983,8 +1039,8 @@ fn test_cert_line_normalization_cases() {
 #[test]
 fn test_claim_roundtrip_normalization_cases() {
     for case in CLAIM_ROUNDTRIP_CASES {
-        let (_project, bindings, kernel_context) = load_mock_module(case.code);
-        let claim = (case.build)(&kernel_context);
+        let (project, bindings, kernel_context) = load_mock_module(case.code);
+        let claim = (case.build)(&project, &bindings, &kernel_context);
         assert_claim_is_already_normalized(&claim, &kernel_context, case.name, "constructed");
 
         let serialized = serialize_claim_with_args_line(&claim, &bindings, &kernel_context);

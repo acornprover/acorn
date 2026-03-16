@@ -438,7 +438,7 @@ fn test_parse_code_line_accepts_claim_with_type_args_only_shape() {
     let mut bindings_cow = Cow::Borrowed(&bindings);
     let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
     let step = Certificate::parse_code_line(
-        "function[T0] { foo[T0] }[Bool]",
+        "function[T0] { foo[T0] }",
         &project,
         &mut bindings_cow,
         &mut kernel_context_cow,
@@ -446,10 +446,44 @@ fn test_parse_code_line_accepts_claim_with_type_args_only_shape() {
     .expect("type-only claim-with-args parsing should succeed");
 
     let claim = expect_claim(step);
-    assert!(claim.var_map().len() > 0);
+    assert_eq!(claim.var_map().len(), 0);
 
     let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
         .expect("serialization should succeed");
+    assert_eq!(serialized, "function[T0] { foo[T0] }");
+    let roundtrip =
+        Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &kernel_context)
+            .expect("deserialization should succeed");
+    assert_eq!(roundtrip, claim);
+}
+
+#[test]
+fn test_parse_code_line_accepts_type_args_only_shape_with_concrete_application() {
+    let code = r#"
+        let foo[T]: Bool = axiom
+
+        theorem goal {
+            foo[Bool]
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step = Certificate::parse_code_line(
+        "function[T0] { foo[T0] }[Bool]",
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect("concrete type-only claim-with-args parsing should succeed");
+
+    let claim = expect_claim(step);
+    assert_eq!(claim.var_map().len(), 1);
+    assert_eq!(claim.var_map().get_mapping(0), Some(Term::bool_type_ref()));
+    let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
+        .expect("serialization should succeed");
+    assert_eq!(serialized, "function[T0] { foo[T0] }[Bool]");
     let roundtrip =
         Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &kernel_context)
             .expect("deserialization should succeed");
