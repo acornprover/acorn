@@ -42,6 +42,11 @@ pub struct Environment {
     /// What all the names mean in this environment
     pub bindings: BindingMap,
 
+    /// Binding snapshots aligned with node order.
+    /// `binding_states[i]` is the bindings visible before `nodes[i]`.
+    /// The final entry is the current bindings after all processed statements.
+    pub binding_states: Vec<BindingMap>,
+
     /// The nodes structure is fundamentally linear.
     /// Each node depends only on the nodes before it.
     pub nodes: Vec<Node>,
@@ -110,6 +115,7 @@ impl Environment {
         Environment {
             module_id,
             bindings: BindingMap::new(module_id),
+            binding_states: vec![BindingMap::new(module_id)],
             nodes: Vec::new(),
             includes_explicit_false: false,
             will_include_explicit_false: false,
@@ -135,6 +141,7 @@ impl Environment {
         Environment {
             module_id: self.module_id,
             bindings: self.bindings.clone(),
+            binding_states: vec![self.bindings.clone()],
             nodes: Vec::new(),
             includes_explicit_false: false,
             will_include_explicit_false: false,
@@ -245,9 +252,23 @@ impl Environment {
     /// Adds a node to the environment tree.
     /// Returns the index of the newly added node.
     pub fn add_node(&mut self, node: Node) -> usize {
+        self.sync_current_binding_state();
         self.nodes.push(node);
-        let index = self.nodes.len() - 1;
-        index
+        self.binding_states.push(self.bindings.clone());
+        self.nodes.len() - 1
+    }
+
+    /// Updates the trailing binding snapshot to match the current bindings.
+    pub fn sync_current_binding_state(&mut self) {
+        if let Some(last) = self.binding_states.last_mut() {
+            *last = self.bindings.clone();
+        } else {
+            self.binding_states.push(self.bindings.clone());
+        }
+    }
+
+    pub fn bindings_before_node(&self, index: usize) -> &BindingMap {
+        &self.binding_states[index]
     }
 
     /// Returns an evaluator that modifies the token map.
@@ -656,21 +677,62 @@ impl Environment {
 
     /// Helper to collect all transitive dependencies for this environment.
     /// Used by the lowering pass since the module isn't in the project yet.
-    fn collect_dependencies(
-        &self,
+    fn collect_dependencies_from_bindings(
+        bindings: &BindingMap,
         project: &Project,
         seen: &mut std::collections::HashSet<crate::module::ModuleId>,
         output: &mut Vec<crate::module::ModuleId>,
     ) {
-        for dep_id in self.bindings.direct_dependencies() {
+        for dep_id in bindings.direct_dependencies() {
             if !seen.insert(dep_id) {
                 continue;
             }
             // Recursively collect dependencies of this dependency
             if let Some(dep_env) = project.get_env_by_id(dep_id) {
-                dep_env.collect_dependencies(project, seen, output);
+                Self::collect_dependencies_from_bindings(&dep_env.bindings, project, seen, output);
             }
             output.push(dep_id);
+        }
+    }
+
+    fn merge_imported_modules(
+        bindings: &BindingMap,
+        project: &Project,
+        imported_modules: &mut HashSet<ModuleId>,
+        kernel_context: &mut KernelContext,
+        mut lowered_imports: Option<&mut Vec<LoweredFact>>,
+    ) {
+        let direct_dependencies = bindings.direct_dependencies();
+        if direct_dependencies
+            .iter()
+            .all(|dep_id| imported_modules.contains(dep_id))
+        {
+            return;
+        }
+
+        for dep_id in direct_dependencies {
+            for module_id in project
+                .all_dependencies(dep_id)
+                .into_iter()
+                .chain(std::iter::once(dep_id))
+            {
+                if !imported_modules.insert(module_id) {
+                    continue;
+                }
+                let dep_env = project
+                    .get_env_by_id(module_id)
+                    .unwrap_or_else(|| panic!("missing dependency {}", module_id.0));
+                let dep_kernel_context = dep_env
+                    .kernel_context
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("Dependency {} not lowered", module_id.0));
+                kernel_context.merge_imports(dep_kernel_context);
+                if let Some(lowered_imports) = lowered_imports.as_mut() {
+                    for normalized in &dep_env.lowered_module_facts {
+                        lowered_imports.push(normalized.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -689,16 +751,21 @@ impl Environment {
                 "lowering pass called after lowered_module_facts was already populated".to_string(),
             );
         }
-        use std::collections::HashSet;
 
         let mut kernel_context = KernelContext::new();
         let mut first_error: Option<String> = None;
+        let mut imported_modules = HashSet::new();
 
         // Collect all dependencies (including transitive) using the environment's bindings.
         // We can't use project.all_dependencies() because this module isn't in the project yet.
         let mut deps = Vec::new();
         let mut seen = HashSet::new();
-        self.collect_dependencies(project, &mut seen, &mut deps);
+        Self::collect_dependencies_from_bindings(
+            &self.binding_states[0],
+            project,
+            &mut seen,
+            &mut deps,
+        );
 
         // Add imported facts from dependencies.
         // If a dependency has lowered state, merge it and reuse the lowered facts.
@@ -709,17 +776,17 @@ impl Environment {
         // dependencies in topological order - each dependency's own facts are added
         // when we process that dependency directly.
         for dep_id in deps {
-            if let Some(dep_env) = project.get_env_by_id(dep_id) {
-                if let Some(ref dep_kernel_context) = dep_env.kernel_context {
-                    // Dependency has lowered state - merge and reuse
-                    kernel_context.merge_imports(dep_kernel_context);
-                    // Add only the dependency's own facts (not its imports)
-                    for normalized in &dep_env.lowered_module_facts {
-                        self.lowered_imports.push(normalized.clone());
-                    }
-                } else {
-                    // This should never happen - dependencies are processed first.
-                    panic!("Dependency {} not lowered", dep_id.0);
+            if imported_modules.insert(dep_id) {
+                let dep_env = project
+                    .get_env_by_id(dep_id)
+                    .unwrap_or_else(|| panic!("missing dependency {}", dep_id.0));
+                let dep_kernel_context = dep_env
+                    .kernel_context
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("Dependency {} not lowered", dep_id.0));
+                kernel_context.merge_imports(dep_kernel_context);
+                for normalized in &dep_env.lowered_module_facts {
+                    self.lowered_imports.push(normalized.clone());
                 }
             }
         }
@@ -735,8 +802,15 @@ impl Environment {
             .import_kernel_context
             .clone()
             .expect("import kernel context should be present");
-        let final_kernel_context =
-            Self::lower_nodes_pass(&mut self.nodes, &import_kernel_context, &mut first_error);
+        let binding_states = self.binding_states.clone();
+        let final_kernel_context = Self::lower_nodes_pass(
+            &mut self.nodes,
+            &binding_states,
+            &import_kernel_context,
+            &imported_modules,
+            project,
+            &mut first_error,
+        );
 
         // Collect lowered top-level facts for use as module facts in dependents.
         // Facts should be lowered exactly once during lower_nodes_pass.
@@ -776,14 +850,25 @@ impl Environment {
     /// kernel_context and process the block's nodes independently.
     fn lower_nodes_pass(
         nodes: &mut [Node],
+        binding_states: &[BindingMap],
         base_kernel_context: &KernelContext,
+        initial_imported_modules: &HashSet<ModuleId>,
+        project: &Project,
         first_error: &mut Option<String>,
     ) -> KernelContext {
         // Clone the kernel_context to track state as we process nodes.
         // We need to track state for this level only.
         let mut current_kernel_context = base_kernel_context.clone();
+        let mut imported_modules = initial_imported_modules.clone();
 
-        for node in nodes.iter_mut() {
+        for (index, node) in nodes.iter_mut().enumerate() {
+            Self::merge_imported_modules(
+                &binding_states[index],
+                project,
+                &mut imported_modules,
+                &mut current_kernel_context,
+                None,
+            );
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {
                     // Lower the fact and store it
@@ -835,7 +920,10 @@ impl Environment {
                     // This mirrors how verify_node clones the processor when entering a block.
                     Self::lower_nodes_pass(
                         &mut block.env.nodes,
+                        &block.env.binding_states.clone(),
                         &current_kernel_context,
+                        &imported_modules,
+                        project,
                         first_error,
                     );
                     // After the block, add the external fact (if any) for subsequent nodes
@@ -961,9 +1049,7 @@ impl Environment {
     /// Get the bindings for the theorem block with the given name.
     pub fn get_bindings(&self, theorem_name: &str) -> &BindingMap {
         let cursor = self.get_node_by_goal_name(theorem_name);
-        // The cursor is now pointing to a goal node. The bindings we want are from
-        // the environment that contains this goal node.
-        &cursor.env().bindings
+        cursor.bindings()
     }
 }
 
@@ -998,6 +1084,7 @@ mod tests {
     use crate::elaborator::fact::Fact;
     use crate::elaborator::names::ConstantName;
     use crate::elaborator::potential_value::PotentialValue;
+    use crate::module::LoadState;
 
     #[test]
     fn test_instance_statement_emits_public_bridge_to_internal_impl() {
@@ -1052,5 +1139,47 @@ mod tests {
             has_public_bridge,
             "expected a post-instance bridge from the public typeclass attribute to the internal implementation"
         );
+    }
+
+    #[test]
+    fn test_goal_bindings_ignore_later_imports() {
+        let mut project = Project::new_mock();
+        project.mock(
+            "/mock/common.ac",
+            r#"
+                let a: Bool = axiom
+            "#,
+        );
+        project.mock(
+            "/mock/helper.ac",
+            r#"
+                from common import a
+                axiom helper { a }
+            "#,
+        );
+        project.mock(
+            "/mock/main.ac",
+            r#"
+                from common import a
+
+                theorem goal {
+                    a
+                }
+
+                from helper import helper
+            "#,
+        );
+
+        let module_id = project.load_module_by_name("main").expect("load failed");
+        let env = match project.get_module_by_id(module_id) {
+            LoadState::Ok(env) => env,
+            LoadState::Error(e) => panic!("error: {}", e),
+            _ => panic!("no module"),
+        };
+
+        let cursor = env.get_node_by_goal_name("goal");
+        assert!(cursor.bindings().has_constant_name("a"));
+        assert!(!cursor.bindings().has_constant_name("helper"));
+        assert!(env.bindings.has_constant_name("helper"));
     }
 }

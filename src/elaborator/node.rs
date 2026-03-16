@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::elaborator::acorn_value::AcornValue;
+use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::block::Block;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::fact::Fact;
@@ -274,6 +275,11 @@ impl<'a> NodeCursor<'a> {
     pub fn node(&self) -> &'a Node {
         let (env, index) = self.annotated_path.last().unwrap();
         &env.nodes[*index]
+    }
+
+    pub fn bindings(&self) -> &'a BindingMap {
+        let (env, index) = self.annotated_path.last().unwrap();
+        env.bindings_before_node(*index)
     }
 
     /// Can use this as an identifier for the iterator, to compare two of them

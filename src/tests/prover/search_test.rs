@@ -1,5 +1,7 @@
+use crate::module::LoadState;
+use crate::processor::Processor;
 use crate::project::Project;
-use crate::prover::Outcome;
+use crate::prover::{Outcome, ProverMode};
 use crate::tests::support::*;
 
 // Search behavior, resolution, and rewrite regressions.
@@ -252,6 +254,55 @@ fn test_lib_keyword() {
 
     let c = prove(&mut p, "main", "goal");
     assert_eq!(c.proof.unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn test_later_import_does_not_help_earlier_goal() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/common.ac",
+        r#"
+            let a: Bool = axiom
+        "#,
+    );
+    p.mock(
+        "/mock/helper.ac",
+        r#"
+            from common import a
+            axiom helper { a }
+        "#,
+    );
+    p.mock(
+        "/mock/main.ac",
+        r#"
+            from common import a
+
+            theorem goal {
+                a
+            }
+
+            from helper import helper
+        "#,
+    );
+
+    let module_id = p.load_module_by_name("main").expect("load failed");
+    let env = match p.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+    let cursor = env.get_node_by_goal_name("goal");
+    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+
+    let mut processor =
+        Processor::with_imports(None, cursor.bindings(), &p).expect("processor creation failed");
+    processor
+        .add_module_facts(&cursor)
+        .expect("adding module facts failed");
+    processor.set_lowered_goal(normalized_goal);
+
+    let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
+    assert_eq!(outcome, Outcome::Exhausted);
 }
 
 #[test]

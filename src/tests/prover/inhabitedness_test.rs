@@ -318,9 +318,8 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
 
     // Run the prover and generate a certificate
     let cursor = env.iter_goals().next().expect("expected a goal in main");
-    let goal_env = cursor.goal_env().unwrap();
-
-    let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
+    let mut processor =
+        crate::processor::Processor::with_imports(None, cursor.bindings(), &p).unwrap();
     processor.add_module_facts(&cursor).unwrap();
     let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
     processor.set_lowered_goal(normalized_goal);
@@ -332,7 +331,7 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     // Generate the certificate
     let cert = processor
         .prover()
-        .make_cert(&goal_env.bindings, goal_kernel_context, true)
+        .make_cert(cursor.bindings(), goal_kernel_context, true)
         .expect("make_cert failed");
 
     // Debug: print the certificate
@@ -346,7 +345,7 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     // The certificate should verify successfully
     // (If the code generator correctly uses lib(monoid).Monoid format)
     processor
-        .check_cert(&cert, None, goal_kernel_context, &p, &goal_env.bindings)
+        .check_cert(&cert, None, goal_kernel_context, &p, cursor.bindings())
         .expect("check_cert should succeed");
 }
 
@@ -505,9 +504,8 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
                 .unwrap_or(false)
         })
         .expect("expected subgroup existence goal");
-    let goal_env = cursor.goal_env().unwrap();
-
-    let mut processor = crate::processor::Processor::with_imports(None, env).unwrap();
+    let mut processor =
+        crate::processor::Processor::with_imports(None, cursor.bindings(), &project).unwrap();
     processor.add_module_facts(&cursor).unwrap();
     let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
     processor.set_lowered_goal(normalized_goal);
@@ -518,7 +516,7 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
 
     let cert = processor
         .prover()
-        .make_cert(&goal_env.bindings, goal_kernel_context, false)
+        .make_cert(cursor.bindings(), goal_kernel_context, false)
         .expect("make_cert failed");
     let proof = cert.proof.expect("proof should exist");
 

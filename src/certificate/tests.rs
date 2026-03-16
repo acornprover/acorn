@@ -107,12 +107,11 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
             .path_for_line(line - 1)
             .expect("selected line should resolve to a node path");
         let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
-        let goal_env = cursor.goal_env().expect("selected line should be a goal");
         let normalized_goal = cursor
             .lowered_goal()
             .expect("selected line should have a lowered goal");
         (
-            goal_env.bindings.clone(),
+            cursor.bindings().clone(),
             normalized_goal.kernel_context.clone(),
         )
     };

@@ -771,7 +771,7 @@ impl<'a> Builder<'a> {
         &mut self,
         mut processor: Rc<Processor>,
         goal: &Goal,
-        env: &Environment,
+        bindings: &crate::elaborator::binding_map::BindingMap,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
         lowered_goal: Option<&LoweredGoal>,
@@ -791,7 +791,7 @@ impl<'a> Builder<'a> {
                 Some(normalized_goal),
                 goal_kernel_context,
                 self.project,
-                &env.bindings,
+                bindings,
             );
             match result {
                 Ok(_steps) => {
@@ -824,7 +824,7 @@ impl<'a> Builder<'a> {
                     Some(normalized_goal),
                     goal_kernel_context,
                     self.project,
-                    &env.bindings,
+                    bindings,
                 ) {
                     Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
                     Err(e) => {
@@ -841,7 +841,7 @@ impl<'a> Builder<'a> {
                     Some(normalized_goal),
                     goal_kernel_context,
                     self.project,
-                    &env.bindings,
+                    bindings,
                 );
                 match result {
                     Ok(checked_cert) => (
@@ -916,10 +916,10 @@ impl<'a> Builder<'a> {
         if self.verbose {
             processor
                 .prover()
-                .print_active_steps(&env.bindings, goal_kernel_context);
+                .print_active_steps(bindings, goal_kernel_context);
         }
         if outcome == Outcome::Success {
-            match processor.make_cert(&env.bindings, goal_kernel_context, false) {
+            match processor.make_cert(bindings, goal_kernel_context, false) {
                 Ok(cert) => {
                     let mut checked_cert_lines = None;
                     #[cfg(feature = "validate")]
@@ -930,7 +930,7 @@ impl<'a> Builder<'a> {
                             Some(normalized_goal),
                             goal_kernel_context,
                             self.project,
-                            &env.bindings,
+                            bindings,
                         ) {
                             Ok(lines) => {
                                 if self.print_proof {
@@ -966,7 +966,7 @@ impl<'a> Builder<'a> {
                             Some(normalized_goal),
                             goal_kernel_context,
                             self.project,
-                            &env.bindings,
+                            bindings,
                         ) {
                             Ok(lines) => checked_cert_lines = Some(lines),
                             Err(e) => {
@@ -992,7 +992,7 @@ impl<'a> Builder<'a> {
                     }
                     if let Some(lines) = checked_cert_lines.as_ref() {
                         let display_bindings = Processor::bindings_with_type_params(
-                            &env.bindings,
+                            bindings,
                             &goal.proposition.params,
                         );
                         print_displayed_proof(display_bindings.as_ref(), lines);
@@ -1041,6 +1041,8 @@ impl<'a> Builder<'a> {
         if !cursor.requires_verification() {
             return Ok(());
         }
+
+        Rc::make_mut(&mut processor).add_imports_from_bindings(cursor.bindings(), self.project)?;
 
         if cursor.num_children() > 0 {
             // We need to recurse into children
@@ -1100,7 +1102,7 @@ impl<'a> Builder<'a> {
         self.verify_goal(
             processor,
             &goal,
-            cursor.goal_env().unwrap(),
+            cursor.bindings(),
             new_certs,
             worklist,
             normalized_goal,
@@ -1146,10 +1148,13 @@ impl<'a> Builder<'a> {
 
         if !env.nodes.is_empty() {
             self.module_proving_started(target.clone());
-
-            let processor = Processor::with_imports(Some(self.cancellation_token.clone()), env)?;
-            let mut processor = Rc::new(processor);
             let mut cursor = NodeCursor::new(env, 0);
+            let processor = Processor::with_imports(
+                Some(self.cancellation_token.clone()),
+                cursor.bindings(),
+                self.project,
+            )?;
+            let mut processor = Rc::new(processor);
 
             // Loop over all the nodes that are right below the top level.
             loop {

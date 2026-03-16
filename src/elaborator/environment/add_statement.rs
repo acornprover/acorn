@@ -176,6 +176,9 @@ impl Environment {
         if !matches!(&statement.statement, StatementInfo::DocComment(_)) {
             self.doc_comments.clear();
             self.last_statement_line = Some(statement.first_line());
+            if result.is_ok() {
+                self.sync_current_binding_state();
+            }
         }
 
         result

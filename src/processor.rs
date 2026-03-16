@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use crate::builder::BuildError;
 use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
@@ -10,6 +11,7 @@ use crate::elaborator::node::NodeCursor;
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
+use crate::module::ModuleId;
 use crate::project::Project;
 use crate::prover::{Outcome, Prover, ProverMode};
 use tokio_util::sync::CancellationToken;
@@ -19,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Processor {
     prover: Prover,
     checker: Checker,
+    imported_modules: HashSet<ModuleId>,
 }
 
 impl Processor {
@@ -50,6 +53,7 @@ impl Processor {
         Processor {
             prover: Prover::new(vec![]),
             checker: Checker::new(),
+            imported_modules: HashSet::new(),
         }
     }
 
@@ -57,14 +61,15 @@ impl Processor {
         Processor {
             prover: Prover::new(vec![cancellation_token]),
             checker: Checker::new(),
+            imported_modules: HashSet::new(),
         }
     }
 
-    /// Creates a new Processor with imports already added from lowered state.
-    /// This uses pre-lowered facts directly (no lowering in phase three).
+    /// Creates a new Processor with the imports visible through these bindings.
     pub fn with_imports(
         cancellation_token: Option<CancellationToken>,
-        env: &crate::elaborator::environment::Environment,
+        bindings: &BindingMap,
+        project: &Project,
     ) -> Result<Processor, BuildError> {
         let mut processor = Processor {
             prover: match cancellation_token {
@@ -72,12 +77,55 @@ impl Processor {
                 None => Prover::new(vec![]),
             },
             checker: Checker::new(),
+            imported_modules: HashSet::new(),
         };
-        // Add pre-normalized import facts
-        for normalized in &env.lowered_imports {
-            processor.add_lowered_fact(normalized)?;
-        }
+        processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
+    }
+
+    pub fn add_imports_from_bindings(
+        &mut self,
+        bindings: &BindingMap,
+        project: &Project,
+    ) -> Result<(), BuildError> {
+        let direct_dependencies = bindings.direct_dependencies();
+        if direct_dependencies
+            .iter()
+            .all(|dep_id| self.imported_modules.contains(dep_id))
+        {
+            return Ok(());
+        }
+
+        for dep_id in direct_dependencies {
+            for module_id in project
+                .all_dependencies(dep_id)
+                .into_iter()
+                .chain(std::iter::once(dep_id))
+            {
+                self.add_imported_module(project, module_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn add_imported_module(
+        &mut self,
+        project: &Project,
+        module_id: ModuleId,
+    ) -> Result<(), BuildError> {
+        if !self.imported_modules.insert(module_id) {
+            return Ok(());
+        }
+        let dep_env = project.get_env_by_id(module_id).ok_or_else(|| {
+            BuildError::new(
+                Default::default(),
+                format!("missing dependency {}", module_id.0),
+            )
+        })?;
+        for normalized in &dep_env.lowered_module_facts {
+            self.add_lowered_fact(normalized)?;
+        }
+        Ok(())
     }
 
     /// Adds all module-local facts that are usable at the given cursor position.
@@ -328,16 +376,14 @@ impl Processor {
         };
 
         let cursor = env.get_node_by_goal_name("goal");
-        let goal_env = cursor.goal_env().unwrap();
-
-        let mut processor = Processor::with_imports(None, env).unwrap();
+        let mut processor = Processor::with_imports(None, cursor.bindings(), &p).unwrap();
         processor.add_module_facts(&cursor).unwrap();
         let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
         processor.set_lowered_goal(normalized_goal);
 
         (
             processor,
-            goal_env.bindings.clone(),
+            cursor.bindings().clone(),
             normalized_goal.clone(),
         )
     }

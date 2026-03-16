@@ -30,9 +30,8 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
         _ => panic!("no module"),
     };
     let node = base_env.get_node_by_goal_name(goal_name);
-    let env = node.goal_env().unwrap();
     let normalized_goal = node.lowered_goal().expect("missing lowered goal");
-    let mut processor = Processor::with_imports(None, base_env).unwrap();
+    let mut processor = Processor::with_imports(None, node.bindings(), project).unwrap();
     processor.add_module_facts(&node).unwrap();
     processor.set_lowered_goal(normalized_goal);
     let goal_kernel_context = &normalized_goal.kernel_context;
@@ -42,13 +41,14 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
 
     let cert = match processor
         .prover()
-        .make_cert(&env.bindings, goal_kernel_context, true)
+        .make_cert(node.bindings(), goal_kernel_context, true)
     {
         Ok(cert) => cert,
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, &env.bindings) {
+    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, node.bindings())
+    {
         panic!("check_cert failed: {}", e);
     }
     cert
@@ -70,7 +70,7 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
     for cursor in env.iter_goals() {
         let goal = cursor.goal().unwrap();
         if goal.name == goal_name {
-            let mut processor = match Processor::with_imports(None, env) {
+            let mut processor = match Processor::with_imports(None, cursor.bindings(), &project) {
                 Ok(p) => p,
                 Err(_) => return Outcome::Inconsistent,
             };
@@ -106,7 +106,6 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
 
     for cursor in env.iter_goals() {
         let _goal = cursor.goal().unwrap();
-        let goal_env = cursor.goal_env().unwrap();
 
         // Track the top-level index of this goal
         let path = cursor.path();
@@ -115,7 +114,7 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
             last_goal_top_index = Some(last_goal_top_index.map_or(top_index, |i| i.max(top_index)));
         }
 
-        let mut processor = Processor::with_imports(None, env)?;
+        let mut processor = Processor::with_imports(None, cursor.bindings(), &project)?;
         processor.add_module_facts(&cursor)?;
         let normalized_goal = cursor
             .lowered_goal()
@@ -132,14 +131,14 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         }
         let cert = processor
             .prover()
-            .make_cert(&goal_env.bindings, goal_kernel_context, true)
+            .make_cert(cursor.bindings(), goal_kernel_context, true)
             .map_err(|e| e.to_string())?;
         if let Err(e) = processor.check_cert(
             &cert,
             None,
             goal_kernel_context,
             &project,
-            &goal_env.bindings,
+            cursor.bindings(),
         ) {
             panic!("check_cert failed: {}", e);
         }
