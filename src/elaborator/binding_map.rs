@@ -1,5 +1,9 @@
 use core::panic;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet as StdHashSet;
+
+use im::hashmap::Entry as HashMapEntry;
+use im::ordmap::Entry as BTreeMapEntry;
+use im::{HashMap, HashSet, OrdMap as BTreeMap};
 
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
 
@@ -218,8 +222,15 @@ impl BindingMap {
     /// Get the set of all typeclasses that this one extends.
     /// This is the transitive closure, ie when A extends B and B extends C, A's set
     /// will include both B and C.
-    pub fn get_extends_set(&self, typeclass: &Typeclass) -> Option<&HashSet<Typeclass>> {
-        Some(&self.typeclass_defs.get(typeclass)?.extends)
+    pub fn get_extends_set(&self, typeclass: &Typeclass) -> Option<StdHashSet<Typeclass>> {
+        Some(
+            self.typeclass_defs
+                .get(typeclass)?
+                .extends
+                .iter()
+                .cloned()
+                .collect(),
+        )
     }
 
     pub fn unifier(&self) -> TypeUnifier<'_> {
@@ -578,11 +589,11 @@ impl BindingMap {
         }
 
         match self.typename_to_type.entry(name.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
+            BTreeMapEntry::Vacant(entry) => {
                 entry.insert(potential_type);
                 Ok(())
             }
-            std::collections::btree_map::Entry::Occupied(_) => {
+            BTreeMapEntry::Occupied(_) => {
                 Err(source.error(&format!("typename {} already bound", name)))
             }
         }
@@ -740,10 +751,10 @@ impl BindingMap {
             name: name.to_string(),
         };
         match self.typeclass_defs.entry(typeclass.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            HashMapEntry::Vacant(entry) => {
                 entry.insert(info);
             }
-            std::collections::hash_map::Entry::Occupied(entry) => {
+            HashMapEntry::Occupied(entry) => {
                 return Err(
                     source.error(&format!("typeclass {} is already bound", entry.key().name))
                 );
@@ -764,11 +775,11 @@ impl BindingMap {
         self.add_typeclass_alias(&typeclass, name);
 
         match self.name_to_typeclass.entry(name.to_string()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
+            BTreeMapEntry::Vacant(entry) => {
                 entry.insert(typeclass);
                 Ok(())
             }
-            std::collections::btree_map::Entry::Occupied(_) => {
+            BTreeMapEntry::Occupied(_) => {
                 Err(source.error(&format!("typeclass name {} is already bound", name)))
             }
         }
@@ -1958,7 +1969,7 @@ impl BindingMap {
     pub fn find_unknown_scoped_constants(
         &self,
         value: &AcornValue,
-        answer: &mut BTreeMap<String, AcornType>,
+        answer: &mut std::collections::BTreeMap<String, AcornType>,
     ) {
         match value {
             AcornValue::Variable(_, _) | AcornValue::Bool(_) => {}
