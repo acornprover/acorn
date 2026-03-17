@@ -7,7 +7,7 @@ use crate::elaborator::names::DefinedName;
 use crate::elaborator::to_term::{
     lower_value_to_term_existing, lower_value_to_term_existing_preserving_alias_spelling,
 };
-use crate::kernel::atom::Atom;
+use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
@@ -75,6 +75,16 @@ struct ProverPairCase {
     left: ProverClauseInput,
     right: ProverClauseInput,
     expected_rules: &'static [ExpectedRule],
+}
+
+struct LiteralMatchCase {
+    name: &'static str,
+    setup: fn(&mut KernelContext),
+    general_clause: &'static str,
+    general_var_types: &'static [&'static str],
+    special_clause: &'static str,
+    flipped: bool,
+    expected_bindings: &'static [(AtomId, &'static str)],
 }
 
 const TERM_CASES: &[DefinitionCase] = &[
@@ -604,6 +614,12 @@ fn setup_extensionality(kernel_context: &mut KernelContext) {
     kernel_context.parse_constants(&["g0", "g1"], "Bool -> Bool");
 }
 
+fn setup_nested_eq_reordering_match(kernel_context: &mut KernelContext) {
+    kernel_context
+        .parse_constants(&["c0", "c1", "c2"], "Bool")
+        .parse_constants(&["g0", "g1"], "Bool -> Bool");
+}
+
 const PROVER_PAIR_CASES: &[ProverPairCase] = &[
     ProverPairCase {
         name: "pairwise_resolution",
@@ -681,6 +697,16 @@ const PROVER_PAIR_CASES: &[ProverPairCase] = &[
         expected_rules: &[ExpectedRule::Extensionality],
     },
 ];
+
+const LITERAL_MATCH_CASES: &[LiteralMatchCase] = &[LiteralMatchCase {
+    name: "nested_eq_reordering",
+    setup: setup_nested_eq_reordering_match,
+    general_clause: "ite(Bool, eq(Bool, x0, c0), c1, g0(x0)) = g1(x0)",
+    general_var_types: &["Bool"],
+    special_clause: "ite(Bool, eq(Bool, c0, c2), c1, g0(c2)) = g1(c2)",
+    flipped: false,
+    expected_bindings: &[(0, "c2")],
+}];
 
 fn assert_term_is_already_normalized(term: &Term, case_name: &str, label: &str) {
     assert_eq!(
@@ -1110,6 +1136,43 @@ fn test_prover_generated_steps_are_normalized() {
                 step.clause
             );
         }
+    }
+}
+
+#[test]
+fn test_literal_match_normalization_cases() {
+    for case in LITERAL_MATCH_CASES {
+        let mut kernel_context = KernelContext::new();
+        (case.setup)(&mut kernel_context);
+
+        let general = kernel_context.parse_clause(case.general_clause, case.general_var_types);
+        let special = kernel_context.parse_clause(case.special_clause, &[]);
+
+        let mut var_map = VariableMap::new();
+        assert!(
+            var_map.match_literal(&general.literals[0], &special.literals[0], case.flipped),
+            "literal matcher should recover the specialization for case `{}`",
+            case.name
+        );
+
+        for (index, expected_term) in case.expected_bindings {
+            assert_eq!(
+                var_map.get_mapping(*index),
+                Some(&kernel_context.parse_term(expected_term)),
+                "literal matcher should recover x{} for case `{}`",
+                index,
+                case.name
+            );
+        }
+
+        assert_eq!(
+            var_map
+                .specialize_clause(&general, &kernel_context)
+                .normalized_preserving_locals(),
+            special,
+            "literal matcher should reproduce the normalized specialized clause for case `{}`",
+            case.name
+        );
     }
 }
 
