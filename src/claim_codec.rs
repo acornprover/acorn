@@ -763,12 +763,16 @@ impl ClaimCodec {
             .iter()
             .map(|arg_type| arg_type.instantiate(&substitutions))
             .collect();
+        let mut specialized_stack = Stack::new();
+        for (arg_name, arg_type) in arg_names.iter().zip(specialized_arg_types.iter()) {
+            specialized_stack.insert(arg_name.clone(), arg_type.clone());
+        }
         let args = shape
             .value_args
             .iter()
             .zip(specialized_arg_types.iter())
             .map(|(expr, arg_type)| {
-                evaluator.evaluate_value_with_stack(&mut stack, expr, Some(arg_type))
+                evaluator.evaluate_value_with_stack(&mut specialized_stack, expr, Some(arg_type))
             })
             .collect::<Result<Vec<_>, _>>()?;
         stack.remove_all(&arg_names);

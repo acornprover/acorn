@@ -1373,14 +1373,36 @@ impl<'a> Clausifier<'a> {
     /// Convert a claim argument term for `claim_with_args` parsing.
     ///
     /// Prefer inline checker-term encoding when available (to preserve existing certificate shape),
-    /// but allow richer closed terms (for example lambdas) so cert parsing can round-trip
-    /// generated witnesses.
+    /// but allow richer terms when inline encoding is unavailable so cert parsing can round-trip
+    /// generated witnesses, including lambdas that still refer to other claim locals.
     fn term_to_claim_arg_shape(&mut self, term: &Term) -> Result<Term, String> {
+        if let Some(reduced) = Self::try_eta_reduce_single_lambda(term) {
+            return self.term_to_claim_arg_shape(&reduced);
+        }
         match self.term_to_checker_inline_term(term) {
             Ok(inline_term) => Ok(inline_term),
-            Err(_) if !term.has_free_variable() => Ok(term.clone()),
-            Err(e) => Err(e),
+            Err(_) => Ok(term.clone()),
         }
+    }
+
+    /// Reduce a one-argument lambda that only forwards its bound variable into the tail
+    /// position of an application, e.g. `function(x) { f(a, x) }` -> `f(a)`.
+    fn try_eta_reduce_single_lambda(term: &Term) -> Option<Term> {
+        let (input_type, body) = term.as_ref().split_lambda()?;
+        let (function, args) = body.split_application_multi()?;
+        let (last_arg, prefix_args) = args.split_last()?;
+        if *last_arg != Term::atom(Atom::BoundVariable(0)) {
+            return None;
+        }
+        if function.has_bound_variable() || prefix_args.iter().any(|arg| arg.has_bound_variable()) {
+            return None;
+        }
+        if !function.has_free_variable() && !prefix_args.iter().any(|arg| arg.has_free_variable()) {
+            return None;
+        }
+
+        let _ = input_type;
+        Some(function.to_owned().apply(prefix_args))
     }
 
     /// Converts an ExtendedTerm to a simple Term.

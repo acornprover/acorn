@@ -150,6 +150,19 @@ const CERT_LINE_CASES: &[CertLineCase] = &[
         line: "true = false",
     },
     CertLineCase {
+        name: "plain_quantified_higher_order_inequality",
+        code: r#"
+            type Foo: axiom
+            let f: Foo -> Foo = axiom
+            let g: Foo -> (Foo -> Foo) = axiom
+
+            theorem goal {
+                true
+            }
+        "#,
+        line: "(forall(x0: Foo) { g(x0) != f })",
+    },
+    CertLineCase {
         name: "plain_false_claim",
         code: r#"
             theorem goal {
@@ -252,6 +265,20 @@ fn build_claim_with_concrete_type_local(
     .expect("claim should deserialize")
 }
 
+fn build_claim_with_type_param_and_capturing_lambda_arg(
+    project: &Project,
+    bindings: &BindingMap,
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    Certificate::deserialize_claim_with_args(
+        "function[T0](x0: T0, x1: T0 -> Bool) { x1(x0) }[Bool](true, function(y0: Bool) { y0 = x0 })",
+        project,
+        bindings,
+        kernel_context,
+    )
+    .expect("claim should deserialize")
+}
+
 const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
     ClaimRoundtripCase {
         name: "dependent_value_arg",
@@ -301,6 +328,15 @@ const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
             }
         "#,
         build: build_claim_with_concrete_type_local,
+    },
+    ClaimRoundtripCase {
+        name: "type_param_lambda_arg_captures_prior_local",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        build: build_claim_with_type_param_and_capturing_lambda_arg,
     },
 ];
 
@@ -853,25 +889,30 @@ fn serialize_claim_line(
     bindings: &BindingMap,
     kernel_context: &KernelContext,
 ) -> String {
-    let concrete_steps = vec![ConcreteStep {
-        generic: claim.clause().clone(),
-        var_maps: vec![(
-            claim.var_map().clone(),
-            claim.clause().get_local_context().clone(),
-        )],
-    }];
-    let cert = Certificate::from_concrete_steps(
-        "goal".to_string(),
-        &concrete_steps,
-        kernel_context,
-        bindings,
-    )
-    .expect("claim should serialize through certificate generation");
-    let mut proof = cert
-        .proof
-        .expect("claim certificate should have one proof line");
-    assert_eq!(proof.len(), 1, "expected one serialized proof line");
-    proof.pop().unwrap()
+    if claim.clause().get_local_context().is_empty() {
+        let concrete_steps = vec![ConcreteStep {
+            generic: claim.clause().clone(),
+            var_maps: vec![(
+                claim.var_map().clone(),
+                crate::kernel::local_context::LocalContext::empty(),
+            )],
+        }];
+        let cert = Certificate::from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            kernel_context,
+            bindings,
+        )
+        .expect("claim should serialize through concrete-step generation");
+        let mut proof = cert
+            .proof
+            .expect("claim certificate should have one proof line");
+        assert_eq!(proof.len(), 1, "expected one serialized proof line");
+        return proof.pop().unwrap();
+    }
+
+    Certificate::serialize_claim_step_for_test(claim, kernel_context, bindings)
+        .expect("claim should serialize through claim-step serialization")
 }
 
 fn serialize_claim_with_args_line(

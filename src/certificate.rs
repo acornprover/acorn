@@ -503,6 +503,15 @@ impl Certificate {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn serialize_claim_step_for_test(
+        claim: &Claim,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<String, CodeGenError> {
+        Self::serialize_claim_step(claim, kernel_context, bindings)
+    }
+
     /// Parse a single code line, updating bindings/kernel_context, and return structured result.
     pub fn parse_code_line(
         code: &str,

@@ -101,7 +101,7 @@ impl VariableMap {
         for opt_term in &self.map {
             if let Some(term) = opt_term {
                 for (var_id, var_type) in term.collect_vars(input_context) {
-                    output.set_type(var_id as usize, var_type);
+                    output.set_type(var_id as usize, apply_to_term(var_type.as_ref(), self));
                 }
             }
         }
