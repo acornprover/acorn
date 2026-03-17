@@ -275,25 +275,6 @@ impl Checker {
             return Some(self.reasons[*step_id].clone());
         }
 
-        if clause.has_any_variable() {
-            let candidates: Vec<Clause> = self.exact_clauses.keys().cloned().collect();
-            for candidate in &candidates {
-                let Some(reduced_clause) =
-                    self.simplify_variable_clause_with_concrete_facts(candidate, kernel_context)
-                else {
-                    continue;
-                };
-                if &reduced_clause == clause {
-                    trace!(
-                        clause = %clause,
-                        result = "simplified_variable_clause",
-                        "checking clause"
-                    );
-                    return Some(StepReason::EqualityGraph);
-                }
-            }
-        }
-
         trace!(clause = %clause, result = "failed", "checking clause");
         None
     }
@@ -751,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checker_simplifies_variable_clause_after_concrete_fact_arrives() {
+    fn test_checker_requires_explicit_step_for_late_variable_clause_simplification() {
         let mut context = KernelContext::new();
         context.parse_constants(&["c0", "c1"], "Bool");
         context.parse_constant("g0", "(Bool, Bool) -> Bool");
@@ -764,7 +745,7 @@ mod tests {
         checker.insert_clause(&not_baz, StepReason::Testing, &context);
 
         let reduced = context.parse_clause("not g0(x0, c0)", &["Bool"]);
-        assert!(checker.check_clause(&reduced, &context).is_some());
+        assert!(checker.check_clause(&reduced, &context).is_none());
     }
 
     #[test]
