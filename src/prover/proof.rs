@@ -168,6 +168,38 @@ fn add_var_map<R: ProofResolver>(
     }
 }
 
+fn passive_contradiction_var_map<R: ProofResolver>(
+    resolver: &R,
+    clause: &Clause,
+) -> Result<(VariableMap, LocalContext), Error> {
+    let local_context = clause.get_local_context().clone();
+    let mut used_vars = HashSet::new();
+    for atom in clause.iter_atoms() {
+        if let crate::kernel::atom::Atom::FreeVariable(var_id) = atom {
+            used_vars.insert(*var_id);
+        }
+    }
+
+    let mut var_map = VariableMap::new();
+    for var_id in used_vars {
+        let Some(var_type) = local_context.get_var_type(var_id as usize) else {
+            continue;
+        };
+        let witness = resolver
+            .kernel_context()
+            .find_inhabitant(var_type, Some(&local_context))
+            .ok_or_else(|| {
+                Error::internal(format!(
+                    "missing inhabitant while reconstructing passive contradiction for {} at x{}: {}",
+                    clause, var_id, var_type
+                ))
+            })?;
+        var_map.set(var_id, witness);
+    }
+
+    Ok((var_map, local_context))
+}
+
 impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
@@ -311,7 +343,18 @@ pub fn reconstruct_step<R: ProofResolver>(
 ) -> Result<(), Error> {
     // Some rules we can handle without the traces.
     match &step.rule {
-        Rule::PassiveContradiction(_) | Rule::MultipleRewrite(_) => {
+        Rule::PassiveContradiction(_) => {
+            // Passive contradictions rely on inhabited instances of the contradictory
+            // passive clauses, so reconstruct those concrete specializations explicitly.
+            for id in step.rule.premises() {
+                let premise_clause = resolver.get_clause(id)?;
+                let (var_map, context) = passive_contradiction_var_map(resolver, premise_clause)?;
+                add_var_map(resolver, id, var_map, context, concrete_steps);
+            }
+            return Ok(());
+        }
+
+        Rule::MultipleRewrite(_) => {
             // These rules use premises that may have free variables.
             // We pass empty map + empty context; add_var_map will automatically
             // use the clause's context when both are empty.

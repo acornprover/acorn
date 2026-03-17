@@ -8,10 +8,11 @@ use crate::elaborator::to_term::{
     lower_value_to_term_existing, lower_value_to_term_existing_preserving_alias_spelling,
 };
 use crate::kernel::atom::Atom;
+use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::proof_step::{ProofStep, Rule, Truthiness};
+use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule, Truthiness};
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
@@ -19,7 +20,7 @@ use crate::kernel::variable_map::VariableMap;
 use crate::module::{LoadState, ModuleId};
 use crate::project::Project;
 use crate::prover::active_set::ActiveSet;
-use crate::prover::proof::ConcreteStep;
+use crate::prover::proof::{ConcreteStep, Proof};
 use crate::prover::synthetic::WitnessRegistry;
 use std::borrow::Cow;
 
@@ -75,6 +76,11 @@ struct ProverPairCase {
     left: ProverClauseInput,
     right: ProverClauseInput,
     expected_rules: &'static [ExpectedRule],
+}
+
+struct ProofReconstructionCase {
+    name: &'static str,
+    build: fn(&mut KernelContext) -> (Vec<(ProofStepId, ProofStep)>, Vec<Clause>),
 }
 
 const TERM_CASES: &[DefinitionCase] = &[
@@ -718,6 +724,47 @@ const PROVER_PAIR_CASES: &[ProverPairCase] = &[
     },
 ];
 
+fn build_passive_contradiction_inhabited_instance_case(
+    kernel_context: &mut KernelContext,
+) -> (Vec<(ProofStepId, ProofStep)>, Vec<Clause>) {
+    kernel_context.parse_constant("g0", "Bool -> Bool");
+
+    let positive = ProofStep::mock_from_clause(kernel_context.parse_clause("g0(x0)", &["Bool"]));
+    let negative =
+        ProofStep::mock_from_clause(kernel_context.parse_clause("not g0(x0)", &["Bool"]));
+    let final_step = ProofStep::passive_contradiction(&[positive.clone(), negative.clone()]);
+    let witness = kernel_context
+        .find_inhabitant(&Term::bool_type(), None)
+        .expect("Bool should be inhabited");
+
+    (
+        vec![
+            (ProofStepId::Passive(0), positive),
+            (ProofStepId::Passive(1), negative),
+            (ProofStepId::Final, final_step),
+        ],
+        vec![
+            Clause::new(
+                vec![Literal::positive(
+                    kernel_context.parse_term("g0").apply(&[witness.clone()]),
+                )],
+                &LocalContext::empty(),
+            ),
+            Clause::new(
+                vec![Literal::negative(
+                    kernel_context.parse_term("g0").apply(&[witness]),
+                )],
+                &LocalContext::empty(),
+            ),
+        ],
+    )
+}
+
+const PROOF_RECONSTRUCTION_CASES: &[ProofReconstructionCase] = &[ProofReconstructionCase {
+    name: "passive_contradiction_inhabited_instance",
+    build: build_passive_contradiction_inhabited_instance_case,
+}];
+
 fn assert_term_is_already_normalized(term: &Term, case_name: &str, label: &str) {
     assert_eq!(
         *term,
@@ -1149,6 +1196,47 @@ fn test_prover_generated_steps_are_normalized() {
                 "generated step from case `{}` should have a normalized clause: {}",
                 case.name,
                 step.clause
+            );
+        }
+    }
+}
+
+#[test]
+fn test_proof_reconstruction_normalization_cases() {
+    for case in PROOF_RECONSTRUCTION_CASES {
+        let mut kernel_context = KernelContext::new();
+        let (steps, expected_clauses) = (case.build)(&mut kernel_context);
+
+        let mut proof = Proof::new(&kernel_context);
+        for (id, step) in &steps {
+            proof.add_step(*id, step);
+        }
+
+        let concrete_proof = proof
+            .make_concrete_proof("goal".to_string())
+            .expect("proof reconstruction should succeed");
+        assert!(
+            !concrete_proof.claims.is_empty(),
+            "expected proof reconstruction case `{}` to produce at least one claim",
+            case.name
+        );
+
+        for clause in &concrete_proof.claims {
+            assert_clause_is_already_normalized(clause, case.name, "reconstructed clause");
+        }
+
+        for expected_clause in &expected_clauses {
+            assert!(
+                concrete_proof.claims.contains(expected_clause),
+                "expected proof reconstruction case `{}` to include concrete clause {}\nactual clauses:\n{}",
+                case.name,
+                expected_clause,
+                concrete_proof
+                    .claims
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
     }

@@ -229,6 +229,52 @@ fn test_inhabited_const() {
     verify_succeeds(text);
 }
 
+#[test]
+fn test_passive_contradiction_cert_replays_inhabited_forall_exists() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        inductive Foo {
+            c0
+        }
+
+        let g: Foo -> Bool = axiom
+
+        theorem goal {
+            (forall(x: Foo) { g(x) }) implies exists(y: Foo) { g(y) }
+        }
+        "#,
+    );
+
+    let cert = prove(&mut project, "main", "goal");
+    let proof = cert.proof.expect("proof should exist");
+    assert!(
+        proof.iter()
+            .any(|line| line == "function(x0: Foo) { g(x0) }(Foo.c0)"),
+        "expected certificate to instantiate the inhabited witness for passive contradiction: {proof:?}"
+    );
+    assert!(
+        proof.iter()
+            .any(|line| line == "function(x0: Foo) { not g(x0) }(Foo.c0)"),
+        "expected certificate to specialize the negated boolean reduction for passive contradiction: {proof:?}"
+    );
+}
+
+#[test]
+fn test_passive_contradiction_cert_replays_outer_function_capture() {
+    let text = r#"
+        inductive Foo {
+            c0
+        }
+
+        theorem goal(h: Foo -> Bool) {
+            (forall(x: Foo) { h(x) }) implies exists(y: Foo) { h(y) }
+        }
+        "#;
+    verify_succeeds(text);
+}
+
 /// Regression test: when a certificate uses a typeclass constraint from a function
 /// defined in another module, but the current module hasn't directly imported that
 /// typeclass BY NAME, the code generator should use lib(module).TypeclassName syntax.
