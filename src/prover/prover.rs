@@ -18,8 +18,6 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{PremiseMap, ProofStep, ProofStepId, Rule, Truthiness};
-use crate::kernel::unifier::{Scope, Unifier};
-use crate::kernel::variable_map::VariableMap;
 use crate::kernel::EqualityGraphContradiction;
 use crate::prover::{Outcome, ProverMode};
 
@@ -442,46 +440,11 @@ impl Prover {
                 continue;
             }
             new_clauses.insert(clause.clone());
-            // Compute pattern var_map by unifying the pattern literal against the concrete literal.
-            let pattern_clause = &rewrite_step.clause;
-            let mut unifier = Unifier::new(3, kernel_context);
-            unifier.set_input_context(Scope::LEFT, pattern_clause.get_local_context());
-            unifier.set_input_context(Scope::RIGHT, LocalContext::empty_ref());
-            let mut unified = unifier.unify_literals(
-                Scope::LEFT,
-                &pattern_clause.literals[0],
-                Scope::RIGHT,
-                &clause.literals[0],
-                false,
+            let premise_map = PremiseMap::new(
+                vec![step.source.pattern_var_map().clone()],
+                vec![],
+                step.source.pattern_output_context().clone(),
             );
-            if !unified {
-                let mut flipped_unifier = Unifier::new(3, kernel_context);
-                flipped_unifier.set_input_context(Scope::LEFT, pattern_clause.get_local_context());
-                flipped_unifier.set_input_context(Scope::RIGHT, LocalContext::empty_ref());
-                unified = flipped_unifier.unify_literals(
-                    Scope::LEFT,
-                    &pattern_clause.literals[0],
-                    Scope::RIGHT,
-                    &clause.literals[0],
-                    true,
-                );
-                if unified {
-                    unifier = flipped_unifier;
-                }
-            }
-            if !unified {
-                panic!(
-                    "Failed to unify rewrite pattern with concrete clause.\nPattern: {}\nClause: {}",
-                    pattern_clause, clause
-                );
-            }
-            let (all_maps, output_context) = unifier.into_maps_with_context();
-            let pattern_var_map = all_maps
-                .into_iter()
-                .find(|(scope, _)| *scope == Scope::LEFT)
-                .map(|(_, map)| map)
-                .unwrap_or_else(VariableMap::new);
-            let premise_map = PremiseMap::new(vec![pattern_var_map], vec![], output_context);
             let step = ProofStep::specialization(
                 step.source.pattern_id.get(),
                 inspiration_id,
@@ -793,5 +756,89 @@ impl Prover {
         self.kernel_context = Some(kernel_context.clone());
         self.add_steps(steps, kernel_context);
         self.goal = Some(goal);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::equality_graph::{RewriteSource, RewriteStep, StepId};
+    use crate::module::ModuleId;
+
+    #[test]
+    fn test_multiple_rewrite_specialization_uses_saved_map() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context
+            .parse_constants(&["c0", "c1", "c2"], "Bool")
+            .parse_constants(&["g0", "g1"], "Bool -> Bool");
+
+        let pattern_clause = kernel_context.parse_clause(
+            "ite(Bool, eq(Bool, x0, c0), c1, g0(x0)) = g1(x0)",
+            &["Bool"],
+        );
+        let pattern_step = ProofStep::mock_from_clause(pattern_clause);
+
+        let inequality_clause =
+            kernel_context.parse_clause("ite(Bool, eq(Bool, c0, c2), c1, g0(c2)) != g1(c2)", &[]);
+        let mut inequality_step = ProofStep::mock_from_clause(inequality_clause.clone());
+        inequality_step.truthiness = Truthiness::Counterfactual;
+
+        let mut prover = Prover::new(vec![]);
+        prover.active_set.activate(
+            pattern_step,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+        prover.active_set.activate(
+            inequality_step,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+
+        let left_term = inequality_clause.literals[0].left.clone();
+        let right_term = inequality_clause.literals[0].right.clone();
+        let left_id = prover
+            .active_set
+            .graph
+            .insert_term(&left_term, &kernel_context);
+        let right_id = prover
+            .active_set
+            .graph
+            .insert_term(&right_term, &kernel_context);
+        let mut pattern_var_map = crate::kernel::variable_map::VariableMap::new();
+        pattern_var_map.set(0, kernel_context.parse_term("c2"));
+
+        let contradiction = EqualityGraphContradiction {
+            inequality_id: 1,
+            rewrite_chain: vec![RewriteStep {
+                source: RewriteSource::new(
+                    StepId(0),
+                    Some(StepId(1)),
+                    left_id,
+                    right_id,
+                    pattern_var_map,
+                    LocalContext::empty(),
+                ),
+                input_term: left_term,
+                output_term: right_term,
+                forwards: true,
+            }],
+        };
+
+        prover.report_equality_graph_contradiction(contradiction, &kernel_context);
+
+        let specialization = prover
+            .useful_passive
+            .first()
+            .expect("expected a specialization step for the concrete rewrite");
+        let expected =
+            kernel_context.parse_clause("ite(Bool, eq(Bool, c0, c2), c1, g0(c2)) = g1(c2)", &[]);
+        assert_eq!(specialization.clause, expected);
+        prover
+            .active_set
+            .validate_step(specialization, &kernel_context)
+            .expect("stored specialization map should validate");
     }
 }

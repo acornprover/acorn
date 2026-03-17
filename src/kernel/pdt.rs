@@ -25,6 +25,7 @@ use super::symbol::Symbol;
 use super::term::Term;
 use super::term::{Decomposition, TermRef};
 use super::unifier::{Scope, Unifier};
+use super::variable_map::VariableMap;
 use crate::module::ModuleId;
 
 const MAX_STACK_LIMIT_WARNINGS: usize = 20;
@@ -472,9 +473,20 @@ impl<T> Pdt<T> {
         local_context: &LocalContext,
         kernel_context: &KernelContext,
     ) -> Option<&'a T> {
+        self.find_pair_with_replacements(left, right, local_context, kernel_context)
+            .map(|(value, _)| value)
+    }
+
+    fn find_pair_with_replacements<'a>(
+        &'a self,
+        left: &Term,
+        right: &Term,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Option<(&'a T, Vec<Term>)> {
         let terms = [left.as_ref(), right.as_ref()];
         let mut replacements: Vec<TermRef> = vec![];
-        let mut found_id = None;
+        let mut found = None;
         let mut key = Vec::new();
         self.find_term_matches_while(
             &mut key,
@@ -482,12 +494,18 @@ impl<T> Pdt<T> {
             local_context,
             kernel_context,
             &mut replacements,
-            &mut |value_id, _| {
-                found_id = Some(value_id);
+            &mut |value_id, matched_replacements| {
+                found = Some((
+                    value_id,
+                    matched_replacements
+                        .iter()
+                        .map(|replacement| replacement.to_owned())
+                        .collect::<Vec<_>>(),
+                ));
                 false // Stop after first match
             },
         );
-        found_id.map(|id| &self.values[id])
+        found.map(|(id, replacements)| (&self.values[id], replacements))
     }
 
     /// Finds a clause in the tree.
@@ -603,6 +621,29 @@ impl LiteralSet {
             Some(&(sign, id, flipped)) => Some((sign == literal.positive, id, flipped)),
             None => None,
         }
+    }
+
+    /// Like `find_generalization`, but also returns the specializing variable map.
+    pub fn find_generalization_with_map(
+        &self,
+        literal: &Literal,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> Option<(bool, usize, bool, VariableMap)> {
+        let ((sign, id, flipped), replacements) = self
+            .tree
+            .find_pair_with_replacements(
+                &literal.left,
+                &literal.right,
+                local_context,
+                kernel_context,
+            )
+            .map(|(value, replacements)| (*value, replacements))?;
+        let mut var_map = VariableMap::new();
+        for (var_id, replacement) in replacements.into_iter().enumerate() {
+            var_map.set(var_id as AtomId, replacement);
+        }
+        Some((sign == literal.positive, id, flipped, var_map))
     }
 }
 

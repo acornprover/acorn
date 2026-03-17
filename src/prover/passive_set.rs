@@ -53,11 +53,12 @@ pub struct PassiveSet {
     scorer: Arc<dyn Scorer + Send + Sync>,
 }
 
-// Whether (left1, right1) can be mapped to (left2, right2) through variable substitution.
+// Returns the specialization map when (left1, right1) can be mapped to
+// (left2, right2) through variable substitution.
 // Only tries this direction.
 // Terms do not have to have variables normalized.
 // general_context is for left1/right1, special_context is for left2/right2.
-fn pair_specializes(
+fn pair_specialization_map(
     general_context: &LocalContext,
     special_context: &LocalContext,
     kernel_context: &KernelContext,
@@ -65,11 +66,11 @@ fn pair_specializes(
     right1: &Term,
     left2: &Term,
     right2: &Term,
-) -> bool {
+) -> Option<VariableMap> {
     // Note: type checking is done inside match_terms when matching variables,
     // so we don't need a separate top-level type check here.
     let mut var_map = VariableMap::new();
-    var_map.match_terms(
+    let matched = var_map.match_terms(
         left1.as_ref(),
         left2.as_ref(),
         general_context,
@@ -81,7 +82,8 @@ fn pair_specializes(
         general_context,
         special_context,
         kernel_context,
-    )
+    );
+    matched.then_some(var_map)
 }
 
 // Makes a new clause by simplifying a bunch of literals with respect to a given literal.
@@ -92,7 +94,7 @@ fn pair_specializes(
 // activated_context is for left/right, passive_context is for literals.
 fn make_simplified(
     activated_context: &LocalContext,
-    activated_literal: &Literal,
+    _activated_literal: &Literal,
     passive_context: &LocalContext,
     kernel_context: &KernelContext,
     left: &Term,
@@ -111,22 +113,23 @@ fn make_simplified(
         // Check both directions consistently for all literals.
         // The flip value must be determined by which direction actually matches,
         // not by which direction was used to find the initial match.
-        let (eliminated, match_flipped) = if pair_specializes(
-            activated_context,
-            passive_context,
-            kernel_context,
-            left,
-            right,
-            &literal.left,
-            &literal.right,
-        ) {
+        let (eliminated, match_flipped, match_var_map) = if let Some(var_map) =
+            pair_specialization_map(
+                activated_context,
+                passive_context,
+                kernel_context,
+                left,
+                right,
+                &literal.left,
+                &literal.right,
+            ) {
             if literal.positive == positive {
                 // The whole clause is implied by the literal we are simplifying with.
                 return None;
             }
             // This specific literal is unsatisfiable.
-            (true, false)
-        } else if pair_specializes(
+            (true, false, Some(var_map))
+        } else if let Some(var_map) = pair_specialization_map(
             activated_context,
             passive_context,
             kernel_context,
@@ -140,17 +143,14 @@ fn make_simplified(
                 return None;
             }
             // This specific literal is unsatisfiable with flipped matching.
-            (true, true)
+            (true, true, Some(var_map))
         } else {
-            (false, false)
+            (false, false, None)
         };
         if eliminated {
             // XOR with caller_flipped to get the flip relative to original orientation
-            let literal_flipped = match_flipped != caller_flipped;
-            // Extract var_map for the simplifying clause
-            let mut var_map = VariableMap::new();
-            var_map.match_literal(activated_literal, &literal, literal_flipped);
-            simp_var_maps.push(var_map);
+            let _literal_flipped = match_flipped != caller_flipped;
+            simp_var_maps.push(match_var_map.expect("eliminated literal should have a var map"));
         } else {
             new_literals.push(literal);
         }
@@ -309,7 +309,7 @@ impl PassiveSet {
             let passive_context = step.clause.get_local_context();
 
             // We've only checked fingerprints. We need to check if they actually match.
-            if !pair_specializes(
+            if pair_specialization_map(
                 local_context,
                 passive_context,
                 kernel_context,
@@ -317,7 +317,9 @@ impl PassiveSet {
                 right,
                 &literal.left,
                 &literal.right,
-            ) {
+            )
+            .is_none()
+            {
                 continue;
             }
 

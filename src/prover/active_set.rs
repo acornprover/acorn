@@ -29,7 +29,7 @@ enum LiteralElimination {
     /// The literal is self-contradictory (e.g., x != x).
     Impossible,
     /// The literal was eliminated by matching an existing clause.
-    Eliminated { step: usize, flipped: bool },
+    Eliminated { step: usize, var_map: VariableMap },
 }
 
 /// The ActiveSet stores a bunch of clauses that are indexed for various efficient lookups.
@@ -649,24 +649,6 @@ impl ActiveSet {
                         }
                     }
 
-                    // Add these rewrites to the term graph (only if both terms are concrete)
-                    let id1 = self.graph.insert_term(&u_subterm, kernel_context);
-                    for rewrite in &rewrites {
-                        // rewrite.term may have variables if the pattern had variables
-                        // that weren't fully matched. Only add to term graph if concrete.
-                        if !rewrite.term.has_any_variable() {
-                            let id2 = self.graph.insert_term(&rewrite.term, kernel_context);
-                            self.add_to_term_graph(
-                                rewrite.pattern_id,
-                                Some(target_id),
-                                id1,
-                                id2,
-                                rewrite.forwards,
-                                true,
-                            );
-                        }
-                    }
-
                     // Populate the subterm info.
                     let id = self.subterms.len();
                     self.subterms.push(SubtermInfo {
@@ -687,7 +669,8 @@ impl ActiveSet {
                 };
 
                 // Apply all the ways to rewrite u_subterm.
-                for rewrite in &self.subterms[u_subterm_id].rewrites {
+                let rewrites = self.subterms[u_subterm_id].rewrites.clone();
+                for rewrite in &rewrites {
                     if target_id == rewrite.pattern_id {
                         // Don't rewrite a literal with itself
                         continue;
@@ -746,10 +729,25 @@ impl ActiveSet {
                         &path,
                         &new_subterm,
                         &new_subterm_context,
-                        pattern_var_map,
+                        pattern_var_map.clone(),
                     );
                     if !Self::rewrite_step_is_well_typed(&ps, kernel_context) {
                         continue;
+                    }
+
+                    if !new_subterm.has_any_variable() {
+                        let id1 = self.graph.insert_term(&u_subterm, kernel_context);
+                        let id2 = self.graph.insert_term(&new_subterm, kernel_context);
+                        self.add_to_term_graph(
+                            rewrite.pattern_id,
+                            Some(target_id),
+                            id1,
+                            id2,
+                            rewrite.forwards,
+                            true,
+                            pattern_var_map.clone(),
+                            new_subterm_context.clone(),
+                        );
                     }
 
                     output.push(ps);
@@ -870,6 +868,8 @@ impl ActiveSet {
                         id2,
                         forwards,
                         true,
+                        pattern_var_map.clone(),
+                        new_subterm_context.clone(),
                     );
                 }
 
@@ -1201,10 +1201,10 @@ impl ActiveSet {
         }
         match self
             .literal_set
-            .find_generalization(&literal, local_context, kernel_context)
+            .find_generalization_with_map(&literal, local_context, kernel_context)
         {
-            Some((positive, step, flipped)) => {
-                Some((positive, LiteralElimination::Eliminated { step, flipped }))
+            Some((positive, step, _flipped, var_map)) => {
+                Some((positive, LiteralElimination::Eliminated { step, var_map }))
             }
             None => None,
         }
@@ -1310,42 +1310,14 @@ impl ActiveSet {
                     // Extract the var_map for the simplifying clause.
                     if let LiteralElimination::Eliminated {
                         step: simp_id,
-                        flipped,
+                        var_map,
+                        ..
                     } = &elimination
                     {
                         let simp_step = self.get_step(*simp_id);
                         new_rules.push((*simp_id, simp_step));
                         if simp_step.clause.literals.len() == 1 {
-                            let mut unifier = Unifier::new(3, kernel_context);
-                            unifier.set_input_context(
-                                Scope::LEFT,
-                                simp_step.clause.get_local_context(),
-                            );
-                            unifier.set_input_context(Scope::RIGHT, &local_context);
-                            let unified = unifier.unify_literals(
-                                Scope::LEFT,
-                                &simp_step.clause.literals[0],
-                                Scope::RIGHT,
-                                &literal,
-                                *flipped,
-                            );
-                            if !unified {
-                                let mut simp_var_map = VariableMap::new();
-                                simp_var_map.match_literal(
-                                    &simp_step.clause.literals[0],
-                                    &literal,
-                                    *flipped,
-                                );
-                                simplifying_var_maps.push(simp_var_map);
-                            } else {
-                                let (maps, _output_context) = unifier.into_maps_with_context();
-                                let simp_var_map = maps
-                                    .into_iter()
-                                    .find(|(scope, _)| *scope == Scope::LEFT)
-                                    .map(|(_, map)| map)
-                                    .unwrap_or_else(VariableMap::new);
-                                simplifying_var_maps.push(simp_var_map);
-                            }
+                            simplifying_var_maps.push(var_map.clone());
                         } else {
                             // Two-long-clause case - concrete, empty map
                             simplifying_var_maps.push(VariableMap::new());
@@ -1530,6 +1502,8 @@ impl ActiveSet {
         term2: TermId,
         forwards: bool,
         equal: bool,
+        pattern_var_map: VariableMap,
+        pattern_output_context: LocalContext,
     ) {
         let (left, right) = if forwards {
             (term1, term2)
@@ -1537,8 +1511,14 @@ impl ActiveSet {
             (term2, term1)
         };
         if equal {
-            self.graph
-                .set_terms_equal(left, right, StepId(pattern_id), inspiration_id.map(StepId));
+            self.graph.set_terms_equal_with_specialization(
+                left,
+                right,
+                StepId(pattern_id),
+                inspiration_id.map(StepId),
+                pattern_var_map,
+                pattern_output_context,
+            );
         } else {
             assert!(inspiration_id.is_none());
             self.graph
@@ -1563,7 +1543,16 @@ impl ActiveSet {
             let left = self.graph.insert_term(&literal.left, kernel_context);
             let right = self.graph.insert_term(&literal.right, kernel_context);
 
-            self.add_to_term_graph(activated_id, None, left, right, true, literal.positive);
+            self.add_to_term_graph(
+                activated_id,
+                None,
+                left,
+                right,
+                true,
+                literal.positive,
+                VariableMap::new(),
+                activated_step.clause.get_local_context().clone(),
+            );
 
             // The activated step could be rewritten immediately.
             self.activate_rewrite_target(activated_id, &activated_step, output, kernel_context);

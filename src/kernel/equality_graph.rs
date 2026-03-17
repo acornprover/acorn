@@ -8,7 +8,9 @@ use crate::kernel::clause::Clause;
 use crate::kernel::clause_set::{ClauseId, ClauseSet, GroupId, LiteralId, Normalization, TermId};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
+use crate::kernel::local_context::LocalContext;
 use crate::kernel::term::{Decomposition as TermDecomposition, Term};
+use crate::kernel::variable_map::VariableMap;
 
 /// Every time we set two terms equal or not equal, that action is tagged with a StepId.
 /// The term graph uses it to provide a history of the reasoning that led to a conclusion.
@@ -28,7 +30,7 @@ impl fmt::Display for StepId {
 }
 
 /// Information about a rewrite that was added to the term graph externally.
-#[derive(Debug, Eq, PartialEq, Copy, Clone, Ord, PartialOrd)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct RewriteSource {
     /// The id of the rule used for this rewrite.
     /// We know this rewrite is true based on the pattern step alone.
@@ -44,6 +46,40 @@ pub struct RewriteSource {
 
     /// The term that was originally on the right side of the pattern.
     right: TermId,
+
+    /// The specialization chosen when this rewrite edge was first discovered.
+    pattern_var_map: VariableMap,
+
+    /// The output context for the specializing terms in `pattern_var_map`.
+    pattern_output_context: LocalContext,
+}
+
+impl RewriteSource {
+    pub(crate) fn new(
+        pattern_id: StepId,
+        inspiration_id: Option<StepId>,
+        left: TermId,
+        right: TermId,
+        pattern_var_map: VariableMap,
+        pattern_output_context: LocalContext,
+    ) -> Self {
+        RewriteSource {
+            pattern_id,
+            inspiration_id,
+            left,
+            right,
+            pattern_var_map,
+            pattern_output_context,
+        }
+    }
+
+    pub fn pattern_var_map(&self) -> &VariableMap {
+        &self.pattern_var_map
+    }
+
+    pub fn pattern_output_context(&self) -> &LocalContext {
+        &self.pattern_output_context
+    }
 }
 
 /// Information provided externally to describe one step in a chain of rewrites.
@@ -805,7 +841,7 @@ impl EqualityGraph {
 
         self.terms[old_term.get() as usize]
             .adjacent
-            .push((new_term, source));
+            .push((new_term, source.clone()));
         self.terms[new_term.get() as usize]
             .adjacent
             .push((old_term, source));
@@ -1033,12 +1069,33 @@ impl EqualityGraph {
         pattern_id: StepId,
         inspiration_id: Option<StepId>,
     ) {
-        let source = RewriteSource {
+        self.set_terms_equal_with_specialization(
+            left,
+            right,
+            pattern_id,
+            inspiration_id,
+            VariableMap::new(),
+            LocalContext::empty(),
+        );
+    }
+
+    pub fn set_terms_equal_with_specialization(
+        &mut self,
+        left: TermId,
+        right: TermId,
+        pattern_id: StepId,
+        inspiration_id: Option<StepId>,
+        pattern_var_map: VariableMap,
+        pattern_output_context: LocalContext,
+    ) {
+        let source = RewriteSource::new(
             pattern_id,
             inspiration_id,
             left,
             right,
-        };
+            pattern_var_map,
+            pattern_output_context,
+        );
         self.pending.push(SemanticOperation::Rewrite(source));
         self.process_pending();
     }
@@ -1238,7 +1295,7 @@ impl EqualityGraph {
                     // We already have a way to get from term_a to term2
                     continue;
                 }
-                next_edge.insert(*term_a, (term_b, *source));
+                next_edge.insert(*term_a, (term_b, source.clone()));
                 if *term_a == term1 {
                     break 'outer;
                 }
@@ -1249,9 +1306,9 @@ impl EqualityGraph {
         let mut answer = vec![];
         let mut term_a = term1;
         while term_a != term2 {
-            let (term_b, source) = next_edge[&term_a];
-            answer.push((term_a, term_b, source));
-            term_a = term_b;
+            let (term_b, source) = &next_edge[&term_a];
+            answer.push((term_a, *term_b, source.clone()));
+            term_a = *term_b;
         }
         answer
     }
