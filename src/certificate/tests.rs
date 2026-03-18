@@ -490,6 +490,38 @@ fn test_parse_code_line_accepts_type_args_only_shape_with_concrete_application()
 }
 
 #[test]
+fn test_claim_with_typeclass_only_params_omits_trailing_type_args() {
+    let code = r#"
+        typeclass T: FiniteGroup {
+            unit: T
+        }
+
+        let g0[T]: Bool -> Bool = axiom
+        let g1[T]: T -> Bool = axiom
+
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+    let line = "function[T0: FiniteGroup] { g1(g0[T0](false)) }";
+
+    let claim =
+        Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
+            .expect("typeclass-only claim should deserialize");
+    assert_eq!(claim.var_map().len(), 0);
+
+    let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
+        .expect("typeclass-only claim should serialize");
+    assert_eq!(serialized, line);
+
+    let roundtrip =
+        Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &kernel_context)
+            .expect("typeclass-only claim should roundtrip");
+    assert_eq!(roundtrip, claim);
+}
+
+#[test]
 fn test_serialize_claim_with_args_avoids_colliding_lambda_arg_names() {
     let code = r#"
         let x0: Bool = axiom
@@ -1168,6 +1200,107 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
     let proof = cert.proof.expect("proof should exist");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
+}
+
+#[test]
+fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
+    use crate::elaborator::names::ConstantName;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+    use crate::kernel::variable_map::VariableMap;
+    use crate::prover::proof::ConcreteStep;
+
+    let code = r#"
+        typeclass T: FiniteGroup {
+            unit: T
+        }
+
+        let g0[T]: Bool -> Bool = axiom
+        let g1[T]: T -> Bool = axiom
+
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let module_id = bindings.module_id();
+    let g0 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::Unqualified(module_id, "g0".to_string()))
+        .expect("g0 should be bound in the mock module");
+    let g1 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::Unqualified(module_id, "g1".to_string()))
+        .expect("g1 should be bound in the mock module");
+    let finite_group = kernel_context
+        .type_store
+        .get_typeclass_id_by_name("FiniteGroup")
+        .expect("FiniteGroup should be registered");
+
+    let generic = Clause::new(
+        vec![Literal::positive(Term::new(
+            Atom::Symbol(g1),
+            vec![Term::new_variable(0), Term::new_variable(1)],
+        ))],
+        &LocalContext::from_types(vec![Term::type_sort(), Term::new_variable(0)]),
+    );
+    let replacement_context = LocalContext::from_types(vec![Term::typeclass(finite_group)]);
+
+    let mut var_map = VariableMap::new();
+    var_map.set(0, Term::bool_type());
+    var_map.set(
+        1,
+        Term::new(
+            Atom::Symbol(g0),
+            vec![Term::new_variable(0), Term::new_false()],
+        ),
+    );
+    let expected_clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
+        &generic,
+        &replacement_context,
+        &kernel_context,
+    );
+
+    let cert = Certificate::from_concrete_steps(
+        "goal".to_string(),
+        &[ConcreteStep {
+            generic,
+            var_maps: vec![(var_map, replacement_context.clone())],
+        }],
+        &kernel_context,
+        &bindings,
+    )
+    .expect("certificate generation should succeed");
+    let proof = cert.proof.expect("proof should exist");
+    assert_eq!(proof.len(), 1);
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step = Certificate::parse_code_line(
+        &proof[0],
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect("generated claim should parse back");
+    let claim = expect_claim(step);
+
+    assert_eq!(
+        claim.clause().get_local_context().get_var_type(0),
+        replacement_context.get_var_type(0),
+        "parsed claim should preserve the replacement-context typeclass kind"
+    );
+    assert_eq!(
+        claim
+            .specialized_clause_for_display(kernel_context_cow.as_ref())
+            .expect("parsed claim should specialize"),
+        expected_clause,
+        "roundtripped claim should still replay to the concrete clause"
+    );
 }
 
 #[test]

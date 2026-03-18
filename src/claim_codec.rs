@@ -134,33 +134,30 @@ impl ClaimCodec {
                         };
                         type_param_decl_codes.push(decl_code);
                     }
-                    if local_type_params
+                    let selected_type_args = local_type_params
                         .iter()
-                        .all(|(_, kind)| matches!(kind, AcornType::Type0))
-                    {
+                        .map(|(_, kind)| {
+                            Self::infer_in_scope_type_arg(kind, bindings)
+                                .map(|selected| generator.type_to_expr(&selected))
+                                .transpose()
+                        })
+                        .collect::<Result<Option<Vec<_>>, _>>()?;
+                    if let Some(type_arg_codes) = selected_type_args {
                         return Ok(format!(
-                            "function[{}] {{ {} }}",
+                            "function[{}] {{ {} }}[{}]",
                             type_param_decl_codes.join(", "),
-                            named_generic_code
+                            named_generic_code,
+                            type_arg_codes
+                                .into_iter()
+                                .map(|expr| expr.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
-
-                    let mut type_arg_codes = vec![];
-                    for (type_param_name, kind) in &local_type_params {
-                        let arg_code = if let Some(selected_type) =
-                            Self::infer_in_scope_type_arg(kind, bindings)
-                        {
-                            generator.type_to_expr(&selected_type)?.to_string()
-                        } else {
-                            type_param_name.clone()
-                        };
-                        type_arg_codes.push(arg_code);
-                    }
                     return Ok(format!(
-                        "function[{}] {{ {} }}[{}]",
+                        "function[{}] {{ {} }}",
                         type_param_decl_codes.join(", "),
-                        named_generic_code,
-                        type_arg_codes.join(", ")
+                        named_generic_code
                     ));
                 }
                 return Self::ensure_claim_code_parses_as_claim(generic_code);
