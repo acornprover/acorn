@@ -915,7 +915,7 @@ impl CodeGenerator<'_> {
         match step {
             CertificateStep::Claim(claim) => {
                 let clause = claim
-                    .specialized_clause_for_display(kernel_context)
+                    .normalized_specialized_clause(kernel_context)
                     .map_err(Error::GeneratedBadCode)?;
                 let value = kernel_context.quote_clause(&clause, None, None, true);
                 self.value_to_code(&value)

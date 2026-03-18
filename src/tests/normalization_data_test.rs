@@ -178,6 +178,15 @@ const CERT_LINE_CASES: &[CertLineCase] = &[
         line: "false",
     },
     CertLineCase {
+        name: "plain_negated_exists_claim",
+        code: r#"
+            theorem goal {
+                true
+            }
+        "#,
+        line: "not exists(k0: Bool, k1: Bool) { k0 = k1 }",
+    },
+    CertLineCase {
         name: "claim_with_normalized_argument_term",
         code: r#"
             theorem goal {

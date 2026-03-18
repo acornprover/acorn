@@ -1148,7 +1148,10 @@ impl ClaimCodec {
                     | Decomposition::Exists(_, _)
                     | Decomposition::Lambda(_, _)
             );
-            if mentions_local && !contains_inline_binder {
+            if contains_inline_binder {
+                return true;
+            }
+            if mentions_local {
                 return true;
             }
         }

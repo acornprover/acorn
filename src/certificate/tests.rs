@@ -632,6 +632,34 @@ fn test_parse_code_line_plain_claim_still_works() {
 }
 
 #[test]
+fn test_parse_code_line_preserves_plain_negated_exists_literal() {
+    let code = r#"
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step = Certificate::parse_code_line(
+        "not exists(k0: Bool, k1: Bool) { k0 = k1 }",
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect("plain negated exists claim should parse");
+
+    let claim = expect_claim(step);
+    assert_eq!(claim.clause().get_local_context().len(), 0);
+    assert_eq!(claim.var_map().len(), 0);
+    assert_eq!(
+        claim.clause().to_string(),
+        "not exists(Bool => exists(Bool => eq(Bool, b0, b1)))"
+    );
+}
+
+#[test]
 fn test_parse_code_line_canonicalizes_plain_claim_equality() {
     let code = r#"
         theorem goal {
