@@ -1401,6 +1401,34 @@ theorem fix_neg(a: Int) {
     }
 
     #[test]
+    fn test_reprove_single_line_double_sum_image_witness_generates_checkable_cert() {
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: false,
+        };
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut verifier = Verifier::new(
+            project_root,
+            reprove_config,
+            Some("real.double_sum".to_string()),
+        )
+        .expect("single-line reprove verifier should construct");
+        verifier.builder.check_hashes = false;
+        verifier.builder.check_mode = false;
+        verifier.builder.print_proof = true;
+        verifier.builder.operation_verb = "reproved";
+        verifier.builder.timeout_secs = 60.0;
+        verifier.builder.activation_limit = 200_000;
+        verifier.line_selection = Some(LineSelection::Single(1089));
+
+        let output = verifier
+            .run()
+            .expect("single-line reprove should not panic or fail cert checking");
+        assert_eq!(output.status, BuildStatus::Good);
+    }
+
+    #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
 
