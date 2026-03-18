@@ -212,6 +212,23 @@ mod tests {
     }
 
     #[test]
+    fn test_verifier_rejects_real_acornlib_in_unit_tests() {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if Project::find_local_acorn_library(&project_root).is_none() {
+            return;
+        }
+
+        let err = match Verifier::new(project_root, ProjectConfig::default(), None) {
+            Ok(_) => panic!("verifier should reject the real acornlib in unit tests"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("you should not use real acornlib during the unit tests"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_verifier_basic() {
         let (acornlib, src, build) = setup();
 
