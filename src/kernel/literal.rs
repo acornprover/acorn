@@ -240,17 +240,34 @@ impl Literal {
         self.right.stable_cmp(&other.right)
     }
 
-    /// Returns (right, left, output_context) with normalized var ids.
-    /// The output_context contains the types of the renumbered variables.
-    /// The input_context provides the types of variables before renumbering.
-    pub fn normalized_reversed(&self, input_context: &LocalContext) -> (Term, Term, LocalContext) {
+    /// Returns (right, left, output_context, var_ids) with normalized var ids.
+    /// `var_ids[new_id] = old_id` maps the reversed-normalized variable numbering
+    /// back to the original local-context numbering.
+    fn normalized_reversed_with_var_ids(
+        &self,
+        input_context: &LocalContext,
+    ) -> (Term, Term, LocalContext, Vec<AtomId>) {
         let mut var_ids: Vec<AtomId> = vec![];
         let mut right = self.right.clone();
         right.normalize_var_ids_with_context(&mut var_ids, input_context);
         let mut left = self.left.clone();
         left.normalize_var_ids_with_context(&mut var_ids, input_context);
         let output_context = input_context.remap(&var_ids);
+        (right, left, output_context, var_ids)
+    }
+
+    /// Returns (right, left, output_context) with normalized var ids.
+    /// The output_context contains the types of the renumbered variables.
+    /// The input_context provides the types of variables before renumbering.
+    pub fn normalized_reversed(&self, input_context: &LocalContext) -> (Term, Term, LocalContext) {
+        let (right, left, output_context, _) = self.normalized_reversed_with_var_ids(input_context);
         (right, left, output_context)
+    }
+
+    /// Returns `var_ids[new_id] = old_id` for the reversed-normalized literal view.
+    pub fn reversed_var_ids(&self, input_context: &LocalContext) -> Vec<AtomId> {
+        let (_, _, _, var_ids) = self.normalized_reversed_with_var_ids(input_context);
+        var_ids
     }
 
     /// Validate that both sides of the literal have the same type.

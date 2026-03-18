@@ -1,4 +1,10 @@
 use crate::tests::support::*;
+use crate::{
+    module::LoadState,
+    processor::Processor,
+    project::Project,
+    prover::{Outcome, ProverMode},
+};
 
 // Proof generation and condensed-certificate regressions.
 
@@ -119,4 +125,94 @@ fn test_proof_indirect_from_goal() {
         "#;
 
     verify_succeeds(text);
+}
+
+#[test]
+fn test_cert_generation_replays_flipped_simplification_match() {
+    let text = r#"
+        inductive Nat {
+            zero
+            suc(Nat)
+        }
+
+        inductive Int {
+            from_nat(Nat)
+            neg_suc(Nat)
+        }
+
+        define neg_nat(n: Nat) -> Int {
+            match n {
+                Nat.zero {
+                    Int.from_nat(Nat.zero)
+                }
+                Nat.suc(k) {
+                    Int.neg_suc(k)
+                }
+            }
+        }
+
+        define neg(a: Int) -> Int {
+            match a {
+                Int.from_nat(n) {
+                    neg_nat(n)
+                }
+                Int.neg_suc(n) {
+                    Int.from_nat(Nat.suc(n))
+                }
+            }
+        }
+
+        theorem fix_neg(a: Int) {
+            neg(a) = a implies a = Int.from_nat(Nat.zero)
+        } by {
+            if neg(a) = a {
+                match a {
+                    Int.from_nat(n) {
+                        n = Nat.zero
+                        a = Int.from_nat(Nat.zero)
+                    }
+                    Int.neg_suc(n) {
+                    }
+                }
+            }
+        }
+    "#;
+
+    let mut project = Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let cursor = env.get_node_by_goal_name("n = Nat.zero");
+    let mut processor = Processor::with_imports(None, cursor.bindings(), &project).unwrap();
+    processor.add_module_facts(&cursor).unwrap();
+    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+    processor.set_lowered_goal(normalized_goal);
+    let goal_kernel_context = &normalized_goal.kernel_context;
+    let outcome = processor.search(
+        ProverMode::Interactive {
+            timeout_secs: 5.0,
+            activation_limit: 2000,
+        },
+        goal_kernel_context,
+    );
+    assert_eq!(outcome, Outcome::Success);
+
+    let cert = processor
+        .prover()
+        .make_cert(cursor.bindings(), goal_kernel_context, false)
+        .expect("make_cert should succeed");
+    processor
+        .check_cert(
+            &cert,
+            None,
+            goal_kernel_context,
+            &project,
+            cursor.bindings(),
+        )
+        .expect("generated cert should replay successfully");
 }

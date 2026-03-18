@@ -579,8 +579,19 @@ impl Pdt<()> {
 /// The LiteralSet stores literals using a PDT.
 #[derive(Clone)]
 pub struct LiteralSet {
-    /// Stores (sign, id, flipped) for each literal.
-    tree: Pdt<(bool, usize, bool)>,
+    /// Stores literal metadata for each indexed literal.
+    tree: Pdt<LiteralEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct LiteralEntry {
+    sign: bool,
+    id: usize,
+    flipped: bool,
+    /// When `flipped` is true, `reversed_var_ids[new_id] = old_id` maps the
+    /// reversed literal's normalized variable numbering back to the original
+    /// clause-local numbering.
+    reversed_var_ids: Vec<AtomId>,
 }
 
 impl LiteralSet {
@@ -593,15 +604,26 @@ impl LiteralSet {
         self.tree.insert_pair(
             &literal.left,
             &literal.right,
-            (literal.positive, id, false),
+            LiteralEntry {
+                sign: literal.positive,
+                id,
+                flipped: false,
+                reversed_var_ids: vec![],
+            },
             local_context,
         );
         if !literal.strict_kbo() {
             let (right, left, reversed_context) = literal.normalized_reversed(local_context);
+            let reversed_var_ids = literal.reversed_var_ids(local_context);
             self.tree.insert_pair(
                 &right,
                 &left,
-                (literal.positive, id, true),
+                LiteralEntry {
+                    sign: literal.positive,
+                    id,
+                    flipped: true,
+                    reversed_var_ids,
+                },
                 &reversed_context,
             );
         }
@@ -618,7 +640,7 @@ impl LiteralSet {
             .tree
             .find_pair(&literal.left, &literal.right, local_context, kernel_context)
         {
-            Some(&(sign, id, flipped)) => Some((sign == literal.positive, id, flipped)),
+            Some(entry) => Some((entry.sign == literal.positive, entry.id, entry.flipped)),
             None => None,
         }
     }
@@ -630,7 +652,7 @@ impl LiteralSet {
         local_context: &LocalContext,
         kernel_context: &KernelContext,
     ) -> Option<(bool, usize, bool, VariableMap)> {
-        let ((sign, id, flipped), replacements) = self
+        let (entry, replacements) = self
             .tree
             .find_pair_with_replacements(
                 &literal.left,
@@ -638,12 +660,24 @@ impl LiteralSet {
                 local_context,
                 kernel_context,
             )
-            .map(|(value, replacements)| (*value, replacements))?;
+            .map(|(value, replacements)| (value.clone(), replacements))?;
         let mut var_map = VariableMap::new();
-        for (var_id, replacement) in replacements.into_iter().enumerate() {
-            var_map.set(var_id as AtomId, replacement);
+        if entry.flipped {
+            for (new_id, replacement) in replacements.into_iter().enumerate() {
+                let original_id = *entry.reversed_var_ids.get(new_id)?;
+                var_map.set(original_id, replacement);
+            }
+        } else {
+            for (var_id, replacement) in replacements.into_iter().enumerate() {
+                var_map.set(var_id as AtomId, replacement);
+            }
         }
-        Some((sign == literal.positive, id, flipped, var_map))
+        Some((
+            entry.sign == literal.positive,
+            entry.id,
+            entry.flipped,
+            var_map,
+        ))
     }
 }
 
