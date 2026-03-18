@@ -1319,6 +1319,88 @@ instance Nat: Two
     }
 
     #[test]
+    fn test_reprove_single_line_nested_match_goal_generates_checkable_cert() {
+        let (acornlib, src, _) = setup();
+
+        let module_text = r#"
+inductive Nat {
+    zero
+    suc(Nat)
+}
+
+inductive Int {
+    from_nat(Nat)
+    neg_suc(Nat)
+}
+
+define neg_nat(n: Nat) -> Int {
+    match n {
+        Nat.zero {
+            Int.from_nat(Nat.zero)
+        }
+        Nat.suc(k) {
+            Int.neg_suc(k)
+        }
+    }
+}
+
+define neg(a: Int) -> Int {
+    match a {
+        Int.from_nat(n) {
+            neg_nat(n)
+        }
+        Int.neg_suc(n) {
+            Int.from_nat(Nat.suc(n))
+        }
+    }
+}
+
+theorem fix_neg(a: Int) {
+    neg(a) = a implies a = Int.from_nat(Nat.zero)
+} by {
+    if neg(a) = a {
+        match a {
+            Int.from_nat(n) {
+                n = Nat.zero
+                a = Int.from_nat(Nat.zero)
+            }
+            Int.neg_suc(n) {
+            }
+        }
+    }
+}
+"#;
+        src.child("test.ac").write_str(module_text).unwrap();
+
+        let claim_line = module_text
+            .lines()
+            .position(|line| line.contains("n = Nat.zero"))
+            .expect("claim line should exist") as u32
+            + 1;
+
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: false,
+        };
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            reprove_config,
+            Some("test".to_string()),
+        )
+        .expect("single-line reprove verifier should construct");
+        verifier.builder.check_hashes = false;
+        verifier.builder.print_proof = true;
+        verifier.builder.operation_verb = "reproved";
+        verifier.line_selection = Some(LineSelection::Single(claim_line));
+
+        let output = verifier
+            .run()
+            .expect("single-line reprove should not panic or fail cert checking");
+        assert_eq!(output.status, BuildStatus::Good);
+    }
+
+    #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
 
