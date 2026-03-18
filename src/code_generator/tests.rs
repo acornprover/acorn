@@ -175,6 +175,60 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
 }
 
 #[test]
+fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
+    use crate::kernel::certificate_step::CertificateStep;
+    use crate::kernel::variable_map::VariableMap;
+    use crate::processor::Processor;
+
+    let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+    let mut kernel_context = normalized_goal.kernel_context;
+
+    kernel_context.parse_typeclass("FiniteGroup");
+    kernel_context.parse_polymorphic_constant("g0", "T: Type", "Bool -> Bool");
+    kernel_context.parse_polymorphic_constant("g1", "T: Type", "T -> Bool");
+
+    // Reproduces the replay-mismatch shape from `reprove finite_group --line 67`:
+    // a generic `(Type, x0)` clause is specialized using a replacement-context type local
+    // constrained by a typeclass, but replay reinterprets the surviving local under the
+    // generic context instead of the replacement context.
+    let generic = kernel_context.parse_clause("g1(x0, x1)", &["Type", "x0"]);
+    let replacement_context = kernel_context.parse_local(&["FiniteGroup"]);
+
+    let mut var_map = VariableMap::new();
+    var_map.set(0, kernel_context.parse_term("Bool"));
+    var_map.set(1, kernel_context.parse_term("g0(x0, false)"));
+    let expected_clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
+        &generic,
+        &replacement_context,
+        &kernel_context,
+    );
+
+    let mut generator = CodeGenerator::new(&bindings);
+    let mut steps = vec![];
+    generator
+        .specialization_to_certificate_steps(
+            &generic,
+            &var_map,
+            &replacement_context,
+            &mut kernel_context,
+            &mut steps,
+        )
+        .expect("claim replay should preserve the replacement context for surviving type locals");
+
+    assert_eq!(steps.len(), 1, "expected one generated claim step");
+    let CertificateStep::Claim(claim) = &steps[0] else {
+        panic!("expected a claim step");
+    };
+    let displayed = claim
+        .specialized_clause_for_display(&kernel_context)
+        .expect("generated claim should specialize for display");
+    assert_eq!(
+        displayed, expected_clause,
+        "generated claim should replay to the concrete clause built from the replacement context"
+    );
+}
+
+#[test]
 fn test_code_generation() {
     let mut p = Project::new_mock();
     p.mock(
