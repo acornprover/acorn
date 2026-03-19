@@ -1417,6 +1417,94 @@ theorem fix_neg(a: Int) {
         assert_eq!(output.status, BuildStatus::Good);
     }
 
+    /// Focused reproducer for `reprove real.abs_conv --line 1255`.
+    ///
+    /// The essential shape is:
+    /// - a local `define p(n)` inside a proof
+    /// - `p` closes over an outer higher-order parameter `s: Nat -> Container`
+    /// - `p(n)` expands to an implication whose consequent is an existential
+    /// - the proof of `p(Nat.zero)` comes from resolving that definition with
+    ///   a prior `forall(big_n) { set_lower_bound(s(big_n), Nat.zero) }`
+    ///
+    /// This should generate a checkable certificate.
+    #[test]
+    fn test_reprove_single_line_local_define_exists_simplification_generates_checkable_cert() {
+        let (acornlib, src, _) = setup();
+
+        let module_text = r#"
+inductive Nat {
+    zero
+    suc(Nat)
+}
+
+structure Container {
+    member: Nat -> Bool
+}
+
+let gte: (Nat, Nat) -> Bool = axiom
+
+axiom nat_zero_lower_bound(k: Nat) {
+    gte(k, Nat.zero)
+}
+
+define set_lower_bound(c: Container, n: Nat) -> Bool {
+    forall(k: Nat) {
+        c.member(k) implies gte(k, n)
+    }
+}
+
+theorem goal(s: Nat -> Container, h: Bool) {
+    h implies exists(big_n: Nat) {
+        set_lower_bound(s(big_n), Nat.zero)
+    }
+} by {
+    define p(n: Nat) -> Bool {
+        h implies exists(big_n: Nat) {
+            set_lower_bound(s(big_n), n)
+        }
+    }
+
+    forall(big_n: Nat) {
+        forall(k: Nat) {
+            if s(big_n).member(k) {
+                nat_zero_lower_bound(k)
+            }
+        }
+        set_lower_bound(s(big_n), Nat.zero)
+    }
+    p(Nat.zero)
+}
+"#;
+        src.child("test.ac").write_str(module_text).unwrap();
+
+        let claim_line = module_text
+            .lines()
+            .position(|line| line.contains("p(Nat.zero)"))
+            .expect("claim line should exist") as u32
+            + 1;
+
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: false,
+        };
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            reprove_config,
+            Some("test".to_string()),
+        )
+        .expect("single-line reprove verifier should construct");
+        verifier.builder.check_hashes = false;
+        verifier.builder.print_proof = true;
+        verifier.builder.operation_verb = "reproved";
+        verifier.line_selection = Some(LineSelection::Single(claim_line));
+
+        let output = verifier
+            .run()
+            .expect("single-line reprove should not panic or fail cert checking");
+        assert_eq!(output.status, BuildStatus::Good);
+    }
+
     #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
