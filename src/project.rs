@@ -287,6 +287,19 @@ impl Project {
         }
     }
 
+    #[cfg(test)]
+    fn is_real_acornlib_src_for_unit_tests(src_dir: &Path) -> bool {
+        let Some(real_src_dir) = std::fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .with_file_name("acornlib")
+                .join("src"),
+        )
+        .ok() else {
+            return false;
+        };
+        std::fs::canonicalize(src_dir).is_ok_and(|candidate| candidate == real_src_dir)
+    }
+
     // A Project based on the provided starting path.
     // Returns an error if we can't find an acorn library, or if the manifest version is too new.
     pub fn new_local(start_path: &Path, config: ProjectConfig) -> Result<Project, ProjectError> {
@@ -299,6 +312,12 @@ impl Project {
                         .to_string(),
                 )
             })?;
+        #[cfg(test)]
+        if config.use_filesystem && Self::is_real_acornlib_src_for_unit_tests(&src_dir) {
+            return Err(ProjectError(
+                "you should not use real acornlib during the unit tests".to_string(),
+            ));
+        }
         Project::new(src_dir, build_dir, config)
     }
 

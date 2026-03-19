@@ -42,6 +42,18 @@ pub struct CodeGenerator<'a> {
 }
 
 impl CodeGenerator<'_> {
+    fn clause_has_only_type_param_locals(clause: &Clause) -> bool {
+        clause
+            .get_local_context()
+            .get_var_types()
+            .iter()
+            .all(|var_type| {
+                var_type
+                    .as_ref()
+                    .is_some_and(|term| term.as_ref().is_type_param_kind())
+            })
+    }
+
     /// Render a binary expression while preserving the operand grouping required by precedence.
     fn value_to_binary_expr(
         &mut self,
@@ -895,9 +907,15 @@ impl CodeGenerator<'_> {
         let concretized_clause =
             replacement_type_map.specialize_clause_with_compact_vars(&clause, kernel_context);
         if replayed != concretized_clause {
+            if Self::clause_has_only_type_param_locals(&concretized_clause) {
+                let claim = Claim::new(concretized_clause, VariableMap::new())
+                    .map_err(Error::GeneratedBadCode)?;
+                steps.push(CertificateStep::Claim(claim));
+                return Ok(());
+            }
             return Err(Error::GeneratedBadCode(format!(
-                "certificate claim map replay mismatch: generic clause '{}' with map '{}' replays to '{}', but concrete clause is '{}'",
-                generic, claim_var_map, replayed, clause
+                "certificate claim map replay mismatch: generic clause '{}' with map '{}' replays to '{}', but concretized clause is '{}' (raw specialized clause '{}')",
+                generic, claim_var_map, replayed, concretized_clause, clause
             )));
         }
         let claim = Claim::new(generic.clone(), claim_var_map).map_err(Error::GeneratedBadCode)?;
@@ -915,7 +933,7 @@ impl CodeGenerator<'_> {
         match step {
             CertificateStep::Claim(claim) => {
                 let clause = claim
-                    .specialized_clause_for_display(kernel_context)
+                    .normalized_specialized_clause(kernel_context)
                     .map_err(Error::GeneratedBadCode)?;
                 let value = kernel_context.quote_clause(&clause, None, None, true);
                 self.value_to_code(&value)

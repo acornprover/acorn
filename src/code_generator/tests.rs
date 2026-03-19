@@ -219,6 +219,16 @@ fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
     let CertificateStep::Claim(claim) = &steps[0] else {
         panic!("expected a claim step");
     };
+    assert_eq!(
+        claim.clause().get_local_context().get_var_type(0),
+        replacement_context.get_var_type(0),
+        "generated claim should keep the replacement-context kind on the surviving type local"
+    );
+    assert_eq!(
+        claim.var_map().len(),
+        0,
+        "fallback claim should serialize as a direct claim rather than a lossy claim map"
+    );
     let displayed = claim
         .specialized_clause_for_display(&kernel_context)
         .expect("generated claim should specialize for display");
