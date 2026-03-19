@@ -50,6 +50,13 @@ struct KernelTermRoundtripCase {
     build: fn(&mut KernelContext) -> Term,
 }
 
+struct KernelClaimSpecializationCase {
+    name: &'static str,
+    setup: fn(&mut KernelContext),
+    build: fn(&KernelContext) -> crate::kernel::certificate_step::Claim,
+    expected_specialized_clause: fn(&KernelContext) -> crate::kernel::clause::Clause,
+}
+
 struct KernelClauseRoundtripCase {
     name: &'static str,
     build: fn(&mut KernelContext) -> crate::kernel::clause::Clause,
@@ -371,6 +378,46 @@ const KERNEL_TERM_ROUNDTRIP_CASES: &[KernelTermRoundtripCase] = &[KernelTermRoun
     name: "applied_function_valued_choose",
     build: build_applied_function_valued_choose_term,
 }];
+
+fn setup_claim_with_surviving_typeclass_local(kernel_context: &mut KernelContext) {
+    kernel_context.parse_typeclass("FiniteGroup");
+    kernel_context.parse_polymorphic_constant("g0", "T: Type", "Bool -> Bool");
+    kernel_context.parse_polymorphic_constant("g1", "T: Type", "T -> Bool");
+}
+
+fn build_kernel_claim_with_surviving_typeclass_local(
+    kernel_context: &KernelContext,
+) -> crate::kernel::certificate_step::Claim {
+    let generic = kernel_context.parse_clause("g1(x0, x1)", &["Type", "x0"]);
+    let mut var_map = VariableMap::new();
+    var_map.set(0, kernel_context.parse_term("Bool"));
+    var_map.set(1, kernel_context.parse_term("g0(x0, false)"));
+    crate::kernel::certificate_step::Claim::new(generic, var_map).expect("claim should normalize")
+}
+
+fn expected_kernel_claim_with_surviving_typeclass_local_specialization(
+    kernel_context: &KernelContext,
+) -> crate::kernel::clause::Clause {
+    let generic = kernel_context.parse_clause("g1(x0, x1)", &["Type", "x0"]);
+    let replacement_context = kernel_context.parse_local(&["FiniteGroup"]);
+    let mut var_map = VariableMap::new();
+    var_map.set(0, kernel_context.parse_term("Bool"));
+    var_map.set(1, kernel_context.parse_term("g0(x0, false)"));
+    var_map.specialize_clause_with_replacement_context_and_compact_vars(
+        &generic,
+        &replacement_context,
+        kernel_context,
+    )
+}
+
+const KERNEL_CLAIM_SPECIALIZATION_CASES: &[KernelClaimSpecializationCase] =
+    &[KernelClaimSpecializationCase {
+        name: "surviving_typeclass_local_preserves_specialization_context",
+        setup: setup_claim_with_surviving_typeclass_local,
+        build: build_kernel_claim_with_surviving_typeclass_local,
+        expected_specialized_clause:
+            expected_kernel_claim_with_surviving_typeclass_local_specialization,
+    }];
 
 /// Builds a normalized clause whose preserved type parameter sits in a non-prefix slot, which
 /// exercises the sparse-local roundtrip bug seen in `finite_set`.
@@ -1155,6 +1202,27 @@ fn test_claim_roundtrip_normalization_cases() {
             serialized, serialized_again,
             "claim roundtrip serialization should be idempotent for case `{}`",
             case.name
+        );
+    }
+}
+
+#[test]
+fn test_kernel_claim_specialization_cases() {
+    for case in KERNEL_CLAIM_SPECIALIZATION_CASES {
+        let mut kernel_context = KernelContext::new();
+        (case.setup)(&mut kernel_context);
+
+        let claim = (case.build)(&kernel_context);
+        assert_claim_is_already_normalized(&claim, &kernel_context, case.name, "constructed");
+
+        let specialized = claim
+            .specialized_clause_for_display(&kernel_context)
+            .expect("claim specialization should succeed");
+        assert_eq!(
+            specialized,
+            (case.expected_specialized_clause)(&kernel_context),
+            "claim specialization should preserve the expected replacement context for case `{}`",
+            case.name,
         );
     }
 }
