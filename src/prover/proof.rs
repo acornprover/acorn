@@ -107,15 +107,20 @@ fn concrete_ids_for(ps_id: ProofStepId) -> [ConcreteStepId; 2] {
     [assumption_id, concrete_id]
 }
 
-/// A concrete version of a proof step that has been reconstructed from the proof.
+/// A reconstructed proof step together with the environments needed to specialize it.
+///
+/// By contract, each `(VariableMap, LocalContext)` pair must fully instantiate `generic`.
+/// That means `to_clauses()` is expected to produce ground clauses with no free variables and
+/// an empty local context. Validate mode checks this invariant.
+///
 /// Also used when converting ConcreteProof to Certificate.
 pub struct ConcreteStep {
     // The generic clause for this proof step.
     pub generic: Clause,
 
-    // All of the ways to map the generic variables to concrete ones.
-    // Each var_map is paired with the context that its replacement terms reference.
-    // This context is needed to look up variable types when specializing.
+    // All of the ways to fully instantiate the generic variables.
+    // Each var_map is paired with the context that its replacement terms reference while
+    // specializing. After specialization, no locals should remain in the output clause.
     pub var_maps: Vec<(VariableMap, LocalContext)>,
 }
 
@@ -127,16 +132,53 @@ impl ConcreteStep {
         }
     }
 
-    /// Convert this ConcreteStep to specialized clauses.
+    #[cfg(any(test, feature = "validate"))]
+    fn validate_specialized_clause_is_concrete(
+        &self,
+        clause: &Clause,
+        var_map: &VariableMap,
+        replacement_context: &LocalContext,
+    ) {
+        if clause.has_any_variable() || !clause.get_local_context().is_empty() {
+            panic!(
+                "ConcreteStep invariant violated: specializing `{}` with var_map {:?} and replacement context {:?} produced non-concrete clause `{}` with context {:?}",
+                self.generic,
+                var_map,
+                replacement_context,
+                clause,
+                clause.get_local_context(),
+            );
+        }
+    }
+
+    #[cfg(any(test, feature = "validate"))]
+    pub(crate) fn validate_specializes_to_concrete_clauses(&self, kernel_context: &KernelContext) {
+        for (var_map, replacement_context) in &self.var_maps {
+            let clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
+                &self.generic,
+                replacement_context,
+                kernel_context,
+            );
+            self.validate_specialized_clause_is_concrete(&clause, var_map, replacement_context);
+        }
+    }
+
+    /// Convert this `ConcreteStep` to the ground clauses it represents.
+    ///
+    /// By contract, every returned clause must be fully instantiated, with no free variables and
+    /// an empty local context.
     fn to_clauses(&self, kernel_context: &KernelContext) -> Vec<Clause> {
         self.var_maps
             .iter()
             .map(|(var_map, replacement_context)| {
-                var_map.specialize_clause_with_replacement_context_and_compact_vars(
+                let clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
                     &self.generic,
                     replacement_context,
                     kernel_context,
-                )
+                );
+                #[cfg(feature = "validate")]
+                self.validate_specialized_clause_is_concrete(&clause, var_map, replacement_context);
+                clause
             })
             .collect()
     }
@@ -325,8 +367,7 @@ impl<'a> Proof<'a> {
 
 // Given a varmap for the conclusion of a proof step, reconstruct varmaps for
 // all of its inputs.
-// The varmaps represent a concrete clause, in the sense that they provide a mapping to specialize
-// the clause into something concrete.
+// The varmaps should fully instantiate the clause into a ground clause with no free variables.
 //
 // Reconstructed varmaps are added to concrete_steps.
 // If the step cannot be reconstructed, we return an error.
@@ -1028,6 +1069,19 @@ mod tests {
         )
         .expect("constant-lambda claim argument should parse");
         assert_eq!(steps.len(), 1, "expected one claim step");
+    }
+
+    #[test]
+    #[should_panic(expected = "ConcreteStep invariant violated")]
+    fn test_concrete_step_validation_rejects_live_locals() {
+        let kctx = KernelContext::new();
+        let generic_clause = kctx.parse_clause("x0", &["Bool"]);
+        let step = crate::prover::proof::ConcreteStep {
+            generic: generic_clause,
+            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+        };
+
+        step.validate_specializes_to_concrete_clauses(&kctx);
     }
 
     #[test]
