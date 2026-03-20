@@ -100,13 +100,6 @@ pub enum ConcreteStepId {
     Assumption(ProofStepId),
 }
 
-// In the order that they are logically deduced, because the assumption comes first.
-fn concrete_ids_for(ps_id: ProofStepId) -> [ConcreteStepId; 2] {
-    let assumption_id = ConcreteStepId::Assumption(ps_id);
-    let concrete_id = ConcreteStepId::ProofStep(ps_id);
-    [assumption_id, concrete_id]
-}
-
 /// A reconstructed proof step together with the environments needed to specialize it.
 ///
 /// By contract, each `(VariableMap, LocalContext)` pair must fully instantiate `generic`.
@@ -114,6 +107,7 @@ fn concrete_ids_for(ps_id: ProofStepId) -> [ConcreteStepId; 2] {
 /// an empty local context. Validate mode checks this invariant.
 ///
 /// Also used when converting ConcreteProof to Certificate.
+#[derive(Clone)]
 pub struct ConcreteStep {
     // The generic clause for this proof step.
     pub generic: Clause,
@@ -181,6 +175,85 @@ impl ConcreteStep {
                 clause
             })
             .collect()
+    }
+}
+
+fn push_concrete_step_if_new(
+    concrete_step: ConcreteStep,
+    claim_index: &mut HashMap<Clause, usize>,
+    steps_in_order: &mut Vec<ConcreteStep>,
+    skip_clauses: &HashSet<Clause>,
+    kernel_context: &KernelContext,
+) {
+    let Some(clause) = concrete_step.to_clauses(kernel_context).into_iter().next() else {
+        return;
+    };
+    if skip_clauses.contains(&clause) {
+        return;
+    }
+    if claim_index.contains_key(&clause) {
+        return;
+    }
+    claim_index.insert(clause, steps_in_order.len());
+    steps_in_order.push(concrete_step);
+}
+
+fn append_inline_simplification_originals(
+    step: &ProofStep,
+    reconstructed_steps: &HashMap<ConcreteStepId, ConcreteStep>,
+    claim_index: &mut HashMap<Clause, usize>,
+    steps_in_order: &mut Vec<ConcreteStep>,
+    skip_clauses: &HashSet<Clause>,
+    kernel_context: &KernelContext,
+) {
+    let Rule::Simplification(info) = &step.rule else {
+        return;
+    };
+
+    if !step.clause.is_impossible() {
+        return;
+    }
+
+    append_inline_simplification_originals(
+        &info.original,
+        reconstructed_steps,
+        claim_index,
+        steps_in_order,
+        skip_clauses,
+        kernel_context,
+    );
+
+    if info.original.rule.is_assumption() {
+        return;
+    }
+
+    if !matches!(info.original.rule, Rule::BooleanReduction(_))
+        || !info.original.clause.has_any_variable()
+    {
+        return;
+    }
+
+    for premise_id in step.rule.premises() {
+        for premise_key in [
+            ConcreteStepId::ProofStep(premise_id),
+            ConcreteStepId::Assumption(premise_id),
+        ] {
+            let Some(concrete_premise) = reconstructed_steps.get(&premise_key) else {
+                continue;
+            };
+            for (var_map, replacement_context) in &concrete_premise.var_maps {
+                push_concrete_step_if_new(
+                    ConcreteStep {
+                        generic: info.original.clause.clone(),
+                        var_maps: vec![(var_map.clone(), replacement_context.clone())],
+                    },
+                    claim_index,
+                    steps_in_order,
+                    skip_clauses,
+                    kernel_context,
+                );
+            }
+        }
     }
 }
 
@@ -290,6 +363,10 @@ impl<'a> Proof<'a> {
             }
         }
 
+        // Keep a snapshot for any synthesized certificate steps that need to inspect
+        // reconstructed premise instantiations after the main collection pass.
+        let reconstructed_steps = concrete_steps.clone();
+
         // Skip direct concrete assumptions because the checker already has them.
         // Do not skip simplified outputs of assumptions: those are derived clauses,
         // and later certificate steps may depend on them as prerequisites.
@@ -315,35 +392,53 @@ impl<'a> Proof<'a> {
         }
 
         // Collect all concrete specializations in order.
+        //
+        // Emit derived proof-step claims before specialized assumption claims.
+        // The checker already starts with the generic assumptions in scope, so
+        // assumption specializations are only needed as extra concrete witnesses.
+        // Placing them after derived concrete claims avoids relying on "late"
+        // variable-clause simplification that the checker intentionally does not do.
         let mut claim_index: HashMap<Clause, usize> = HashMap::new();
         let mut steps_in_order: Vec<ConcreteStep> = Vec::new();
-        for (ps_id, _) in &self.steps {
-            for concrete_id in concrete_ids_for(*ps_id) {
-                let Some(cs) = concrete_steps.remove(&concrete_id) else {
-                    continue;
+        for assumption_phase in [false, true] {
+            for (ps_id, _) in &self.steps {
+                let concrete_ids = if assumption_phase {
+                    [ConcreteStepId::Assumption(*ps_id)]
+                } else {
+                    [ConcreteStepId::ProofStep(*ps_id)]
                 };
-                let ConcreteStep {
-                    generic, var_maps, ..
-                } = cs;
-                for (var_map, replacement_context) in var_maps {
-                    let concrete_step = ConcreteStep {
-                        generic: generic.clone(),
-                        var_maps: vec![(var_map, replacement_context)],
-                    };
-                    let Some(clause) = concrete_step.to_clauses(kernel_context).into_iter().next()
-                    else {
+                for concrete_id in concrete_ids {
+                    let Some(cs) = concrete_steps.remove(&concrete_id) else {
                         continue;
                     };
-                    if skip_clauses.contains(&clause) {
-                        continue;
+                    let ConcreteStep {
+                        generic, var_maps, ..
+                    } = cs;
+                    for (var_map, replacement_context) in var_maps {
+                        push_concrete_step_if_new(
+                            ConcreteStep {
+                                generic: generic.clone(),
+                                var_maps: vec![(var_map, replacement_context)],
+                            },
+                            &mut claim_index,
+                            &mut steps_in_order,
+                            &skip_clauses,
+                            kernel_context,
+                        );
                     }
-                    if claim_index.contains_key(&clause) {
-                        continue;
-                    }
-                    claim_index.insert(clause, steps_in_order.len());
-                    steps_in_order.push(concrete_step);
                 }
             }
+        }
+
+        for (_, step) in &self.steps {
+            append_inline_simplification_originals(
+                step,
+                &reconstructed_steps,
+                &mut claim_index,
+                &mut steps_in_order,
+                &skip_clauses,
+                kernel_context,
+            );
         }
 
         Ok(steps_in_order)
@@ -527,9 +622,12 @@ mod tests {
     use crate::kernel::variable_map::VariableMap;
     use crate::module::ModuleId;
     use crate::prover::active_set::ActiveSet;
-    use crate::prover::proof::{add_var_map, Proof, ProofResolver};
+    use crate::prover::proof::{
+        add_var_map, append_inline_simplification_originals, ConcreteStep, ConcreteStepId, Proof,
+        ProofResolver,
+    };
     use crate::prover::synthetic::WitnessRegistry;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     /// Test helper that threads synthetic witness state through active-set activation.
     fn activate_test(
@@ -805,6 +903,74 @@ mod tests {
             concrete_clauses.contains(&simplified_clause),
             "expected reconstructed clauses to keep simplified assumption output {}\nactual clauses:\n{}",
             simplified_clause,
+            concrete_clauses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn test_append_inline_simplification_originals_replays_concrete_specialization() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool")
+            .parse_constant("c0", "Bool");
+
+        let simplifying_clause = kctx.parse_clause("g0(x0)", &["Bool"]);
+        let source_clause = kctx.parse_clause("g0(c0)", &[]);
+        let reduced_clause = kctx.parse_clause("not g0(x0)", &["Bool"]);
+
+        let source_step = ProofStep::mock_from_clause(source_clause);
+        let original_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduced_clause.clone(),
+            PremiseMap::empty(),
+        );
+        let simplification_step = ProofStep {
+            clause: Clause::impossible(),
+            truthiness: original_step.truthiness,
+            rule: Rule::Simplification(SimplificationInfo {
+                original: Box::new(original_step),
+                simplifying_ids: vec![0],
+            }),
+            proof_size: 1,
+            depth: 0,
+            premise_map: PremiseMap::empty(),
+        };
+
+        let mut premise_map = VariableMap::new();
+        premise_map.set(0, kctx.parse_term("c0"));
+        let reconstructed_steps = HashMap::from([(
+            ConcreteStepId::ProofStep(ProofStepId::Active(0)),
+            ConcreteStep {
+                generic: simplifying_clause,
+                var_maps: vec![(premise_map, LocalContext::empty())],
+            },
+        )]);
+        let mut claim_index = HashMap::new();
+        let mut steps_in_order = Vec::new();
+
+        append_inline_simplification_originals(
+            &simplification_step,
+            &reconstructed_steps,
+            &mut claim_index,
+            &mut steps_in_order,
+            &HashSet::new(),
+            &kctx,
+        );
+
+        let concrete_clauses: Vec<_> = steps_in_order
+            .into_iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+        let expected = kctx.parse_clause("not g0(c0)", &[]);
+
+        assert!(
+            concrete_clauses.contains(&expected),
+            "expected inline simplification original to specialize to {}\nactual clauses:\n{}",
+            expected,
             concrete_clauses
                 .iter()
                 .map(ToString::to_string)
