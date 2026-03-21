@@ -1288,6 +1288,9 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
     )
     .expect("generated claim should parse back");
     let claim = expect_claim(step);
+    claim
+        .validate_normalized_shape(kernel_context_cow.as_ref())
+        .expect("parsed claim should already be normalized");
 
     assert_eq!(
         claim.clause().get_local_context().get_var_type(0),
