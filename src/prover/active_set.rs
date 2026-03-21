@@ -20,7 +20,7 @@ use crate::kernel::proof_step::{
 };
 use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
-use crate::kernel::variable_map::VariableMap;
+use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::kernel::{EqualityGraph, StepId};
 use crate::module::ModuleId;
 
@@ -284,6 +284,32 @@ impl ActiveSet {
         true
     }
 
+    fn witness_map_for_eliminated_vars(
+        pre_norm_context: &LocalContext,
+        var_ids: &[AtomId],
+        kernel_context: &KernelContext,
+    ) -> Option<VariableMap> {
+        let surviving_ids: HashSet<AtomId> = var_ids.iter().copied().collect();
+        let mut pre_norm_to_normalized = VariableMap::from_var_ids(var_ids);
+        let normalized_context = pre_norm_to_normalized.build_output_context(pre_norm_context);
+        let mut witness_map = VariableMap::new();
+
+        for var_id in 0..pre_norm_context.len() {
+            let var_id_atom = var_id as AtomId;
+            if surviving_ids.contains(&var_id_atom) {
+                continue;
+            }
+            let var_type = pre_norm_context.get_var_type(var_id)?;
+            let witness_type = apply_to_term(var_type.as_ref(), &pre_norm_to_normalized);
+            let witness =
+                kernel_context.find_inhabitant(&witness_type, Some(&normalized_context))?;
+            witness_map.set(var_id_atom, witness.clone());
+            pre_norm_to_normalized.set(var_id_atom, witness);
+        }
+
+        Some(witness_map)
+    }
+
     /// Finds all resolutions that can be done with a given proof step.
     /// The "new clause" is the one that is being activated, and the "old clause" is the existing one.
     pub fn find_resolutions(
@@ -530,10 +556,18 @@ impl ActiveSet {
 
         let normalized = Clause::normalize_with_trace(literals, &context);
 
-        let premise_map = PremiseMap::new(
+        let witness_map = Self::witness_map_for_eliminated_vars(
+            &normalized.pre_norm_context,
+            &normalized.var_ids,
+            kernel_context,
+        )
+        .unwrap_or_else(VariableMap::new);
+
+        let premise_map = PremiseMap::new_with_witnesses(
             vec![short_var_map.clone(), long_var_map.clone()],
             normalized.var_ids,
             normalized.pre_norm_context,
+            witness_map,
         );
         let clause = normalized.clause;
         if !Self::clause_is_well_typed(&clause, kernel_context) {
@@ -938,10 +972,18 @@ impl ActiveSet {
 
             // Check if normalization resulted in a tautology
             if !normalized.clause.is_tautology() {
-                let premise_map = PremiseMap::new(
+                let witness_map = Self::witness_map_for_eliminated_vars(
+                    &normalized.pre_norm_context,
+                    &normalized.var_ids,
+                    kernel_context,
+                )
+                .unwrap_or_else(VariableMap::new);
+
+                let premise_map = PremiseMap::new_with_witnesses(
                     vec![input_var_map.clone()],
                     normalized.var_ids,
                     normalized.pre_norm_context,
+                    witness_map,
                 );
                 let step = ProofStep::direct(
                     activated_step,
@@ -1006,10 +1048,18 @@ impl ActiveSet {
             }
 
             let normalized = Clause::normalize_with_trace(literals, original_context);
-            let premise_map = PremiseMap::new(
+            let witness_map = Self::witness_map_for_eliminated_vars(
+                &normalized.pre_norm_context,
+                &normalized.var_ids,
+                kernel_context,
+            )
+            .unwrap_or_else(VariableMap::new);
+
+            let premise_map = PremiseMap::new_with_witnesses(
                 vec![VariableMap::new()],
                 normalized.var_ids,
                 normalized.pre_norm_context,
+                witness_map,
             );
             let step = ProofStep::direct(
                 activated_step,
@@ -1041,10 +1091,18 @@ impl ActiveSet {
             if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
                 continue;
             }
-            let premise_map = PremiseMap::new(
+            let witness_map = Self::witness_map_for_eliminated_vars(
+                &reduction.pre_norm_context,
+                &reduction.var_ids,
+                kernel_context,
+            )
+            .unwrap_or_else(VariableMap::new);
+
+            let premise_map = PremiseMap::new_with_witnesses(
                 vec![VariableMap::new()],
                 reduction.var_ids,
                 reduction.pre_norm_context,
+                witness_map,
             );
             let step = ProofStep::direct(
                 activated_step,
@@ -1072,10 +1130,18 @@ impl ActiveSet {
             if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
                 return answer;
             }
-            let premise_map = PremiseMap::new(
+            let witness_map = Self::witness_map_for_eliminated_vars(
+                &reduction.pre_norm_context,
+                &reduction.var_ids,
+                kernel_context,
+            )
+            .unwrap_or_else(VariableMap::new);
+
+            let premise_map = PremiseMap::new_with_witnesses(
                 vec![VariableMap::new()],
                 reduction.var_ids,
                 reduction.pre_norm_context,
+                witness_map,
             );
             let step = ProofStep::direct(
                 activated_step,
@@ -1397,10 +1463,18 @@ impl ActiveSet {
             })
             .collect();
 
-        let premise_map = PremiseMap::new(
+        let witness_map = Self::witness_map_for_eliminated_vars(
+            &normalized.pre_norm_context,
+            &normalized.var_ids,
+            kernel_context,
+        )
+        .unwrap_or_else(VariableMap::new);
+
+        let premise_map = PremiseMap::new_with_witnesses(
             simplifying_var_maps,
             normalized.var_ids,
             normalized.pre_norm_context,
+            witness_map,
         );
 
         // Restore the original literals so the inline step has its complete clause

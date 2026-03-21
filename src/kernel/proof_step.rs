@@ -284,6 +284,15 @@ pub struct PremiseMap {
     /// The local context for the pre-normalization output variables.
     /// Used to look up types for eliminated variables when assigning fresh IDs.
     pre_norm_context: LocalContext,
+
+    /// Witnesses for pre-normalization output variables that were eliminated by
+    /// normalization.
+    ///
+    /// The keys are old pre-normalization variable IDs. The replacement terms are
+    /// expressed in the normalized output scope (that is, in terms of `var_ids`),
+    /// so later reconstruction can compose them with the concrete conclusion map
+    /// instead of inventing fresh locals after the fact.
+    witness_map: VariableMap,
 }
 
 impl PremiseMap {
@@ -292,6 +301,7 @@ impl PremiseMap {
             raw_maps: vec![],
             var_ids: vec![],
             pre_norm_context: LocalContext::empty(),
+            witness_map: VariableMap::new(),
         }
     }
 
@@ -300,10 +310,20 @@ impl PremiseMap {
         var_ids: Vec<AtomId>,
         pre_norm_context: LocalContext,
     ) -> PremiseMap {
+        PremiseMap::new_with_witnesses(raw_maps, var_ids, pre_norm_context, VariableMap::new())
+    }
+
+    pub fn new_with_witnesses(
+        raw_maps: Vec<VariableMap>,
+        var_ids: Vec<AtomId>,
+        pre_norm_context: LocalContext,
+        witness_map: VariableMap,
+    ) -> PremiseMap {
         PremiseMap {
             raw_maps,
             var_ids,
             pre_norm_context,
+            witness_map,
         }
     }
 
@@ -315,7 +335,8 @@ impl PremiseMap {
     /// Maps pre-norm variables to concrete terms using var_ids and the outer conclusion_map.
     ///
     /// For surviving variables (in var_ids): maps through conclusion_map.
-    /// For eliminated variables (not in var_ids): assigns fresh variable IDs.
+    /// For eliminated variables (not in var_ids): uses stored witnesses when available,
+    /// otherwise assigns fresh variable IDs as a fallback.
     ///
     /// Returns (pre_norm_map, concrete_context) where concrete_context has types
     /// for all variables referenced by pre_norm_map's replacement terms.
@@ -339,6 +360,15 @@ impl PremiseMap {
                 if let Some(var_type) = inner_step_context.get_var_type(old_id as usize) {
                     context.set_type(new_id, var_type.clone());
                 }
+            }
+        }
+
+        for (old_id, witness) in self.witness_map.iter() {
+            if !map.has_mapping(old_id as AtomId) {
+                map.set(
+                    old_id as AtomId,
+                    variable_map::apply_to_term(witness.as_ref(), conclusion_map),
+                );
             }
         }
 
@@ -374,7 +404,8 @@ impl PremiseMap {
     ) -> Vec<(VariableMap, LocalContext)> {
         // Step 1: Build pre-norm → concrete mapping.
         // For surviving pre-norm vars (in var_ids): compose with conclusion_map.
-        // For eliminated pre-norm vars: assign fresh concrete variable IDs.
+        // For eliminated pre-norm vars: use stored witness terms when available,
+        // otherwise assign fresh concrete variable IDs as a fallback.
         let mut pre_norm_concrete = VariableMap::new();
 
         // Start with all types from conclusion_context, since composed terms
@@ -388,6 +419,15 @@ impl PremiseMap {
             } else {
                 // Output var not in conclusion_map: keep as identity
                 pre_norm_concrete.set(old_id, Term::atom(Atom::FreeVariable(new_id as AtomId)));
+            }
+        }
+
+        for (old_id, witness) in self.witness_map.iter() {
+            if !pre_norm_concrete.has_mapping(old_id as AtomId) {
+                pre_norm_concrete.set(
+                    old_id as AtomId,
+                    variable_map::apply_to_term(witness.as_ref(), conclusion_map),
+                );
             }
         }
 
@@ -993,5 +1033,37 @@ mod tests {
                 &LocalContext::empty()
             )
         );
+    }
+
+    #[test]
+    fn test_concretize_premises_uses_stored_witnesses_for_eliminated_vars() {
+        let premise_context =
+            LocalContext::from_types(vec![Term::type_sort(), Term::atom(Atom::FreeVariable(0))]);
+
+        let mut raw_map = VariableMap::new();
+        raw_map.set(0, Term::atom(Atom::FreeVariable(0)));
+        raw_map.set(1, Term::atom(Atom::FreeVariable(1)));
+
+        let mut witness_map = VariableMap::new();
+        witness_map.set(0, Term::bool_type());
+        witness_map.set(1, Term::new_true());
+
+        let premise_map =
+            PremiseMap::new_with_witnesses(vec![raw_map], vec![], premise_context, witness_map);
+
+        let concretized = premise_map.concretize_premises(
+            &VariableMap::new(),
+            &LocalContext::empty(),
+            &[&LocalContext::from_types(vec![
+                Term::type_sort(),
+                Term::atom(Atom::FreeVariable(0)),
+            ])],
+        );
+
+        assert_eq!(concretized.len(), 1);
+        let (var_map, context) = &concretized[0];
+        assert_eq!(var_map.get_mapping(0), Some(&Term::bool_type()));
+        assert_eq!(var_map.get_mapping(1), Some(&Term::new_true()));
+        assert!(context.is_empty());
     }
 }

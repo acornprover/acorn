@@ -110,30 +110,33 @@ impl KernelContext {
             return None;
         }
 
-        if let Some(var_id) = match var_type.as_ref().get_head_atom() {
-            Atom::FreeVariable(id) | Atom::BoundVariable(id) => Some(*id),
+        let constraint_type = match var_type.as_ref().get_head_atom() {
+            Atom::FreeVariable(id) | Atom::BoundVariable(id) => local_context
+                .and_then(|ctx| ctx.get_var_type(*id as usize))
+                .cloned(),
+            Atom::Symbol(Symbol::ScopedConstant(id)) => Some(
+                self.symbol_table
+                    .get_type(Symbol::ScopedConstant(*id))
+                    .clone(),
+            ),
             _ => None,
-        } {
-            if let Some(ctx) = local_context {
-                if let Some(constraint_type) = ctx.get_var_type(var_id as usize) {
-                    if constraint_type.as_ref().is_type0() {
-                        // Unconstrained type variable may be empty.
-                        seen.pop();
-                        return None;
-                    }
-                    if let Some(tc_id) = constraint_type.as_ref().as_typeclass() {
-                        if let Some(provider) = self.find_typeclass_provider(tc_id) {
-                            let result = Some(
-                                Term::atom(Atom::Symbol(provider))
-                                    .apply(std::slice::from_ref(var_type)),
-                            );
-                            seen.pop();
-                            return result;
-                        }
-                        seen.pop();
-                        return None;
-                    }
+        };
+        if let Some(constraint_type) = constraint_type {
+            if constraint_type.as_ref().is_type0() {
+                // Unconstrained type variable may be empty.
+                seen.pop();
+                return None;
+            }
+            if let Some(tc_id) = constraint_type.as_ref().as_typeclass() {
+                if let Some(provider) = self.find_typeclass_provider(tc_id) {
+                    let result = Some(
+                        Term::atom(Atom::Symbol(provider)).apply(std::slice::from_ref(var_type)),
+                    );
+                    seen.pop();
+                    return result;
                 }
+                seen.pop();
+                return None;
             }
         }
 
@@ -1451,6 +1454,31 @@ mod tests {
         let expected = ctx.parse_term("g0(x0)");
         assert_eq!(witness, expected);
         assert!(ctx.provably_inhabited(&p_type, Some(&local_ctx)));
+    }
+
+    #[test]
+    fn test_find_inhabitant_for_typeclass_constrained_scoped_constant_type() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_typeclass("Pointed");
+
+        // g0 : Π(P: Pointed). P
+        let point_type = ctx.parse_pi("P: Pointed", "P");
+        ctx.symbol_table.add_global_constant(point_type);
+
+        let pointed_id = ctx.type_store.get_typeclass_id_by_name("Pointed").unwrap();
+        let scoped_type_symbol = ctx
+            .symbol_table
+            .add_scoped_constant(Term::typeclass(pointed_id));
+        let scoped_type = Term::atom(Atom::Symbol(scoped_type_symbol));
+
+        let witness = ctx
+            .find_inhabitant(&scoped_type, None)
+            .expect("expected witness for constrained scoped type");
+
+        let expected = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(std::slice::from_ref(&scoped_type));
+        assert_eq!(witness, expected);
+        assert!(ctx.provably_inhabited(&scoped_type, None));
     }
 
     #[test]

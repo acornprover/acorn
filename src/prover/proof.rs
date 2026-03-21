@@ -393,14 +393,14 @@ impl<'a> Proof<'a> {
 
         // Collect all concrete specializations in order.
         //
-        // Emit derived proof-step claims before specialized assumption claims.
-        // The checker already starts with the generic assumptions in scope, so
-        // assumption specializations are only needed as extra concrete witnesses.
-        // Placing them after derived concrete claims avoids relying on "late"
-        // variable-clause simplification that the checker intentionally does not do.
+        // Emit specialized assumptions before derived proof-step claims.
+        // The checker cannot instantiate generic assumptions on its own, so a derived
+        // concrete clause like `not bar[Bool](foo)` must come after the concrete
+        // specialization of the source assumption it depends on, such as
+        // `not bar[Bool](foo) or baz`.
         let mut claim_index: HashMap<Clause, usize> = HashMap::new();
         let mut steps_in_order: Vec<ConcreteStep> = Vec::new();
-        for assumption_phase in [false, true] {
+        for assumption_phase in [true, false] {
             for (ps_id, _) in &self.steps {
                 let concrete_ids = if assumption_phase {
                     [ConcreteStepId::Assumption(*ps_id)]

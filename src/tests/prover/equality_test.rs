@@ -163,9 +163,9 @@ fn test_proving_multiple_simplifying() {
     assert_proof_lines(
         proof,
         &[
-            "not f(Foo.foo) or not f(Foo.bar)",
             "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { f(x0) }(Foo.bar)",
+            "not f(Foo.foo) or not f(Foo.bar)",
         ],
     );
 }
@@ -508,8 +508,8 @@ fn test_proving_using_unimported_function() {
         proof,
         &[
             "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
-            "not lib(foo).g(Foo.foo)",
             "function(x0: Foo) { not f(x0) or lib(foo).g(x0) }(Foo.foo)",
+            "not lib(foo).g(Foo.foo)",
         ],
     );
 }
