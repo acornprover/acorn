@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -59,6 +61,22 @@ fn compact_check_cert_error(error: &str) -> String {
         MAX_CHECK_CERT_ERROR_CHARS,
         CHECK_CERT_ERROR_PREFIX_CHARS,
         CHECK_CERT_ERROR_SUFFIX_CHARS,
+    )
+}
+
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "panic with non-string payload".to_string(),
+        },
+    }
+}
+
+fn format_goal_panic_message(panic_message: &str, module_name: &str, external_line: u32) -> String {
+    format!(
+        "panic during certificate generation at {module_name}:{external_line}: {panic_message}\nRepro command: acorn reprove {module_name} --line {external_line}",
     )
 }
 
@@ -919,109 +937,130 @@ impl<'a> Builder<'a> {
                 .print_active_steps(bindings, goal_kernel_context);
         }
         if outcome == Outcome::Success {
-            match processor.make_cert(bindings, goal_kernel_context, false) {
-                Ok(cert) => {
-                    let mut checked_cert_lines = None;
-                    #[cfg(feature = "validate")]
-                    {
-                        // Validate the cert immediately after generation.
-                        match processor.check_generated_cert(
-                            &cert,
-                            Some(normalized_goal),
-                            goal_kernel_context,
-                            self.project,
-                            bindings,
-                        ) {
-                            Ok(lines) => {
-                                if self.print_proof {
-                                    checked_cert_lines = Some(lines);
-                                }
-                            }
-                            Err(e) => {
-                                let module_name = self
-                                    .current_module
-                                    .as_ref()
-                                    .map(|m| m.to_string())
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                let external_line = goal.first_line + 1;
-                                let compact_error = compact_check_cert_error(&e.to_string());
-                                panic!(
-                                    "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                     Repro command: acorn reprove {} --line {}",
-                                    goal.name,
-                                    module_name,
-                                    external_line,
-                                    compact_error,
-                                    module_name,
-                                    external_line
-                                );
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "validate"))]
-                    if self.print_proof {
-                        // Since we aren't performance-sensitive, check the cert.
-                        match processor.check_cert(
-                            &cert,
-                            Some(normalized_goal),
-                            goal_kernel_context,
-                            self.project,
-                            bindings,
-                        ) {
-                            Ok(lines) => checked_cert_lines = Some(lines),
-                            Err(e) => {
-                                let module_name = self
-                                    .current_module
-                                    .as_ref()
-                                    .map(|m| m.to_string())
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                let external_line = goal.first_line + 1;
-                                let compact_error = compact_check_cert_error(&e.to_string());
-                                panic!(
-                                    "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                     Repro command: acorn reprove {} --line {}",
-                                    goal.name,
-                                    module_name,
-                                    external_line,
-                                    compact_error,
-                                    module_name,
-                                    external_line
-                                );
-                            }
-                        }
-                    }
-                    if let Some(lines) = checked_cert_lines.as_ref() {
-                        let display_bindings = Processor::bindings_with_type_params(
-                            bindings,
-                            &goal.proposition.params,
-                        );
-                        print_displayed_proof(display_bindings.as_ref(), lines);
-                    }
-                    new_certs.push(cert);
-                    self.metrics.certs_created += 1;
-                }
-                Err(e) => {
-                    #[cfg(feature = "validate")]
-                    {
-                        let module_name = self
-                            .current_module
-                            .as_ref()
-                            .map(|m| m.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let external_line = goal.first_line + 1;
-                        panic!(
-                            "full prover should create a certificate for goal '{}' at {}:{}: {}\n\
-                             Repro command: acorn reprove {} --line {}",
-                            goal.name, module_name, external_line, e, module_name, external_line
-                        );
-                    }
-
-                    #[cfg(not(feature = "validate"))]
+            let cert_result = catch_unwind(AssertUnwindSafe(|| {
+                processor.make_cert(bindings, goal_kernel_context, false)
+            }));
+            match cert_result {
+                Err(payload) => {
+                    let module_name = self
+                        .current_module
+                        .as_ref()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let external_line = goal.first_line + 1;
                     return Err(BuildError::goal(
                         goal,
-                        format!("full prover failed to create certificate: {}", e),
+                        format_goal_panic_message(
+                            &panic_payload_to_string(payload),
+                            &module_name,
+                            external_line,
+                        ),
                     ));
                 }
+                Ok(result) => match result {
+                    Ok(cert) => {
+                        let mut checked_cert_lines = None;
+                        #[cfg(feature = "validate")]
+                        {
+                            // Validate the cert immediately after generation.
+                            match processor.check_generated_cert(
+                                &cert,
+                                Some(normalized_goal),
+                                goal_kernel_context,
+                                self.project,
+                                bindings,
+                            ) {
+                                Ok(lines) => {
+                                    if self.print_proof {
+                                        checked_cert_lines = Some(lines);
+                                    }
+                                }
+                                Err(e) => {
+                                    let module_name = self
+                                        .current_module
+                                        .as_ref()
+                                        .map(|m| m.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let external_line = goal.first_line + 1;
+                                    let compact_error = compact_check_cert_error(&e.to_string());
+                                    panic!(
+                                        "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                         Repro command: acorn reprove {} --line {}",
+                                        goal.name,
+                                        module_name,
+                                        external_line,
+                                        compact_error,
+                                        module_name,
+                                        external_line
+                                    );
+                                }
+                            }
+                        }
+                        #[cfg(not(feature = "validate"))]
+                        if self.print_proof {
+                            // Since we aren't performance-sensitive, check the cert.
+                            match processor.check_cert(
+                                &cert,
+                                Some(normalized_goal),
+                                goal_kernel_context,
+                                self.project,
+                                bindings,
+                            ) {
+                                Ok(lines) => checked_cert_lines = Some(lines),
+                                Err(e) => {
+                                    let module_name = self
+                                        .current_module
+                                        .as_ref()
+                                        .map(|m| m.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let external_line = goal.first_line + 1;
+                                    let compact_error = compact_check_cert_error(&e.to_string());
+                                    panic!(
+                                        "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
+                                         Repro command: acorn reprove {} --line {}",
+                                        goal.name,
+                                        module_name,
+                                        external_line,
+                                        compact_error,
+                                        module_name,
+                                        external_line
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(lines) = checked_cert_lines.as_ref() {
+                            let display_bindings = Processor::bindings_with_type_params(
+                                bindings,
+                                &goal.proposition.params,
+                            );
+                            print_displayed_proof(display_bindings.as_ref(), lines);
+                        }
+                        new_certs.push(cert);
+                        self.metrics.certs_created += 1;
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "validate")]
+                        {
+                            let module_name = self
+                                .current_module
+                                .as_ref()
+                                .map(|m| m.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let external_line = goal.first_line + 1;
+                            panic!(
+                                "full prover should create a certificate for goal '{}' at {}:{}: {}\n\
+                                 Repro command: acorn reprove {} --line {}",
+                                goal.name, module_name, external_line, e, module_name, external_line
+                            );
+                        }
+
+                        #[cfg(not(feature = "validate"))]
+                        return Err(BuildError::goal(
+                            goal,
+                            format!("full prover failed to create certificate: {}", e),
+                        ));
+                    }
+                },
             }
         }
         self.search_finished(goal, outcome, start.elapsed());
@@ -1446,7 +1485,7 @@ impl<'a> Builder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_check_cert_error;
+    use super::{compact_check_cert_error, format_goal_panic_message, panic_payload_to_string};
 
     #[test]
     fn test_compact_check_cert_error_strips_generic_debug() {
@@ -1462,5 +1501,22 @@ mod tests {
         assert!(compact.contains("chars omitted"));
         assert!(compact.starts_with("prefix "));
         assert!(compact.ends_with(" suffix"));
+    }
+
+    #[test]
+    fn test_panic_payload_to_string_accepts_string_payloads() {
+        assert_eq!(
+            panic_payload_to_string(Box::new("oops".to_string())),
+            "oops"
+        );
+        assert_eq!(panic_payload_to_string(Box::new("oops")), "oops");
+    }
+
+    #[test]
+    fn test_format_goal_panic_message_includes_repro_context() {
+        let message = format_goal_panic_message("internal panic", "finite_group", 114);
+        assert!(message.contains("internal panic"));
+        assert!(message.contains("panic during certificate generation at finite_group:114"));
+        assert!(message.contains("acorn reprove finite_group --line 114"));
     }
 }
