@@ -550,6 +550,15 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
                 .unwrap_or(false)
         })
         .expect("expected subgroup existence goal");
+    assert!(
+        cursor
+            .goal()
+            .expect("expected concrete subgroup goal")
+            .proposition
+            .params
+            .is_empty(),
+        "let ... satisfy should create a concrete block goal rather than a parameterized goal"
+    );
     let mut processor =
         crate::processor::Processor::with_imports(None, cursor.bindings(), &project).unwrap();
     processor.add_module_facts(&cursor).unwrap();

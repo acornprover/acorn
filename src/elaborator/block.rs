@@ -74,6 +74,11 @@ pub enum BlockParams<'a> {
     /// The last one, we are trying to prove there exists a variable that satisfies the goal.
     FunctionSatisfy(AcornValue, AcornType, Range),
 
+    /// (unbound goal, range of condition)
+    /// Used for `let ... satisfy` witness goals that should be proved inside a block where
+    /// ambient type parameters have been converted to arbitrary types.
+    VariableSatisfy(AcornValue, Range),
+
     /// MatchCase represents a single case within a match statement.
     /// The scrutinee, the constructor, the pattern arguments, and the range of the pattern.
     MatchCase(AcornValue, AcornValue, Vec<(String, AcornType)>, Range),
@@ -201,6 +206,12 @@ impl Block {
                     .bind_values(0, 0, &internal_args)
                     .to_arbitrary();
                 let bound_goal = AcornValue::exists(vec![return_type.to_arbitrary()], partial_goal);
+                let source = Source::block_goal(env.module_id, range, subenv.depth);
+                let prop = Proposition::new(bound_goal, vec![], source);
+                Some(prop)
+            }
+            BlockParams::VariableSatisfy(ref unbound_goal, range) => {
+                let bound_goal = unbound_goal.clone().to_arbitrary();
                 let source = Source::block_goal(env.module_id, range, subenv.depth);
                 let prop = Proposition::new(bound_goal, vec![], source);
                 Some(prop)

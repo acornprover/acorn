@@ -461,11 +461,16 @@ impl Environment {
             }
             None => local_type_params.clone(),
         };
-        let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let general_prop = Proposition::new(general_claim, definition_type_params.clone(), source);
-        let index = self
-            .add_node(Node::claim(project, self, general_prop).map_err(|e| statement.error(&e))?);
-        self.add_node_lines(index, &statement.range());
+        let block = Block::new(
+            project,
+            &self,
+            vec![],
+            vec![],
+            BlockParams::VariableSatisfy(general_claim, vss.condition.range()),
+            &statement.first_token,
+            &statement.last_token,
+            None,
+        )?;
 
         let mut constant_values = Vec::new();
         for ((declaration, quant_name), quant_type) in vss
@@ -520,7 +525,8 @@ impl Environment {
         let external_claim = specific_claim_value.genericize(&definition_type_params);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let specific_prop = Proposition::new(external_claim, definition_type_params, source);
-        self.add_node(Node::structural(project, self, specific_prop));
+        let index = self.add_node(Node::block(project, self, block, Some(specific_prop)));
+        self.add_node_lines(index, &statement.range());
 
         for param in local_type_params.iter().rev() {
             self.bindings.remove_type(&param.name);

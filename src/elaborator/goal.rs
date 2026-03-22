@@ -40,8 +40,18 @@ impl Goal {
         first_line: u32,
         last_line: u32,
     ) -> Result<Goal, String> {
-        // Goals should never be generic.
-        assert!(!prop.value.has_generic());
+        if !prop.params.is_empty() {
+            return Err(format!(
+                "goals must be concrete, but this goal still has type parameters: {}",
+                prop
+            ));
+        }
+        if prop.value.has_generic() {
+            return Err(format!(
+                "goals must be concrete, but this goal still has generic type variables: {}",
+                prop.value
+            ));
+        }
 
         let name = if let Some(name) = prop.theorem_name() {
             name.to_string()
