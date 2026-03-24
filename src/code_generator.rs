@@ -948,9 +948,6 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
-        #[cfg(feature = "validate")]
-        step.validate_specializes_to_concrete_clauses(kernel_context);
-
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_certificate_steps(

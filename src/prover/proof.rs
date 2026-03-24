@@ -102,9 +102,9 @@ pub enum ConcreteStepId {
 
 /// A reconstructed proof step together with the environments needed to specialize it.
 ///
-/// By contract, each `(VariableMap, LocalContext)` pair must fully instantiate `generic`.
-/// That means `to_clauses()` is expected to produce ground clauses with no free variables and
-/// an empty local context. Validate mode checks this invariant.
+/// The stored `(VariableMap, LocalContext)` pairs reconstruct the specialization data needed to
+/// replay this step. The resulting clauses may still contain universally quantified locals; later
+/// certificate generation can either preserve them as binders or choose explicit witnesses.
 ///
 /// Also used when converting ConcreteProof to Certificate.
 #[derive(Clone)]
@@ -112,9 +112,9 @@ pub struct ConcreteStep {
     // The generic clause for this proof step.
     pub generic: Clause,
 
-    // All of the ways to fully instantiate the generic variables.
+    // All of the ways to specialize the generic variables.
     // Each var_map is paired with the context that its replacement terms reference while
-    // specializing. After specialization, no locals should remain in the output clause.
+    // specializing.
     pub var_maps: Vec<(VariableMap, LocalContext)>,
 }
 
@@ -126,53 +126,16 @@ impl ConcreteStep {
         }
     }
 
-    #[cfg(any(test, feature = "validate"))]
-    fn validate_specialized_clause_is_concrete(
-        &self,
-        clause: &Clause,
-        var_map: &VariableMap,
-        replacement_context: &LocalContext,
-    ) {
-        if clause.has_any_variable() || !clause.get_local_context().is_empty() {
-            panic!(
-                "ConcreteStep invariant violated: specializing `{}` with var_map {:?} and replacement context {:?} produced non-concrete clause `{}` with context {:?}",
-                self.generic,
-                var_map,
-                replacement_context,
-                clause,
-                clause.get_local_context(),
-            );
-        }
-    }
-
-    #[cfg(any(test, feature = "validate"))]
-    pub(crate) fn validate_specializes_to_concrete_clauses(&self, kernel_context: &KernelContext) {
-        for (var_map, replacement_context) in &self.var_maps {
-            let clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
-                &self.generic,
-                replacement_context,
-                kernel_context,
-            );
-            self.validate_specialized_clause_is_concrete(&clause, var_map, replacement_context);
-        }
-    }
-
-    /// Convert this `ConcreteStep` to the ground clauses it represents.
-    ///
-    /// By contract, every returned clause must be fully instantiated, with no free variables and
-    /// an empty local context.
+    /// Convert this `ConcreteStep` to the specialized clauses it represents.
     fn to_clauses(&self, kernel_context: &KernelContext) -> Vec<Clause> {
         self.var_maps
             .iter()
             .map(|(var_map, replacement_context)| {
-                let clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
+                var_map.specialize_clause_with_replacement_context_and_compact_vars(
                     &self.generic,
                     replacement_context,
                     kernel_context,
-                );
-                #[cfg(feature = "validate")]
-                self.validate_specialized_clause_is_concrete(&clause, var_map, replacement_context);
-                clause
+                )
             })
             .collect()
     }
@@ -462,7 +425,7 @@ impl<'a> Proof<'a> {
 
 // Given a varmap for the conclusion of a proof step, reconstruct varmaps for
 // all of its inputs.
-// The varmaps should fully instantiate the clause into a ground clause with no free variables.
+// The varmaps should specialize the clause enough to replay the proof step.
 //
 // Reconstructed varmaps are added to concrete_steps.
 // If the step cannot be reconstructed, we return an error.
@@ -612,6 +575,8 @@ pub fn reconstruct_step<R: ProofResolver>(
 
 #[cfg(test)]
 mod tests {
+    use crate::certificate::Certificate;
+    use crate::elaborator::binding_map::BindingMap;
     use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
@@ -1238,16 +1203,57 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ConcreteStep invariant violated")]
-    fn test_concrete_step_validation_rejects_live_locals() {
+    fn test_append_inline_simplification_originals_with_live_locals_roundtrip_to_certificate() {
         let kctx = KernelContext::new();
-        let generic_clause = kctx.parse_clause("x0", &["Bool"]);
-        let step = crate::prover::proof::ConcreteStep {
-            generic: generic_clause,
-            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+
+        let simplifying_clause = kctx.parse_clause("x0 = false", &["Bool"]);
+        let source_clause = kctx.parse_clause("true", &[]);
+        let reduced_clause = kctx.parse_clause("x0 != false", &["Bool"]);
+
+        let source_step = ProofStep::mock_from_clause(source_clause);
+        let original_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduced_clause,
+            PremiseMap::empty(),
+        );
+        let simplification_step = ProofStep {
+            clause: Clause::impossible(),
+            truthiness: original_step.truthiness,
+            rule: Rule::Simplification(SimplificationInfo {
+                original: Box::new(original_step),
+                simplifying_ids: vec![0],
+            }),
+            proof_size: 1,
+            depth: 0,
+            premise_map: PremiseMap::empty(),
         };
 
-        step.validate_specializes_to_concrete_clauses(&kctx);
+        let reconstructed_steps = HashMap::from([(
+            ConcreteStepId::ProofStep(ProofStepId::Active(0)),
+            ConcreteStep {
+                generic: simplifying_clause,
+                var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+            },
+        )]);
+        let mut claim_index = HashMap::new();
+        let mut steps_in_order = Vec::new();
+
+        append_inline_simplification_originals(
+            &simplification_step,
+            &reconstructed_steps,
+            &mut claim_index,
+            &mut steps_in_order,
+            &HashSet::new(),
+            &kctx,
+        );
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let cert =
+            Certificate::from_concrete_steps("goal".to_string(), &steps_in_order, &kctx, &bindings)
+                .expect("live-local inline original should serialize");
+        let proof = cert.proof.expect("proof should exist");
+        assert_eq!(proof, vec!["function(x0: Bool) { x0 != false }(true)"]);
     }
 
     #[test]
