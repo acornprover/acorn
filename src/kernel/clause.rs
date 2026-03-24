@@ -791,7 +791,8 @@ impl Clause {
 
     /// Reduce `exists(T => body)` to `body[choose(T, function(x:T){body})/x]`.
     ///
-    /// This is the generic existential-activation path.
+    /// This is the legacy existential-activation path for non-`nwit` builds.
+    #[cfg(not(feature = "nwit"))]
     fn reduce_exists_with_choose(term: &Term) -> Option<Term> {
         let (binder_type, body) = term.as_ref().split_exists()?;
         let binder_type = binder_type.to_owned();
@@ -1080,6 +1081,8 @@ impl Clause {
         kernel_context: &KernelContext,
         allow_positive_exists_witness: bool,
     ) -> Vec<NormalizedClauseTrace> {
+        #[cfg(feature = "nwit")]
+        let _ = allow_positive_exists_witness;
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];
@@ -1234,6 +1237,7 @@ impl Clause {
                         ));
                         continue;
                     }
+                    #[cfg(not(feature = "nwit"))]
                     if allow_positive_exists_witness {
                         if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
                             answer.extend(self.with_replaced_literal_and_context(
@@ -1877,6 +1881,7 @@ mod tests {
         assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_boolean_reduction_negated_forall_becomes_exists_negated_body() {
         let mut kctx = KernelContext::new();
@@ -1917,6 +1922,7 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_boolean_reduction_negated_forall_normalizes_resulting_exists_body() {
         let mut kctx = KernelContext::new();
@@ -1992,6 +1998,7 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_boolean_reduction_function_inequality_composes_with_exists() {
         let mut kctx = KernelContext::new();

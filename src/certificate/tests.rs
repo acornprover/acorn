@@ -1000,6 +1000,7 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
 }
 
+#[cfg(not(feature = "nwit"))]
 #[test]
 fn test_from_concrete_steps_handles_binder_claim_args() {
     let code = r#"

@@ -68,6 +68,11 @@ impl WitnessRegistry {
         self.by_local_id.get(&local_id)
     }
 
+    /// Iterate over every prover-generated witness recorded for this proof search.
+    pub fn iter(&self) -> impl Iterator<Item = (&AtomId, &WitnessEntry)> {
+        self.by_local_id.iter()
+    }
+
     /// Open a top-level positive existential by introducing a named witness.
     pub fn open_positive_exists(
         &mut self,

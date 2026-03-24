@@ -1076,9 +1076,12 @@ impl<'a> TermRef<'a> {
                 | TermComponent::Atom(Atom::Symbol(Symbol::And))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Or))
                 | TermComponent::Atom(Atom::Symbol(Symbol::Eq))
-                | TermComponent::Atom(Atom::Symbol(Symbol::Ite))
-                | TermComponent::Atom(Atom::Symbol(Symbol::Choose)) => {
+                | TermComponent::Atom(Atom::Symbol(Symbol::Ite)) => {
                     // Built-in type/logical symbols contribute to weight
+                    weight1 += 1;
+                }
+                #[cfg(not(feature = "nwit"))]
+                TermComponent::Atom(Atom::Symbol(Symbol::Choose)) => {
                     weight1 += 1;
                 }
                 TermComponent::Atom(Atom::FreeVariable(i)) => {
@@ -2098,6 +2101,7 @@ impl Term {
     }
 
     /// Create a choice term: `choose(choice_type, predicate)`.
+    #[cfg(not(feature = "nwit"))]
     pub fn choose(choice_type: Term, predicate: Term) -> Term {
         Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[choice_type, predicate])
     }

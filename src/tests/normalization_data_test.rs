@@ -355,6 +355,7 @@ const CLAIM_ROUNDTRIP_CASES: &[ClaimRoundtripCase] = &[
     },
 ];
 
+#[cfg(not(feature = "nwit"))]
 fn build_applied_function_valued_choose_term(_kernel_context: &mut KernelContext) -> Term {
     let choice_type = Term::pi(Term::bool_type(), Term::bool_type());
     Term::choose(
@@ -367,10 +368,14 @@ fn build_applied_function_valued_choose_term(_kernel_context: &mut KernelContext
     .apply(&[Term::new_true()])
 }
 
+#[cfg(not(feature = "nwit"))]
 const KERNEL_TERM_ROUNDTRIP_CASES: &[KernelTermRoundtripCase] = &[KernelTermRoundtripCase {
     name: "applied_function_valued_choose",
     build: build_applied_function_valued_choose_term,
 }];
+
+#[cfg(feature = "nwit")]
+const KERNEL_TERM_ROUNDTRIP_CASES: &[KernelTermRoundtripCase] = &[];
 
 /// Builds a normalized clause whose preserved type parameter sits in a non-prefix slot, which
 /// exercises the sparse-local roundtrip bug seen in `finite_set`.

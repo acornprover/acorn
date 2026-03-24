@@ -460,32 +460,44 @@ fn lower_value_to_term_with_stack(
         ),
 
         AcornValue::Choose(choice_type, body) => {
-            let choice_type_term = lower_type_to_term(kernel_context, choice_type, type_var_map);
-            let choice_var_index = stack.len() as AtomId;
-            let predicate = if let Some(predicate_value) =
-                strip_wrapped_choose_function(body, choice_var_index, choice_type)
+            #[cfg(feature = "nwit")]
             {
-                let mut eta_stack = stack.clone();
-                eta_stack.insert(choice_var_index as usize, Term::new_true());
-                lower_value_to_term_with_stack(
-                    kernel_context,
-                    &predicate_value,
-                    type_var_map,
-                    prefer_instance_aliases,
-                    &mut eta_stack,
-                )?
-            } else {
-                let predicate_value =
-                    AcornValue::lambda(vec![choice_type.clone()], (**body).clone());
-                lower_value_to_term_with_stack(
-                    kernel_context,
-                    &predicate_value,
-                    type_var_map,
-                    prefer_instance_aliases,
-                    stack,
-                )?
-            };
-            Ok(logical_head(Symbol::Choose).apply(&[choice_type_term, predicate]))
+                let _ = (choice_type, body);
+                return Err(
+                    "choose expressions are not supported with feature \"nwit\"".to_string()
+                );
+            }
+
+            #[cfg(not(feature = "nwit"))]
+            {
+                let choice_type_term =
+                    lower_type_to_term(kernel_context, choice_type, type_var_map);
+                let choice_var_index = stack.len() as AtomId;
+                let predicate = if let Some(predicate_value) =
+                    strip_wrapped_choose_function(body, choice_var_index, choice_type)
+                {
+                    let mut eta_stack = stack.clone();
+                    eta_stack.insert(choice_var_index as usize, Term::new_true());
+                    lower_value_to_term_with_stack(
+                        kernel_context,
+                        &predicate_value,
+                        type_var_map,
+                        prefer_instance_aliases,
+                        &mut eta_stack,
+                    )?
+                } else {
+                    let predicate_value =
+                        AcornValue::lambda(vec![choice_type.clone()], (**body).clone());
+                    lower_value_to_term_with_stack(
+                        kernel_context,
+                        &predicate_value,
+                        type_var_map,
+                        prefer_instance_aliases,
+                        stack,
+                    )?
+                };
+                Ok(logical_head(Symbol::Choose).apply(&[choice_type_term, predicate]))
+            }
         }
 
         AcornValue::Binary(op, left, right) => {
@@ -585,6 +597,7 @@ fn lower_value_to_term_with_stack(
     }
 }
 
+#[cfg(not(feature = "nwit"))]
 fn strip_wrapped_choose_function(
     body: &AcornValue,
     choice_var_index: AtomId,
@@ -608,6 +621,7 @@ fn strip_wrapped_choose_function(
     strip_choose_body_application(&lambda_body, choice_var_index, choice_type)
 }
 
+#[cfg(not(feature = "nwit"))]
 fn strip_choose_body_application(
     body: &AcornValue,
     choice_var_index: AtomId,
@@ -1112,6 +1126,7 @@ mod tests {
         assert_eq!(term, expected);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_lower_value_to_term_choose_eta_reduces_wrapped_predicate_function() {
         let mut kernel_context = KernelContext::new();
@@ -1155,6 +1170,7 @@ mod tests {
         assert_eq!(term, expected);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_lower_value_to_term_preserving_alias_spelling_roundtrips_choose_function_predicate() {
         let mut kernel_context = KernelContext::new();
@@ -1179,6 +1195,7 @@ mod tests {
         assert_eq!(term, roundtripped);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_lower_value_to_term_preserving_alias_spelling_keeps_non_eta_choose_lambda() {
         let mut kernel_context = KernelContext::new();
@@ -1756,7 +1773,8 @@ mod tests {
             vec!["T".to_string()],
         );
 
-        let cases: Vec<(&str, AcornValue)> = vec![
+        #[allow(unused_mut)]
+        let mut cases: Vec<(&str, AcornValue)> = vec![
             ("bool_true", AcornValue::Bool(true)),
             ("bool_false", AcornValue::Bool(false)),
             ("not", AcornValue::Not(Box::new(AcornValue::Bool(false)))),
@@ -1809,10 +1827,6 @@ mod tests {
                 ),
             ),
             (
-                "choose",
-                AcornValue::choose(bool_ty.clone(), AcornValue::Variable(0, bool_ty.clone())),
-            ),
-            (
                 "value_application",
                 AcornValue::apply(f.clone(), vec![AcornValue::Bool(true)]),
             ),
@@ -1829,6 +1843,12 @@ mod tests {
                 ),
             ),
         ];
+
+        #[cfg(not(feature = "nwit"))]
+        cases.push((
+            "choose",
+            AcornValue::choose(bool_ty.clone(), AcornValue::Variable(0, bool_ty.clone())),
+        ));
 
         for (name, value) in cases {
             let mut kernel_context = KernelContext::new();

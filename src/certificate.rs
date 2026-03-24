@@ -1225,6 +1225,9 @@ impl<'a> WitnessEmitter<'a> {
                 emitter.prepare_witness(local_id, kernel_context)?;
             }
         }
+        for (&local_id, _) in witness_registry.iter() {
+            emitter.prepare_witness(local_id, kernel_context)?;
+        }
         Ok(emitter)
     }
 

@@ -32,6 +32,7 @@ impl KernelContext {
             Atom::Symbol(Symbol::Or) => "or".to_string(),
             Atom::Symbol(Symbol::Eq) => "eq".to_string(),
             Atom::Symbol(Symbol::Ite) => "ite".to_string(),
+            #[cfg(not(feature = "nwit"))]
             Atom::Symbol(Symbol::Choose) => "choose".to_string(),
             Atom::Symbol(Symbol::Bool) => "Bool".to_string(),
             Atom::Symbol(Symbol::Type0) => "Type".to_string(),
@@ -1046,6 +1047,7 @@ impl KernelContext {
             "or" => Term::atom(Atom::Symbol(Symbol::Or)),
             "eq" => Term::atom(Atom::Symbol(Symbol::Eq)),
             "ite" => Term::atom(Atom::Symbol(Symbol::Ite)),
+            #[cfg(not(feature = "nwit"))]
             "choose" => Term::atom(Atom::Symbol(Symbol::Choose)),
             _ => {
                 // Fall back to Term::parse for anything else
@@ -1316,6 +1318,7 @@ mod tests {
         assert_eq!(add_type, expected);
     }
 
+    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_choose_builtin_parsing_and_type() {
         use crate::kernel::atom::Atom;
