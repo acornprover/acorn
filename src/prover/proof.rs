@@ -163,7 +163,7 @@ fn push_concrete_step_if_new(
 
 fn append_inline_simplification_originals(
     step: &ProofStep,
-    reconstructed_steps: &HashMap<ConcreteStepId, ConcreteStep>,
+    step_var_maps: &[(VariableMap, LocalContext)],
     claim_index: &mut HashMap<Clause, usize>,
     steps_in_order: &mut Vec<ConcreteStep>,
     skip_clauses: &HashSet<Clause>,
@@ -177,9 +177,20 @@ fn append_inline_simplification_originals(
         return;
     }
 
+    let original_var_maps: Vec<(VariableMap, LocalContext)> = step_var_maps
+        .iter()
+        .map(|(var_map, replacement_context)| {
+            step.premise_map.inner_step_map(
+                var_map,
+                replacement_context,
+                info.original.clause.get_local_context(),
+            )
+        })
+        .collect();
+
     append_inline_simplification_originals(
         &info.original,
-        reconstructed_steps,
+        &original_var_maps,
         claim_index,
         steps_in_order,
         skip_clauses,
@@ -196,27 +207,17 @@ fn append_inline_simplification_originals(
         return;
     }
 
-    for premise_id in step.rule.premises() {
-        for premise_key in [
-            ConcreteStepId::ProofStep(premise_id),
-            ConcreteStepId::Assumption(premise_id),
-        ] {
-            let Some(concrete_premise) = reconstructed_steps.get(&premise_key) else {
-                continue;
-            };
-            for (var_map, replacement_context) in &concrete_premise.var_maps {
-                push_concrete_step_if_new(
-                    ConcreteStep {
-                        generic: info.original.clause.clone(),
-                        var_maps: vec![(var_map.clone(), replacement_context.clone())],
-                    },
-                    claim_index,
-                    steps_in_order,
-                    skip_clauses,
-                    kernel_context,
-                );
-            }
-        }
+    for (var_map, replacement_context) in &original_var_maps {
+        push_concrete_step_if_new(
+            ConcreteStep {
+                generic: info.original.clause.clone(),
+                var_maps: vec![(var_map.clone(), replacement_context.clone())],
+            },
+            claim_index,
+            steps_in_order,
+            skip_clauses,
+            kernel_context,
+        );
     }
 }
 
@@ -393,10 +394,19 @@ impl<'a> Proof<'a> {
             }
         }
 
-        for (_, step) in &self.steps {
+        for (ps_id, step) in &self.steps {
+            let step_var_maps = if *ps_id == ProofStepId::Final {
+                vec![(VariableMap::new(), LocalContext::empty())]
+            } else if let Some(concrete_step) =
+                reconstructed_steps.get(&ConcreteStepId::ProofStep(*ps_id))
+            {
+                concrete_step.var_maps.clone()
+            } else {
+                continue;
+            };
             append_inline_simplification_originals(
                 step,
-                &reconstructed_steps,
+                &step_var_maps,
                 &mut claim_index,
                 &mut steps_in_order,
                 &skip_clauses,
@@ -588,8 +598,7 @@ mod tests {
     use crate::module::ModuleId;
     use crate::prover::active_set::ActiveSet;
     use crate::prover::proof::{
-        add_var_map, append_inline_simplification_originals, ConcreteStep, ConcreteStepId, Proof,
-        ProofResolver,
+        add_var_map, append_inline_simplification_originals, Proof, ProofResolver,
     };
     use crate::prover::synthetic::WitnessRegistry;
     use std::collections::{HashMap, HashSet};
@@ -878,21 +887,42 @@ mod tests {
 
     #[test]
     fn test_append_inline_simplification_originals_replays_concrete_specialization() {
-        let mut kctx = KernelContext::new();
-        kctx.parse_constant("g0", "Bool -> Bool")
-            .parse_constant("c0", "Bool");
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
 
-        let simplifying_clause = kctx.parse_clause("g0(x0)", &["Bool"]);
-        let source_clause = kctx.parse_clause("g0(c0)", &[]);
-        let reduced_clause = kctx.parse_clause("not g0(x0)", &["Bool"]);
+        let kctx = KernelContext::new();
 
-        let source_step = ProofStep::mock_from_clause(source_clause);
+        let source_clause = Clause::new(
+            vec![Literal::negative(Term::forall(
+                Term::bool_type(),
+                Term::eq(
+                    Term::bool_type(),
+                    Term::atom(Atom::BoundVariable(0)),
+                    Term::new_variable(0),
+                ),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+
+        let reduction = source_clause
+            .find_boolean_reductions_with_options(&kctx, true)
+            .into_iter()
+            .next()
+            .expect("expected forall reduction");
         let original_step = ProofStep::direct(
             &source_step,
             Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-            reduced_clause.clone(),
-            PremiseMap::empty(),
+            reduction.clause,
+            PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            ),
         );
+
+        let mut witness_map = VariableMap::new();
+        witness_map.set(0, Term::new_true());
         let simplification_step = ProofStep {
             clause: Clause::impossible(),
             truthiness: original_step.truthiness,
@@ -902,24 +932,20 @@ mod tests {
             }),
             proof_size: 1,
             depth: 0,
-            premise_map: PremiseMap::empty(),
+            premise_map: PremiseMap::new_with_witnesses(
+                vec![VariableMap::new()],
+                vec![],
+                source_clause.get_local_context().clone(),
+                witness_map,
+            ),
         };
 
-        let mut premise_map = VariableMap::new();
-        premise_map.set(0, kctx.parse_term("c0"));
-        let reconstructed_steps = HashMap::from([(
-            ConcreteStepId::ProofStep(ProofStepId::Active(0)),
-            ConcreteStep {
-                generic: simplifying_clause,
-                var_maps: vec![(premise_map, LocalContext::empty())],
-            },
-        )]);
         let mut claim_index = HashMap::new();
         let mut steps_in_order = Vec::new();
 
         append_inline_simplification_originals(
             &simplification_step,
-            &reconstructed_steps,
+            &[(VariableMap::new(), LocalContext::empty())],
             &mut claim_index,
             &mut steps_in_order,
             &HashSet::new(),
@@ -930,10 +956,12 @@ mod tests {
             .into_iter()
             .flat_map(|step| step.to_clauses(&kctx))
             .collect();
-        let expected = kctx.parse_clause("not g0(c0)", &[]);
+        let expected = "not choose(Bool, lambda(Bool => not(eq(Bool, true, b0))))";
 
         assert!(
-            concrete_clauses.contains(&expected),
+            concrete_clauses
+                .iter()
+                .any(|clause| clause.to_string() == expected),
             "expected inline simplification original to specialize to {}\nactual clauses:\n{}",
             expected,
             concrete_clauses
@@ -942,6 +970,81 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+
+    #[test]
+    fn test_make_cert_inline_boolean_reduction_with_polymorphic_simplifier() {
+        let kctx = KernelContext::new();
+        use crate::kernel::atom::Atom;
+        use crate::kernel::literal::Literal;
+
+        let simplifying_clause = kctx.parse_clause("x1 = x2", &["Type", "x0", "x0"]);
+        let simplifying_step = ProofStep::mock_from_clause(simplifying_clause);
+
+        let source_clause = Clause::new(
+            vec![Literal::negative(Term::forall(
+                Term::bool_type(),
+                Term::eq(
+                    Term::bool_type(),
+                    Term::atom(Atom::BoundVariable(0)),
+                    Term::new_variable(0),
+                ),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+
+        let reduction = source_clause
+            .find_boolean_reductions_with_options(&kctx, true)
+            .into_iter()
+            .next()
+            .expect("expected forall reduction");
+        let original_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduction.clause,
+            PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            ),
+        );
+
+        let reduced_literal = &original_step.clause.literals[0];
+        let mut simplifying_var_map = VariableMap::new();
+        simplifying_var_map.set(0, Term::bool_type());
+        simplifying_var_map.set(1, reduced_literal.left.clone());
+        simplifying_var_map.set(2, reduced_literal.right.clone());
+
+        let mut witness_map = VariableMap::new();
+        witness_map.set(0, Term::new_true());
+
+        let final_step = ProofStep {
+            clause: Clause::impossible(),
+            truthiness: original_step.truthiness,
+            rule: Rule::Simplification(SimplificationInfo {
+                original: Box::new(original_step),
+                simplifying_ids: vec![0],
+            }),
+            proof_size: 1,
+            depth: 0,
+            premise_map: PremiseMap::new_with_witnesses(
+                vec![simplifying_var_map],
+                vec![],
+                source_clause.get_local_context().clone(),
+                witness_map,
+            ),
+        };
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &simplifying_step);
+        proof.add_step(ProofStepId::Active(1), &source_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let bindings = BindingMap::new(ModuleId::default());
+        proof
+            .make_cert("goal".to_string(), &bindings)
+            .expect("certificate generation should succeed");
     }
 
     /// Test that resolution with polymorphic simplification works correctly.
@@ -1206,7 +1309,6 @@ mod tests {
     fn test_append_inline_simplification_originals_with_live_locals_roundtrip_to_certificate() {
         let kctx = KernelContext::new();
 
-        let simplifying_clause = kctx.parse_clause("x0 = false", &["Bool"]);
         let source_clause = kctx.parse_clause("true", &[]);
         let reduced_clause = kctx.parse_clause("x0 != false", &["Bool"]);
 
@@ -1215,7 +1317,11 @@ mod tests {
             &source_step,
             Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
             reduced_clause,
-            PremiseMap::empty(),
+            PremiseMap::new(
+                vec![VariableMap::new()],
+                vec![0],
+                LocalContext::from_types(vec![Term::bool_type()]),
+            ),
         );
         let simplification_step = ProofStep {
             clause: Clause::impossible(),
@@ -1226,22 +1332,23 @@ mod tests {
             }),
             proof_size: 1,
             depth: 0,
-            premise_map: PremiseMap::empty(),
+            premise_map: PremiseMap::new_with_witnesses(
+                vec![VariableMap::new()],
+                vec![],
+                LocalContext::from_types(vec![Term::bool_type()]),
+                {
+                    let mut witness_map = VariableMap::new();
+                    witness_map.set(0, Term::new_true());
+                    witness_map
+                },
+            ),
         };
-
-        let reconstructed_steps = HashMap::from([(
-            ConcreteStepId::ProofStep(ProofStepId::Active(0)),
-            ConcreteStep {
-                generic: simplifying_clause,
-                var_maps: vec![(VariableMap::new(), LocalContext::empty())],
-            },
-        )]);
         let mut claim_index = HashMap::new();
         let mut steps_in_order = Vec::new();
 
         append_inline_simplification_originals(
             &simplification_step,
-            &reconstructed_steps,
+            &[(VariableMap::new(), LocalContext::empty())],
             &mut claim_index,
             &mut steps_in_order,
             &HashSet::new(),
