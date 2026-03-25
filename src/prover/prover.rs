@@ -232,6 +232,7 @@ impl Prover {
 
     /// Prints every activated proof step in activation order.
     pub fn print_active_steps(&self, bindings: &BindingMap, kernel_context: &KernelContext) {
+        let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
 
         println!(
@@ -246,7 +247,11 @@ impl Prover {
             let clause_text = if step.clause.is_impossible() {
                 "contradiction".to_string()
             } else {
-                self.clause_text(&step.clause, cert_bindings.as_ref(), kernel_context)
+                self.clause_text(
+                    &step.clause,
+                    cert_bindings.as_ref(),
+                    effective_kernel_context,
+                )
             };
 
             println!(
@@ -840,5 +845,67 @@ mod tests {
             .active_set
             .validate_step(specialization, &kernel_context)
             .expect("stored specialization map should validate");
+    }
+
+    #[cfg(feature = "nwit")]
+    #[test]
+    fn test_print_active_steps_uses_search_kernel_context_for_named_witnesses() {
+        let stale_kernel_context = KernelContext::new();
+        let mut search_kernel_context = KernelContext::new();
+
+        let source_clause = Clause::new(
+            vec![crate::kernel::literal::Literal::positive(
+                crate::kernel::term::Term::exists(
+                    crate::kernel::term::Term::bool_type(),
+                    crate::kernel::term::Term::not(crate::kernel::term::Term::eq(
+                        crate::kernel::term::Term::bool_type(),
+                        crate::kernel::term::Term::atom(crate::kernel::atom::Atom::BoundVariable(
+                            0,
+                        )),
+                        crate::kernel::term::Term::new_true(),
+                    )),
+                ),
+            )],
+            &LocalContext::empty(),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+
+        let mut prover = Prover::new(vec![]);
+        let exists_reduction = source_clause
+            .positive_exists_reduction(&search_kernel_context)
+            .expect("expected positive exists reduction");
+        let opening = prover.witness_registry.open_positive_exists(
+            &mut search_kernel_context,
+            ModuleId::default(),
+            &source_clause,
+            &exists_reduction,
+        );
+        let reduction = opening.reduction;
+        let witness_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(crate::kernel::proof_step::SingleSourceInfo { id: 0 }),
+            reduction.clause,
+            PremiseMap::new(
+                vec![crate::kernel::variable_map::VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            ),
+        );
+        prover.active_set.activate(
+            witness_step,
+            &mut search_kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+        prover.kernel_context = Some(search_kernel_context);
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prover.print_active_steps(&bindings, &stale_kernel_context);
+        }));
+        assert!(
+            result.is_ok(),
+            "print_active_steps should quote named witnesses with the prover-owned search context"
+        );
     }
 }

@@ -227,7 +227,6 @@ impl Certificate {
                 bindings,
             )?);
         }
-
         Ok(Certificate::new(goal, answer))
     }
 
@@ -330,11 +329,17 @@ impl Certificate {
             &witness.ambient_context,
             &witness.return_type,
         );
+        let arguments: Vec<(String, AcornType)> = arguments
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, arg_type))| (format!("arg{}", i), arg_type))
+            .collect();
         let return_type = kernel_context.quote_type_with_context(
             witness.return_type.clone(),
             &witness.ambient_context,
             false,
         );
+        let type_param_placeholders = vec![AcornValue::Bool(true); type_params.len()];
 
         let mut local_context = witness.ambient_context.clone();
         local_context.push_type(witness.return_type.clone());
@@ -345,27 +350,48 @@ impl Certificate {
                 &Term::new_variable(witness.ambient_context.len() as AtomId),
             )
             .shift_bound(0, -1);
-        let general_condition =
-            kernel_context.quote_term_with_context(&opened_body, &local_context, false);
-
-        let (condition, return_name) = if arguments.is_empty() {
-            let specialized_body = witness
-                .body
-                .substitute_bound(
-                    0,
-                    &witness_application(witness.symbol, &witness.ambient_context),
-                )
-                .shift_bound(0, -1);
-            (
-                kernel_context.quote_term_with_context(
-                    &specialized_body,
-                    &witness.ambient_context,
-                    false,
-                ),
-                None,
+        let general_condition = kernel_context
+            .quote_term_with_context(&opened_body, &local_context, false)
+            .bind_values(0, local_context.len() as AtomId, &type_param_placeholders);
+        let specialized_body = witness
+            .body
+            .substitute_bound(
+                0,
+                &witness_application(witness.symbol, &witness.ambient_context),
             )
+            .shift_bound(0, -1);
+        let specialized_condition = kernel_context
+            .quote_term_with_context(&specialized_body, &witness.ambient_context, false)
+            .bind_values(
+                0,
+                witness.ambient_context.len() as AtomId,
+                &type_param_placeholders,
+            );
+        let mut checker_kernel_context = kernel_context.clone();
+
+        let (condition, return_name, witness_clauses) = if arguments.is_empty() {
+            let witness_clauses = Self::checker_clauses_for_proposition(
+                &mut checker_kernel_context,
+                &specialized_condition,
+                &type_params,
+            )?;
+            (specialized_condition, None, witness_clauses)
         } else {
-            (general_condition, Some("r".to_string()))
+            let arg_types: Vec<AcornType> = arguments
+                .iter()
+                .map(|(_, arg_type)| arg_type.clone())
+                .collect();
+            let specialized_claim = AcornValue::ForAll(arg_types, Box::new(specialized_condition));
+            let witness_clauses = Self::checker_clauses_for_proposition(
+                &mut checker_kernel_context,
+                &specialized_claim,
+                &type_params,
+            )?;
+            (
+                general_condition,
+                Some(format!("{}_result", witness.name)),
+                witness_clauses,
+            )
         };
 
         Ok(SatisfyStep {
@@ -376,7 +402,7 @@ impl Certificate {
             return_type,
             condition,
             justification,
-            witness_clauses: vec![witness.specialized_clause.clone()],
+            witness_clauses,
         })
     }
 
@@ -1176,17 +1202,27 @@ impl CertificateWorklist {
 /// Emits named witness steps directly in the certificate stream.
 struct WitnessEmitter<'a> {
     ordered_steps: Vec<CertificateStep>,
+    claim_generic_clauses: Vec<Option<Clause>>,
     claim_clauses: Vec<Option<Clause>>,
     referenced_ids: Vec<Vec<AtomId>>,
     witness_registry: &'a WitnessRegistry,
     witness_steps: HashMap<AtomId, SatisfyStep>,
     claim_replacements: HashMap<usize, AtomId>,
     replacement_indices: HashMap<AtomId, usize>,
+    claim_anchors: HashMap<usize, Vec<AtomId>>,
+    anchor_indices: HashMap<AtomId, usize>,
     declared: HashSet<AtomId>,
     buffered: Vec<usize>,
     emitted: Vec<bool>,
     in_progress: HashSet<AtomId>,
     output: Vec<CertificateStep>,
+}
+
+#[derive(Clone, Copy)]
+enum WitnessPlacement {
+    Standalone,
+    Anchor(usize),
+    Replace(usize),
 }
 
 impl<'a> WitnessEmitter<'a> {
@@ -1197,6 +1233,13 @@ impl<'a> WitnessEmitter<'a> {
         kernel_context: &KernelContext,
     ) -> Result<Self, CodeGenError> {
         let num_steps = ordered_steps.len();
+        let claim_generic_clauses: Vec<Option<Clause>> = ordered_steps
+            .iter()
+            .map(|step| match step {
+                CertificateStep::Claim(claim) => Some(claim.normalized_generic_clause()),
+                CertificateStep::Satisfy(_) => None,
+            })
+            .collect();
         let claim_clauses: Vec<Option<Clause>> = ordered_steps
             .iter()
             .map(|step| Certificate::claim_clause(step, kernel_context))
@@ -1208,12 +1251,15 @@ impl<'a> WitnessEmitter<'a> {
 
         let mut emitter = Self {
             ordered_steps,
+            claim_generic_clauses,
             claim_clauses,
             referenced_ids,
             witness_registry,
             witness_steps: HashMap::new(),
             claim_replacements: HashMap::new(),
             replacement_indices: HashMap::new(),
+            claim_anchors: HashMap::new(),
+            anchor_indices: HashMap::new(),
             declared: HashSet::new(),
             buffered: Vec::new(),
             emitted: vec![false; num_steps],
@@ -1240,14 +1286,20 @@ impl<'a> WitnessEmitter<'a> {
         Ok(self.output)
     }
 
+    fn declaration_index(&self, local_id: AtomId) -> Option<usize> {
+        self.replacement_indices
+            .get(&local_id)
+            .copied()
+            .or_else(|| self.anchor_indices.get(&local_id).copied())
+    }
+
     /// Delay any step whose first witness use depends on a later replacement claim.
     fn step_needs_future_witness(&self, index: usize, current_index: usize) -> bool {
         self.referenced_ids[index].iter().any(|local_id| {
             !self.declared.contains(local_id)
                 && self
-                    .replacement_indices
-                    .get(local_id)
-                    .is_some_and(|replacement_index| *replacement_index > current_index)
+                    .declaration_index(*local_id)
+                    .is_some_and(|declaration_index| declaration_index > current_index)
         })
     }
 
@@ -1255,6 +1307,12 @@ impl<'a> WitnessEmitter<'a> {
     fn schedule_step(&mut self, index: usize, current_index: usize) -> Result<(), CodeGenError> {
         if self.emitted[index] {
             return Ok(());
+        }
+
+        if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
+            for local_id in local_ids {
+                self.emit_witness(local_id)?;
+            }
         }
 
         if let Some(local_id) = self.claim_replacements.get(&index).copied() {
@@ -1286,6 +1344,12 @@ impl<'a> WitnessEmitter<'a> {
 
         for local_id in self.referenced_ids[index].clone() {
             self.ensure_declared(local_id, current_index)?;
+        }
+        if let CertificateStep::Claim(claim) = &step {
+            if self.is_redundant_specialized_claim(claim, &self.referenced_ids[index]) {
+                self.emitted[index] = true;
+                return Ok(());
+            }
         }
         self.output.push(step);
         self.emitted[index] = true;
@@ -1340,21 +1404,12 @@ impl<'a> WitnessEmitter<'a> {
         }
 
         let general_clause = witness.general_clause.clone();
-        let matching_claims: Vec<usize> = self
-            .claim_clauses
-            .iter()
-            .enumerate()
-            .filter_map(|(index, clause)| {
-                (clause.as_ref() == Some(&general_clause)).then_some(index)
-            })
-            .collect();
-        if matching_claims.len() > 1 {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "named witness '{}' matches multiple certificate claims",
-                witness.name
-            )));
-        }
-        let justification = if let Some(index) = matching_claims.first().copied() {
+        let placement =
+            self.find_witness_placement(&general_clause, kernel_context, &witness.name)?;
+        let justification = if let Some(index) = match placement {
+            WitnessPlacement::Standalone => None,
+            WitnessPlacement::Anchor(index) | WitnessPlacement::Replace(index) => Some(index),
+        } {
             let CertificateStep::Claim(claim) = &self.ordered_steps[index] else {
                 panic!("claim_clauses only records claim steps");
             };
@@ -1363,16 +1418,23 @@ impl<'a> WitnessEmitter<'a> {
             Claim::new(general_clause.clone(), VariableMap::new())
                 .map_err(CodeGenError::GeneratedBadCode)?
         };
-        if let Some(index) = matching_claims.first().copied() {
-            if let Some(existing) = self.claim_replacements.insert(index, local_id) {
-                return Err(CodeGenError::GeneratedBadCode(format!(
-                    "certificate claim {} would introduce both witness x{} and witness x{}",
-                    index + 1,
-                    existing,
-                    local_id
-                )));
+        match placement {
+            WitnessPlacement::Standalone => {}
+            WitnessPlacement::Replace(index) => {
+                if let Some(existing) = self.claim_replacements.insert(index, local_id) {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "certificate claim {} would introduce both witness x{} and witness x{}",
+                        index + 1,
+                        existing,
+                        local_id
+                    )));
+                }
+                self.replacement_indices.insert(local_id, index);
             }
-            self.replacement_indices.insert(local_id, index);
+            WitnessPlacement::Anchor(index) => {
+                self.claim_anchors.entry(index).or_default().push(local_id);
+                self.anchor_indices.insert(local_id, index);
+            }
         }
         let step = Certificate::witness_entry_to_step(witness, justification, kernel_context)?;
         self.witness_steps.insert(local_id, step);
@@ -1389,7 +1451,7 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        if let Some(index) = self.replacement_indices.get(&local_id).copied() {
+        if let Some(index) = self.declaration_index(local_id) {
             if index > current_index {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "named witness x{} was used before its justification claim",
@@ -1427,10 +1489,86 @@ impl<'a> WitnessEmitter<'a> {
             .get(&local_id)
             .expect("prepared witness step should exist")
             .clone();
+        if !self.replacement_indices.contains_key(&local_id)
+            && !self.anchor_indices.contains_key(&local_id)
+        {
+            self.output
+                .push(CertificateStep::Claim(step.justification.clone()));
+        }
         self.output.push(CertificateStep::Satisfy(step));
         self.declared.insert(local_id);
         self.in_progress.remove(&local_id);
         Ok(())
+    }
+
+    fn is_redundant_specialized_claim(&self, claim: &Claim, referenced_ids: &[AtomId]) -> bool {
+        referenced_ids.iter().any(|local_id| {
+            let Some(witness) = self.witness_registry.get(*local_id) else {
+                return false;
+            };
+            let Some(witness_step) = self.witness_steps.get(local_id) else {
+                return false;
+            };
+            claim.clause() == &witness.specialized_clause
+                && !witness_step
+                    .witness_clauses
+                    .iter()
+                    .any(|clause| clause == claim.clause())
+        })
+    }
+
+    fn find_witness_placement(
+        &self,
+        general_clause: &Clause,
+        kernel_context: &KernelContext,
+        witness_name: &impl std::fmt::Display,
+    ) -> Result<WitnessPlacement, CodeGenError> {
+        let matching_claims: Vec<usize> = self
+            .claim_generic_clauses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                if clause.as_ref() == Some(general_clause)
+                    || self.claim_clauses[index].as_ref() == Some(general_clause)
+                {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if matching_claims.len() > 1 {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "named witness '{}' matches multiple certificate claims",
+                witness_name
+            )));
+        }
+        if let Some(index) = matching_claims.first().copied() {
+            return Ok(WitnessPlacement::Anchor(index));
+        }
+
+        let implying_claims: Vec<usize> = self
+            .claim_clauses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                if self.claim_replacements.contains_key(&index) {
+                    return None;
+                }
+                let clause = clause.as_ref()?;
+                let mut checker = Checker::new();
+                checker.insert_clause(clause, StepReason::Testing, kernel_context);
+                checker
+                    .check_clause(general_clause, kernel_context)
+                    .is_some()
+                    .then_some(index)
+            })
+            .collect();
+        Ok(if implying_claims.len() == 1 {
+            WitnessPlacement::Replace(implying_claims[0])
+        } else {
+            WitnessPlacement::Standalone
+        })
     }
 }
 

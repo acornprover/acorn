@@ -119,6 +119,77 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
     (project, bindings, kernel_context)
 }
 
+#[cfg(feature = "nwit")]
+fn witness_body_equating_ambient_bool() -> crate::kernel::term::Term {
+    use crate::kernel::atom::Atom;
+    use crate::kernel::term::Term;
+
+    Term::and(
+        Term::eq(
+            Term::bool_type(),
+            Term::new_variable(0),
+            Term::atom(Atom::BoundVariable(0)),
+        ),
+        Term::new_true(),
+    )
+}
+
+#[cfg(feature = "nwit")]
+fn bool_exists_source_clause(body: crate::kernel::term::Term) -> crate::kernel::clause::Clause {
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+
+    Clause::new(
+        vec![Literal::positive(Term::exists(Term::bool_type(), body))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+}
+
+#[cfg(feature = "nwit")]
+fn open_named_witness(
+    source_clause: &crate::kernel::clause::Clause,
+) -> (
+    KernelContext,
+    crate::prover::synthetic::WitnessRegistry,
+    crate::prover::synthetic::WitnessOpening,
+) {
+    use crate::module::ModuleId;
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let mut kernel_context = KernelContext::new();
+    let exists_reduction = source_clause
+        .positive_exists_reduction(&kernel_context)
+        .expect("expected positive exists reduction");
+    let mut witness_registry = WitnessRegistry::new();
+    let opening = witness_registry.open_positive_exists(
+        &mut kernel_context,
+        ModuleId::default(),
+        source_clause,
+        &exists_reduction,
+    );
+    (kernel_context, witness_registry, opening)
+}
+
+#[cfg(feature = "nwit")]
+fn implying_claim_for_equating_bool_witness() -> (crate::kernel::clause::Clause, Claim) {
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+
+    let clause = crate::kernel::clause::Clause::new(
+        vec![Literal::positive(Term::not(Term::forall(
+            Term::bool_type(),
+            Term::not(witness_body_equating_ambient_bool()),
+        )))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    );
+    let claim =
+        Claim::new(clause.clone(), VariableMap::new()).expect("candidate claim should normalize");
+    (clause, claim)
+}
+
 #[test]
 fn test_claim_with_args_roundtrip_single_argument() {
     let code = r#"
@@ -262,6 +333,144 @@ fn test_parse_code_line_accepts_claim_with_args_shape() {
 
     let claim = expect_claim(step);
     assert_eq!(claim, expected);
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_emit_named_function_witness_inserts_missing_justification_claim() {
+    use crate::kernel::checker::{Checker, StepReason};
+    use crate::kernel::term::Term;
+
+    let source_clause = bool_exists_source_clause(Term::not(Term::eq(
+        Term::bool_type(),
+        Term::atom(crate::kernel::atom::Atom::BoundVariable(0)),
+        Term::new_variable(0),
+    )));
+    let (kernel_context, witness_registry, opening) = open_named_witness(&source_clause);
+
+    let ordered_steps = vec![CertificateStep::Claim(
+        Claim::new(opening.reduction.clause.clone(), VariableMap::new())
+            .expect("specialized witness clause should become a claim"),
+    )];
+    let emitted =
+        Certificate::emit_named_witnesses(ordered_steps, &witness_registry, &kernel_context)
+            .expect("named witness emission should succeed");
+
+    assert!(
+        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        "expected a synthesized justification claim before the witness step"
+    );
+    assert!(
+        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration after the synthesized claim"
+    );
+
+    let mut checker = Checker::new();
+    checker.insert_clause(
+        &source_clause.normalized(),
+        StepReason::Testing,
+        &kernel_context,
+    );
+    let err = checker
+        .check_cert_steps(&emitted, None, &kernel_context)
+        .expect_err("the synthetic proof should stop at the normal non-contradiction error");
+    assert!(
+        err.to_string()
+            .contains("proof does not result in a contradiction"),
+        "unexpected checker error: {err}"
+    );
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_named_function_witness_can_match_implying_claim() {
+    use crate::kernel::checker::{Checker, StepReason};
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (&local_id, _) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+
+    let (candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
+
+    let mut checker = Checker::new();
+    checker.insert_clause(
+        &candidate_clause.normalized(),
+        StepReason::Testing,
+        &kernel_context,
+    );
+    assert!(
+        checker
+            .check_clause(&source_clause.normalized(), &kernel_context)
+            .is_some(),
+        "candidate claim should imply the witness existential"
+    );
+
+    let emitter = super::WitnessEmitter::new(
+        vec![CertificateStep::Claim(candidate_claim)],
+        &witness_registry,
+        &kernel_context,
+    )
+    .expect("witness emitter should build");
+    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (_local_id, witness) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+
+    let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
+    let specialized_claim = Claim::new(witness.specialized_clause.clone(), VariableMap::new())
+        .expect("specialized witness clause should normalize");
+
+    let emitted = Certificate::emit_named_witnesses(
+        vec![
+            CertificateStep::Claim(candidate_claim),
+            CertificateStep::Claim(specialized_claim),
+        ],
+        &witness_registry,
+        &kernel_context,
+    )
+    .expect("named witness emission should succeed");
+
+    assert_eq!(
+        emitted.len(),
+        2,
+        "redundant specialized claim should be skipped"
+    );
+    assert!(
+        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration to be emitted before the anchoring claim"
+    );
+    assert!(
+        matches!(emitted.get(1), Some(CertificateStep::Claim(_))),
+        "expected the anchoring claim to remain after the witness declaration"
+    );
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_named_function_witness_uses_fresh_result_binder_name() {
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (_local_id, witness) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+    let justification = Claim::new(source_clause.normalized(), VariableMap::new())
+        .expect("justification should normalize");
+
+    let step = Certificate::witness_entry_to_step(witness, justification, &kernel_context)
+        .expect("witness step should build");
+
+    assert_eq!(step.return_name.as_deref(), Some("w0_result"));
 }
 
 #[test]
