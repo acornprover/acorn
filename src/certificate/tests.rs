@@ -1,5 +1,7 @@
 use super::*;
 use crate::module::LoadState;
+#[cfg(feature = "nwit")]
+use crate::module::ModuleId;
 use crate::processor::Processor;
 use std::borrow::Cow;
 use tempfile::tempdir;
@@ -188,6 +190,70 @@ fn implying_claim_for_equating_bool_witness() -> (crate::kernel::clause::Clause,
     let claim =
         Claim::new(clause.clone(), VariableMap::new()).expect("candidate claim should normalize");
     (clause, claim)
+}
+
+#[cfg(feature = "nwit")]
+fn nested_bool_exists_clause(kernel_context: &mut KernelContext) -> crate::kernel::clause::Clause {
+    use crate::kernel::atom::Atom;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::symbol::Symbol;
+    use crate::kernel::term::Term;
+
+    let predicate_local_id = add_test_scoped_constant(
+        kernel_context,
+        ModuleId::default(),
+        "pred",
+        kernel_context.parse_type("Bool -> Bool -> Bool"),
+    );
+    let predicate = Term::atom(Atom::Symbol(Symbol::ScopedConstant(predicate_local_id)));
+    Clause::new(
+        vec![Literal::positive(Term::exists(
+            Term::bool_type(),
+            predicate.apply(&[Term::new_variable(0), Term::atom(Atom::BoundVariable(0))]),
+        ))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+}
+
+#[cfg(feature = "nwit")]
+fn add_test_scoped_constant(
+    kernel_context: &mut KernelContext,
+    module_id: ModuleId,
+    name: &str,
+    constant_type: crate::kernel::term::Term,
+) -> crate::kernel::atom::AtomId {
+    use crate::elaborator::names::ConstantName;
+    use crate::kernel::symbol::Symbol;
+    use crate::kernel::symbol_table::NewConstantType;
+
+    let symbol = kernel_context.symbol_table.add_constant(
+        ConstantName::unqualified(module_id, name),
+        NewConstantType::Local,
+        constant_type,
+    );
+    let Symbol::ScopedConstant(local_id) = symbol else {
+        panic!("test constant should be a scoped constant");
+    };
+    local_id
+}
+
+#[cfg(feature = "nwit")]
+fn claim_specializing_local_to_scoped_constant(
+    clause: &crate::kernel::clause::Clause,
+    local_id: crate::kernel::atom::AtomId,
+) -> Claim {
+    use crate::kernel::atom::Atom;
+    use crate::kernel::symbol::Symbol;
+    use crate::kernel::term::Term;
+
+    let mut var_map = VariableMap::new();
+    var_map.set(
+        0,
+        Term::atom(Atom::Symbol(Symbol::ScopedConstant(local_id))),
+    );
+    Claim::new(clause.clone(), var_map).expect("specialized claim should normalize")
 }
 
 #[test]
@@ -410,7 +476,8 @@ fn test_named_function_witness_can_match_implying_claim() {
     let emitter = super::WitnessEmitter::new(
         vec![CertificateStep::Claim(candidate_claim)],
         &witness_registry,
-        &kernel_context,
+        kernel_context.clone(),
+        ModuleId::default(),
     )
     .expect("witness emitter should build");
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
@@ -471,6 +538,81 @@ fn test_named_function_witness_uses_fresh_result_binder_name() {
         .expect("witness step should build");
 
     assert_eq!(step.return_name.as_deref(), Some("w0_result"));
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let mut kernel_context = KernelContext::new();
+    let parent_local_id = add_test_scoped_constant(
+        &mut kernel_context,
+        ModuleId::default(),
+        "parent",
+        Term::bool_type(),
+    );
+    let clause = nested_bool_exists_clause(&mut kernel_context);
+    let claim = claim_specializing_local_to_scoped_constant(&clause, parent_local_id);
+
+    let emitted = Certificate::emit_named_witnesses(
+        vec![CertificateStep::Claim(claim.clone())],
+        &WitnessRegistry::new(),
+        &kernel_context,
+    )
+    .expect("specialized positive exists claim should emit a synthetic witness");
+
+    assert_eq!(
+        emitted.len(),
+        2,
+        "expected the original claim followed by one synthetic witness step"
+    );
+    assert_eq!(emitted[0], CertificateStep::Claim(claim.clone()));
+
+    let CertificateStep::Satisfy(step) = &emitted[1] else {
+        panic!("expected a synthetic witness step");
+    };
+    assert_eq!(step.justification, claim);
+    assert!(step.return_name.is_none());
+    CertificateStep::Satisfy(step.clone())
+        .validate_normalized_shape(&kernel_context)
+        .expect("synthetic witness step should keep normalized witness clauses");
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_specialized_positive_exists_step_uses_emitter_module_id() {
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let module_id = ModuleId(7);
+    let mut kernel_context = KernelContext::new();
+    let parent_local_id =
+        add_test_scoped_constant(&mut kernel_context, module_id, "parent", Term::bool_type());
+    let clause = nested_bool_exists_clause(&mut kernel_context);
+    let claim = claim_specializing_local_to_scoped_constant(&clause, parent_local_id);
+    let witness_registry = WitnessRegistry::new();
+
+    let mut emitter = super::WitnessEmitter::new(
+        vec![CertificateStep::Claim(claim.clone())],
+        &witness_registry,
+        kernel_context,
+        module_id,
+    )
+    .expect("witness emitter should build");
+
+    let (synthetic_local_id, returned_parent_local_id, step) = emitter
+        .specialized_positive_exists_step(&claim)
+        .expect("opening a specialized positive exists should succeed")
+        .expect("expected a synthetic witness step");
+
+    assert_eq!(returned_parent_local_id, parent_local_id);
+    assert_eq!(step.justification, claim);
+
+    let synthetic_witness = emitter
+        .synthetic_witness_registry
+        .get(synthetic_local_id)
+        .expect("synthetic witness should be registered");
+    assert_eq!(synthetic_witness.name.module_id(), module_id);
 }
 
 #[test]
