@@ -513,12 +513,12 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
         "redundant specialized claim should be skipped"
     );
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration to be emitted before the anchoring claim"
+        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        "expected the anchoring claim to stay ahead of the named witness"
     );
     assert!(
-        matches!(emitted.get(1), Some(CertificateStep::Claim(_))),
-        "expected the anchoring claim to remain after the witness declaration"
+        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration after the anchoring claim"
     );
 }
 
@@ -613,6 +613,66 @@ fn test_specialized_positive_exists_step_uses_emitter_module_id() {
         .get(synthetic_local_id)
         .expect("synthetic witness should be registered");
     assert_eq!(synthetic_witness.name.module_id(), module_id);
+}
+
+#[cfg(feature = "nwit")]
+#[test]
+fn test_synthetic_witness_preserves_unused_binder_contradiction() {
+    use crate::kernel::checker::{Checker, StepReason};
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let mut kernel_context = KernelContext::new();
+    let parent_local_id = add_test_scoped_constant(
+        &mut kernel_context,
+        ModuleId::default(),
+        "parent",
+        Term::bool_type(),
+    );
+
+    let conjunction = Term::and(Term::new_variable(0), Term::new_true());
+    let negated_clause = crate::kernel::clause::Clause::new(
+        vec![Literal::positive(Term::not(conjunction.clone()))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    );
+    let exists_clause = crate::kernel::clause::Clause::new(
+        vec![Literal::positive(Term::exists(
+            Term::bool_type(),
+            conjunction,
+        ))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    );
+
+    let negated_claim =
+        claim_specializing_local_to_scoped_constant(&negated_clause, parent_local_id);
+    let exists_claim = claim_specializing_local_to_scoped_constant(&exists_clause, parent_local_id);
+
+    let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
+        vec![
+            CertificateStep::Claim(negated_claim),
+            CertificateStep::Claim(exists_claim),
+        ],
+        &WitnessRegistry::new(),
+        kernel_context,
+        ModuleId::default(),
+    )
+    .expect("named witness emission should succeed");
+
+    let mut checker = Checker::new();
+    checker.insert_clause(
+        &negated_clause.normalized(),
+        StepReason::Testing,
+        &updated_kernel_context,
+    );
+    checker.insert_clause(
+        &exists_clause.normalized(),
+        StepReason::Testing,
+        &updated_kernel_context,
+    );
+    checker
+        .check_cert_steps(&emitted, None, &updated_kernel_context)
+        .expect("synthetic witness should preserve the contradiction when the existential binder is unused");
 }
 
 #[test]

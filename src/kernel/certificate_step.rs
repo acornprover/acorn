@@ -153,6 +153,8 @@ pub struct SatisfyStep {
     pub condition: AcornValue,
     /// The implicit `exists` / `forall ... exists` claim justified by this line.
     pub justification: Claim,
+    /// The exact instantiated proposition made available after naming the witness.
+    pub specialized_clause: Option<Clause>,
     /// The clauses made available after naming the witness.
     pub witness_clauses: Vec<Clause>,
 }
@@ -185,6 +187,11 @@ impl CertificateStep {
             CertificateStep::Satisfy(step) => {
                 step.justification
                     .validate_normalized_shape(kernel_context)?;
+                if let Some(clause) = &step.specialized_clause {
+                    if *clause != clause.normalized() {
+                        return Err(format!("specialized clause is not normalized: {}", clause));
+                    }
+                }
                 for clause in &step.witness_clauses {
                     if *clause != clause.normalized() {
                         return Err(format!("witness clause is not normalized: {}", clause));
@@ -202,6 +209,9 @@ impl CertificateStep {
             CertificateStep::Satisfy(step) => {
                 step.justification
                     .validate_roundtrip_shape(kernel_context)?;
+                if let Some(clause) = &step.specialized_clause {
+                    kernel_context.validate_clause_roundtrip(clause)?;
+                }
                 for clause in &step.witness_clauses {
                     kernel_context.validate_clause_roundtrip(clause)?;
                 }

@@ -23,6 +23,7 @@ use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
 use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
@@ -395,27 +396,44 @@ impl Certificate {
             );
         let mut checker_kernel_context = kernel_context.clone();
 
-        let (condition, return_name, witness_clauses) = if arguments.is_empty() {
+        let (condition, return_name, specialized_clause, witness_clauses) = if arguments.is_empty()
+        {
+            let specialized_clause = Self::maybe_specialized_clause_for_proposition(
+                &mut checker_kernel_context,
+                &specialized_condition,
+                &type_params,
+            )?;
             let witness_clauses = Self::checker_clauses_for_proposition(
                 &mut checker_kernel_context,
                 &specialized_condition,
                 &type_params,
             )?;
-            (specialized_condition, None, witness_clauses)
+            (
+                specialized_condition,
+                None,
+                specialized_clause,
+                witness_clauses,
+            )
         } else {
             let arg_types: Vec<AcornType> = arguments
                 .iter()
                 .map(|(_, arg_type)| arg_type.clone())
                 .collect();
-            let specialized_claim = AcornValue::ForAll(arg_types, Box::new(specialized_condition));
+            let specialized_value = AcornValue::ForAll(arg_types, Box::new(specialized_condition));
+            let specialized_clause = Self::maybe_specialized_clause_for_proposition(
+                &mut checker_kernel_context,
+                &specialized_value,
+                &type_params,
+            )?;
             let witness_clauses = Self::checker_clauses_for_proposition(
                 &mut checker_kernel_context,
-                &specialized_claim,
+                &specialized_value,
                 &type_params,
             )?;
             (
                 general_condition,
                 Some(format!("{}_result", witness.name)),
+                specialized_clause,
                 witness_clauses,
             )
         };
@@ -432,6 +450,7 @@ impl Certificate {
             return_type,
             condition,
             justification,
+            specialized_clause,
             witness_clauses,
         })
     }
@@ -668,6 +687,28 @@ impl Certificate {
             .collect())
     }
 
+    /// Lower a parsed certificate proposition to a single closed checker clause.
+    fn maybe_specialized_clause_for_proposition(
+        kernel_context: &mut KernelContext,
+        value: &AcornValue,
+        type_params: &[TypeParam],
+    ) -> Result<Option<Clause>, CodeGenError> {
+        let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
+        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = normalize_term(&term);
+        let checker_term = match kernel_context.term_to_checker_term(&term, type_var_map) {
+            Ok(term) => term,
+            Err(_) => return Ok(None),
+        };
+        Ok(Some(
+            Clause::from_literals_unnormalized(
+                vec![Literal::positive(checker_term)],
+                &LocalContext::empty(),
+            )
+            .normalized(),
+        ))
+    }
+
     /// Register a local constant introduced by a certificate `let ... satisfy` declaration.
     fn register_certificate_local_constant(
         bindings: &mut BindingMap,
@@ -810,6 +851,11 @@ impl Certificate {
             &specific_condition,
             &type_params,
         )?;
+        let specialized_clause = Self::maybe_specialized_clause_for_proposition(
+            kernel_context,
+            &specific_condition,
+            &type_params,
+        )?;
 
         for param in type_params.iter().rev() {
             bindings.remove_type(&param.name);
@@ -823,6 +869,7 @@ impl Certificate {
             return_type,
             condition: specific_condition,
             justification,
+            specialized_clause,
             witness_clauses,
         }))
     }
@@ -916,6 +963,11 @@ impl Certificate {
             &specialized_claim,
             &type_params,
         )?;
+        let specialized_clause = Self::maybe_specialized_clause_for_proposition(
+            kernel_context,
+            &specialized_claim,
+            &type_params,
+        )?;
 
         Ok(CertificateStep::Satisfy(SatisfyStep {
             name,
@@ -925,6 +977,7 @@ impl Certificate {
             return_type,
             condition,
             justification,
+            specialized_clause,
             witness_clauses,
         }))
     }
@@ -1359,12 +1412,6 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
-            for local_id in local_ids {
-                self.emit_witness(local_id)?;
-            }
-        }
-
         if let Some(local_id) = self.claim_replacements.get(&index).copied() {
             self.emit_witness(local_id)?;
             self.emitted[index] = true;
@@ -1376,7 +1423,11 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        self.emit_ready_step(index, current_index)
+        self.emit_ready_step(index, current_index)?;
+
+        self.emit_anchors_for_step(index)?;
+
+        Ok(())
     }
 
     /// Emit a step once every witness it references can already be declared.
@@ -1387,7 +1438,7 @@ impl<'a> WitnessEmitter<'a> {
 
         let step = self.ordered_steps[index].clone();
         if self.claim_clauses[index].is_none() {
-            self.output.push(step);
+            self.push_output_step(step)?;
             self.emitted[index] = true;
             return Ok(());
         }
@@ -1400,7 +1451,7 @@ impl<'a> WitnessEmitter<'a> {
                 self.specialized_positive_exists_step(claim)?
             {
                 self.ensure_declared(local_id, current_index)?;
-                self.output.push(step.clone());
+                self.push_output_step(step.clone())?;
                 self.emit_witness_step(
                     local_id,
                     CertificateStep::Satisfy(rewritten_step),
@@ -1413,8 +1464,13 @@ impl<'a> WitnessEmitter<'a> {
                 self.emitted[index] = true;
                 return Ok(());
             }
+            self.emit_supporting_witness_clause_specializations(claim)?;
+            if self.output.contains(&step) {
+                self.emitted[index] = true;
+                return Ok(());
+            }
         }
-        self.output.push(step);
+        self.push_output_step(step)?;
         self.emitted[index] = true;
         Ok(())
     }
@@ -1441,6 +1497,7 @@ impl<'a> WitnessEmitter<'a> {
                     continue;
                 }
                 self.emit_ready_step(index, current_index)?;
+                self.emit_anchors_for_step(index)?;
                 made_progress = true;
             }
         }
@@ -1464,17 +1521,17 @@ impl<'a> WitnessEmitter<'a> {
 
         let general_clause = witness.general_clause.clone();
         let placement = self.find_witness_placement(&general_clause, &witness.name)?;
-        let justification = if let Some(index) = match placement {
-            WitnessPlacement::Standalone => None,
-            WitnessPlacement::Anchor(index) | WitnessPlacement::Replace(index) => Some(index),
-        } {
-            let CertificateStep::Claim(claim) = &self.ordered_steps[index] else {
-                panic!("claim_clauses only records claim steps");
-            };
-            claim.clone()
-        } else {
-            Claim::new(general_clause.clone(), VariableMap::new())
-                .map_err(CodeGenError::GeneratedBadCode)?
+        let justification = match placement {
+            WitnessPlacement::Anchor(index) => {
+                let CertificateStep::Claim(claim) = &self.ordered_steps[index] else {
+                    panic!("claim_clauses only records claim steps");
+                };
+                claim.clone()
+            }
+            WitnessPlacement::Standalone | WitnessPlacement::Replace(_) => {
+                Claim::new(general_clause.clone(), VariableMap::new())
+                    .map_err(CodeGenError::GeneratedBadCode)?
+            }
         };
         match placement {
             WitnessPlacement::Standalone => {}
@@ -1551,8 +1608,7 @@ impl<'a> WitnessEmitter<'a> {
         if !self.replacement_indices.contains_key(&local_id)
             && !self.anchor_indices.contains_key(&local_id)
         {
-            self.output
-                .push(CertificateStep::Claim(step.justification.clone()));
+            self.push_output_step(CertificateStep::Claim(step.justification.clone()))?;
         }
         self.emit_witness_step(local_id, CertificateStep::Satisfy(step), None)?;
         self.in_progress.remove(&local_id);
@@ -1570,7 +1626,7 @@ impl<'a> WitnessEmitter<'a> {
             panic!("expected satisfy step");
         };
         let satisfy_step = satisfy_step.clone();
-        self.output.push(step);
+        self.push_output_step(step)?;
         self.declared.insert(local_id);
         self.record_specializable_witness_clauses(local_id, &satisfy_step);
         if let Some(parent_local_id) = parent_local_id {
@@ -1619,7 +1675,7 @@ impl<'a> WitnessEmitter<'a> {
 
             let claim = Self::claim_from_unary_witness_clause(clause.clone(), witness_term.clone())
                 .map_err(CodeGenError::GeneratedBadCode)?;
-            self.output.push(CertificateStep::Claim(claim.clone()));
+            self.push_output_step(CertificateStep::Claim(claim.clone()))?;
             if let Some((synthetic_local_id, parent_local_id, step)) =
                 self.specialized_positive_exists_step(&claim)?
             {
@@ -1680,6 +1736,71 @@ impl<'a> WitnessEmitter<'a> {
                     .map(|witness| witness.name.module_id())
             })
             .unwrap_or(self.module_id)
+    }
+
+    fn push_output_step(&mut self, step: CertificateStep) -> Result<(), CodeGenError> {
+        self.output.push(step);
+        Ok(())
+    }
+
+    fn emit_anchors_for_step(&mut self, index: usize) -> Result<(), CodeGenError> {
+        if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
+            for local_id in local_ids {
+                self.emit_witness(local_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_supporting_witness_clause_specializations(
+        &mut self,
+        claim: &Claim,
+    ) -> Result<(), CodeGenError> {
+        let candidate_clauses = self.specializable_witness_clauses.clone();
+        let candidate_terms: Vec<Term> = claim
+            .var_map()
+            .iter()
+            .map(|(_, term)| term.clone())
+            .collect();
+
+        for (_origin_local_id, clause) in candidate_clauses {
+            let expected_type = clause
+                .get_local_context()
+                .get_var_type(0)
+                .expect("unary witness clause should bind one local");
+            for candidate_term in &candidate_terms {
+                if candidate_term
+                    .get_type_with_context(&LocalContext::empty(), &self.kernel_context)
+                    != expected_type.to_owned()
+                {
+                    continue;
+                }
+                let support_claim = match Self::claim_from_unary_witness_clause(
+                    clause.clone(),
+                    candidate_term.clone(),
+                ) {
+                    Ok(claim) => claim,
+                    Err(_) => continue,
+                };
+                if self
+                    .output
+                    .contains(&CertificateStep::Claim(support_claim.clone()))
+                {
+                    continue;
+                }
+                self.push_output_step(CertificateStep::Claim(support_claim.clone()))?;
+                if let Some((synthetic_local_id, parent_local_id, step)) =
+                    self.specialized_positive_exists_step(&support_claim)?
+                {
+                    self.emit_witness_step(
+                        synthetic_local_id,
+                        CertificateStep::Satisfy(step),
+                        Some(parent_local_id),
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Open a specialized top-level positive existential into a fresh synthetic witness step.

@@ -509,6 +509,13 @@ impl Checker {
                         StepReason::WitnessDeclaration,
                         kernel_context,
                     );
+                    if let Some(specialized_clause) = &step.specialized_clause {
+                        self.insert_clause(
+                            specialized_clause,
+                            StepReason::WitnessDeclaration,
+                            kernel_context,
+                        );
+                    }
                     for clause in &step.witness_clauses {
                         self.insert_clause(clause, StepReason::WitnessDeclaration, kernel_context);
                     }
