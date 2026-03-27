@@ -36,6 +36,76 @@ fn test_proof_generation_with_intermediate_existential() {
     verify_succeeds(text);
 }
 
+#[cfg(feature = "nwit")]
+#[test]
+fn test_nwit_cert_generation_replays_source_let_satisfy_inside_forall() {
+    let text = r#"
+        type Nat: axiom
+        let p: (Nat, Nat) -> Bool = axiom
+
+        theorem goal {
+            forall(big_n: Nat) {
+                exists(m: Nat) {
+                    p(big_n, m)
+                }
+            }
+            implies
+            forall(big_n: Nat) {
+                exists(m: Nat) {
+                    p(big_n, m)
+                }
+            }
+        } by {
+            forall(big_n: Nat) {
+                let m: Nat satisfy {
+                    p(big_n, m)
+                }
+
+                p(big_n, m)
+            }
+        }
+    "#;
+
+    let mut project = Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let cursor = env.get_node_by_goal_name("goal");
+    let mut processor = Processor::with_imports(None, cursor.bindings(), &project).unwrap();
+    processor.add_module_facts(&cursor).unwrap();
+    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+    processor.set_lowered_goal(normalized_goal);
+    let goal_kernel_context = &normalized_goal.kernel_context;
+    let outcome = processor.search(ProverMode::Test, goal_kernel_context);
+    assert_eq!(outcome, Outcome::Success);
+
+    let cert = processor
+        .prover()
+        .make_cert(cursor.bindings(), goal_kernel_context, true)
+        .expect("make_cert should succeed");
+    let proof = cert.proof.as_ref().expect("proof should exist");
+    assert!(
+        proof
+            .iter()
+            .any(|line| line.contains("let w0: Nat satisfy")),
+        "expected witness emission in generated cert: {proof:?}"
+    );
+    processor
+        .check_cert(
+            &cert,
+            None,
+            goal_kernel_context,
+            &project,
+            cursor.bindings(),
+        )
+        .expect("generated cert should replay");
+}
+
 #[test]
 fn test_assuming_lhs_of_implication() {
     verify_succeeds(

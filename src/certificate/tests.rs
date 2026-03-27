@@ -524,12 +524,16 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
 
     assert_eq!(
         emitted.len(),
-        1,
+        2,
         "redundant specialized claim should be skipped"
     );
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
-        "expected only the witness declaration once the witness absorbs its existential claim"
+        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        "expected the anchoring claim to remain ahead of the witness declaration"
+    );
+    assert!(
+        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration after the anchoring claim"
     );
 }
 
@@ -575,11 +579,13 @@ fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
 
     assert_eq!(
         emitted.len(),
-        1,
-        "expected the synthetic witness step without a separate existential claim"
+        2,
+        "expected the original claim followed by one synthetic witness step"
     );
 
-    let CertificateStep::Satisfy(step) = &emitted[0] else {
+    assert_eq!(emitted[0], CertificateStep::Claim(claim.clone()));
+
+    let CertificateStep::Satisfy(step) = &emitted[1] else {
         panic!("expected a synthetic witness step");
     };
     assert_eq!(step.justification, claim);
