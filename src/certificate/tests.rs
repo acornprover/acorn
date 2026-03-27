@@ -403,7 +403,7 @@ fn test_parse_code_line_accepts_claim_with_args_shape() {
 
 #[cfg(feature = "nwit")]
 #[test]
-fn test_emit_named_function_witness_inserts_missing_justification_claim() {
+fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
     use crate::kernel::checker::{Checker, StepReason};
     use crate::kernel::term::Term;
 
@@ -423,12 +423,27 @@ fn test_emit_named_function_witness_inserts_missing_justification_claim() {
             .expect("named witness emission should succeed");
 
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
-        "expected a synthesized justification claim before the witness step"
+        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration before any claim that mentions it"
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .count(),
+        1,
+        "expected exactly one witness declaration"
     );
     assert!(
-        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration after the synthesized claim"
+        !emitted.iter().any(|step| {
+            let CertificateStep::Claim(claim) = step else {
+                return false;
+            };
+            claim
+                .normalized_specialized_clause(&kernel_context)
+                .is_ok_and(|clause| clause == source_clause.normalized())
+        }),
+        "the emitted proof should not reintroduce the witness existential as a standalone claim"
     );
 
     let mut checker = Checker::new();
@@ -509,16 +524,12 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
 
     assert_eq!(
         emitted.len(),
-        2,
+        1,
         "redundant specialized claim should be skipped"
     );
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
-        "expected the anchoring claim to stay ahead of the named witness"
-    );
-    assert!(
-        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration after the anchoring claim"
+        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
+        "expected only the witness declaration once the witness absorbs its existential claim"
     );
 }
 
@@ -564,12 +575,11 @@ fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
 
     assert_eq!(
         emitted.len(),
-        2,
-        "expected the original claim followed by one synthetic witness step"
+        1,
+        "expected the synthetic witness step without a separate existential claim"
     );
-    assert_eq!(emitted[0], CertificateStep::Claim(claim.clone()));
 
-    let CertificateStep::Satisfy(step) = &emitted[1] else {
+    let CertificateStep::Satisfy(step) = &emitted[0] else {
         panic!("expected a synthetic witness step");
     };
     assert_eq!(step.justification, claim);

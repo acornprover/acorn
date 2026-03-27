@@ -1412,8 +1412,18 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
+        let mut replaced_by_witness = false;
         if let Some(local_id) = self.claim_replacements.get(&index).copied() {
             self.emit_witness(local_id)?;
+            replaced_by_witness = true;
+        }
+        if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
+            for local_id in local_ids {
+                self.emit_witness(local_id)?;
+                replaced_by_witness = true;
+            }
+        }
+        if replaced_by_witness {
             self.emitted[index] = true;
             return Ok(());
         }
@@ -1451,7 +1461,6 @@ impl<'a> WitnessEmitter<'a> {
                 self.specialized_positive_exists_step(claim)?
             {
                 self.ensure_declared(local_id, current_index)?;
-                self.push_output_step(step.clone())?;
                 self.emit_witness_step(
                     local_id,
                     CertificateStep::Satisfy(rewritten_step),
@@ -1605,11 +1614,6 @@ impl<'a> WitnessEmitter<'a> {
             .get(&local_id)
             .expect("prepared witness step should exist")
             .clone();
-        if !self.replacement_indices.contains_key(&local_id)
-            && !self.anchor_indices.contains_key(&local_id)
-        {
-            self.push_output_step(CertificateStep::Claim(step.justification.clone()))?;
-        }
         self.emit_witness_step(local_id, CertificateStep::Satisfy(step), None)?;
         self.in_progress.remove(&local_id);
         Ok(())
