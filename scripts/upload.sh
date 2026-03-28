@@ -10,20 +10,25 @@ current_dir="$(pwd)"
 # Exit immediately if any command fails
 set -ex
 
-# We always want an up-to-date build, and it's cached so it won't slow us down to redo this.
-./scripts/crossbuild.sh
-
 # Default value: empty
 CLOBBER=""
+SKIP_BUILD=""
 
 # Parse CLI arguments
 for arg in "$@"; do
   if [ "$arg" == "--clobber" ]; then
     echo "clobbering."
     CLOBBER="--clobber"
-    break
+  elif [ "$arg" == "--skip-build" ]; then
+    echo "skipping rebuild."
+    SKIP_BUILD="1"
   fi
 done
+
+if [ -z "$SKIP_BUILD" ]; then
+  # We always want an up-to-date build, and it's cached so it won't slow us down to redo this.
+  ./scripts/crossbuild.sh
+fi
 
 VERSION=`cat VERSION`
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version"; exit 1; }

@@ -37,8 +37,8 @@ echo "New version: $VERSION"
 
 ./scripts/crossbuild.sh
 
-# Make sure the embedded acornlib checks
-./target/release/acorn check --lib ./vscode/extension/acornlib
+# Make sure the uploaded Linux release binary can check the embedded acornlib.
+./target/x86_64-unknown-linux-gnu/release/acorn check --lib ./vscode/extension/acornlib
 
 git add .
 git commit -m "Releasing version $VERSION"
@@ -49,7 +49,7 @@ git push upstream master
 ./python/tag.py
 
 # This creates the release, and hopefully finishes before the Windows build.
-./scripts/upload.sh
+./scripts/upload.sh --skip-build
 
 set +x
 echo Check the Windows build here:      https://github.com/acornprover/acorn/actions
