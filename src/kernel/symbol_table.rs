@@ -64,7 +64,6 @@ fn ite_symbol_type_ref() -> &'static Term {
     &ITE_TYPE
 }
 
-#[cfg(not(feature = "nwit"))]
 fn choose_symbol_type_ref() -> &'static Term {
     use std::sync::LazyLock;
     static CHOOSE_TYPE: LazyLock<Term> = LazyLock::new(|| {
@@ -341,7 +340,6 @@ impl SymbolTable {
             Symbol::And | Symbol::Or => bool_binary_symbol_type_ref(),
             Symbol::Eq => eq_symbol_type_ref(),
             Symbol::Ite => ite_symbol_type_ref(),
-            #[cfg(not(feature = "nwit"))]
             Symbol::Choose => choose_symbol_type_ref(),
             Symbol::Bool | Symbol::Type0 | Symbol::Type(_) | Symbol::Typeclass(_) => {
                 Term::type_sort_ref()
@@ -362,7 +360,6 @@ impl SymbolTable {
             Symbol::And | Symbol::Or => bool_binary_symbol_type_ref().clone(),
             Symbol::Eq => eq_symbol_type_ref().clone(),
             Symbol::Ite => ite_symbol_type_ref().clone(),
-            #[cfg(not(feature = "nwit"))]
             Symbol::Choose => choose_symbol_type_ref().clone(),
             Symbol::Bool | Symbol::Type0 | Symbol::Typeclass(_) => Term::type_sort(),
             Symbol::Type(ground_id) => type_store.get_type_kind(ground_id),

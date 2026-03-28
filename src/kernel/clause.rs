@@ -789,19 +789,6 @@ impl Clause {
         Some((witness, instantiated))
     }
 
-    /// Reduce `exists(T => body)` to `body[choose(T, function(x:T){body})/x]`.
-    ///
-    /// This is the legacy existential-activation path for non-`nwit` builds.
-    #[cfg(not(feature = "nwit"))]
-    fn reduce_exists_with_choose(term: &Term) -> Option<Term> {
-        let (binder_type, body) = term.as_ref().split_exists()?;
-        let binder_type = binder_type.to_owned();
-        let body = body.to_owned();
-        let predicate = Term::lambda(binder_type.clone(), body.clone());
-        let choose_term = Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[binder_type, predicate]);
-        Some(body.substitute_bound(0, &choose_term).shift_bound(0, -1))
-    }
-
     /// Reduce a top-level function inequality `f != g` to
     /// `exists(x: A) { f(x) != g(x) }`.
     ///
@@ -1079,10 +1066,8 @@ impl Clause {
     pub fn find_boolean_reductions_with_options(
         &self,
         kernel_context: &KernelContext,
-        allow_positive_exists_witness: bool,
+        _allow_positive_exists_witness: bool,
     ) -> Vec<NormalizedClauseTrace> {
-        #[cfg(feature = "nwit")]
-        let _ = allow_positive_exists_witness;
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];
@@ -1236,17 +1221,6 @@ impl Clause {
                             &self.context,
                         ));
                         continue;
-                    }
-                    #[cfg(not(feature = "nwit"))]
-                    if allow_positive_exists_witness {
-                        if let Some(reduced) = Self::reduce_exists_with_choose(&literal.left) {
-                            answer.extend(self.with_replaced_literal_and_context(
-                                i,
-                                vec![vec![Literal::positive(reduced)]],
-                                &self.context,
-                            ));
-                            continue;
-                        }
                     }
                 } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
                     answer.extend(self.with_replaced_literal_and_context(
@@ -1881,94 +1855,6 @@ mod tests {
         assert!(Clause::impossible().boolean_reductions(&kctx).is_empty());
     }
 
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_boolean_reduction_negated_forall_becomes_exists_negated_body() {
-        let mut kctx = KernelContext::new();
-        kctx.parse_constant("g0", "Bool -> Bool");
-
-        let forall_term = Term::forall(
-            Term::bool_type(),
-            kctx.parse_term("g0")
-                .apply(&[Term::atom(Atom::BoundVariable(0))]),
-        );
-        let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
-        let expected_clause = Clause::new(
-            vec![Literal::positive(Term::exists(
-                Term::bool_type(),
-                Term::not(
-                    kctx.parse_term("g0")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                ),
-            ))],
-            &LocalContext::empty(),
-        );
-        assert_eq!(clause, expected_clause);
-
-        let choose = Term::choose(
-            Term::bool_type(),
-            Term::lambda(
-                Term::bool_type(),
-                Term::not(
-                    kctx.parse_term("g0")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                ),
-            ),
-        );
-        let expected_reduction = Clause::new(
-            vec![Literal::negative(kctx.parse_term("g0").apply(&[choose]))],
-            &LocalContext::empty(),
-        );
-        assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
-    }
-
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_boolean_reduction_negated_forall_normalizes_resulting_exists_body() {
-        let mut kctx = KernelContext::new();
-        kctx.parse_constant("g0", "Bool -> Bool");
-
-        let body = Term::not(Term::and(
-            Term::atom(Atom::BoundVariable(0)),
-            kctx.parse_term("g0")
-                .apply(&[Term::atom(Atom::BoundVariable(0))]),
-        ));
-        let forall_term = Term::forall(Term::bool_type(), body);
-        let clause = Clause::new(vec![Literal::negative(forall_term)], &LocalContext::empty());
-        let expected_clause = Clause::new(
-            vec![Literal::positive(Term::exists(
-                Term::bool_type(),
-                Term::and(
-                    Term::atom(Atom::BoundVariable(0)),
-                    kctx.parse_term("g0")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                ),
-            ))],
-            &LocalContext::empty(),
-        );
-        assert_eq!(clause, expected_clause);
-
-        let choose = Term::choose(
-            Term::bool_type(),
-            Term::lambda(
-                Term::bool_type(),
-                Term::and(
-                    Term::atom(Atom::BoundVariable(0)),
-                    kctx.parse_term("g0")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                ),
-            ),
-        );
-        let expected_reduction = Clause::new(
-            vec![Literal::positive(Term::and(
-                choose.clone(),
-                kctx.parse_term("g0").apply(&[choose]),
-            ))],
-            &LocalContext::empty(),
-        );
-        assert_eq!(clause.boolean_reductions(&kctx), vec![expected_reduction]);
-    }
-
     #[test]
     fn test_boolean_reduction_function_inequality_becomes_exists() {
         let mut kctx = KernelContext::new();
@@ -1996,67 +1882,6 @@ mod tests {
         );
 
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
-    }
-
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_boolean_reduction_function_inequality_composes_with_exists() {
-        let mut kctx = KernelContext::new();
-        kctx.parse_constants(&["g0", "g1"], "Bool -> Bool");
-
-        let start = Clause::new(
-            vec![Literal::not_equals(
-                kctx.parse_term("g0"),
-                kctx.parse_term("g1"),
-            )],
-            &LocalContext::empty(),
-        );
-        let first = start.boolean_reductions(&kctx);
-        assert_eq!(first.len(), 1, "expected function inequality -> exists");
-
-        let second = first[0].boolean_reductions(&kctx);
-        assert_eq!(second.len(), 1, "expected exists -> choose witness");
-
-        let choose = Term::choose(
-            Term::bool_type(),
-            Term::lambda(
-                Term::bool_type(),
-                Term::not(Term::eq(
-                    Term::bool_type(),
-                    kctx.parse_term("g0")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                    kctx.parse_term("g1")
-                        .apply(&[Term::atom(Atom::BoundVariable(0))]),
-                )),
-            ),
-        );
-        let expected_second = Clause::new(
-            vec![Literal::not_equals(
-                kctx.parse_term("g0").apply(&[choose.clone()]),
-                kctx.parse_term("g1").apply(&[choose.clone()]),
-            )],
-            &LocalContext::empty(),
-        );
-        assert_eq!(second, vec![expected_second.clone()]);
-
-        let third = expected_second.boolean_reductions(&kctx);
-        let expected_third = vec![
-            Clause::new(
-                vec![
-                    Literal::negative(kctx.parse_term("g1").apply(&[choose.clone()])),
-                    Literal::negative(kctx.parse_term("g0").apply(&[choose.clone()])),
-                ],
-                &LocalContext::empty(),
-            ),
-            Clause::new(
-                vec![
-                    Literal::positive(kctx.parse_term("g1").apply(&[choose.clone()])),
-                    Literal::positive(kctx.parse_term("g0").apply(&[choose.clone()])),
-                ],
-                &LocalContext::empty(),
-            ),
-        ];
-        assert_eq!(third, expected_third);
     }
 
     #[test]

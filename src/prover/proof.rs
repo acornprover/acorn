@@ -34,7 +34,6 @@ pub trait ProofResolver {
 /// previous steps.
 pub struct Proof<'a> {
     kernel_context: &'a KernelContext,
-    #[cfg_attr(not(feature = "nwit"), allow(dead_code))]
     witness_registry: Option<&'a WitnessRegistry>,
 
     // Steps of the proof that can be directly verified.
@@ -283,16 +282,12 @@ impl<'a> Proof<'a> {
     /// Create a certificate for this proof.
     pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        #[cfg(feature = "nwit")]
-        let witness_registry = self.witness_registry;
-        #[cfg(not(feature = "nwit"))]
-        let witness_registry = None;
         Certificate::from_concrete_steps_with_witnesses(
             goal,
             &concrete_steps,
             self.kernel_context,
             bindings,
-            witness_registry,
+            self.witness_registry,
         )
     }
 
@@ -344,11 +339,10 @@ impl<'a> Proof<'a> {
                 .iter()
                 .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
             let should_skip = step.rule.is_assumption()
-                && !(cfg!(feature = "nwit")
-                    && step
-                        .clause
-                        .positive_exists_reduction(kernel_context)
-                        .is_some());
+                && step
+                    .clause
+                    .positive_exists_reduction(kernel_context)
+                    .is_none();
 
             if should_skip && !step.clause.has_any_variable() && !has_type_params {
                 let Some(cs) = concrete_steps.remove(&concrete_id) else {
@@ -554,10 +548,9 @@ pub fn reconstruct_step<R: ProofResolver>(
     match &step.rule {
         Rule::Assumption(info) => {
             let generic = Clause::from_literals_unnormalized(info.literals.clone(), &info.context);
-            let needs_explicit_existential = cfg!(feature = "nwit")
-                && generic
-                    .positive_exists_reduction(resolver.kernel_context())
-                    .is_some();
+            let needs_explicit_existential = generic
+                .positive_exists_reduction(resolver.kernel_context())
+                .is_some();
             if conclusion_map.len() == 0 && !needs_explicit_existential {
                 // No concrete instantiation needed.
                 return Ok(());
@@ -608,7 +601,6 @@ mod tests {
     use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
     use crate::kernel::proof_step::{SimplificationInfo, SingleSourceInfo};
     use crate::kernel::term::Term;
-    #[cfg(feature = "nwit")]
     use crate::kernel::variable_map::apply_to_term;
     use crate::kernel::variable_map::VariableMap;
     use crate::module::ModuleId;
@@ -912,91 +904,50 @@ mod tests {
 
         let mut kctx = KernelContext::new();
 
-        let (source_clause, original_step, expected) = {
-            #[cfg(feature = "nwit")]
-            {
-                let source_clause = Clause::new(
-                    vec![Literal::positive(Term::exists(
-                        Term::bool_type(),
-                        Term::not(Term::eq(
-                            Term::bool_type(),
-                            Term::atom(Atom::BoundVariable(0)),
-                            Term::new_variable(0),
-                        )),
-                    ))],
-                    &LocalContext::from_types(vec![Term::bool_type()]),
-                );
-                let source_step = ProofStep::mock_from_clause(source_clause.clone());
-                let mut witness_registry = WitnessRegistry::new();
-                let exists_reduction = source_clause
-                    .positive_exists_reduction(&kctx)
-                    .expect("expected positive exists reduction");
-                let opening = witness_registry.open_positive_exists(
-                    &mut kctx,
-                    ModuleId::default(),
-                    &source_clause,
-                    &exists_reduction,
-                );
-                let opening_term = opening.term.clone();
-                let reduction = opening.reduction;
-                let original_step = ProofStep::direct(
-                    &source_step,
-                    Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-                    reduction.clause,
-                    PremiseMap::new(
-                        vec![VariableMap::new()],
-                        reduction.var_ids,
-                        reduction.pre_norm_context,
-                    ),
-                );
-                let mut specialization_map = VariableMap::new();
-                specialization_map.set(0, Term::new_true());
-                let expected_clause = Clause::new(
-                    vec![Literal::not_equals(
-                        apply_to_term(opening_term.as_ref(), &specialization_map),
-                        Term::new_true(),
-                    )],
-                    &LocalContext::empty(),
-                );
-                (source_clause, original_step, expected_clause.to_string())
-            }
-
-            #[cfg(not(feature = "nwit"))]
-            {
-                let source_clause = Clause::new(
-                    vec![Literal::negative(Term::forall(
-                        Term::bool_type(),
-                        Term::eq(
-                            Term::bool_type(),
-                            Term::atom(Atom::BoundVariable(0)),
-                            Term::new_variable(0),
-                        ),
-                    ))],
-                    &LocalContext::from_types(vec![Term::bool_type()]),
-                );
-                let source_step = ProofStep::mock_from_clause(source_clause.clone());
-                let reduction = source_clause
-                    .find_boolean_reductions_with_options(&kctx, true)
-                    .into_iter()
-                    .next()
-                    .expect("expected forall reduction");
-                let original_step = ProofStep::direct(
-                    &source_step,
-                    Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-                    reduction.clause,
-                    PremiseMap::new(
-                        vec![VariableMap::new()],
-                        reduction.var_ids,
-                        reduction.pre_norm_context,
-                    ),
-                );
-                (
-                    source_clause,
-                    original_step,
-                    "not choose(Bool, lambda(Bool => not(eq(Bool, true, b0))))".to_string(),
-                )
-            }
-        };
+        let source_clause = Clause::new(
+            vec![Literal::positive(Term::exists(
+                Term::bool_type(),
+                Term::not(Term::eq(
+                    Term::bool_type(),
+                    Term::atom(Atom::BoundVariable(0)),
+                    Term::new_variable(0),
+                )),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+        let mut witness_registry = WitnessRegistry::new();
+        let exists_reduction = source_clause
+            .positive_exists_reduction(&kctx)
+            .expect("expected positive exists reduction");
+        let opening = witness_registry.open_positive_exists(
+            &mut kctx,
+            ModuleId::default(),
+            &source_clause,
+            &exists_reduction,
+        );
+        let opening_term = opening.term.clone();
+        let reduction = opening.reduction;
+        let original_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduction.clause,
+            PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            ),
+        );
+        let mut specialization_map = VariableMap::new();
+        specialization_map.set(0, Term::new_true());
+        let expected = Clause::new(
+            vec![Literal::not_equals(
+                apply_to_term(opening_term.as_ref(), &specialization_map),
+                Term::new_true(),
+            )],
+            &LocalContext::empty(),
+        )
+        .to_string();
 
         let mut witness_map = VariableMap::new();
         witness_map.set(0, Term::new_true());
@@ -1057,79 +1008,40 @@ mod tests {
         let simplifying_clause = kctx.parse_clause("x1 = x2", &["Type", "x0", "x0"]);
         let simplifying_step = ProofStep::mock_from_clause(simplifying_clause);
 
-        #[cfg(feature = "nwit")]
         let mut witness_registry = WitnessRegistry::new();
 
-        let (source_clause, source_step, original_step) = {
-            #[cfg(feature = "nwit")]
-            {
-                let source_clause = Clause::new(
-                    vec![Literal::positive(Term::exists(
-                        Term::bool_type(),
-                        Term::not(Term::eq(
-                            Term::bool_type(),
-                            Term::atom(Atom::BoundVariable(0)),
-                            Term::new_variable(0),
-                        )),
-                    ))],
-                    &LocalContext::from_types(vec![Term::bool_type()]),
-                );
-                let source_step = ProofStep::mock_from_clause(source_clause.clone());
-                let exists_reduction = source_clause
-                    .positive_exists_reduction(&kctx)
-                    .expect("expected positive exists reduction");
-                let opening = witness_registry.open_positive_exists(
-                    &mut kctx,
-                    ModuleId::default(),
-                    &source_clause,
-                    &exists_reduction,
-                );
-                let reduction = opening.reduction;
-                let original_step = ProofStep::direct(
-                    &source_step,
-                    Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-                    reduction.clause,
-                    PremiseMap::new(
-                        vec![VariableMap::new()],
-                        reduction.var_ids,
-                        reduction.pre_norm_context,
-                    ),
-                );
-                (source_clause, source_step, original_step)
-            }
-
-            #[cfg(not(feature = "nwit"))]
-            {
-                let source_clause = Clause::new(
-                    vec![Literal::negative(Term::forall(
-                        Term::bool_type(),
-                        Term::eq(
-                            Term::bool_type(),
-                            Term::atom(Atom::BoundVariable(0)),
-                            Term::new_variable(0),
-                        ),
-                    ))],
-                    &LocalContext::from_types(vec![Term::bool_type()]),
-                );
-                let source_step = ProofStep::mock_from_clause(source_clause.clone());
-                let reduction = source_clause
-                    .find_boolean_reductions_with_options(&kctx, true)
-                    .into_iter()
-                    .next()
-                    .expect("expected forall reduction");
-                let original_step = ProofStep::direct(
-                    &source_step,
-                    Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-                    reduction.clause,
-                    PremiseMap::new(
-                        vec![VariableMap::new()],
-                        reduction.var_ids,
-                        reduction.pre_norm_context,
-                    ),
-                );
-                (source_clause, source_step, original_step)
-            }
-        };
+        let source_clause = Clause::new(
+            vec![Literal::positive(Term::exists(
+                Term::bool_type(),
+                Term::not(Term::eq(
+                    Term::bool_type(),
+                    Term::atom(Atom::BoundVariable(0)),
+                    Term::new_variable(0),
+                )),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+        let exists_reduction = source_clause
+            .positive_exists_reduction(&kctx)
+            .expect("expected positive exists reduction");
+        let opening = witness_registry.open_positive_exists(
+            &mut kctx,
+            ModuleId::default(),
+            &source_clause,
+            &exists_reduction,
+        );
+        let reduction = opening.reduction;
+        let original_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            reduction.clause,
+            PremiseMap::new(
+                vec![VariableMap::new()],
+                reduction.var_ids,
+                reduction.pre_norm_context,
+            ),
+        );
 
         let reduced_literal = &original_step.clause.literals[0];
         let mut simplifying_var_map = VariableMap::new();
@@ -1157,10 +1069,7 @@ mod tests {
             ),
         };
 
-        #[cfg(feature = "nwit")]
         let mut proof = Proof::new_with_witnesses(&kctx, Some(&witness_registry));
-        #[cfg(not(feature = "nwit"))]
-        let mut proof = Proof::new(&kctx);
         proof.add_step(ProofStepId::Active(0), &simplifying_step);
         proof.add_step(ProofStepId::Active(1), &source_step);
         proof.add_step(ProofStepId::Final, &final_step);

@@ -1,7 +1,7 @@
 #![allow(unexpected_cfgs)]
 
-#[cfg(all(feature = "nwit", feature = "nocnf"))]
-compile_error!("features \"nwit\" and \"nocnf\" are not supported together");
+#[cfg(feature = "nocnf")]
+compile_error!("feature \"nocnf\" is not supported with named-witness certificates");
 
 pub mod build_cache;
 pub mod builder;

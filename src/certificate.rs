@@ -112,9 +112,9 @@ pub struct Certificate {
 }
 
 impl Certificate {
-    /// Named-witness mode rejects legacy `choose(...)` certificate syntax.
+    /// Certificates reject legacy `choose(...)` certificate syntax.
     fn certificate_allows_choose() -> bool {
-        !cfg!(feature = "nwit")
+        false
     }
 
     fn references_value_local(
@@ -317,7 +317,7 @@ impl Certificate {
 
     /// Replace eligible proof claims with named-witness steps and emit assumption-backed
     /// witnesses before their first use.
-    #[cfg(all(test, feature = "nwit"))]
+    #[cfg(test)]
     fn emit_named_witnesses(
         ordered_steps: Vec<CertificateStep>,
         witness_registry: &WitnessRegistry,

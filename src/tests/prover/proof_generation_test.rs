@@ -36,9 +36,8 @@ fn test_proof_generation_with_intermediate_existential() {
     verify_succeeds(text);
 }
 
-#[cfg(feature = "nwit")]
 #[test]
-fn test_nwit_cert_generation_replays_source_let_satisfy_inside_forall() {
+fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     let text = r#"
         type Nat: axiom
         let p: (Nat, Nat) -> Bool = axiom

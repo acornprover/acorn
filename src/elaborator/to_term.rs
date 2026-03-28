@@ -459,46 +459,7 @@ fn lower_value_to_term_with_stack(
             BinderKind::Exists,
         ),
 
-        AcornValue::Choose(choice_type, body) => {
-            #[cfg(feature = "nwit")]
-            {
-                let _ = (choice_type, body);
-                return Err(
-                    "choose expressions are not supported with feature \"nwit\"".to_string()
-                );
-            }
-
-            #[cfg(not(feature = "nwit"))]
-            {
-                let choice_type_term =
-                    lower_type_to_term(kernel_context, choice_type, type_var_map);
-                let choice_var_index = stack.len() as AtomId;
-                let predicate = if let Some(predicate_value) =
-                    strip_wrapped_choose_function(body, choice_var_index, choice_type)
-                {
-                    let mut eta_stack = stack.clone();
-                    eta_stack.insert(choice_var_index as usize, Term::new_true());
-                    lower_value_to_term_with_stack(
-                        kernel_context,
-                        &predicate_value,
-                        type_var_map,
-                        prefer_instance_aliases,
-                        &mut eta_stack,
-                    )?
-                } else {
-                    let predicate_value =
-                        AcornValue::lambda(vec![choice_type.clone()], (**body).clone());
-                    lower_value_to_term_with_stack(
-                        kernel_context,
-                        &predicate_value,
-                        type_var_map,
-                        prefer_instance_aliases,
-                        stack,
-                    )?
-                };
-                Ok(logical_head(Symbol::Choose).apply(&[choice_type_term, predicate]))
-            }
-        }
+        AcornValue::Choose(_, _) => Err("choose expressions are not supported".to_string()),
 
         AcornValue::Binary(op, left, right) => {
             let left_term = lower_value_to_term_with_stack(
@@ -595,95 +556,6 @@ fn lower_value_to_term_with_stack(
             stack,
         ),
     }
-}
-
-#[cfg(not(feature = "nwit"))]
-fn strip_wrapped_choose_function(
-    body: &AcornValue,
-    choice_var_index: AtomId,
-    choice_type: &AcornType,
-) -> Option<AcornValue> {
-    let flattened = body.flatten_applications();
-    let AcornValue::Application(app) = flattened else {
-        return None;
-    };
-    if app.args.len() != 1
-        || app.args[0] != AcornValue::Variable(choice_var_index, choice_type.clone())
-    {
-        return None;
-    }
-    let AcornValue::Lambda(arg_types, lambda_body) = *app.function else {
-        return None;
-    };
-    if arg_types.len() != 1 || arg_types[0] != *choice_type {
-        return None;
-    }
-    strip_choose_body_application(&lambda_body, choice_var_index, choice_type)
-}
-
-#[cfg(not(feature = "nwit"))]
-fn strip_choose_body_application(
-    body: &AcornValue,
-    choice_var_index: AtomId,
-    choice_type: &AcornType,
-) -> Option<AcornValue> {
-    fn references_stack_range(value: &AcornValue, start: AtomId, end: AtomId) -> bool {
-        match value {
-            AcornValue::Variable(index, _) => *index >= start && *index < end,
-            AcornValue::Application(app) => {
-                references_stack_range(&app.function, start, end)
-                    || app
-                        .args
-                        .iter()
-                        .any(|arg| references_stack_range(arg, start, end))
-            }
-            AcornValue::TypeApplication(app) => references_stack_range(&app.function, start, end),
-            AcornValue::Lambda(_, value)
-            | AcornValue::ForAll(_, value)
-            | AcornValue::Exists(_, value)
-            | AcornValue::Choose(_, value)
-            | AcornValue::Not(value)
-            | AcornValue::Try(value, _) => references_stack_range(value, start, end),
-            AcornValue::Binary(_, left, right) => {
-                references_stack_range(left, start, end)
-                    || references_stack_range(right, start, end)
-            }
-            AcornValue::IfThenElse(cond, if_value, else_value) => {
-                references_stack_range(cond, start, end)
-                    || references_stack_range(if_value, start, end)
-                    || references_stack_range(else_value, start, end)
-            }
-            AcornValue::Match(scrutinee, cases) => {
-                references_stack_range(scrutinee, start, end)
-                    || cases.iter().any(|case| {
-                        references_stack_range(&case.pattern, start, end)
-                            || references_stack_range(&case.result, start, end)
-                    })
-            }
-            AcornValue::Constant(_) | AcornValue::Bool(_) => false,
-        }
-    }
-
-    let flattened = body.flatten_applications();
-    let AcornValue::Application(app) = flattened else {
-        return None;
-    };
-    if app.args.is_empty() {
-        return None;
-    }
-    let last_arg = app.args.last()?;
-    if *last_arg != AcornValue::Variable(choice_var_index, choice_type.clone()) {
-        return None;
-    }
-    let prefix_args = &app.args[..app.args.len() - 1];
-    if references_stack_range(&app.function, choice_var_index, choice_var_index + 1)
-        || prefix_args
-            .iter()
-            .any(|arg| references_stack_range(arg, choice_var_index, choice_var_index + 1))
-    {
-        return None;
-    }
-    Some(AcornValue::apply(*app.function, prefix_args.to_vec()))
 }
 
 #[derive(Clone, Copy)]
@@ -1124,108 +996,6 @@ mod tests {
             ),
         );
         assert_eq!(term, expected);
-    }
-
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_lower_value_to_term_choose_eta_reduces_wrapped_predicate_function() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_type =
-            AcornType::functional(vec![AcornType::Bool, AcornType::Bool], AcornType::Bool);
-        let g0 = AcornValue::constant(
-            g0_name.clone(),
-            vec![],
-            g0_type.clone(),
-            g0_type.clone(),
-            vec![],
-        );
-
-        let value = AcornValue::choose(
-            AcornType::Bool,
-            AcornValue::apply(
-                AcornValue::lambda(
-                    vec![AcornType::Bool],
-                    AcornValue::apply(
-                        g0.clone().insert_stack(0, 1),
-                        vec![
-                            AcornValue::Bool(true),
-                            AcornValue::Variable(0, AcornType::Bool),
-                        ],
-                    ),
-                ),
-                vec![AcornValue::Variable(0, AcornType::Bool)],
-            ),
-        );
-        let term = lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
-            .expect("choose lowering should succeed");
-
-        let g0_symbol = kernel_context
-            .symbol_table
-            .get_symbol(&g0_name)
-            .expect("g0 symbol should be registered");
-        let expected_predicate = Term::atom(Atom::Symbol(g0_symbol)).apply(&[Term::new_true()]);
-        let expected = Term::atom(Atom::Symbol(Symbol::Choose))
-            .apply(&[Term::bool_type(), expected_predicate]);
-        assert_eq!(term, expected);
-    }
-
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_lower_value_to_term_preserving_alias_spelling_roundtrips_choose_function_predicate() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_symbol = kernel_context.symbol_table.add_constant(
-            g0_name,
-            NewConstantType::Global,
-            kernel_context.parse_type("Bool -> Bool"),
-        );
-
-        let term = Term::atom(Atom::Symbol(Symbol::Choose))
-            .apply(&[Term::bool_type(), Term::atom(Atom::Symbol(g0_symbol))]);
-        let quoted =
-            kernel_context.quote_term_with_context(&term, LocalContext::empty_ref(), false);
-        let roundtripped = lower_value_to_term_existing_preserving_alias_spelling(
-            &mut kernel_context,
-            &quoted,
-            None,
-        )
-        .expect("validation lowering should preserve choose predicate shape");
-
-        assert_eq!(term, roundtripped);
-    }
-
-    #[cfg(not(feature = "nwit"))]
-    #[test]
-    fn test_lower_value_to_term_preserving_alias_spelling_keeps_non_eta_choose_lambda() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_symbol = kernel_context.symbol_table.add_constant(
-            g0_name,
-            NewConstantType::Global,
-            kernel_context.parse_type("Bool -> Bool -> Bool"),
-        );
-
-        let term = Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[
-            Term::bool_type(),
-            Term::lambda(
-                Term::bool_type(),
-                Term::atom(Atom::Symbol(g0_symbol)).apply(&[
-                    Term::atom(Atom::BoundVariable(0)),
-                    Term::atom(Atom::BoundVariable(0)),
-                ]),
-            ),
-        ]);
-        let quoted =
-            kernel_context.quote_term_with_context(&term, LocalContext::empty_ref(), false);
-        let roundtripped = lower_value_to_term_existing_preserving_alias_spelling(
-            &mut kernel_context,
-            &quoted,
-            None,
-        )
-        .expect("validation lowering should keep non-eta choose predicate lambdas");
-
-        assert_eq!(term, roundtripped);
     }
 
     #[test]
@@ -1843,12 +1613,6 @@ mod tests {
                 ),
             ),
         ];
-
-        #[cfg(not(feature = "nwit"))]
-        cases.push((
-            "choose",
-            AcornValue::choose(bool_ty.clone(), AcornValue::Variable(0, bool_ty.clone())),
-        ));
 
         for (name, value) in cases {
             let mut kernel_context = KernelContext::new();

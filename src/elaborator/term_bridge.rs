@@ -80,7 +80,6 @@ impl<'a> TermBridge<'a> {
             | Atom::Symbol(Symbol::Ite) => {
                 panic!("logical symbols should be handled in quote_term")
             }
-            #[cfg(not(feature = "nwit"))]
             Atom::Symbol(Symbol::Choose) => {
                 panic!("logical symbols should be handled in quote_term")
             }
@@ -561,7 +560,6 @@ impl<'a> TermBridge<'a> {
             Atom::Symbol(Symbol::Or) => Some(Symbol::Or),
             Atom::Symbol(Symbol::Eq) => Some(Symbol::Eq),
             Atom::Symbol(Symbol::Ite) => Some(Symbol::Ite),
-            #[cfg(not(feature = "nwit"))]
             Atom::Symbol(Symbol::Choose) => Some(Symbol::Choose),
             _ => None,
         };
@@ -654,7 +652,6 @@ impl<'a> TermBridge<'a> {
 
         // Picks a fresh local index after any remapped locals so synthesized partial lambdas
         // do not capture or collide with existing quoted variables.
-        #[cfg(not(feature = "nwit"))]
         fn next_lambda_var_index(
             local_context: &LocalContext,
             var_remapping: Option<&[Option<u16>]>,
@@ -873,7 +870,6 @@ impl<'a> TermBridge<'a> {
                         Box::new(args.next().unwrap()),
                     );
                 }
-                #[cfg(not(feature = "nwit"))]
                 Symbol::Choose => {
                     if type_args.len() != 1 || value_args.is_empty() {
                         panic!("malformed choose term during quoting: {}", term);
@@ -1148,7 +1144,6 @@ mod tests {
     use super::*;
     use crate::elaborator::acorn_type::{AcornType, TypeParam};
     use crate::elaborator::names::ConstantName;
-    #[cfg(not(feature = "nwit"))]
     use crate::kernel::atom::Atom;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
@@ -1303,7 +1298,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_quote_choose_applies_partially_applied_predicate_to_bound_variable() {
         let mut kernel_context = KernelContext::new();
@@ -1362,7 +1356,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_quote_choose_applies_function_predicate_to_bound_variable() {
         let mut kernel_context = KernelContext::new();
@@ -1411,7 +1404,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_quote_choose_shifts_nested_lambda_for_inserted_binder() {
         let mut kernel_context = KernelContext::new();
@@ -1488,7 +1480,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_quote_applied_function_valued_choose_stays_applied() {
         let kernel_context = KernelContext::new();

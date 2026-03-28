@@ -1085,9 +1085,7 @@ impl ActiveSet {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
-        for reduction in
-            clause.find_boolean_reductions_with_options(kernel_context, !cfg!(feature = "nwit"))
-        {
+        for reduction in clause.find_boolean_reductions_with_options(kernel_context, false) {
             if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
                 continue;
             }
@@ -1113,10 +1111,6 @@ impl ActiveSet {
             answer.push(step);
         }
 
-        #[cfg(not(feature = "nwit"))]
-        let _ = (witness_registry, module_id);
-
-        #[cfg(feature = "nwit")]
         // Positive existentials are the one boolean-reduction case where the prover now
         // introduces a named witness instead of opening a raw `choose(...)` term.
         if let Some(exists_reduction) = clause.positive_exists_reduction(kernel_context) {

@@ -741,7 +741,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_match_literal_handles_choose_with_nested_exists() {
         let kctx = KernelContext::new();

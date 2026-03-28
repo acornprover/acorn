@@ -1,6 +1,5 @@
 use super::*;
 use crate::module::LoadState;
-#[cfg(feature = "nwit")]
 use crate::module::ModuleId;
 use crate::processor::Processor;
 use std::borrow::Cow;
@@ -121,7 +120,6 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
     (project, bindings, kernel_context)
 }
 
-#[cfg(feature = "nwit")]
 fn witness_body_equating_ambient_bool() -> crate::kernel::term::Term {
     use crate::kernel::atom::Atom;
     use crate::kernel::term::Term;
@@ -136,7 +134,6 @@ fn witness_body_equating_ambient_bool() -> crate::kernel::term::Term {
     )
 }
 
-#[cfg(feature = "nwit")]
 fn bool_exists_source_clause(body: crate::kernel::term::Term) -> crate::kernel::clause::Clause {
     use crate::kernel::clause::Clause;
     use crate::kernel::literal::Literal;
@@ -149,7 +146,6 @@ fn bool_exists_source_clause(body: crate::kernel::term::Term) -> crate::kernel::
     )
 }
 
-#[cfg(feature = "nwit")]
 fn open_named_witness(
     source_clause: &crate::kernel::clause::Clause,
 ) -> (
@@ -174,7 +170,6 @@ fn open_named_witness(
     (kernel_context, witness_registry, opening)
 }
 
-#[cfg(feature = "nwit")]
 fn implying_claim_for_equating_bool_witness() -> (crate::kernel::clause::Clause, Claim) {
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -192,7 +187,6 @@ fn implying_claim_for_equating_bool_witness() -> (crate::kernel::clause::Clause,
     (clause, claim)
 }
 
-#[cfg(feature = "nwit")]
 fn nested_bool_exists_clause(kernel_context: &mut KernelContext) -> crate::kernel::clause::Clause {
     use crate::kernel::atom::Atom;
     use crate::kernel::clause::Clause;
@@ -217,7 +211,6 @@ fn nested_bool_exists_clause(kernel_context: &mut KernelContext) -> crate::kerne
     )
 }
 
-#[cfg(feature = "nwit")]
 fn add_test_scoped_constant(
     kernel_context: &mut KernelContext,
     module_id: ModuleId,
@@ -239,7 +232,6 @@ fn add_test_scoped_constant(
     local_id
 }
 
-#[cfg(feature = "nwit")]
 fn claim_specializing_local_to_scoped_constant(
     clause: &crate::kernel::clause::Clause,
     local_id: crate::kernel::atom::AtomId,
@@ -401,7 +393,6 @@ fn test_parse_code_line_accepts_claim_with_args_shape() {
     assert_eq!(claim, expected);
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
     use crate::kernel::checker::{Checker, StepReason};
@@ -462,7 +453,6 @@ fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
     );
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_named_function_witness_can_match_implying_claim() {
     use crate::kernel::checker::{Checker, StepReason};
@@ -498,7 +488,6 @@ fn test_named_function_witness_can_match_implying_claim() {
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
@@ -537,7 +526,6 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
     );
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_named_function_witness_uses_fresh_result_binder_name() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
@@ -555,7 +543,6 @@ fn test_named_function_witness_uses_fresh_result_binder_name() {
     assert_eq!(step.return_name.as_deref(), Some("w0_result"));
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
     use crate::prover::synthetic::WitnessRegistry;
@@ -595,7 +582,6 @@ fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
         .expect("synthetic witness step should keep normalized witness clauses");
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_specialized_positive_exists_step_uses_emitter_module_id() {
     use crate::prover::synthetic::WitnessRegistry;
@@ -631,7 +617,6 @@ fn test_specialized_positive_exists_step_uses_emitter_module_id() {
     assert_eq!(synthetic_witness.name.module_id(), module_id);
 }
 
-#[cfg(feature = "nwit")]
 #[test]
 fn test_synthetic_witness_preserves_unused_binder_contradiction() {
     use crate::kernel::checker::{Checker, StepReason};
@@ -788,33 +773,14 @@ fn test_deserialize_claim_with_args_preserves_single_not_if_literal() {
     let (project, bindings, kernel_context) = setup_claim_codec_env(code);
     let line = "function(x0: Nat) { not if a = zero { x0 = zero } else { suc(x0) = a } }(choose(k0: Nat) { a = suc(k0) })";
 
-    if cfg!(feature = "nwit") {
-        let err =
-            Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
-                .expect_err("nwit should reject choose in claim-with-args deserialization");
-        assert!(
-            err.to_string()
-                .contains("choose expressions are not allowed here"),
-            "unexpected error: {}",
-            err
-        );
-        return;
-    }
-
-    let claim =
-        Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
-            .expect("deserialization should preserve a single not-if literal");
-
-    assert_eq!(claim.clause().get_local_context().len(), 1);
-    assert_eq!(claim.var_map().len(), 1);
-
-    let serialized = Certificate::serialize_claim_with_args(&claim, &kernel_context, &bindings)
-        .expect("serialization should succeed");
-    assert!(serialized.contains("not if"));
-    let reparsed =
-        Certificate::deserialize_claim_with_args(&serialized, &project, &bindings, &kernel_context)
-            .expect("serialized claim should deserialize again");
-    assert_eq!(reparsed, claim);
+    let err = Certificate::deserialize_claim_with_args(line, &project, &bindings, &kernel_context)
+        .expect_err("choose should be rejected in claim-with-args deserialization");
+    assert!(
+        err.to_string()
+            .contains("choose expressions are not allowed here"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]
@@ -1190,24 +1156,13 @@ fn test_parse_code_line_handles_choose_claim_shape() {
         &mut kernel_context_cow,
     );
 
-    if cfg!(feature = "nwit") {
-        let err = match result {
-            Ok(_) => panic!("nwit should reject choose claims"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("choose expressions are not allowed here"),
-            "unexpected error: {}",
-            err
-        );
-        return;
-    }
-
-    let step = result.expect("choose claim parsing should succeed for certificate parsing");
-
-    let claim = expect_claim(step);
-    assert_eq!(claim.var_map().len(), 0);
+    let err = result.expect_err("choose claims should be rejected");
+    assert!(
+        err.to_string()
+            .contains("choose expressions are not allowed here"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]
@@ -1230,25 +1185,13 @@ fn test_parse_code_line_handles_closed_binder_claims_with_choose() {
         &mut kernel_context_cow,
     );
 
-    if cfg!(feature = "nwit") {
-        let err = match result {
-            Ok(_) => panic!("nwit should reject choose in closed binder-heavy claims"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("choose expressions are not allowed here"),
-            "unexpected error: {}",
-            err
-        );
-        return;
-    }
-
-    let step = result.expect("closed binder-heavy claim should parse");
-
-    let claim = expect_claim(step);
-    assert_eq!(claim.var_map().len(), 0);
-    assert!(claim.clause().get_local_context().is_empty());
+    let err = result.expect_err("choose in closed binder-heavy claims should be rejected");
+    assert!(
+        err.to_string()
+            .contains("choose expressions are not allowed here"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]
@@ -1269,28 +1212,10 @@ fn test_checker_rejects_unjustified_choose_claim() {
         &mut kernel_context_cow,
     );
 
-    if cfg!(feature = "nwit") {
-        let err = match result {
-            Ok(_) => panic!("nwit should reject choose claims before checking"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("choose expressions are not allowed here"),
-            "unexpected error: {}",
-            err
-        );
-        return;
-    }
-
-    let step = result.expect("choose claim parsing should succeed for certificate parsing");
-
-    let mut checker = Checker::new();
-    let err = checker
-        .check_cert_steps(&[step], None, &kernel_context)
-        .expect_err("arbitrary choose claim should not be accepted");
+    let err = result.expect_err("choose claims should be rejected before checking");
     assert!(
-        err.to_string().contains("not obviously true"),
+        err.to_string()
+            .contains("choose expressions are not allowed here"),
         "unexpected error: {}",
         err
     );
@@ -1427,7 +1352,6 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
 }
 
-#[cfg(not(feature = "nwit"))]
 #[test]
 fn test_from_concrete_steps_handles_binder_claim_args() {
     let code = r#"
@@ -1459,23 +1383,12 @@ fn test_from_concrete_steps_handles_binder_claim_args() {
         &bindings,
     );
 
-    if cfg!(feature = "nwit") {
-        let err = result.expect_err("nwit should reject choose during certificate generation");
-        assert!(
-            err.to_string()
-                .contains("choose expressions are not supported with feature \"nwit\""),
-            "unexpected error: {}",
-            err
-        );
-        return;
-    }
-
-    let cert = result.expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
-    assert_eq!(proof.len(), 1);
-    assert_eq!(
-        proof[0],
-        "function(x0: Bool) { x0 }(choose(k0: Bool) { k0 })"
+    let err = result.expect_err("choose should be rejected during certificate generation");
+    assert!(
+        err.to_string()
+            .contains("choose expressions are not supported"),
+        "unexpected error: {}",
+        err
     );
 }
 

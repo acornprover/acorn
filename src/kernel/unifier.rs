@@ -905,7 +905,6 @@ mod tests {
         u.assert_unify(Scope::LEFT, &const_f_term, Scope::RIGHT, &var_f_term);
     }
 
-    #[cfg(not(feature = "nwit"))]
     #[test]
     fn test_unify_variable_against_choose_term_with_nested_exists() {
         let mut ctx = KernelContext::new();

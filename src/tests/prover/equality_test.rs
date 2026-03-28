@@ -199,11 +199,7 @@ fn test_proving_of_existence() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    if cfg!(feature = "nwit") {
-        assert!(!proof.is_empty());
-    } else {
-        assert!(proof.is_empty());
-    }
+    assert!(!proof.is_empty());
 }
 
 #[test]
@@ -236,11 +232,7 @@ fn test_proving_of_conjunction_existence() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    if cfg!(feature = "nwit") {
-        assert!(!proof.is_empty());
-    } else {
-        assert!(proof.is_empty());
-    }
+    assert!(!proof.is_empty());
 }
 
 #[test]

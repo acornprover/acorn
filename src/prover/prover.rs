@@ -847,7 +847,6 @@ mod tests {
             .expect("stored specialization map should validate");
     }
 
-    #[cfg(feature = "nwit")]
     #[test]
     fn test_print_active_steps_uses_search_kernel_context_for_named_witnesses() {
         let stale_kernel_context = KernelContext::new();
