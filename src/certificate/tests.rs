@@ -777,7 +777,7 @@ fn test_deserialize_claim_with_args_preserves_single_not_if_literal() {
         .expect_err("choose should be rejected in claim-with-args deserialization");
     assert!(
         err.to_string()
-            .contains("choose expressions are not allowed here"),
+            .contains("choose expressions are not supported"),
         "unexpected error: {}",
         err
     );
@@ -1159,7 +1159,7 @@ fn test_parse_code_line_handles_choose_claim_shape() {
     let err = result.expect_err("choose claims should be rejected");
     assert!(
         err.to_string()
-            .contains("choose expressions are not allowed here"),
+            .contains("choose expressions are not supported"),
         "unexpected error: {}",
         err
     );
@@ -1188,7 +1188,7 @@ fn test_parse_code_line_handles_closed_binder_claims_with_choose() {
     let err = result.expect_err("choose in closed binder-heavy claims should be rejected");
     assert!(
         err.to_string()
-            .contains("choose expressions are not allowed here"),
+            .contains("choose expressions are not supported"),
         "unexpected error: {}",
         err
     );
@@ -1215,7 +1215,7 @@ fn test_checker_rejects_unjustified_choose_claim() {
     let err = result.expect_err("choose claims should be rejected before checking");
     assert!(
         err.to_string()
-            .contains("choose expressions are not allowed here"),
+            .contains("choose expressions are not supported"),
         "unexpected error: {}",
         err
     );

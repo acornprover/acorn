@@ -740,7 +740,7 @@ instance Foo: Mul {
 
     let expr =
         Expression::parse_value_string("foo_zero * foo_zero").expect("expression should parse");
-    let mut evaluator = Evaluator::new_with_allow_choose(&project, &full_bindings, None, true);
+    let mut evaluator = Evaluator::new(&project, &full_bindings, None);
     let value = evaluator
         .evaluate_value(&expr, None)
         .expect("full-module bindings should resolve the later instance");
@@ -771,7 +771,7 @@ instance Foo: Mul {
 
     let explicit_expr =
         Expression::parse_value_string(&rendered).expect("rendered expression should parse");
-    let mut goal_evaluator = Evaluator::new_with_allow_choose(&project, &goal_bindings, None, true);
+    let mut goal_evaluator = Evaluator::new(&project, &goal_bindings, None);
     let roundtrip = goal_evaluator
         .evaluate_value(&explicit_expr, None)
         .expect("explicit typeclass call should evaluate in goal bindings");

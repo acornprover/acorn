@@ -112,11 +112,6 @@ pub struct Certificate {
 }
 
 impl Certificate {
-    /// Certificates reject legacy `choose(...)` certificate syntax.
-    fn certificate_allows_choose() -> bool {
-        false
-    }
-
     fn references_value_local(
         term: crate::kernel::term::TermRef<'_>,
         local_context: &LocalContext,
@@ -595,12 +590,7 @@ impl Certificate {
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
         let statement = Statement::parse_str_with_options(&code, true)?;
-        let mut evaluator = Evaluator::new_with_allow_choose(
-            project,
-            bindings,
-            None,
-            Self::certificate_allows_choose(),
-        );
+        let mut evaluator = Evaluator::new(project, bindings, None);
         let mut claim_step_from_expr =
             |expr: &Expression| -> Result<CertificateStep, CodeGenError> {
                 if let Some(claim) = ClaimCodec::try_deserialize_claim_expression(
@@ -608,7 +598,6 @@ impl Certificate {
                     project,
                     bindings.as_ref(),
                     kernel_context.to_mut(),
-                    Self::certificate_allows_choose(),
                 )? {
                     return Ok(CertificateStep::Claim(claim));
                 }
@@ -790,12 +779,7 @@ impl Certificate {
 
         let bindings = bindings.to_mut();
         let kernel_context = kernel_context.to_mut();
-        let mut evaluator = Evaluator::new_with_allow_choose(
-            project,
-            bindings,
-            None,
-            Self::certificate_allows_choose(),
-        );
+        let mut evaluator = Evaluator::new(project, bindings, None);
         let type_params = evaluator.evaluate_type_params(&vss.type_params)?;
         for param in &type_params {
             bindings.add_arbitrary_type(param.clone());
@@ -803,12 +787,7 @@ impl Certificate {
         }
 
         let mut stack = Stack::new();
-        let mut general_evaluator = Evaluator::new_with_allow_choose(
-            project,
-            bindings,
-            None,
-            Self::certificate_allows_choose(),
-        );
+        let mut general_evaluator = Evaluator::new(project, bindings, None);
         let (quant_names, quant_types) =
             general_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
         let Some(return_type) = quant_types.first().cloned() else {
@@ -834,12 +813,7 @@ impl Certificate {
             code,
         )?;
 
-        let mut specific_evaluator = Evaluator::new_with_allow_choose(
-            project,
-            bindings,
-            None,
-            Self::certificate_allows_choose(),
-        );
+        let mut specific_evaluator = Evaluator::new(project, bindings, None);
         let specific_condition =
             specific_evaluator.evaluate_value(&vss.condition, Some(&AcornType::Bool))?;
 
@@ -1007,13 +981,7 @@ impl Certificate {
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) -> Result<Claim, CodeGenError> {
-        ClaimCodec::deserialize_claim_with_args(
-            code,
-            project,
-            bindings,
-            kernel_context,
-            Self::certificate_allows_choose(),
-        )
+        ClaimCodec::deserialize_claim_with_args(code, project, bindings, kernel_context)
     }
 
     /// Check this certificate. It is expected that it has a proof.

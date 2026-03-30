@@ -457,7 +457,6 @@ impl ClaimCodec {
         project: &Project,
         bindings: &BindingMap,
         kernel_context: &KernelContext,
-        allow_choose: bool,
     ) -> Result<Claim, CodeGenError> {
         let statement = Statement::parse_str_with_options(code, true)?;
         let StatementInfo::Claim(claim_statement) = statement.statement else {
@@ -472,7 +471,6 @@ impl ClaimCodec {
             project,
             bindings,
             &mut kernel_context_clone,
-            allow_choose,
         )?
         .ok_or_else(|| {
             CodeGenError::GeneratedBadCode(
@@ -487,13 +485,12 @@ impl ClaimCodec {
         project: &Project,
         bindings: &BindingMap,
         kernel_context: &mut KernelContext,
-        allow_choose: bool,
     ) -> Result<Option<Claim>, CodeGenError> {
         let Some(shape) = Self::split_claim_expression(expr) else {
             return Ok(None);
         };
         let (function_value, args) =
-            Self::evaluate_claim_expression_shape(shape, project, bindings, allow_choose)?;
+            Self::evaluate_claim_expression_shape(shape, project, bindings)?;
         Self::claim_from_function_value(function_value, args, kernel_context).map(Some)
     }
 
@@ -721,10 +718,8 @@ impl ClaimCodec {
         shape: ClaimExpressionShape<'_>,
         project: &Project,
         bindings: &BindingMap,
-        allow_choose: bool,
     ) -> Result<(ClaimFunctionValue, Vec<AcornValue>), CodeGenError> {
-        let mut type_param_evaluator =
-            Evaluator::new_with_allow_choose(project, bindings, None, allow_choose);
+        let mut type_param_evaluator = Evaluator::new(project, bindings, None);
         let type_params = type_param_evaluator.evaluate_type_params(shape.type_params)?;
 
         let mut scoped_bindings = bindings.clone();
@@ -732,8 +727,7 @@ impl ClaimCodec {
             scoped_bindings.add_arbitrary_type(type_param.clone());
         }
 
-        let mut evaluator =
-            Evaluator::new_with_allow_choose(project, &scoped_bindings, None, allow_choose);
+        let mut evaluator = Evaluator::new(project, &scoped_bindings, None);
         let type_args = shape
             .type_args
             .iter()
@@ -900,10 +894,6 @@ impl ClaimCodec {
                 arg_types.clone(),
                 Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
-            AcornValue::Choose(choice_type, body) => AcornValue::choose(
-                choice_type.clone(),
-                Self::rebase_value_to_standalone(body, removed_prefix_len)?,
-            ),
             AcornValue::Bool(value) => AcornValue::Bool(*value),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(Self::rebase_value_to_standalone(cond, removed_prefix_len)?),
@@ -984,10 +974,6 @@ impl ClaimCodec {
             AcornValue::Exists(arg_types, body) => {
                 AcornValue::exists(arg_types.clone(), Self::shift_value_variables(body, amount))
             }
-            AcornValue::Choose(choice_type, body) => AcornValue::choose(
-                choice_type.clone(),
-                Self::shift_value_variables(body, amount),
-            ),
             AcornValue::Bool(value) => AcornValue::Bool(*value),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(Self::shift_value_variables(cond, amount)),
@@ -1023,7 +1009,6 @@ impl ClaimCodec {
             AcornValue::Lambda(_, body)
             | AcornValue::ForAll(_, body)
             | AcornValue::Exists(_, body)
-            | AcornValue::Choose(_, body)
             | AcornValue::Not(body)
             | AcornValue::Try(body, _) => Self::value_has_variable(body),
             AcornValue::Binary(_, left, right) => {

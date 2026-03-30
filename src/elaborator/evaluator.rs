@@ -46,10 +46,6 @@ pub struct Evaluator<'a> {
     /// This may not be from the same module as the bindings, so we need to be careful.
     token_map: Option<&'a mut TokenMap>,
 
-    /// Whether the evaluator accepts `choose(...) { ... }` binder syntax.
-    /// This is currently intended for certificate parsing only.
-    allow_choose: bool,
-
     /// When we are elaborating the body of an `instance` member, explicit uses of the matching
     /// typeclass attribute such as `Add.add[Nat]` should resolve to the instance implementation
     /// slot, not to the public typeclass constant. This context is only set for that temporary,
@@ -64,20 +60,10 @@ impl<'a> Evaluator<'a> {
         bindings: &'a BindingMap,
         token_map: Option<&'a mut TokenMap>,
     ) -> Self {
-        Self::new_with_allow_choose(project, bindings, token_map, false)
-    }
-
-    pub fn new_with_allow_choose(
-        project: &'a Project,
-        bindings: &'a BindingMap,
-        token_map: Option<&'a mut TokenMap>,
-        allow_choose: bool,
-    ) -> Self {
         Self {
             project,
             bindings,
             token_map,
-            allow_choose,
             current_instance_context: None,
         }
     }
@@ -92,7 +78,6 @@ impl<'a> Evaluator<'a> {
             project,
             bindings,
             token_map,
-            allow_choose: false,
             current_instance_context: Some(CurrentInstanceContext {
                 defining_module: bindings.module_id(),
                 typeclass: instance_name.typeclass.clone(),
@@ -258,15 +243,14 @@ impl<'a> Evaluator<'a> {
     /// Creates a sibling evaluator that shares the current evaluation mode.
     ///
     /// We use this when we need a temporary evaluator with different bindings or without token
-    /// tracking, but we still need to preserve flags like `allow_choose` and the temporary
-    /// instance-member context. Reconstructing via `Evaluator::new(...)` would silently drop that
-    /// context and change how explicit typeclass attributes resolve inside an `instance` body.
+    /// tracking, but we still need to preserve the temporary instance-member context.
+    /// Reconstructing via `Evaluator::new(...)` would silently drop that context and change how
+    /// explicit typeclass attributes resolve inside an `instance` body.
     fn fork(&self, bindings: &'a BindingMap, token_map: Option<&'a mut TokenMap>) -> Self {
         Self {
             project: self.project,
             bindings,
             token_map,
-            allow_choose: self.allow_choose,
             current_instance_context: self.current_instance_context.clone(),
         }
     }
@@ -1628,6 +1612,9 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expression::Binder(token, args, body, _) => {
+                if token.token_type == TokenType::Choose {
+                    return Err(token.error("choose expressions are not supported"));
+                }
                 if args.len() < 1 {
                     return Err(token.error("binders must have at least one argument"));
                 }
@@ -1635,22 +1622,12 @@ impl<'a> Evaluator<'a> {
                 let body_type = match token.token_type {
                     TokenType::ForAll => Some(&AcornType::Bool),
                     TokenType::Exists => Some(&AcornType::Bool),
-                    TokenType::Choose => Some(&AcornType::Bool),
                     _ => None,
                 };
                 let ret_val = match self.evaluate_value_with_stack(stack, body, body_type) {
                     Ok(value) => match token.token_type {
                         TokenType::ForAll => Ok(AcornValue::ForAll(arg_types, Box::new(value))),
                         TokenType::Exists => Ok(AcornValue::Exists(arg_types, Box::new(value))),
-                        TokenType::Choose => {
-                            if !self.allow_choose {
-                                Err(token.error("choose expressions are not allowed here"))
-                            } else if arg_types.len() != 1 {
-                                Err(token.error("choose requires exactly one bound variable"))
-                            } else {
-                                Ok(AcornValue::choose(arg_types[0].clone(), value))
-                            }
-                        }
                         TokenType::Function => Ok(AcornValue::Lambda(arg_types, Box::new(value))),
                         _ => Err(token.error("expected a binder identifier token")),
                     },

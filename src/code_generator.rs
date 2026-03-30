@@ -1586,9 +1586,6 @@ impl CodeGenerator<'_> {
             AcornValue::Exists(quants, value) => {
                 self.generate_quantifier_expr(TokenType::Exists, quants, value, false)
             }
-            AcornValue::Choose(_, _) => Err(Error::GeneratedBadCode(
-                "choose expressions are not supported".to_string(),
-            )),
             AcornValue::Lambda(quants, body) => {
                 if let Some(expr) = self.operator_ref_expr(value) {
                     return Ok(expr);

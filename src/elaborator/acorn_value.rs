@@ -375,9 +375,6 @@ pub enum AcornValue {
     /// Quantifiers that introduce variables onto the stack.
     ForAll(Vec<AcornType>, Box<AcornValue>),
     Exists(Vec<AcornType>, Box<AcornValue>),
-    /// Hilbert-choice style term: `choose(x: T) { predicate(x) }`.
-    /// The body must be a Bool expression with one bound variable in scope.
-    Choose(AcornType, Box<AcornValue>),
 
     /// A plain old bool. True or false
     Bool(bool),
@@ -471,12 +468,6 @@ impl fmt::Display for Subvalue<'_> {
             }
             AcornValue::ForAll(args, body) => fmt_binder(f, "forall", args, body, self.stack_size),
             AcornValue::Exists(args, body) => fmt_binder(f, "exists", args, body, self.stack_size),
-            AcornValue::Choose(choice_type, body) => write!(
-                f,
-                "choose({}) {{ {} }}",
-                AcornType::decs_to_str(std::slice::from_ref(choice_type), self.stack_size),
-                Subvalue::new(body, self.stack_size + 1)
-            ),
             AcornValue::Constant(c) => {
                 write!(f, "{}", c)
             }
@@ -561,7 +552,6 @@ impl AcornValue {
             AcornValue::Try(_, unwrapped_type) => unwrapped_type.clone(),
             AcornValue::ForAll(_, _) => AcornType::Bool,
             AcornValue::Exists(_, _) => AcornType::Bool,
-            AcornValue::Choose(choice_type, _) => choice_type.clone(),
             AcornValue::Constant(c) => c.instance_type.clone(),
             AcornValue::Bool(_) => AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.get_type(),
@@ -592,7 +582,6 @@ impl AcornValue {
             AcornValue::Try(_, unwrapped_type) => unwrapped_type == t,
             AcornValue::ForAll(_, _) => *t == AcornType::Bool,
             AcornValue::Exists(_, _) => *t == AcornType::Bool,
-            AcornValue::Choose(choice_type, _) => choice_type == t,
             AcornValue::Constant(c) => c.instance_type == *t,
             AcornValue::Bool(_) => *t == AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.is_type(t),
@@ -677,10 +666,6 @@ impl AcornValue {
         } else {
             AcornValue::Exists(args, Box::new(value))
         }
-    }
-
-    pub fn choose(choice_type: AcornType, value: AcornValue) -> AcornValue {
-        AcornValue::Choose(choice_type, Box::new(value))
     }
 
     /// Creates an implication binary operation
@@ -771,7 +756,6 @@ impl AcornValue {
             AcornValue::Try(inner, _) => inner.is_term(),
             AcornValue::ForAll(_, _) => false,
             AcornValue::Exists(_, _) => false,
-            AcornValue::Choose(_, _) => false,
             AcornValue::Constant(_) => true,
 
             // Bit of a weird case. "true" is a term but "false" is not.
@@ -916,13 +900,6 @@ impl AcornValue {
                     Box::new(value.bind_values(first_binding_index, value_stack_size, values)),
                 )
             }
-            AcornValue::Choose(choice_type, value) => {
-                let value_stack_size = stack_size + 1;
-                AcornValue::Choose(
-                    choice_type,
-                    Box::new(value.bind_values(first_binding_index, value_stack_size, values)),
-                )
-            }
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.bind_values(first_binding_index, stack_size, values)),
                 Box::new(if_value.bind_values(first_binding_index, stack_size, values)),
@@ -1013,9 +990,6 @@ impl AcornValue {
             AcornValue::Exists(quants, value) => {
                 AcornValue::Exists(quants, Box::new(value.insert_stack(index, increment)))
             }
-            AcornValue::Choose(choice_type, value) => {
-                AcornValue::Choose(choice_type, Box::new(value.insert_stack(index, increment)))
-            }
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.insert_stack(index, increment)),
                 Box::new(if_value.insert_stack(index, increment)),
@@ -1088,13 +1062,6 @@ impl AcornValue {
                 let new_stack_size = stack_size + quants.len() as AtomId;
                 AcornValue::Exists(
                     quants.clone(),
-                    Box::new(value.expand_lambdas(new_stack_size)),
-                )
-            }
-            AcornValue::Choose(choice_type, value) => {
-                let new_stack_size = stack_size + 1;
-                AcornValue::Choose(
-                    choice_type.clone(),
                     Box::new(value.expand_lambdas(new_stack_size)),
                 )
             }
@@ -1177,9 +1144,6 @@ impl AcornValue {
             AcornValue::Exists(quants, value) => {
                 AcornValue::Exists(quants.clone(), Box::new(value.flatten_applications()))
             }
-            AcornValue::Choose(choice_type, value) => {
-                AcornValue::Choose(choice_type.clone(), Box::new(value.flatten_applications()))
-            }
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.flatten_applications()),
                 Box::new(if_value.flatten_applications()),
@@ -1245,10 +1209,6 @@ impl AcornValue {
                 let new_stack_size = stack_size + quants.len() as AtomId;
                 AcornValue::Exists(quants.clone(), Box::new(value.reduce_eta(new_stack_size)))
             }
-            AcornValue::Choose(choice_type, value) => AcornValue::Choose(
-                choice_type.clone(),
-                Box::new(value.reduce_eta(stack_size + 1)),
-            ),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.reduce_eta(stack_size)),
                 Box::new(if_value.reduce_eta(stack_size)),
@@ -1333,7 +1293,6 @@ impl AcornValue {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value)
-            | AcornValue::Choose(_, value)
             | AcornValue::Not(value)
             | AcornValue::Try(value, _) => value.references_stack_range(start, end),
             AcornValue::Binary(_, left, right) => {
@@ -1431,10 +1390,6 @@ impl AcornValue {
                     value.replace_constants(stack_size + quants.len() as AtomId, replacer);
                 AcornValue::Exists(quants.clone(), Box::new(new_value))
             }
-            AcornValue::Choose(choice_type, value) => {
-                let new_value = value.replace_constants(stack_size + 1, replacer);
-                AcornValue::Choose(choice_type.clone(), Box::new(new_value))
-            }
             AcornValue::Constant(c) => replacer(c).unwrap_or_else(|| self.clone()),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.replace_constants(stack_size, replacer)),
@@ -1506,19 +1461,6 @@ impl AcornValue {
                 let original_len = stack.len();
                 stack.extend(args.iter().cloned());
                 let answer = value.validate_against_stack(stack);
-                stack.truncate(original_len);
-                answer
-            }
-            AcornValue::Choose(choice_type, value) => {
-                let original_len = stack.len();
-                stack.push(choice_type.clone());
-                let answer = value.validate_against_stack(stack).and_then(|_| {
-                    if value.get_type() == AcornType::Bool {
-                        Ok(())
-                    } else {
-                        Err("choose body must be Bool".to_string())
-                    }
-                });
                 stack.truncate(original_len);
                 answer
             }
@@ -1644,10 +1586,6 @@ impl AcornValue {
                     .collect::<Vec<_>>(),
                 Box::new(value.instantiate(params)),
             ),
-            AcornValue::Choose(choice_type, value) => AcornValue::Choose(
-                choice_type.instantiate(params),
-                Box::new(value.instantiate(params)),
-            ),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
                 Box::new(left.instantiate(params)),
@@ -1700,9 +1638,6 @@ impl AcornValue {
             | AcornValue::Exists(args, value) => {
                 args.iter().any(|x| x.has_generic()) || value.has_generic()
             }
-            AcornValue::Choose(choice_type, value) => {
-                choice_type.has_generic() || value.has_generic()
-            }
             AcornValue::Binary(_, left, right) => left.has_generic() || right.has_generic(),
             AcornValue::IfThenElse(cond, if_value, else_value) => {
                 cond.has_generic() || if_value.has_generic() || else_value.has_generic()
@@ -1733,9 +1668,6 @@ impl AcornValue {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value) => value.has_arbitrary(),
-            AcornValue::Choose(choice_type, value) => {
-                choice_type.has_arbitrary() || value.has_arbitrary()
-            }
             AcornValue::Binary(_, left, right) => left.has_arbitrary() || right.has_arbitrary(),
             AcornValue::IfThenElse(cond, if_value, else_value) => {
                 cond.has_arbitrary() || if_value.has_arbitrary() || else_value.has_arbitrary()
@@ -1769,7 +1701,6 @@ impl AcornValue {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value) => value.for_each_constant(f),
-            AcornValue::Choose(_, value) => value.for_each_constant(f),
             AcornValue::Binary(_, left, right) => {
                 left.for_each_constant(f);
                 right.for_each_constant(f);
@@ -1828,10 +1759,6 @@ impl AcornValue {
                 for quant_type in quant_types {
                     f(quant_type);
                 }
-                value.for_each_type(f);
-            }
-            AcornValue::Choose(choice_type, value) => {
-                f(choice_type);
                 value.for_each_type(f);
             }
             AcornValue::Binary(_, left, right) => {
@@ -1909,9 +1836,6 @@ impl AcornValue {
                 args.iter().map(|x| x.to_arbitrary()).collect(),
                 Box::new(value.to_arbitrary()),
             ),
-            AcornValue::Choose(choice_type, value) => {
-                AcornValue::Choose(choice_type.to_arbitrary(), Box::new(value.to_arbitrary()))
-            }
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
                 Box::new(left.to_arbitrary()),
@@ -1969,10 +1893,6 @@ impl AcornValue {
             ),
             AcornValue::Exists(args, value) => AcornValue::Exists(
                 args.iter().map(|x| x.genericize(params)).collect(),
-                Box::new(value.genericize(params)),
-            ),
-            AcornValue::Choose(choice_type, value) => AcornValue::Choose(
-                choice_type.genericize(params),
                 Box::new(value.genericize(params)),
             ),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
@@ -2047,9 +1967,6 @@ impl AcornValue {
             }
             AcornValue::Exists(args, value) => {
                 AcornValue::Exists(args, Box::new(value.set_params(name, params)))
-            }
-            AcornValue::Choose(choice_type, value) => {
-                AcornValue::Choose(choice_type, Box::new(value.set_params(name, params)))
             }
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 op,
@@ -2265,10 +2182,6 @@ impl AcornValue {
                 for arg_type in args {
                     arg_type.find_type_vars(vars, source)?;
                 }
-                value.find_type_vars(vars, source)?;
-            }
-            AcornValue::Choose(choice_type, value) => {
-                choice_type.find_type_vars(vars, source)?;
                 value.find_type_vars(vars, source)?;
             }
             AcornValue::Binary(_, left, right) => {

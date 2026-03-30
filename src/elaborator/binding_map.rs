@@ -1996,7 +1996,6 @@ impl BindingMap {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value)
-            | AcornValue::Choose(_, value)
             | AcornValue::Not(value) => {
                 self.find_unknown_scoped_constants(value, answer);
             }
