@@ -1717,4 +1717,141 @@ mod tests {
 
         assert_term_roundtrip_stable_in_kernel_context(&mut kernel_context, match_value);
     }
+
+    #[test]
+    fn test_quote_eta_reduced_match_branch_recovers_case_binders() {
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let succ_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "succ");
+        let id_name = ConstantName::unqualified(ModuleId(0), "id");
+
+        let zero = AcornValue::constant(
+            zero_name.clone(),
+            vec![],
+            nat_type.clone(),
+            nat_type.clone(),
+            vec![],
+        );
+        let succ = AcornValue::constant(
+            succ_name.clone(),
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
+        );
+        let id = AcornValue::constant(
+            id_name.clone(),
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
+        );
+        let match_value = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero.clone(),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
+                        function: Box::new(succ.clone()),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    result: AcornValue::apply(
+                        id.clone(),
+                        vec![AcornValue::Variable(0, nat_type.clone())],
+                    ),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
+            ],
+        );
+
+        let mut kernel_context = KernelContext::new();
+        kernel_context.symbol_table.add_from(
+            &match_value,
+            NewConstantType::Global,
+            &mut kernel_context.type_store,
+        );
+        kernel_context.symbol_table.add_from(
+            &id,
+            NewConstantType::Global,
+            &mut kernel_context.type_store,
+        );
+
+        let canonical = lower_value_to_term(
+            &mut kernel_context,
+            &match_value,
+            NewConstantType::Local,
+            None,
+        )
+        .expect("canonical match lowering should succeed");
+
+        let match_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "match");
+        let match_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&match_name)
+            .expect("match symbol should exist");
+        let zero_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&zero_name)
+            .expect("zero symbol should exist");
+        let id_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&id_name)
+            .expect("id symbol should exist");
+        let nat_id = kernel_context
+            .type_store
+            .get_datatype_id(&nat)
+            .expect("nat type id should exist");
+        let nat_term = Term::ground_type(nat_id);
+
+        let eta_reduced = Term::atom(Atom::Symbol(match_symbol)).apply(&[
+            nat_term.clone(),
+            Term::atom(Atom::Symbol(zero_symbol)),
+            Term::atom(Atom::Symbol(zero_symbol)),
+            Term::atom(Atom::Symbol(id_symbol)),
+        ]);
+
+        let quoted =
+            kernel_context.quote_term_with_context(&eta_reduced, LocalContext::empty_ref(), false);
+
+        let expected = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: zero,
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
+                        function: Box::new(succ),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    result: AcornValue::apply(id, vec![AcornValue::Variable(0, nat_type)]),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
+            ],
+        );
+        assert_eq!(quoted, expected);
+
+        let roundtripped =
+            lower_value_to_term(&mut kernel_context, &quoted, NewConstantType::Local, None)
+                .expect("re-lowering eta-reduced quoted match should succeed");
+        assert_eq!(roundtripped, canonical);
+    }
 }
