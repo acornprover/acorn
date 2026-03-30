@@ -292,21 +292,24 @@ impl<'a> TermBridge<'a> {
             .zip(value_args.iter().skip(1))
             .enumerate()
         {
-            let (new_vars, result) = match branch_value.clone() {
-                AcornValue::Lambda(args, body) => (args, *body),
-                other => (vec![], other),
-            };
-
             let constructor = self.instantiate_symbol_for_match(*constructor_symbol, type_args)?;
-            let pattern = if new_vars.is_empty() {
-                constructor
+            let new_vars = match constructor.get_type() {
+                AcornType::Function(function_type) => function_type.arg_types.clone(),
+                _ => vec![],
+            };
+            let pattern_args: Vec<_> = new_vars
+                .iter()
+                .enumerate()
+                .map(|(i, var_type)| {
+                    AcornValue::Variable(first_new_var_id + i as AtomId, var_type.clone())
+                })
+                .collect();
+            let pattern = AcornValue::apply(constructor, pattern_args.clone());
+            let result = if pattern_args.is_empty() {
+                branch_value.clone()
             } else {
-                let mut pattern_args = vec![];
-                for (i, var_type) in new_vars.iter().enumerate() {
-                    let var_id = first_new_var_id + i as AtomId;
-                    pattern_args.push(AcornValue::Variable(var_id, var_type.clone()));
-                }
-                AcornValue::apply(constructor, pattern_args)
+                AcornValue::apply(branch_value.clone(), pattern_args)
+                    .expand_lambdas(first_new_var_id)
             };
 
             cases.push(MatchCase {
