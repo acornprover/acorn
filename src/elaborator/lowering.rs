@@ -335,8 +335,8 @@ impl KernelContext {
     }
 
     /// Quotes a clause back into an `AcornValue`.
-    /// The resulting value may include generated `choose(...)` witnesses or other
-    /// normalized boolean structure that did not appear verbatim in the source.
+    /// The resulting value may include normalized boolean structure that did not
+    /// appear verbatim in the source.
     /// If arbitrary names are provided, any free variables of the keyed types are converted
     /// to constants.
     /// If type_vars is provided, those variable indices are treated as type-level variables

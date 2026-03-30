@@ -107,7 +107,6 @@ const ATOM_SYMBOL_AND: u8 = 16;
 const ATOM_SYMBOL_OR: u8 = 17;
 const ATOM_SYMBOL_EQ: u8 = 18;
 const ATOM_SYMBOL_ITE: u8 = 19;
-const ATOM_SYMBOL_CHOOSE: u8 = 24;
 const ATOM_BOUND_VARIABLE: u8 = 20;
 const LAMBDA: u8 = 21;
 const FORALL: u8 = 22;
@@ -140,7 +139,6 @@ impl Edge {
                 Atom::Symbol(Symbol::Or) => ATOM_SYMBOL_OR,
                 Atom::Symbol(Symbol::Eq) => ATOM_SYMBOL_EQ,
                 Atom::Symbol(Symbol::Ite) => ATOM_SYMBOL_ITE,
-                Atom::Symbol(Symbol::Choose) => ATOM_SYMBOL_CHOOSE,
                 Atom::Symbol(Symbol::GlobalConstant(..)) => ATOM_SYMBOL_GLOBAL,
                 Atom::Symbol(Symbol::ScopedConstant(_)) => ATOM_SYMBOL_SCOPED,
             },
@@ -175,7 +173,6 @@ impl Edge {
                 Atom::Symbol(Symbol::Or) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Eq) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Ite) => v.extend_from_slice(&0u16.to_ne_bytes()),
-                Atom::Symbol(Symbol::Choose) => v.extend_from_slice(&0u16.to_ne_bytes()),
                 Atom::Symbol(Symbol::Type(t)) => {
                     // Type uses 4 bytes: module_id (2) + local_id (2)
                     v.extend_from_slice(&t.module_id().get().to_ne_bytes());
@@ -242,7 +239,6 @@ impl Edge {
             ATOM_SYMBOL_OR => (Edge::Atom(Atom::Symbol(Symbol::Or)), 3),
             ATOM_SYMBOL_EQ => (Edge::Atom(Atom::Symbol(Symbol::Eq)), 3),
             ATOM_SYMBOL_ITE => (Edge::Atom(Atom::Symbol(Symbol::Ite)), 3),
-            ATOM_SYMBOL_CHOOSE => (Edge::Atom(Atom::Symbol(Symbol::Choose)), 3),
             ATOM_SYMBOL_TYPE => {
                 // Type uses 5 bytes: 1 discriminant + 2 module_id + 2 local_id
                 let module_id = u16::from_ne_bytes([bytes[1], bytes[2]]);

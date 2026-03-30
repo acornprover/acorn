@@ -30,10 +30,6 @@ pub enum Symbol {
     // Polymorphic if-then-else: Pi(T: Type0). Bool -> T -> T -> T.
     Ite,
 
-    // Choice operator: Pi(T: Type0). (T -> Bool) -> T.
-    // This is introduced by prover rules (e.g. existential activation), not directly by parsing.
-    Choose,
-
     // The Bool type.
     Bool,
 
@@ -70,7 +66,6 @@ impl fmt::Display for Symbol {
             Symbol::Or => write!(f, "or"),
             Symbol::Eq => write!(f, "eq"),
             Symbol::Ite => write!(f, "ite"),
-            Symbol::Choose => write!(f, "choose"),
             Symbol::Bool => write!(f, "Bool"),
             Symbol::Type0 => write!(f, "Type0"),
             Symbol::Type(t) => write!(f, "T{}_{}", t.module_id().get(), t.local_id()),

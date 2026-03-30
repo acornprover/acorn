@@ -1251,10 +1251,6 @@ mod tests {
             "expected boolean reduction to surface the negated foralls as positive exists literals"
         );
         assert!(
-            clause_strings.iter().all(|s| !s.contains("choose(")),
-            "expected disjunctive positive exists to stay inline rather than opening a choose witness"
-        );
-        assert!(
             closure.len() < 40,
             "expected closure to stabilize well before the exploration limit, got {} clauses",
             closure.len()

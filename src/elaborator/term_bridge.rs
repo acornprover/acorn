@@ -80,9 +80,6 @@ impl<'a> TermBridge<'a> {
             | Atom::Symbol(Symbol::Ite) => {
                 panic!("logical symbols should be handled in quote_term")
             }
-            Atom::Symbol(Symbol::Choose) => {
-                panic!("logical symbols should be handled in quote_term")
-            }
             Atom::Symbol(Symbol::GlobalConstant(m, i)) => {
                 let name = self
                     .kernel_context
@@ -560,7 +557,6 @@ impl<'a> TermBridge<'a> {
             Atom::Symbol(Symbol::Or) => Some(Symbol::Or),
             Atom::Symbol(Symbol::Eq) => Some(Symbol::Eq),
             Atom::Symbol(Symbol::Ite) => Some(Symbol::Ite),
-            Atom::Symbol(Symbol::Choose) => Some(Symbol::Choose),
             _ => None,
         };
 
@@ -650,21 +646,6 @@ impl<'a> TermBridge<'a> {
             go(term.as_ref())
         }
 
-        // Picks a fresh local index after any remapped locals so synthesized partial lambdas
-        // do not capture or collide with existing quoted variables.
-        fn next_lambda_var_index(
-            local_context: &LocalContext,
-            var_remapping: Option<&[Option<u16>]>,
-        ) -> u16 {
-            match var_remapping {
-                Some(mapping) => mapping
-                    .iter()
-                    .filter_map(|mapped| *mapped)
-                    .max()
-                    .map_or(0, |max| max + 1),
-                None => local_context.len() as u16,
-            }
-        }
         // Shifts existing quoted args upward when we need to insert missing lambda binders
         // ahead of them for partially applied logical builtins.
         fn shift_for_inserted_lambda(
@@ -869,50 +850,6 @@ impl<'a> TermBridge<'a> {
                         Box::new(args.next().unwrap()),
                         Box::new(args.next().unwrap()),
                     );
-                }
-                Symbol::Choose => {
-                    if type_args.len() != 1 || value_args.is_empty() {
-                        panic!("malformed choose term during quoting: {}", term);
-                    }
-                    let choice_type = type_args.into_iter().next().unwrap();
-                    let mut value_args = value_args.into_iter();
-                    let predicate = value_args.next().unwrap();
-                    let choose_value = match predicate {
-                        AcornValue::Lambda(arg_types, body) => {
-                            if arg_types.len() != 1 || arg_types[0] != choice_type {
-                                panic!(
-                                    "malformed choose predicate binder type during quoting: {}",
-                                    term
-                                );
-                            }
-                            AcornValue::choose(choice_type, *body)
-                        }
-                        function => {
-                            let AcornType::Function(function_type) = function.get_type() else {
-                                panic!("malformed choose predicate type during quoting: {}", term);
-                            };
-                            if function_type.arg_types.len() != 1
-                                || function_type.arg_types[0] != choice_type
-                                || *function_type.return_type != AcornType::Bool
-                            {
-                                panic!("malformed choose predicate type during quoting: {}", term);
-                            }
-                            let arg_index = next_lambda_var_index(local_context, var_remapping);
-                            let shifted_function = function.insert_stack(arg_index, 1);
-                            let wrapper_body = AcornValue::apply(
-                                shifted_function,
-                                vec![AcornValue::Variable(arg_index, choice_type.clone())],
-                            );
-                            AcornValue::choose(
-                                choice_type.clone(),
-                                AcornValue::apply(
-                                    AcornValue::lambda(vec![choice_type.clone()], wrapper_body),
-                                    vec![AcornValue::Variable(arg_index, choice_type)],
-                                ),
-                            )
-                        }
-                    };
-                    return AcornValue::apply(choose_value, value_args.collect());
                 }
                 _ => unreachable!("unexpected logical symbol: {}", symbol),
             }
@@ -1144,7 +1081,6 @@ mod tests {
     use super::*;
     use crate::elaborator::acorn_type::{AcornType, TypeParam};
     use crate::elaborator::names::ConstantName;
-    use crate::kernel::atom::Atom;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -1294,223 +1230,6 @@ mod tests {
             &AcornValue::and(
                 AcornValue::Variable(0, AcornType::Bool),
                 AcornValue::Variable(1, AcornType::Bool),
-            )
-        );
-    }
-
-    #[test]
-    fn test_quote_choose_applies_partially_applied_predicate_to_bound_variable() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_type = kernel_context.parse_type("(Bool, Bool) -> Bool");
-        let g0_symbol = kernel_context.symbol_table.add_constant(
-            g0_name.clone(),
-            NewConstantType::Global,
-            g0_type.clone(),
-        );
-
-        let predicate = Term::atom(Atom::Symbol(g0_symbol)).apply(&[Term::new_true()]);
-        let choose_term =
-            Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[Term::bool_type(), predicate]);
-
-        let value = TermBridge::new(&kernel_context).quote_term_with_context(
-            &choose_term,
-            &LocalContext::empty(),
-            true,
-        );
-        value
-            .validate()
-            .expect("quoted choose with partially applied predicate should validate");
-
-        let AcornValue::Choose(choice_type, body) = value else {
-            panic!("quoted choose term should use choose syntax");
-        };
-        assert_eq!(choice_type, AcornType::Bool);
-        assert_eq!(
-            body.as_ref(),
-            &AcornValue::apply(
-                AcornValue::lambda(
-                    vec![AcornType::Bool],
-                    AcornValue::apply(
-                        AcornValue::apply(
-                            AcornValue::constant(
-                                g0_name,
-                                vec![],
-                                AcornType::functional(
-                                    vec![AcornType::Bool, AcornType::Bool],
-                                    AcornType::Bool,
-                                ),
-                                AcornType::functional(
-                                    vec![AcornType::Bool, AcornType::Bool],
-                                    AcornType::Bool,
-                                ),
-                                vec![],
-                            ),
-                            vec![AcornValue::Bool(true)],
-                        ),
-                        vec![AcornValue::Variable(0, AcornType::Bool)],
-                    ),
-                ),
-                vec![AcornValue::Variable(0, AcornType::Bool)],
-            )
-        );
-    }
-
-    #[test]
-    fn test_quote_choose_applies_function_predicate_to_bound_variable() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_type = kernel_context.parse_type("Bool -> Bool");
-        let g0_symbol = kernel_context.symbol_table.add_constant(
-            g0_name.clone(),
-            NewConstantType::Global,
-            g0_type.clone(),
-        );
-
-        let choose_term = Term::atom(Atom::Symbol(Symbol::Choose))
-            .apply(&[Term::bool_type(), Term::atom(Atom::Symbol(g0_symbol))]);
-
-        let value = TermBridge::new(&kernel_context).quote_term_with_context(
-            &choose_term,
-            &LocalContext::empty(),
-            true,
-        );
-        value
-            .validate()
-            .expect("quoted choose with function predicate should validate");
-
-        let AcornValue::Choose(choice_type, body) = value else {
-            panic!("quoted choose term should use choose syntax");
-        };
-        assert_eq!(choice_type, AcornType::Bool);
-        assert_eq!(
-            body.as_ref(),
-            &AcornValue::apply(
-                AcornValue::lambda(
-                    vec![AcornType::Bool],
-                    AcornValue::apply(
-                        AcornValue::constant(
-                            g0_name,
-                            vec![],
-                            AcornType::functional(vec![AcornType::Bool], AcornType::Bool),
-                            AcornType::functional(vec![AcornType::Bool], AcornType::Bool),
-                            vec![],
-                        ),
-                        vec![AcornValue::Variable(0, AcornType::Bool)],
-                    ),
-                ),
-                vec![AcornValue::Variable(0, AcornType::Bool)],
-            )
-        );
-    }
-
-    #[test]
-    fn test_quote_choose_shifts_nested_lambda_for_inserted_binder() {
-        let mut kernel_context = KernelContext::new();
-        let g0_name = ConstantName::unqualified(ModuleId(0), "g0");
-        let g0_type = kernel_context.parse_type("(Bool -> Bool) -> Bool -> Bool");
-        let g0_symbol = kernel_context.symbol_table.add_constant(
-            g0_name.clone(),
-            NewConstantType::Global,
-            g0_type.clone(),
-        );
-
-        let predicate = Term::atom(Atom::Symbol(g0_symbol)).apply(&[Term::lambda(
-            Term::bool_type(),
-            Term::atom(Atom::BoundVariable(0)),
-        )]);
-        let choose_term =
-            Term::atom(Atom::Symbol(Symbol::Choose)).apply(&[Term::bool_type(), predicate]);
-
-        let value = TermBridge::new(&kernel_context).quote_term_with_context(
-            &choose_term,
-            &LocalContext::empty(),
-            true,
-        );
-        value
-            .validate()
-            .expect("quoted choose with nested lambda predicate should validate");
-
-        let AcornValue::Choose(choice_type, body) = value else {
-            panic!("quoted choose term should use choose syntax");
-        };
-        assert_eq!(choice_type, AcornType::Bool);
-        assert_eq!(
-            body.as_ref(),
-            &AcornValue::apply(
-                AcornValue::lambda(
-                    vec![AcornType::Bool],
-                    AcornValue::apply(
-                        AcornValue::apply(
-                            AcornValue::constant(
-                                g0_name,
-                                vec![],
-                                AcornType::functional(
-                                    vec![
-                                        AcornType::functional(
-                                            vec![AcornType::Bool],
-                                            AcornType::Bool
-                                        ),
-                                        AcornType::Bool
-                                    ],
-                                    AcornType::Bool,
-                                ),
-                                AcornType::functional(
-                                    vec![
-                                        AcornType::functional(
-                                            vec![AcornType::Bool],
-                                            AcornType::Bool
-                                        ),
-                                        AcornType::Bool
-                                    ],
-                                    AcornType::Bool,
-                                ),
-                                vec![],
-                            ),
-                            vec![AcornValue::lambda(
-                                vec![AcornType::Bool],
-                                AcornValue::Variable(1, AcornType::Bool),
-                            )],
-                        ),
-                        vec![AcornValue::Variable(0, AcornType::Bool)],
-                    ),
-                ),
-                vec![AcornValue::Variable(0, AcornType::Bool)],
-            )
-        );
-    }
-
-    #[test]
-    fn test_quote_applied_function_valued_choose_stays_applied() {
-        let kernel_context = KernelContext::new();
-        let choice_type_term = Term::pi(Term::bool_type(), Term::bool_type());
-        let choice_type = AcornType::functional(vec![AcornType::Bool], AcornType::Bool);
-        let predicate = Term::lambda(
-            choice_type_term.clone(),
-            Term::atom(Atom::BoundVariable(0)).apply(&[Term::new_true()]),
-        );
-        let term = Term::choose(choice_type_term, predicate).apply(&[Term::new_true()]);
-
-        let value = TermBridge::new(&kernel_context).quote_term_with_context(
-            &term,
-            &LocalContext::empty(),
-            true,
-        );
-        value
-            .validate()
-            .expect("quoted applied choose should validate");
-
-        assert_eq!(
-            value,
-            AcornValue::apply(
-                AcornValue::choose(
-                    choice_type.clone(),
-                    AcornValue::apply(
-                        AcornValue::Variable(0, choice_type),
-                        vec![AcornValue::Bool(true)],
-                    ),
-                ),
-                vec![AcornValue::Bool(true)],
             )
         );
     }

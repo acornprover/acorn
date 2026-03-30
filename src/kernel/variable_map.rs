@@ -740,29 +740,4 @@ mod tests {
             Some(&Term::atom(Atom::BoundVariable(0)))
         );
     }
-
-    #[test]
-    fn test_match_literal_handles_choose_with_nested_exists() {
-        let kctx = KernelContext::new();
-        let foo = kctx.parse_type("Bool");
-        let choose_general = Term::choose(
-            foo.clone(),
-            Term::lambda(
-                foo.clone(),
-                Term::exists(
-                    foo,
-                    Term::and(
-                        Term::atom(Atom::BoundVariable(1)),
-                        Term::atom(Atom::BoundVariable(0)),
-                    ),
-                ),
-            ),
-        );
-        let choose_special = choose_general.clone();
-        let general = Literal::negative(Term::atom(Atom::FreeVariable(0)).apply(&[choose_general]));
-        let special = Literal::negative(Term::atom(Atom::FreeVariable(1)).apply(&[choose_special]));
-
-        let mut var_map = VariableMap::new();
-        assert!(var_map.match_literal(&general, &special, false));
-    }
 }

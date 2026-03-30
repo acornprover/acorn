@@ -769,7 +769,7 @@ impl Clause {
     /// a closed witness term `t`, reduce it to the instantiated body.
     ///
     /// This captures the obvious existential-introduction case
-    /// without introducing a fresh `choose(...)` witness.
+    /// without introducing a fresh witness term.
     fn reduce_exists_with_obvious_witness(term: &Term) -> Option<(Term, Term)> {
         let (_binder_type, body) = term.as_ref().split_exists()?;
         let body = body.to_owned();

@@ -1353,46 +1353,6 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
 }
 
 #[test]
-fn test_from_concrete_steps_handles_binder_claim_args() {
-    let code = r#"
-        theorem goal {
-            true
-        }
-    "#;
-    let (_project, bindings, kernel_context) = setup_claim_codec_env(code);
-    let kernel = &kernel_context;
-    let generic = kernel.parse_clause("x0", &["Bool"]);
-
-    let mut var_map = VariableMap::new();
-    var_map.set(
-        0,
-        Term::choose(
-            Term::bool_type(),
-            Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0))),
-        ),
-    );
-    let concrete_steps = vec![ConcreteStep {
-        generic: generic.clone(),
-        var_maps: vec![(var_map, generic.get_local_context().clone())],
-    }];
-
-    let result = Certificate::from_concrete_steps(
-        "goal".to_string(),
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    );
-
-    let err = result.expect_err("choose should be rejected during certificate generation");
-    assert!(
-        err.to_string()
-            .contains("choose expressions are not supported"),
-        "unexpected error: {}",
-        err
-    );
-}
-
-#[test]
 fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
     let code = r#"
         theorem goal {
