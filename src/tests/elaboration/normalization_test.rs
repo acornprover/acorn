@@ -28,12 +28,19 @@ fn get_inline_exists_body(
     })
 }
 
-fn is_signed_outer_equality(clause: &crate::kernel::clause::Clause, positive: bool) -> bool {
+fn is_top_level_boolean_equality_literal(
+    clause: &crate::kernel::clause::Clause,
+    positive: bool,
+) -> bool {
     clause.literals.len() == 1
-        && clause.literals[0].is_signed_term()
         && clause.literals[0].positive == positive
+        && !clause.literals[0].is_signed_term()
         && matches!(
             clause.literals[0].left.as_ref().decompose(),
+            crate::kernel::term::Decomposition::Application(_, _)
+        )
+        && matches!(
+            clause.literals[0].right.as_ref().decompose(),
             crate::kernel::term::Decomposition::Application(_, _)
         )
 }
@@ -219,7 +226,7 @@ fn test_boolean_equality() {
         let clauses = norm.get_all_clauses(&env);
         assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
         assert!(
-            is_signed_outer_equality(&clauses[0], true),
+            is_top_level_boolean_equality_literal(&clauses[0], true),
             "expected a single signed equality clause, got {:?}",
             clauses
         );
@@ -250,7 +257,7 @@ fn test_boolean_inequality() {
         let clauses = norm.get_all_clauses(&env);
         assert_eq!(clauses.len(), 1, "expected one clause under nocnf");
         assert!(
-            is_signed_outer_equality(&clauses[0], false),
+            is_top_level_boolean_equality_literal(&clauses[0], false),
             "expected a single signed inequality clause, got {:?}",
             clauses
         );
@@ -378,7 +385,7 @@ fn test_if_then_else_under_equality() {
     );
     let mut norm = KernelContext::new();
     if cfg!(feature = "nocnf") {
-        norm.check(&env, "goal", &["eq(Bool, ite(Bool, b, c, d), a)"]);
+        norm.check(&env, "goal", &["ite(Bool, b, c, d) = a"]);
     } else {
         norm.check(
             &env,
@@ -413,7 +420,7 @@ fn test_if_then_else_with_true_branch_under_equality() {
     );
     let mut norm = KernelContext::new();
     if cfg!(feature = "nocnf") {
-        norm.check(&env, "goal", &["eq(Bool, ite(Bool, b, true, d), a)"]);
+        norm.check(&env, "goal", &["ite(Bool, b, true, d) = a"]);
     } else {
         norm.check(
             &env,
@@ -468,7 +475,7 @@ fn test_if_then_else_normalization_with_variables() {
         norm.check(
             &env,
             "goal",
-            &["eq(Bool, foo(x0, x1, x2), ite(Bool, eq(T0_0, x1, x2), true, x0(x2)))"],
+            &["ite(Bool, eq(T0_0, x0, x1), true, x2(x1)) = foo(x2, x0, x1)"],
         );
     } else {
         norm.check(
@@ -525,11 +532,7 @@ fn test_normalizing_functional_or() {
     );
     let mut norm = KernelContext::new();
     if cfg!(feature = "nocnf") {
-        norm.check(
-            &env,
-            "goal",
-            &["eq(Bool, dis(x0), or(or(f(x0), g(x0)), h(x0)))"],
-        );
+        norm.check(&env, "goal", &["or(or(f(x0), g(x0)), h(x0)) = dis(x0)"]);
     } else {
         norm.check(
             &env,
