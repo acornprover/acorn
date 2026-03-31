@@ -107,6 +107,7 @@ It must:
 
 - normalize every subterm of a normalized term
 - beta-reduce head lambda applications
+- eta-reduce lambdas that only forward their bound variables
 - cancel double negation
 - order fully applied equality terms
 - recurse under binders

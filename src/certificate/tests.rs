@@ -1269,8 +1269,8 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
     assert!(
         proof
             .iter()
-            .any(|line| { line.contains("is_transitive") && line.contains("}[Nat](function(") }),
-        "expected a proof step to preserve the lambda-valued claim argument: {proof:?}"
+            .any(|line| line.contains("is_transitive") && line.contains("}[Nat](rel)")),
+        "expected a proof step to normalize the lambda-valued claim argument: {proof:?}"
     );
 
     processor

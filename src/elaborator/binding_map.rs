@@ -2021,15 +2021,13 @@ impl BindingMap {
         }
     }
 
-    /// Canonicalize proposition syntax without replacing theorem calls.
+    /// Validate proposition syntax without replacing theorem calls.
     pub fn canonicalize_proposition(&self, proposition: Proposition) -> Proposition {
         proposition
             .value
             .validate()
             .unwrap_or_else(|e| panic!("invalid claim: {} ({})", proposition.value, e));
-
-        let value = proposition.value.flatten_applications().reduce_eta(0);
-        proposition.with_value(value)
+        proposition
     }
 
     /// Replaces the cited outer theorem with its definition.

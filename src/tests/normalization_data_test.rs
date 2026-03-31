@@ -111,6 +111,20 @@ const TERM_CASES: &[DefinitionCase] = &[
                 }(function(x: Nat) { x })
         "#,
     },
+    DefinitionCase {
+        name: "eta_reduction_of_partial_application",
+        code: r#"
+            type Nat: axiom
+            type Val: axiom
+            let f: (Nat, Nat) -> Val = axiom
+            let i: Nat = axiom
+
+            let target: Nat -> Val =
+                function(j: Nat) {
+                    f(i, j)
+                }
+        "#,
+    },
 ];
 
 const CLAUSE_CASES: &[DefinitionCase] = &[
