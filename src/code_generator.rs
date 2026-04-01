@@ -31,6 +31,9 @@ pub struct CodeGenerator<'a> {
     /// so proofs can cite generic definitions with concrete type arguments.
     allow_out_of_scope_typeclass_calls: bool,
 
+    /// When true, always emit `Type.0` instead of shortcutting to `0` for numeric literals.
+    explicit_numerals: bool,
+
     /// We use variables named x0, x1, x2, etc for universal variables.
     next_x: u32,
 
@@ -291,6 +294,7 @@ impl CodeGenerator<'_> {
         CodeGenerator {
             bindings,
             allow_out_of_scope_typeclass_calls: false,
+            explicit_numerals: false,
             next_x: 0,
             next_k: 0,
             var_names: vec![],
@@ -306,6 +310,43 @@ impl CodeGenerator<'_> {
             allow_out_of_scope_typeclass_calls: true,
             ..Self::new(bindings)
         }
+    }
+
+    /// Returns a code generator that always emits explicit `Type.0` instead of bare `0`.
+    pub fn with_explicit_numerals(mut self) -> Self {
+        self.explicit_numerals = true;
+        self
+    }
+
+    /// Peel ForAll layers from a value, returning (params, body_code).
+    /// `param_names` provides original parameter names from the source.
+    /// Falls back to generated names (x0, x1, ...) if not enough names are given.
+    pub fn value_to_theorem_parts(
+        &mut self,
+        value: &AcornValue,
+        param_names: &[String],
+    ) -> Result<(Vec<(String, String)>, String)> {
+        let mut params = vec![];
+        let mut current = value;
+        let mut name_idx = 0;
+
+        while let AcornValue::ForAll(quants, body) = current {
+            for arg_type in quants {
+                let var_name = if name_idx < param_names.len() {
+                    param_names[name_idx].clone()
+                } else {
+                    self.bindings.next_indexed_var('x', &mut self.next_x)
+                };
+                name_idx += 1;
+                self.var_names.push(var_name.clone());
+                let type_str = self.type_to_code(arg_type)?;
+                params.push((var_name, type_str));
+            }
+            current = body;
+        }
+
+        let body_expr = self.value_to_expr(current, false)?;
+        Ok((params, body_expr.to_string()))
     }
 
     pub fn marked(code: String) -> MarkedString {
@@ -1642,7 +1683,9 @@ impl CodeGenerator<'_> {
                                     // Special case for digit attributes
                                     if attr.chars().all(|ch| ch.is_ascii_digit()) {
                                         let numeral = TokenType::Numeral.new_token(&attr);
-                                        if self.bindings.numerals() == Some(datatype) {
+                                        if !self.explicit_numerals
+                                            && self.bindings.numerals() == Some(datatype)
+                                        {
                                             // If it's the numerals type, just return the numeral
                                             return Ok(Expression::Singleton(numeral));
                                         }
@@ -1693,8 +1736,20 @@ impl CodeGenerator<'_> {
                     TokenType::RightBrace.generate(),
                 ))
             }
-            AcornValue::Match(_scrutinee, _cases) => {
-                todo!("codegen match expressions");
+            AcornValue::Match(scrutinee, cases) => {
+                let scrutinee_expr = self.value_to_expr(scrutinee, false)?;
+                let mut case_pairs = Vec::new();
+                for case in cases {
+                    let pattern_expr = self.value_to_expr(&case.pattern, false)?;
+                    let result_expr = self.value_to_expr(&case.result, false)?;
+                    case_pairs.push((pattern_expr, result_expr));
+                }
+                Ok(Expression::Match(
+                    TokenType::Match.generate(),
+                    Box::new(scrutinee_expr),
+                    case_pairs,
+                    TokenType::RightBrace.generate(),
+                ))
             }
         }
     }
