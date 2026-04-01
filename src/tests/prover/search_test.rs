@@ -748,10 +748,10 @@ fn test_proving_with_equality_factoring_basic() {
         assert_proof_lines(
             proof,
             &[
-                "h(y) != g(y) or g(y) = f(y)",
                 "function(x0: Foo) { h(x0) = g(x0) }(y)",
-                "g(y) = f(y)",
                 "function(x0: Foo) { h(x0) != f(x0) }(y)",
+                "h(y) != g(y) or g(y) = f(y)",
+                "g(y) = f(y)",
             ],
         );
     } else {
@@ -804,10 +804,10 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
         assert_proof_lines(
             proof,
             &[
-                "h(y) != g(y) or g(y) = f(y)",
                 "function(x0: Foo) { h(x0) = g(x0) }(y)",
-                "g(y) = f(y)",
                 "function(x0: Foo) { h(x0) != f(x0) }(y)",
+                "h(y) != g(y) or g(y) = f(y)",
+                "g(y) = f(y)",
             ],
         );
     } else {

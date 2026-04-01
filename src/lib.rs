@@ -1,8 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-#[cfg(feature = "nocnf")]
-compile_error!("feature \"nocnf\" is not supported with named-witness certificates");
-
 pub mod build_cache;
 pub mod builder;
 pub mod certificate;

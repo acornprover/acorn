@@ -185,6 +185,53 @@ fn beta_reduce_head_lambda_application(term: &Term) -> Option<Term> {
     Some(substituted.shift_bound(0, -1))
 }
 
+fn references_bound_range(term: TermRef<'_>, start: u16, end: u16, depth: u16) -> bool {
+    match term.decompose() {
+        Decomposition::Atom(Atom::BoundVariable(i)) => *i >= start + depth && *i < end + depth,
+        Decomposition::Atom(_) => false,
+        Decomposition::Application(function, argument) => {
+            references_bound_range(function, start, end, depth)
+                || references_bound_range(argument, start, end, depth)
+        }
+        Decomposition::Pi(input, output) => {
+            references_bound_range(input, start, end, depth)
+                || references_bound_range(output, start, end, depth + 1)
+        }
+        Decomposition::Lambda(input, body) => {
+            references_bound_range(input, start, end, depth)
+                || references_bound_range(body, start, end, depth + 1)
+        }
+        Decomposition::ForAll(binder_type, body) => {
+            references_bound_range(binder_type, start, end, depth)
+                || references_bound_range(body, start, end, depth + 1)
+        }
+        Decomposition::Exists(binder_type, body) => {
+            references_bound_range(binder_type, start, end, depth)
+                || references_bound_range(body, start, end, depth + 1)
+        }
+    }
+}
+
+fn eta_reduce_single_lambda(term: &Term) -> Option<Term> {
+    let (_input_type, body) = term.as_ref().split_lambda()?;
+    let (function, args) = body.split_application_multi()?;
+    let (last_arg, prefix_args) = args.split_last()?;
+    if *last_arg != Term::atom(Atom::BoundVariable(0)) {
+        return None;
+    }
+    if references_bound_range(function.as_ref(), 0, 1, 0) {
+        return None;
+    }
+    if prefix_args
+        .iter()
+        .any(|arg| references_bound_range(arg.as_ref(), 0, 1, 0))
+    {
+        return None;
+    }
+
+    Some(function.apply(prefix_args).shift_bound(1, -1))
+}
+
 fn cancel_double_negation(term: &Term) -> Option<Term> {
     let args = split_symbol_application(term, Symbol::Not, 1)?;
     let inner_args = split_symbol_application(&args[0], Symbol::Not, 1)?;
@@ -250,6 +297,7 @@ pub fn normalize_clause_subterms(clause: &Clause) -> Clause {
 ///
 /// This:
 /// - beta-reduces head lambda applications
+/// - eta-reduces lambdas that only forward their bound variable
 /// - cancels `not not`
 /// - orders fully applied equality terms
 /// - recurses under quantifier bodies
@@ -261,6 +309,9 @@ pub fn normalize_clause_subterms(clause: &Clause) -> Clause {
 pub fn normalize_term(term: &Term) -> Term {
     let normalized = normalize_term_children(term);
     if let Some(reduced) = beta_reduce_head_lambda_application(&normalized) {
+        return normalize_term(&reduced);
+    }
+    if let Some(reduced) = eta_reduce_single_lambda(&normalized) {
         return normalize_term(&reduced);
     }
     let normalized = cancel_double_negation(&normalized).unwrap_or(normalized);
@@ -425,6 +476,66 @@ mod tests {
         .apply(&[Term::parse("c0")]);
         let expected = Term::lambda(Term::bool_type(), Term::parse("c0"));
         assert_eq!(normalize_term(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_eta_reduces_simple_lambda() {
+        let term = Term::lambda(
+            Term::bool_type(),
+            Term::parse("c0").apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        assert_eq!(normalize_term(&term), Term::parse("c0"));
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_eta_reduces_nested_lambdas() {
+        let term = Term::lambda(
+            Term::bool_type(),
+            Term::lambda(
+                Term::bool_type(),
+                Term::parse("c0").apply(&[
+                    Term::atom(Atom::BoundVariable(1)),
+                    Term::atom(Atom::BoundVariable(0)),
+                ]),
+            ),
+        );
+        assert_eq!(normalize_term(&term), Term::parse("c0"));
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_eta_reduction_preserves_outer_binders() {
+        let term = Term::lambda(
+            Term::bool_type(),
+            Term::lambda(
+                Term::bool_type(),
+                Term::lambda(
+                    Term::bool_type(),
+                    Term::parse("c0").apply(&[
+                        Term::parse("c1").apply(&[Term::atom(Atom::BoundVariable(2))]),
+                        Term::atom(Atom::BoundVariable(1)),
+                        Term::atom(Atom::BoundVariable(0)),
+                    ]),
+                ),
+            ),
+        );
+        let expected = Term::lambda(
+            Term::bool_type(),
+            Term::parse("c0")
+                .apply(&[Term::parse("c1").apply(&[Term::atom(Atom::BoundVariable(0))])]),
+        );
+        assert_eq!(normalize_term(&term), expected);
+    }
+
+    #[test]
+    fn test_normalize_boolean_subterms_eta_reduction_requires_forwarding_shape() {
+        let term = Term::lambda(
+            Term::bool_type(),
+            Term::parse("c0").apply(&[
+                Term::atom(Atom::BoundVariable(0)),
+                Term::atom(Atom::BoundVariable(0)),
+            ]),
+        );
+        assert_eq!(normalize_term(&term), term);
     }
 
     #[test]

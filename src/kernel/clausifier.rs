@@ -481,6 +481,59 @@ impl<'a> Clausifier<'a> {
         (current, consumed)
     }
 
+    /// Build the constructor pattern for a match case and instantiate the case
+    /// term with fresh field variables.
+    ///
+    /// This works whether the case term is still an explicit lambda tower or has
+    /// already been eta-reduced to a function term.
+    fn instantiate_match_case(
+        &self,
+        constructor_symbol: Symbol,
+        datatype_type_args: &[Term],
+        case_term: &Term,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        context: &mut LocalContext,
+    ) -> Result<(Term, Term), String> {
+        let mut constructor_type = self.symbol_table().get_type(constructor_symbol).clone();
+        for type_arg in datatype_type_args {
+            let Some((input, output)) = constructor_type.as_ref().split_pi() else {
+                return Err(format!(
+                    "constructor {constructor_symbol:?} is missing match type parameters"
+                ));
+            };
+            if !input.is_type_param_kind() {
+                return Err(format!(
+                    "constructor {constructor_symbol:?} expected a value argument before all match type parameters were instantiated"
+                ));
+            }
+            constructor_type = self.open_binder_body(&output.to_owned(), type_arg);
+        }
+
+        let mut constructor_args = datatype_type_args.to_vec();
+        let mut field_args = Vec::new();
+        while let Some((input, output)) = constructor_type.as_ref().split_pi() {
+            if input.is_type_param_kind() {
+                return Err(format!(
+                    "constructor {constructor_symbol:?} unexpectedly requires extra type parameters during match clausification"
+                ));
+            }
+            let input_type = input.to_owned();
+            let var_id = *next_var_id;
+            *next_var_id += 1;
+            context.push_type(input_type.clone());
+            let var = Term::new_variable(var_id);
+            constructor_args.push(var.clone());
+            field_args.push(var.clone());
+            stack.push(TermBinding::Free);
+            constructor_type = self.open_binder_body(&output.to_owned(), &var);
+        }
+
+        let pattern = Term::new(Atom::Symbol(constructor_symbol), constructor_args);
+        let (case_value, _) = self.instantiate_binder_prefix(case_term, &field_args);
+        Ok((pattern, case_value))
+    }
+
     /// Abstract a specific free variable into a new outer binder.
     ///
     /// This both:
@@ -904,22 +957,15 @@ impl<'a> Clausifier<'a> {
             let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
             let mut answer = Cnf::true_value();
             for (constructor_symbol, case_term) in &cases {
-                let mut constructor_args = datatype_type_args.clone();
-                let mut case_value = case_term.clone();
                 let stack_len = stack.len();
-
-                while let Some((input, body)) = case_value.as_ref().split_lambda() {
-                    let input_type = input.to_owned();
-                    let var_id = *next_var_id;
-                    *next_var_id += 1;
-                    context.push_type(input_type.clone());
-                    let var = Term::new_variable(var_id);
-                    constructor_args.push(var.clone());
-                    stack.push(TermBinding::Free);
-                    case_value = self.open_binder_body(&body.to_owned(), &var);
-                }
-
-                let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
+                let (pattern, case_value) = self.instantiate_match_case(
+                    *constructor_symbol,
+                    &datatype_type_args,
+                    case_term,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
                 let condition =
                     self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
                 let conclusion =
@@ -935,22 +981,15 @@ impl<'a> Clausifier<'a> {
             let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
             let mut answer = Cnf::true_value();
             for (constructor_symbol, case_term) in &cases {
-                let mut constructor_args = datatype_type_args.clone();
-                let mut case_value = case_term.clone();
                 let stack_len = stack.len();
-
-                while let Some((input, body)) = case_value.as_ref().split_lambda() {
-                    let input_type = input.to_owned();
-                    let var_id = *next_var_id;
-                    *next_var_id += 1;
-                    context.push_type(input_type.clone());
-                    let var = Term::new_variable(var_id);
-                    constructor_args.push(var.clone());
-                    stack.push(TermBinding::Free);
-                    case_value = self.open_binder_body(&body.to_owned(), &var);
-                }
-
-                let pattern = Term::new(Atom::Symbol(*constructor_symbol), constructor_args);
+                let (pattern, case_value) = self.instantiate_match_case(
+                    *constructor_symbol,
+                    &datatype_type_args,
+                    case_term,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
                 let condition =
                     self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
                 let conclusion =
@@ -1376,33 +1415,10 @@ impl<'a> Clausifier<'a> {
     /// but allow richer terms when inline encoding is unavailable so cert parsing can round-trip
     /// generated witnesses, including lambdas that still refer to other claim locals.
     fn term_to_claim_arg_shape(&mut self, term: &Term) -> Result<Term, String> {
-        if let Some(reduced) = Self::try_eta_reduce_single_lambda(term) {
-            return self.term_to_claim_arg_shape(&reduced);
-        }
         match self.term_to_checker_inline_term(term) {
             Ok(inline_term) => Ok(inline_term),
             Err(_) => Ok(term.clone()),
         }
-    }
-
-    /// Reduce a one-argument lambda that only forwards its bound variable into the tail
-    /// position of an application, e.g. `function(x) { f(a, x) }` -> `f(a)`.
-    fn try_eta_reduce_single_lambda(term: &Term) -> Option<Term> {
-        let (input_type, body) = term.as_ref().split_lambda()?;
-        let (function, args) = body.split_application_multi()?;
-        let (last_arg, prefix_args) = args.split_last()?;
-        if *last_arg != Term::atom(Atom::BoundVariable(0)) {
-            return None;
-        }
-        if function.has_bound_variable() || prefix_args.iter().any(|arg| arg.has_bound_variable()) {
-            return None;
-        }
-        if !function.has_free_variable() && !prefix_args.iter().any(|arg| arg.has_free_variable()) {
-            return None;
-        }
-
-        let _ = input_type;
-        Some(function.to_owned().apply(prefix_args))
     }
 
     /// Converts an ExtendedTerm to a simple Term.
@@ -1517,6 +1533,10 @@ impl KernelContext {
 #[cfg(test)]
 mod tests {
     use super::{Clausifier, TermLoweringMode};
+    use crate::elaborator::acorn_type::{AcornType, Datatype};
+    use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase};
+    use crate::elaborator::names::ConstantName;
+    use crate::elaborator::to_term::lower_value_to_term;
     use crate::kernel::atom::Atom;
     use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
@@ -1524,6 +1544,8 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol_table::NewConstantType;
     use crate::kernel::term::{Decomposition, Term};
+    use crate::kernel::term_normalization::normalize_term;
+    use crate::module::ModuleId;
 
     #[test]
     fn test_negated_forall_clausification_stays_inline_without_opening_witness() {
@@ -1697,5 +1719,128 @@ mod tests {
             .expect("exact clause lowering should preserve nested equality order");
 
         assert_eq!(lowered, clause);
+    }
+
+    #[test]
+    fn test_match_clausification_accepts_eta_reduced_case_functions() {
+        let mut kernel_context = KernelContext::new();
+
+        let nat = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let int = Datatype {
+            module_id: ModuleId(0),
+            name: "Int".to_string(),
+        };
+        let nat_type = AcornType::Data(nat.clone(), vec![]);
+        let int_type = AcornType::Data(int.clone(), vec![]);
+
+        let zero_name = ConstantName::datatype_attr(ModuleId(0), nat.clone(), "zero");
+        let succ_name = ConstantName::datatype_attr(ModuleId(0), nat, "succ");
+        let from_nat_name = ConstantName::datatype_attr(ModuleId(0), int.clone(), "from_nat");
+        let neg_suc_name = ConstantName::datatype_attr(ModuleId(0), int, "neg_suc");
+
+        let zero = AcornValue::constant(
+            zero_name,
+            vec![],
+            nat_type.clone(),
+            nat_type.clone(),
+            vec![],
+        );
+        let succ = AcornValue::constant(
+            succ_name,
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
+        );
+        let from_nat = AcornValue::constant(
+            from_nat_name,
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], int_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], int_type.clone()),
+            vec![],
+        );
+        let neg_suc = AcornValue::constant(
+            neg_suc_name,
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], int_type.clone()),
+            AcornType::functional(vec![nat_type.clone()], int_type.clone()),
+            vec![],
+        );
+
+        let match_value = AcornValue::Match(
+            Box::new(zero.clone()),
+            vec![
+                MatchCase {
+                    new_vars: vec![],
+                    pattern: zero.clone(),
+                    result: AcornValue::Application(FunctionApplication {
+                        function: Box::new(from_nat.clone()),
+                        args: vec![zero.clone()],
+                    }),
+                    constructor_index: 0,
+                    constructor_total: 2,
+                },
+                MatchCase {
+                    new_vars: vec![nat_type.clone()],
+                    pattern: AcornValue::Application(FunctionApplication {
+                        function: Box::new(succ),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    result: AcornValue::Application(FunctionApplication {
+                        function: Box::new(neg_suc),
+                        args: vec![AcornValue::Variable(0, nat_type.clone())],
+                    }),
+                    constructor_index: 1,
+                    constructor_total: 2,
+                },
+            ],
+        );
+
+        {
+            let symbol_table = &mut kernel_context.symbol_table;
+            let type_store = &mut kernel_context.type_store;
+            symbol_table.add_from(&match_value, NewConstantType::Global, type_store);
+        }
+
+        let lowered = lower_value_to_term(
+            &mut kernel_context,
+            &match_value,
+            NewConstantType::Local,
+            None,
+        )
+        .expect("match lowering should succeed");
+        let normalized = normalize_term(&lowered);
+        let (_, args) = normalized
+            .as_ref()
+            .split_application_multi()
+            .expect("normalized match should stay an application");
+        assert!(
+            args[3].as_ref().split_lambda().is_none(),
+            "eta normalization should remove the forwarding constructor lambda: {normalized:?}"
+        );
+
+        let int_term = kernel_context
+            .type_store
+            .get_type_term(&int_type)
+            .expect("Int should be registered")
+            .clone();
+        let a_name = ConstantName::unqualified(ModuleId(0), "a");
+        let a_symbol = kernel_context.symbol_table.add_constant(
+            a_name,
+            NewConstantType::Global,
+            int_term.clone(),
+        );
+        let equality = Term::eq(int_term, Term::atom(Atom::Symbol(a_symbol)), normalized);
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&equality, None, TermLoweringMode::ClausifyShallowly)
+            .expect("clausification should accept eta-reduced match branches");
+
+        assert!(!clauses.is_empty(), "match equality should produce clauses");
+        for clause in &clauses {
+            clause.validate(&kernel_context);
+        }
     }
 }
