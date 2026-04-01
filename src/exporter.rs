@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,29 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::source::SourceType;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::Project;
+
+// ── Export options ───────────────────────────────────────────────────────
+
+/// Controls which optional fields are included in the export.
+pub struct ExportOptions {
+    pub pretty: bool,
+    pub type_annotations: bool,
+    pub proof_deps: bool,
+    pub elaborated: bool,
+}
+
+impl ExportOptions {
+    /// Basic export with no optional fields.
+    #[cfg(test)]
+    pub fn basic() -> Self {
+        ExportOptions {
+            pretty: false,
+            type_annotations: false,
+            proof_deps: false,
+            elaborated: false,
+        }
+    }
+}
 
 // ── Exported data structures ────────────────────────────────────────────
 
@@ -93,6 +116,25 @@ pub struct ExportedTheorem {
     pub doc_comments: Vec<String>,
     pub line: u32,
     pub dependencies: Vec<String>,
+
+    // Optional fields (controlled by ExportOptions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_dependencies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elaborated_proof: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_annotations: Option<Vec<IdentifierInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_annotations: Option<Vec<IdentifierInfo>>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IdentifierInfo {
+    pub name: String,
+    pub full_name: String,
+    #[serde(rename = "type")]
+    pub id_type: String,
+    pub kind: String, // "constant" | "variable"
 }
 
 #[derive(Serialize)]
@@ -122,7 +164,7 @@ pub fn export_project(
     project: &Project,
     output_dir: &Path,
     module_filter: Option<&str>,
-    pretty: bool,
+    options: &ExportOptions,
 ) -> Result<(), String> {
     fs::create_dir_all(output_dir).map_err(|e| format!("cannot create output dir: {}", e))?;
 
@@ -153,7 +195,7 @@ pub fn export_project(
             None => continue,
         };
 
-        let exported = export_module(project, env, *module_id, &module_name, descriptor);
+        let exported = export_module(project, env, *module_id, &module_name, descriptor, options);
 
         let entry = ExportedIndexEntry {
             name: module_name.clone(),
@@ -202,7 +244,7 @@ pub fn export_project(
     let file =
         fs::File::create(&index_path).map_err(|e| format!("cannot create index.json: {}", e))?;
     let writer = BufWriter::new(file);
-    if pretty {
+    if options.pretty {
         serde_json::to_writer_pretty(writer, &index)
     } else {
         serde_json::to_writer(writer, &index)
@@ -281,6 +323,7 @@ fn export_module(
     module_id: ModuleId,
     module_name: &str,
     descriptor: &ModuleDescriptor,
+    options: &ExportOptions,
 ) -> ExportedModule {
     let bindings = &env.bindings;
 
@@ -414,6 +457,7 @@ fn export_module(
             node,
             &cert_worklist,
             &source_lines,
+            options,
             &mut instances,
             &mut definitions,
             &mut theorems,
@@ -439,6 +483,7 @@ fn export_node(
     node: &Node,
     cert_worklist: &crate::certificate::CertificateWorklist,
     source_lines: &[String],
+    options: &ExportOptions,
     instances: &mut Vec<ExportedInstance>,
     definitions: &mut Vec<ExportedDefinition>,
     theorems: &mut Vec<ExportedTheorem>,
@@ -493,6 +538,10 @@ fn export_node(
                 doc_comments: vec![],
                 line,
                 dependencies,
+                proof_dependencies: None,
+                elaborated_proof: None,
+                statement_annotations: None,
+                proof_annotations: None,
             });
         }
         Node::Block(block, external_fact, _) => {
@@ -534,6 +583,49 @@ fn export_node(
                         let source_proof =
                             extract_source_proof(source_lines, block.source_range.as_ref());
 
+                        // Optional fields
+                        let proof_dependencies = if options.proof_deps {
+                            Some(collect_proof_dependencies(
+                                &block.env,
+                                &env.bindings,
+                                &dependencies,
+                                &param_names,
+                            ))
+                        } else {
+                            None
+                        };
+
+                        let elaborated_proof = if options.elaborated {
+                            Some(collect_elaborated_proof(&block.env, &env.bindings))
+                        } else {
+                            None
+                        };
+
+                        let statement_annotations = if options.type_annotations {
+                            Some(collect_identifiers(
+                                &prop.value,
+                                &env.bindings,
+                                &param_names,
+                            ))
+                        } else {
+                            None
+                        };
+
+                        let proof_annotations = if options.type_annotations {
+                            Some(collect_block_identifiers(&block.env, &env.bindings))
+                        } else {
+                            None
+                        };
+
+                        let doc_comments = env
+                            .bindings
+                            .get_constant_doc_comments(&ConstantName::Unqualified(
+                                module_id,
+                                name.to_string(),
+                            ))
+                            .cloned()
+                            .unwrap_or_default();
+
                         theorems.push(ExportedTheorem {
                             name: name.to_string(),
                             qualified_name,
@@ -542,9 +634,13 @@ fn export_node(
                             is_axiom,
                             proof,
                             source_proof,
-                            doc_comments: vec![],
+                            doc_comments,
                             line,
                             dependencies,
+                            proof_dependencies,
+                            elaborated_proof,
+                            statement_annotations,
+                            proof_annotations,
                         });
                     }
                 }
@@ -576,6 +672,7 @@ fn export_node(
                     sub_node,
                     cert_worklist,
                     source_lines,
+                    options,
                     instances,
                     definitions,
                     theorems,
@@ -641,6 +738,10 @@ fn export_fact(
                         doc_comments: vec![],
                         line: source.range.start.line + 1,
                         dependencies,
+                        proof_dependencies: None,
+                        elaborated_proof: None,
+                        statement_annotations: None,
+                        proof_annotations: None,
                     });
                 }
                 _ => {}
@@ -690,7 +791,266 @@ fn export_fact(
     }
 }
 
+// ── Optional field collectors ───────────────────────────────────────────
+
+/// Collect proof-level dependencies by walking the block's sub-nodes and
+/// extracting all referenced constants, then filtering out statement-level deps
+/// and block argument names.
+fn collect_proof_dependencies(
+    block_env: &Environment,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    statement_deps: &[String],
+    block_arg_names: &[String],
+) -> Vec<String> {
+    let _ = bindings;
+    let stmt_set: BTreeSet<&str> = statement_deps.iter().map(|s| s.as_str()).collect();
+    let arg_set: BTreeSet<&str> = block_arg_names.iter().map(|s| s.as_str()).collect();
+    let mut proof_deps = BTreeSet::new();
+
+    for node in &block_env.nodes {
+        collect_node_constants(node, &mut proof_deps);
+    }
+
+    // Remove statement-level deps, block argument names, and internal defs
+    proof_deps
+        .into_iter()
+        .filter(|dep| !stmt_set.contains(dep.as_str()) && !arg_set.contains(dep.as_str()))
+        .collect()
+}
+
+/// Recursively collect all constant names from a node's values.
+fn collect_node_constants(node: &Node, deps: &mut BTreeSet<String>) {
+    match node {
+        Node::Structural(fact, _) => {
+            if let Some(value) = fact_value(fact) {
+                collect_deps_recursive(value, deps);
+            }
+        }
+        Node::Claim(goal, _fact, _, _) => {
+            collect_deps_recursive(&goal.proposition.value, deps);
+        }
+        Node::Block(block, external_fact, _) => {
+            if let Some(fact) = external_fact {
+                if let Some(value) = fact_value(fact) {
+                    collect_deps_recursive(value, deps);
+                }
+            }
+            for sub_node in &block.env.nodes {
+                collect_node_constants(sub_node, deps);
+            }
+        }
+    }
+}
+
+fn fact_value(fact: &Fact) -> Option<&AcornValue> {
+    match fact {
+        Fact::Proposition(prop) => Some(&prop.value),
+        Fact::Definition(_, def, _) => Some(def),
+        _ => None,
+    }
+}
+
+/// Collect elaborated proof lines from a block's sub-nodes.
+/// Each claim/structural proposition is rendered with explicit numerals.
+fn collect_elaborated_proof(
+    block_env: &Environment,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for node in &block_env.nodes {
+        collect_elaborated_from_node(node, bindings, &mut lines);
+    }
+
+    lines
+}
+
+fn collect_elaborated_from_node(
+    node: &Node,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    lines: &mut Vec<String>,
+) {
+    match node {
+        Node::Structural(fact, _) => {
+            if let Fact::Proposition(prop) = fact {
+                let mut codegen = CodeGenerator::new(bindings).with_explicit_numerals();
+                if let Ok(code) = codegen.value_to_code(&prop.value) {
+                    lines.push(code);
+                }
+            }
+        }
+        Node::Claim(goal, _, _, _) => {
+            let mut codegen = CodeGenerator::new(bindings).with_explicit_numerals();
+            if let Ok(code) = codegen.value_to_code(&goal.proposition.value) {
+                lines.push(code);
+            }
+        }
+        Node::Block(block, _, _) => {
+            // Recurse into sub-blocks
+            for sub_node in &block.env.nodes {
+                collect_elaborated_from_node(sub_node, bindings, lines);
+            }
+        }
+    }
+}
+
+/// Collect type annotation info for all identifiers in a value.
+fn collect_identifiers(
+    value: &AcornValue,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    var_names: &[String],
+) -> Vec<IdentifierInfo> {
+    let mut seen = BTreeMap::new();
+    collect_identifiers_recursive(value, bindings, var_names, 0, &mut seen);
+    seen.into_values().collect()
+}
+
+fn collect_identifiers_recursive(
+    value: &AcornValue,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    var_names: &[String],
+    var_offset: usize,
+    seen: &mut BTreeMap<String, IdentifierInfo>,
+) {
+    match value {
+        AcornValue::Constant(ci) => {
+            let (name, full_name) = constant_name_strings(&ci.name);
+            let codegen = CodeGenerator::new(bindings);
+            let id_type = codegen
+                .type_to_code_for_display(&ci.instance_type)
+                .unwrap_or_default();
+            let key = format!("c:{}", full_name);
+            seen.entry(key).or_insert(IdentifierInfo {
+                name,
+                full_name,
+                id_type,
+                kind: "constant".to_string(),
+            });
+        }
+        AcornValue::Variable(id, ty) => {
+            let idx = *id as usize;
+            let name = if idx < var_names.len() {
+                var_names[idx].clone()
+            } else {
+                format!("x{}", idx - var_offset)
+            };
+            let codegen = CodeGenerator::new(bindings);
+            let id_type = codegen.type_to_code_for_display(ty).unwrap_or_default();
+            let key = format!("v:{}:{}", name, id_type);
+            seen.entry(key).or_insert(IdentifierInfo {
+                name,
+                full_name: String::new(),
+                id_type,
+                kind: "variable".to_string(),
+            });
+        }
+        AcornValue::Application(app) => {
+            collect_identifiers_recursive(&app.function, bindings, var_names, var_offset, seen);
+            for arg in &app.args {
+                collect_identifiers_recursive(arg, bindings, var_names, var_offset, seen);
+            }
+        }
+        AcornValue::TypeApplication(ta) => {
+            collect_identifiers_recursive(&ta.function, bindings, var_names, var_offset, seen);
+        }
+        AcornValue::Lambda(types, body) => {
+            collect_identifiers_recursive(
+                body,
+                bindings,
+                var_names,
+                var_offset + types.len(),
+                seen,
+            );
+        }
+        AcornValue::Binary(_, left, right) => {
+            collect_identifiers_recursive(left, bindings, var_names, var_offset, seen);
+            collect_identifiers_recursive(right, bindings, var_names, var_offset, seen);
+        }
+        AcornValue::Not(inner) | AcornValue::Try(inner, _) => {
+            collect_identifiers_recursive(inner, bindings, var_names, var_offset, seen);
+        }
+        AcornValue::ForAll(types, body) | AcornValue::Exists(types, body) => {
+            collect_identifiers_recursive(
+                body,
+                bindings,
+                var_names,
+                var_offset + types.len(),
+                seen,
+            );
+        }
+        AcornValue::IfThenElse(cond, then_val, else_val) => {
+            collect_identifiers_recursive(cond, bindings, var_names, var_offset, seen);
+            collect_identifiers_recursive(then_val, bindings, var_names, var_offset, seen);
+            collect_identifiers_recursive(else_val, bindings, var_names, var_offset, seen);
+        }
+        AcornValue::Match(scrutinee, cases) => {
+            collect_identifiers_recursive(scrutinee, bindings, var_names, var_offset, seen);
+            for case in cases {
+                collect_identifiers_recursive(&case.pattern, bindings, var_names, var_offset, seen);
+                collect_identifiers_recursive(&case.result, bindings, var_names, var_offset, seen);
+            }
+        }
+        AcornValue::Bool(_) => {}
+    }
+}
+
+/// Collect identifiers from all proof nodes in a block.
+fn collect_block_identifiers(
+    block_env: &Environment,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+) -> Vec<IdentifierInfo> {
+    let mut seen = BTreeMap::new();
+
+    for node in &block_env.nodes {
+        collect_node_identifiers(node, bindings, &mut seen);
+    }
+
+    seen.into_values().collect()
+}
+
+fn collect_node_identifiers(
+    node: &Node,
+    bindings: &crate::elaborator::binding_map::BindingMap,
+    seen: &mut BTreeMap<String, IdentifierInfo>,
+) {
+    match node {
+        Node::Structural(fact, _) => {
+            if let Fact::Proposition(prop) = fact {
+                collect_identifiers_recursive(&prop.value, bindings, &[], 0, seen);
+            }
+        }
+        Node::Claim(goal, _, _, _) => {
+            collect_identifiers_recursive(&goal.proposition.value, bindings, &[], 0, seen);
+        }
+        Node::Block(block, _, _) => {
+            for sub_node in &block.env.nodes {
+                collect_node_identifiers(sub_node, bindings, seen);
+            }
+        }
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Extract (short_name, full_name) from a ConstantName.
+fn constant_name_strings(name: &ConstantName) -> (String, String) {
+    match name {
+        ConstantName::Unqualified(_, n) => (n.clone(), n.clone()),
+        ConstantName::DatatypeAttribute(_, dt, attr) => {
+            (attr.clone(), format!("{}.{}", dt.name, attr))
+        }
+        ConstantName::SpecificDatatypeAttribute(_, dt, _, attr) => {
+            (attr.clone(), format!("{}.{}", dt.name, attr))
+        }
+        ConstantName::TypeclassAttribute(_, tc, attr) => {
+            (attr.clone(), format!("{}.{}", tc.name, attr))
+        }
+        ConstantName::InstanceAttribute(_, inst) => {
+            let s = format!("{:?}", inst);
+            (s.clone(), s)
+        }
+    }
+}
 
 fn collect_imports(env: &Environment, project: &Project, module_id: ModuleId) -> Vec<String> {
     let mut imports = BTreeSet::new();
@@ -852,4 +1212,134 @@ fn dedent(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dedent_basic() {
+        let input = "    a\n    b\n    c";
+        assert_eq!(dedent(input), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_dedent_mixed_indent() {
+        let input = "        line1\n    line2\n        line3";
+        assert_eq!(dedent(input), "    line1\nline2\n    line3");
+    }
+
+    #[test]
+    fn test_dedent_empty_lines() {
+        let input = "    a\n\n    b";
+        assert_eq!(dedent(input), "a\n\nb");
+    }
+
+    #[test]
+    fn test_dedent_single_line() {
+        let input = "  hello";
+        assert_eq!(dedent(input), "hello");
+    }
+
+    #[test]
+    fn test_dedent_no_indent() {
+        let input = "a\nb\nc";
+        assert_eq!(dedent(input), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_extract_source_proof_basic() {
+        let source = vec![
+            "theorem foo(a: Nat) {".to_string(),
+            "    a = a".to_string(),
+            "} by {".to_string(),
+            "    a + 0 = a".to_string(),
+            "    done".to_string(),
+            "}".to_string(),
+        ];
+        let range = Range {
+            start: tower_lsp::lsp_types::Position {
+                line: 2,
+                character: 0,
+            },
+            end: tower_lsp::lsp_types::Position {
+                line: 5,
+                character: 0,
+            },
+        };
+        let result = extract_source_proof(&source, Some(&range));
+        assert!(result.is_some());
+        let proof = result.unwrap();
+        assert!(proof.contains("a + 0 = a"));
+        assert!(proof.contains("done"));
+    }
+
+    #[test]
+    fn test_extract_source_proof_none_range() {
+        let source = vec!["something".to_string()];
+        assert!(extract_source_proof(&source, None).is_none());
+    }
+
+    #[test]
+    fn test_extract_source_proof_empty_body() {
+        let source = vec!["} by {}".to_string()];
+        let range = Range {
+            start: tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            end: tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 6,
+            },
+        };
+        assert!(extract_source_proof(&source, Some(&range)).is_none());
+    }
+
+    #[test]
+    fn test_export_options_basic() {
+        let opts = ExportOptions::basic();
+        assert!(!opts.pretty);
+        assert!(!opts.type_annotations);
+        assert!(!opts.proof_deps);
+        assert!(!opts.elaborated);
+    }
+
+    #[test]
+    fn test_constant_name_strings_unqualified() {
+        use crate::module::ModuleId;
+        let name = ConstantName::Unqualified(ModuleId(0), "foo".to_string());
+        let (short, full) = constant_name_strings(&name);
+        assert_eq!(short, "foo");
+        assert_eq!(full, "foo");
+    }
+
+    #[test]
+    fn test_constant_name_strings_datatype_attr() {
+        use crate::elaborator::acorn_type::Datatype;
+        use crate::module::ModuleId;
+        let dt = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let name = ConstantName::datatype_attr(ModuleId(0), dt, "add");
+        let (short, full) = constant_name_strings(&name);
+        assert_eq!(short, "add");
+        assert_eq!(full, "Nat.add");
+    }
+
+    #[test]
+    fn test_module_name_to_path() {
+        let output = Path::new("/tmp/export");
+        let path = module_name_to_path(output, "nat.nat_base");
+        assert_eq!(path, PathBuf::from("/tmp/export/nat/nat_base.jsonl"));
+    }
+
+    #[test]
+    fn test_module_name_to_path_simple() {
+        let output = Path::new("/tmp/export");
+        let path = module_name_to_path(output, "prelude");
+        assert_eq!(path, PathBuf::from("/tmp/export/prelude.jsonl"));
+    }
 }

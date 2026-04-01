@@ -419,6 +419,22 @@ enum Command {
         /// Pretty-print JSON output
         #[clap(long)]
         pretty: bool,
+
+        /// Include type annotations for identifiers in statements and proofs
+        #[clap(long)]
+        type_annotations: bool,
+
+        /// Include proof-level dependencies (which lemmas are used in proofs)
+        #[clap(long)]
+        proof_deps: bool,
+
+        /// Include elaborated proof lines (explicit numerals, resolved types)
+        #[clap(long)]
+        elaborated: bool,
+
+        /// Enable all optional export fields
+        #[clap(long)]
+        full: bool,
     },
 }
 
@@ -1009,6 +1025,10 @@ async fn main() {
             output_dir,
             module,
             pretty,
+            type_annotations,
+            proof_deps,
+            elaborated,
+            full,
         }) => {
             let mut project = Project::new_local(
                 &current_dir,
@@ -1040,9 +1060,16 @@ async fn main() {
                 std::process::exit(1);
             }
 
+            let options = acorn::exporter::ExportOptions {
+                pretty,
+                type_annotations: type_annotations || full,
+                proof_deps: proof_deps || full,
+                elaborated: elaborated || full,
+            };
+
             let output_path = std::path::Path::new(&output_dir);
             if let Err(e) =
-                acorn::exporter::export_project(&project, output_path, module.as_deref(), pretty)
+                acorn::exporter::export_project(&project, output_path, module.as_deref(), &options)
             {
                 println!("Export failed: {}", e);
                 std::process::exit(1);

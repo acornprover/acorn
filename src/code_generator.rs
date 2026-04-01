@@ -1202,7 +1202,7 @@ impl CodeGenerator<'_> {
                 let numeral = TokenType::Numeral.new_token(&attr);
 
                 // If it's the default type, we don't need to scope it
-                if self.bindings.numerals() == Some(&datatype) {
+                if !self.explicit_numerals && self.bindings.numerals() == Some(&datatype) {
                     return Ok(Expression::Singleton(numeral));
                 }
 
