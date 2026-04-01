@@ -653,6 +653,14 @@ impl Clause {
             return None; // No matching suffix at all
         }
 
+        fn would_leave_unsupported_bare_builtin(term: &Term, remaining_arg_count: usize) -> bool {
+            remaining_arg_count == 0
+                && matches!(
+                    term.get_head_atom(),
+                    Atom::Symbol(Symbol::Eq) | Atom::Symbol(Symbol::Ite)
+                )
+        }
+
         // Find the longest right-suffix of matching args that are distinct free variables.
         // We peel from the right, stopping when we hit a non-variable or a duplicate.
         let mut peel_count = 0;
@@ -664,6 +672,25 @@ impl Clause {
             let arg = &shorter_args[shorter_idx];
             match arg.atomic_variable() {
                 Some(var_id) => {
+                    // Type arguments can be peeled for ordinary polymorphic constants, but
+                    // special builtins like `eq` and `ite` do not support a bare head in the
+                    // clause roundtrip codec. Stop right before we would produce that shape.
+                    let next_peel_count = peel_count + 1;
+                    if self
+                        .context
+                        .get_var_type(var_id as usize)
+                        .is_some_and(|var_type| var_type.as_ref().is_type_param_kind())
+                        && (would_leave_unsupported_bare_builtin(
+                            longer,
+                            longer_len - next_peel_count,
+                        ) || would_leave_unsupported_bare_builtin(
+                            shorter,
+                            shorter_len - next_peel_count,
+                        ))
+                    {
+                        break;
+                    }
+
                     // Check this var is distinct from vars we're already peeling
                     if peeled_vars.contains(&var_id) {
                         break; // Duplicate var, stop peeling
@@ -1420,6 +1447,43 @@ mod tests {
         // Both sides should have 1 argument (c0)
         assert_eq!(result_lit.left.num_args(), 1);
         assert_eq!(result_lit.right.num_args(), 1);
+    }
+
+    #[test]
+    fn test_extensionality_can_peel_type_params_for_generic_constants() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_polymorphic_constant("c1", "T: Type", "T -> Bool");
+        kctx.parse_polymorphic_constant("c2", "T: Type", "T -> Bool");
+
+        let clause = kctx.parse_clause("c1(x0, x1) = c2(x0, x1)", &["Type", "x0"]);
+        let result_lits = clause
+            .find_extensionality(&kctx)
+            .expect("extensionality should peel both the value and type arguments");
+        let result_clause = Clause::new(result_lits, clause.get_local_context());
+        let expected = kctx.parse_clause("c1 = c2", &[]);
+        assert_eq!(result_clause, expected);
+        assert!(
+            result_clause.find_extensionality(&kctx).is_none(),
+            "extensionality should stop once both sides are bare generic heads"
+        );
+    }
+
+    #[test]
+    fn test_extensionality_stops_before_bare_eq_builtin() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_polymorphic_constant("g0", "T: Type", "T -> T -> Bool");
+
+        let clause = kctx.parse_clause("eq(x0, x1) = g0(x0, x1)", &["Type", "x0"]);
+        let result_lits = clause
+            .find_extensionality(&kctx)
+            .expect("extensionality should peel the shared value argument");
+        let result_clause = Clause::new(result_lits, clause.get_local_context());
+        let expected = kctx.parse_clause("eq(x0) = g0(x0)", &["Type"]);
+        assert_eq!(result_clause, expected);
+        assert!(
+            result_clause.find_extensionality(&kctx).is_none(),
+            "extensionality must not peel eq down to a bare head"
+        );
     }
 
     /// Test that extensionality works with same head but different prefix.
