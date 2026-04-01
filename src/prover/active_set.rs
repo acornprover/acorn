@@ -207,9 +207,26 @@ impl ActiveSet {
                     step.clause
                 )));
             }
-            kernel_context
-                .validate_clause_roundtrip(&step.clause)
-                .map_err(Error::GeneratedBadCode)?;
+            let roundtrip = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                kernel_context.validate_clause_roundtrip(&step.clause)
+            }));
+            match roundtrip {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(Error::GeneratedBadCode(e)),
+                Err(payload) => {
+                    let panic_message = match payload.downcast::<String>() {
+                        Ok(message) => *message,
+                        Err(payload) => match payload.downcast::<&'static str>() {
+                            Ok(message) => (*message).to_string(),
+                            Err(_) => "unknown panic payload".to_string(),
+                        },
+                    };
+                    return Err(Error::GeneratedBadCode(format!(
+                        "panic during clause roundtrip validation: {}",
+                        panic_message
+                    )));
+                }
+            }
             Ok(())
         }
     }
