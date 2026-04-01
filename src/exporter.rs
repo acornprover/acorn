@@ -587,7 +587,7 @@ fn export_node(
                         let proof_dependencies = if options.proof_deps {
                             Some(collect_proof_dependencies(
                                 &block.env,
-                                &env.bindings,
+                                env,
                                 &dependencies,
                                 &param_names,
                             ))
@@ -612,7 +612,11 @@ fn export_node(
                         };
 
                         let proof_annotations = if options.type_annotations {
-                            Some(collect_block_identifiers(&block.env, &env.bindings))
+                            Some(collect_block_identifiers(
+                                &block.env,
+                                &env.bindings,
+                                &param_names,
+                            ))
                         } else {
                             None
                         };
@@ -794,28 +798,80 @@ fn export_fact(
 // ── Optional field collectors ───────────────────────────────────────────
 
 /// Collect proof-level dependencies by walking the block's sub-nodes and
-/// extracting all referenced constants, then filtering out statement-level deps
-/// and block argument names.
+/// extracting all referenced constants, then filtering out statement-level deps,
+/// block argument names, and block-internal local definitions.
 fn collect_proof_dependencies(
     block_env: &Environment,
-    bindings: &crate::elaborator::binding_map::BindingMap,
+    parent_env: &Environment,
     statement_deps: &[String],
     block_arg_names: &[String],
 ) -> Vec<String> {
-    let _ = bindings;
     let stmt_set: BTreeSet<&str> = statement_deps.iter().map(|s| s.as_str()).collect();
     let arg_set: BTreeSet<&str> = block_arg_names.iter().map(|s| s.as_str()).collect();
-    let mut proof_deps = BTreeSet::new();
 
+    // Collect all names defined locally inside the block (define, let, forall args, etc.)
+    let mut local_names = BTreeSet::new();
+    collect_local_definitions(&block_env.nodes, &mut local_names);
+
+    // Also collect all module-level theorem/definition names to distinguish
+    // external references from proof-local constants
+    let mut module_level_names = BTreeSet::new();
+    for node in &parent_env.nodes {
+        if let Some(name) = node.source_name() {
+            module_level_names.insert(name);
+        }
+    }
+
+    let mut proof_deps = BTreeSet::new();
     for node in &block_env.nodes {
         collect_node_constants(node, &mut proof_deps);
     }
 
-    // Remove statement-level deps, block argument names, and internal defs
+    // Remove statement-level deps, block argument names, and block-internal definitions.
+    // Also remove unqualified names that are not module-level definitions
+    // (these are proof-local variables from let/forall/if etc.)
     proof_deps
         .into_iter()
-        .filter(|dep| !stmt_set.contains(dep.as_str()) && !arg_set.contains(dep.as_str()))
+        .filter(|dep| {
+            if stmt_set.contains(dep.as_str()) || arg_set.contains(dep.as_str()) {
+                return false;
+            }
+            if local_names.contains(dep.as_str()) {
+                return false;
+            }
+            // Qualified names (containing '.') are always external
+            if dep.contains('.') {
+                return true;
+            }
+            // Unqualified names are only kept if they exist at module level
+            module_level_names.contains(dep.as_str())
+        })
         .collect()
+}
+
+/// Recursively collect all locally-defined names within a block's nodes.
+/// This includes: `define` names, sub-block argument names (forall/if/let vars).
+fn collect_local_definitions(nodes: &[Node], names: &mut BTreeSet<String>) {
+    for node in nodes {
+        match node {
+            Node::Structural(fact, _) => {
+                if let Fact::Definition(_, _, source) = fact {
+                    if let SourceType::ConstantDefinition(_, name) = &source.source_type {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+            Node::Claim(_, _, _, _) => {}
+            Node::Block(block, _, _) => {
+                // Sub-block args (forall x, if condition, let d1, etc.)
+                for (arg_name, _) in &block.args {
+                    names.insert(arg_name.clone());
+                }
+                // Recurse into sub-block
+                collect_local_definitions(&block.env.nodes, names);
+            }
+        }
+    }
 }
 
 /// Recursively collect all constant names from a node's values.
@@ -995,14 +1051,29 @@ fn collect_identifiers_recursive(
 }
 
 /// Collect identifiers from all proof nodes in a block.
+/// Block argument names are re-tagged with kind="parameter" for consistency
+/// (they appear as constants inside the block but are parameters from the outside).
 fn collect_block_identifiers(
     block_env: &Environment,
     bindings: &crate::elaborator::binding_map::BindingMap,
+    block_arg_names: &[String],
 ) -> Vec<IdentifierInfo> {
     let mut seen = BTreeMap::new();
 
     for node in &block_env.nodes {
         collect_node_identifiers(node, bindings, &mut seen);
+    }
+
+    // Re-tag block args: inside the block they are constants, but semantically
+    // they are the theorem's parameters (same as statement_annotations' variables).
+    let arg_set: BTreeSet<&str> = block_arg_names.iter().map(|s| s.as_str()).collect();
+    for info in seen.values_mut() {
+        if info.kind == "constant"
+            && arg_set.contains(info.name.as_str())
+            && info.full_name == info.name
+        {
+            info.kind = "parameter".to_string();
+        }
     }
 
     seen.into_values().collect()
@@ -1045,10 +1116,13 @@ fn constant_name_strings(name: &ConstantName) -> (String, String) {
         ConstantName::TypeclassAttribute(_, tc, attr) => {
             (attr.clone(), format!("{}.{}", tc.name, attr))
         }
-        ConstantName::InstanceAttribute(_, inst) => {
-            let s = format!("{:?}", inst);
-            (s.clone(), s)
-        }
+        ConstantName::InstanceAttribute(_, inst) => (
+            inst.attribute.clone(),
+            format!(
+                "{}.{}[{}]",
+                inst.typeclass.name, inst.attribute, inst.datatype.name
+            ),
+        ),
     }
 }
 
