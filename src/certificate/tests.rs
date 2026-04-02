@@ -489,6 +489,31 @@ fn test_named_function_witness_can_match_implying_claim() {
 }
 
 #[test]
+fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (&local_id, _) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+
+    let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
+
+    let emitter = super::WitnessEmitter::new(
+        vec![
+            CertificateStep::Claim(candidate_claim.clone()),
+            CertificateStep::Claim(candidate_claim),
+        ],
+        &witness_registry,
+        kernel_context,
+        ModuleId::default(),
+    )
+    .expect("duplicate matching claims should still anchor successfully");
+
+    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
+}
+
+#[test]
 fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
     let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);

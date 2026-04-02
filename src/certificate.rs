@@ -1811,13 +1811,16 @@ impl<'a> WitnessEmitter<'a> {
     fn find_witness_placement(
         &self,
         general_clause: &Clause,
-        witness_name: &impl std::fmt::Display,
+        _witness_name: &impl std::fmt::Display,
     ) -> Result<WitnessPlacement, CodeGenError> {
         let matching_claims: Vec<usize> = self
             .claim_generic_clauses
             .iter()
             .enumerate()
             .filter_map(|(index, clause)| {
+                if self.claim_replacements.contains_key(&index) {
+                    return None;
+                }
                 if clause.as_ref() == Some(general_clause)
                     || self.claim_clauses[index].as_ref() == Some(general_clause)
                 {
@@ -1827,13 +1830,10 @@ impl<'a> WitnessEmitter<'a> {
                 }
             })
             .collect();
-        if matching_claims.len() > 1 {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "named witness '{}' matches multiple certificate claims",
-                witness_name
-            )));
-        }
         if let Some(index) = matching_claims.first().copied() {
+            // Exact matching claims can legitimately repeat in the displayed proof.
+            // Anchoring at the earliest surviving claim keeps the witness declaration
+            // close to the original justification without requiring uniqueness.
             return Ok(WitnessPlacement::Anchor(index));
         }
 
