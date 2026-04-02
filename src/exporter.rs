@@ -47,6 +47,8 @@ impl ExportOptions {
 pub struct ExportedModule {
     pub name: String,
     pub imports: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numerals: Option<String>,
     pub types: Vec<ExportedType>,
     pub typeclasses: Vec<ExportedTypeclass>,
     pub instances: Vec<ExportedInstance>,
@@ -278,6 +280,33 @@ fn write_jsonl(path: &Path, module: &ExportedModule) -> io::Result<()> {
     let file = fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
 
+    // Write module metadata line
+    {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "kind".to_string(),
+            serde_json::Value::String("module".to_string()),
+        );
+        meta.insert(
+            "name".to_string(),
+            serde_json::Value::String(module.name.clone()),
+        );
+        meta.insert(
+            "imports".to_string(),
+            serde_json::to_value(&module.imports)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+        );
+        if let Some(ref numerals) = module.numerals {
+            meta.insert(
+                "numerals".to_string(),
+                serde_json::Value::String(numerals.clone()),
+            );
+        }
+        let line = serde_json::to_string(&serde_json::Value::Object(meta))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        writeln!(writer, "{}", line)?;
+    }
+
     for t in &module.types {
         write_json_line(&mut writer, "type", t)?;
     }
@@ -464,9 +493,12 @@ fn export_module(
         );
     }
 
+    let numerals = bindings.numerals().map(|dt| dt.name.clone());
+
     ExportedModule {
         name: module_name.to_string(),
         imports,
+        numerals,
         types,
         typeclasses,
         instances,
