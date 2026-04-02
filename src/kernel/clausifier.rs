@@ -28,13 +28,16 @@ struct Clausifier<'a> {
     type_var_map: Option<HashMap<String, (AtomId, Term)>>,
 }
 
-/// How a normalized top-level term should be lowered into initial clauses.
+/// Legacy hint for top-level lowering.
+///
+/// Initial clause generation now always preserves a single top-level clause shape.
+/// Callers still thread this through for compatibility with existing lowering sites.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TermLoweringMode {
-    /// Lower clause-shaped boolean structure at the top level.
+    /// Legacy request to lower clause-shaped boolean structure eagerly.
     ClausifyShallowly,
 
-    /// Preserve the normalized term as a single top-level literal clause.
+    /// Legacy request to preserve the original top-level boolean structure.
     PreserveAsLiteral,
 }
 
@@ -50,24 +53,15 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    /// Lower a normalized term into initial clause form using the selected top-level policy.
+    /// Lower a normalized term into initial clause form using the default single-clause policy.
+    /// The `mode` parameter is retained for API compatibility.
     fn lower_normalized_term_to_clauses(
         &mut self,
         term: &Term,
         mode: TermLoweringMode,
     ) -> Result<Vec<Clause>, String> {
-        #[cfg(feature = "nocnf")]
-        {
-            let _ = mode;
-            self.clausify_term_to_single_clause(term)
-        }
-        #[cfg(not(feature = "nocnf"))]
-        {
-            match mode {
-                TermLoweringMode::ClausifyShallowly => self.shallow_clausify_term(term),
-                TermLoweringMode::PreserveAsLiteral => self.preserve_term_as_clause(term),
-            }
-        }
+        let _ = mode;
+        self.clausify_term_to_single_clause(term)
     }
 
     fn symbol_table(&self) -> &crate::kernel::symbol_table::SymbolTable {
@@ -354,7 +348,6 @@ impl<'a> Clausifier<'a> {
     /// Leading foralls are opened as free variables. At the top level we collect only
     /// disjunctive literals, so formulas like `a or b` or `not (a and b)` become one
     /// clause, while formulas that are not clause-shaped stay inline as one signed literal.
-    #[cfg_attr(not(feature = "nocnf"), allow(dead_code))]
     fn clausify_term_to_single_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
         let mut stack = vec![];
@@ -381,20 +374,6 @@ impl<'a> Clausifier<'a> {
         } else {
             Ok(vec![clause])
         }
-    }
-
-    fn preserve_term_as_clause(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
-        let (mut context, mut next_var_id, pinned) = self.initial_clause_context();
-        let mut stack = vec![];
-        let literal =
-            self.literal_from_shallow_term(term, true, &mut stack, &mut next_var_id, &mut context)?;
-        let clause = Clause::new_with_pinned_vars(vec![literal], &context, pinned);
-        let clauses = if clause.is_tautology() {
-            vec![]
-        } else {
-            vec![clause]
-        };
-        Ok(clauses)
     }
 
     /// If `term` is exactly `symbol(arg1, ..., argN)`, return those arguments.
@@ -1586,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lower_normalized_term_to_clauses_respects_mode() {
+    fn test_lower_normalized_term_to_clauses_uses_single_clause_policy() {
         let mut kernel_context = KernelContext::new();
         kernel_context.parse_constants(&["c0", "c1"], "Bool");
         let term = Term::or(
@@ -1598,11 +1577,7 @@ mod tests {
             .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::PreserveAsLiteral)
             .expect("preserve-mode lowering should succeed");
         assert_eq!(preserved.len(), 1);
-        if cfg!(feature = "nocnf") {
-            assert_eq!(preserved[0].literals.len(), 2);
-        } else {
-            assert_eq!(preserved[0].literals.len(), 1);
-        }
+        assert_eq!(preserved[0].literals.len(), 2);
 
         let clausified = kernel_context
             .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::ClausifyShallowly)
