@@ -405,6 +405,37 @@ enum Command {
 
     /// List all module names in the library
     List,
+
+    /// Export all definitions, theorems, and types to JSONL
+    Export {
+        /// Output directory for exported files
+        #[clap(long, default_value = "export")]
+        output_dir: String,
+
+        /// Only export a specific module
+        #[clap(long)]
+        module: Option<String>,
+
+        /// Pretty-print JSON output
+        #[clap(long)]
+        pretty: bool,
+
+        /// Include type annotations for identifiers in statements and proofs
+        #[clap(long)]
+        type_annotations: bool,
+
+        /// Include proof-level dependencies (which lemmas are used in proofs)
+        #[clap(long)]
+        proof_deps: bool,
+
+        /// Include elaborated proof lines (explicit numerals, resolved types)
+        #[clap(long)]
+        elaborated: bool,
+
+        /// Enable all optional export fields
+        #[clap(long)]
+        full: bool,
+    },
 }
 
 #[tokio::main]
@@ -987,6 +1018,61 @@ async fn main() {
 
             for module_name in module_names {
                 println!("{}", module_name);
+            }
+        }
+
+        Some(Command::Export {
+            output_dir,
+            module,
+            pretty,
+            type_annotations,
+            proof_deps,
+            elaborated,
+            full,
+        }) => {
+            let mut project = Project::new_local(
+                &current_dir,
+                ProjectConfig {
+                    use_filesystem: true,
+                    read_cache: true,
+                    write_cache: false,
+                },
+            )
+            .unwrap_or_else(|e| {
+                println!("Error loading project: {}", e);
+                std::process::exit(1);
+            });
+
+            project.add_src_targets();
+            let errors = project.errors();
+            if !errors.is_empty() {
+                for (module_id, error) in errors {
+                    let module_name = project
+                        .get_module_name_by_id(module_id)
+                        .or_else(|| {
+                            project
+                                .get_module_descriptor(module_id)
+                                .map(|descriptor| descriptor.to_string())
+                        })
+                        .unwrap_or_else(|| module_id.to_string());
+                    println!("Error loading {}: {}", module_name, error);
+                }
+                std::process::exit(1);
+            }
+
+            let options = acorn::exporter::ExportOptions {
+                pretty,
+                type_annotations: type_annotations || full,
+                proof_deps: proof_deps || full,
+                elaborated: elaborated || full,
+            };
+
+            let output_path = std::path::Path::new(&output_dir);
+            if let Err(e) =
+                acorn::exporter::export_project(&project, output_path, module.as_deref(), &options)
+            {
+                println!("Export failed: {}", e);
+                std::process::exit(1);
             }
         }
 

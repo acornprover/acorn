@@ -29,7 +29,7 @@ pub struct Block {
     /// This does not include pattern-matched variables because those have additional constraints.
     /// Internally to the block, the arguments are constants.
     /// Externally, these arguments are variables.
-    args: Vec<(String, AcornType)>,
+    pub args: Vec<(String, AcornType)>,
 
     /// The environment created inside the block.
     /// Goals for this block are now represented as child nodes at the end of env.nodes,
