@@ -29,15 +29,12 @@ use crate::elaborator::to_term::lower_value_to_term;
 use crate::elaborator::to_term::lower_value_to_term_preserving_alias_spelling;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
-use crate::kernel::clausifier::TermLoweringMode;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
-#[cfg(test)]
-use crate::module::ModuleId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::trace;
@@ -106,29 +103,16 @@ impl KernelContext {
 }
 
 impl KernelContext {
-    fn source_term_lowering_mode(source: &Source) -> TermLoweringMode {
-        if source.should_clausify_shallowly() {
-            TermLoweringMode::ClausifyShallowly
-        } else {
-            TermLoweringMode::PreserveAsLiteral
-        }
-    }
-
     /// Lower a term-level proposition into clauses.
     ///
     /// This is the term-native backend for proposition lowering.
     fn lower_term_to_clauses(
         &mut self,
         term: &Term,
-        source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         term.validate();
-        self.lower_normalized_term_to_clauses(
-            term,
-            type_var_map,
-            Self::source_term_lowering_mode(source),
-        )
+        self.lower_normalized_term_to_clauses(term, type_var_map)
     }
 
     /// Lowers a boolean proposition to clauses via:
@@ -137,7 +121,6 @@ impl KernelContext {
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
-        source: &Source,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
         if let Err(e) = value.validate() {
@@ -150,7 +133,7 @@ impl KernelContext {
 
         let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        self.lower_term_to_clauses(&term, source, type_var_map)
+        self.lower_term_to_clauses(&term, type_var_map)
     }
 
     /// Lowers a quoted clause value to exactly one normalized clause.
@@ -269,7 +252,7 @@ impl KernelContext {
                     NewConstantType::Local
                 };
                 let clauses = self
-                    .lower_proposition_to_clauses(&value, ctype, &source, type_var_map_opt.clone())
+                    .lower_proposition_to_clauses(&value, ctype, type_var_map_opt.clone())
                     .map_err(|msg| BuildError::new(range, msg))?;
                 for clause in &clauses {
                     trace!(clause = %clause, "normalized to clause");
@@ -560,12 +543,7 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .lower_proposition_to_clauses(
-                value,
-                NewConstantType::Local,
-                &Source::theorem(false, ModuleId(0), Default::default(), true, 0, None),
-                None,
-            )
+            .lower_proposition_to_clauses(value, NewConstantType::Local, None)
             .unwrap();
         if actual.len() != expected.len() {
             panic!(

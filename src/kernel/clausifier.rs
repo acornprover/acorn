@@ -28,19 +28,6 @@ struct Clausifier<'a> {
     type_var_map: Option<HashMap<String, (AtomId, Term)>>,
 }
 
-/// Legacy hint for top-level lowering.
-///
-/// Initial clause generation now always preserves a single top-level clause shape.
-/// Callers still thread this through for compatibility with existing lowering sites.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TermLoweringMode {
-    /// Legacy request to lower clause-shaped boolean structure eagerly.
-    ClausifyShallowly,
-
-    /// Legacy request to preserve the original top-level boolean structure.
-    PreserveAsLiteral,
-}
-
 impl<'a> Clausifier<'a> {
     /// Create a new Clausifier with mutable access.
     fn new_mut(
@@ -54,13 +41,7 @@ impl<'a> Clausifier<'a> {
     }
 
     /// Lower a normalized term into initial clause form using the default single-clause policy.
-    /// The `mode` parameter is retained for API compatibility.
-    fn lower_normalized_term_to_clauses(
-        &mut self,
-        term: &Term,
-        mode: TermLoweringMode,
-    ) -> Result<Vec<Clause>, String> {
-        let _ = mode;
+    fn lower_normalized_term_to_clauses(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
         self.clausify_term_to_single_clause(term)
     }
 
@@ -1465,10 +1446,9 @@ impl KernelContext {
         &mut self,
         term: &Term,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-        mode: TermLoweringMode,
     ) -> Result<Vec<Clause>, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
-        view.lower_normalized_term_to_clauses(term, mode)
+        view.lower_normalized_term_to_clauses(term)
     }
 
     /// Kernel-owned entry point for converting a term to the checker's pre-normalized clause form.
@@ -1511,7 +1491,7 @@ impl KernelContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clausifier, TermLoweringMode};
+    use super::Clausifier;
     use crate::elaborator::acorn_type::{AcornType, Datatype};
     use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase};
     use crate::elaborator::names::ConstantName;
@@ -1573,17 +1553,11 @@ mod tests {
             kernel_context.parse_term("c1"),
         );
 
-        let preserved = kernel_context
-            .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::PreserveAsLiteral)
-            .expect("preserve-mode lowering should succeed");
-        assert_eq!(preserved.len(), 1);
-        assert_eq!(preserved[0].literals.len(), 2);
-
-        let clausified = kernel_context
-            .lower_normalized_term_to_clauses(&term, None, TermLoweringMode::ClausifyShallowly)
-            .expect("shallow clausification should succeed");
-        assert_eq!(clausified.len(), 1);
-        assert_eq!(clausified[0].literals.len(), 2);
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&term, None)
+            .expect("term lowering should succeed");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].literals.len(), 2);
     }
 
     #[test]
@@ -1810,7 +1784,7 @@ mod tests {
         );
         let equality = Term::eq(int_term, Term::atom(Atom::Symbol(a_symbol)), normalized);
         let clauses = kernel_context
-            .lower_normalized_term_to_clauses(&equality, None, TermLoweringMode::ClausifyShallowly)
+            .lower_normalized_term_to_clauses(&equality, None)
             .expect("clausification should accept eta-reduced match branches");
 
         assert!(!clauses.is_empty(), "match equality should produce clauses");
