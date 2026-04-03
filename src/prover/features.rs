@@ -1,12 +1,14 @@
 use ndarray::{Array1, Array2, Axis};
 
-use crate::kernel::proof_step::{ProofStep, Truthiness};
+use crate::kernel::proof_step::{ProofStep, ShallowStatus, Truthiness};
 
 // Features of a proof step that can be used to score it.
 // This is like a feature vector but in struct rather than vector form.
 // Try to only use bools, i32s, and f32s.
 pub struct Features {
     pub is_contradiction: bool,
+    pub is_shallow: bool,
+    pub shallow_status: ShallowStatus,
 
     // Features from the clause
     pub atom_count: i32,
@@ -31,6 +33,8 @@ impl Features {
     pub fn new(step: &ProofStep) -> Self {
         Features {
             is_contradiction: step.clause.is_impossible(),
+            is_shallow: step.is_shallow(),
+            shallow_status: step.shallow_status,
             atom_count: step.clause.atom_count() as i32,
             is_counterfactual: step.truthiness == Truthiness::Counterfactual,
             is_hypothetical: step.truthiness == Truthiness::Hypothetical,

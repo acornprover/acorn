@@ -16,7 +16,7 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::pdt::LiteralSet;
 use crate::kernel::proof_step::{
-    PremiseMap, ProofStep, ProofStepId, Rule, SimplificationInfo, SingleSourceInfo, Truthiness,
+    PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
 };
 use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
@@ -1464,6 +1464,10 @@ impl ActiveSet {
         let mut truthiness = step.truthiness;
         let mut proof_size = step.proof_size;
         let mut depth = step.depth;
+        let simplifying_steps: Vec<&ProofStep> = new_rules
+            .iter()
+            .map(|(_, short_step)| *short_step)
+            .collect();
         let simplifying_ids: Vec<usize> = new_rules
             .iter()
             .map(|(id, short_step)| {
@@ -1490,18 +1494,16 @@ impl ActiveSet {
 
         // Restore the original literals so the inline step has its complete clause
         step.clause.literals = original_literals;
-
-        let result = ProofStep {
+        let result = ProofStep::simplification(
+            step,
+            simplifying_ids,
+            &simplifying_steps,
             clause,
             truthiness,
-            rule: Rule::Simplification(SimplificationInfo {
-                original: Box::new(step),
-                simplifying_ids,
-            }),
             proof_size,
             depth,
             premise_map,
-        };
+        );
 
         // Validate the simplified step when the validate feature is enabled
         #[cfg(any(test, feature = "validate"))]

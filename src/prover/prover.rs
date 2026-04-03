@@ -17,7 +17,9 @@ use crate::kernel::display::DisplayClause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::proof_step::{PremiseMap, ProofStep, ProofStepId, Rule, Truthiness};
+use crate::kernel::proof_step::{
+    PremiseMap, ProofStep, ProofStepId, Rule, ShallowStatus, Truthiness,
+};
 use crate::kernel::EqualityGraphContradiction;
 use crate::prover::{Outcome, ProverMode};
 
@@ -396,6 +398,7 @@ impl Prover {
     fn report_equality_graph_contradiction(
         &mut self,
         contradiction: EqualityGraphContradiction,
+        shallow_status: ShallowStatus,
         #[cfg_attr(not(feature = "validate"), allow(unused_variables))]
         kernel_context: &KernelContext,
     ) {
@@ -482,6 +485,7 @@ impl Prover {
             passive_ids,
             truthiness,
             max_depth,
+            shallow_status,
         );
 
         #[cfg(feature = "validate")]
@@ -518,9 +522,21 @@ impl Prover {
         self.final_step = Some(final_step);
     }
 
+    fn maybe_finish_with_step(&mut self, step: ProofStep, shallow_only: bool) -> bool {
+        if step.finishes_proof() {
+            self.final_step = Some(step);
+            return true;
+        }
+        if shallow_only && !step.is_shallow() {
+            return false;
+        }
+        self.final_step = Some(step);
+        true
+    }
+
     /// Activates the next clause from the queue, unless we're already done.
     /// Returns whether the prover finished.
-    fn activate_next(&mut self, kernel_context: &mut KernelContext) -> bool {
+    fn activate_next(&mut self, kernel_context: &mut KernelContext, shallow_only: bool) -> bool {
         if self.final_step.is_some() {
             return true;
         }
@@ -566,11 +582,10 @@ impl Prover {
         }
 
         if step.clause.is_impossible() {
-            self.final_step = Some(step);
-            return true;
+            return self.maybe_finish_with_step(step, shallow_only);
         }
 
-        self.activate(step, kernel_context)
+        self.activate(step, kernel_context, shallow_only)
     }
 
     /// Generates new passive clauses, simplifying appropriately, and adds them to the passive set.
@@ -583,7 +598,12 @@ impl Prover {
     /// respect to every active clause.
     ///
     /// Returns whether the prover finished.
-    fn activate(&mut self, activated_step: ProofStep, kernel_context: &mut KernelContext) -> bool {
+    fn activate(
+        &mut self,
+        activated_step: ProofStep,
+        kernel_context: &mut KernelContext,
+        shallow_only: bool,
+    ) -> bool {
         // Use the step for simplification
         let activated_id = self.active_set.next_id();
         if activated_step.clause.literals.len() == 1 {
@@ -612,8 +632,10 @@ impl Prover {
         let mut new_steps = vec![];
         for step in generated_steps {
             if step.finishes_proof() {
-                self.final_step = Some(step);
-                return true;
+                if self.maybe_finish_with_step(step, shallow_only) {
+                    return true;
+                }
+                continue;
             }
 
             if step.automatic_reject() {
@@ -622,13 +644,25 @@ impl Prover {
 
             if let Some(simple_step) = self.active_set.simplify(step, kernel_context) {
                 if simple_step.clause.is_impossible() {
-                    self.final_step = Some(simple_step);
-                    return true;
+                    if self.maybe_finish_with_step(simple_step, shallow_only) {
+                        return true;
+                    }
+                    continue;
                 }
                 new_steps.push(simple_step);
             }
         }
         self.passive_set.push_batch(new_steps, kernel_context);
+        if let Some(passive_steps) = self.passive_set.get_contradiction() {
+            trace!(
+                target: "acorn::prover::activation",
+                goal = self.goal_name_for_trace(),
+                passive_count = passive_steps.len(),
+                "found passive contradiction after push"
+            );
+            self.report_passive_contradiction(passive_steps, kernel_context);
+            return true;
+        }
 
         // Sometimes we find a bunch of contradictions at once.
         // It doesn't really matter what we pick, so we guess which is most likely
@@ -636,7 +670,11 @@ impl Prover {
         // First regular contradictions (in the loop above), then term graph.
 
         if let Some(contradiction) = self.active_set.graph.get_contradiction_trace() {
-            self.report_equality_graph_contradiction(contradiction, kernel_context);
+            self.report_equality_graph_contradiction(
+                contradiction,
+                ShallowStatus::Contradiction,
+                kernel_context,
+            );
             return true;
         }
 
@@ -723,7 +761,7 @@ impl Prover {
                 );
                 return Outcome::Exhausted;
             }
-            if self.activate_next(kernel_context) {
+            if self.activate_next(kernel_context, shallow_only) {
                 // The prover terminated. Determine which outcome that is.
                 if let Some(final_step) = &self.final_step {
                     if final_step.truthiness == Truthiness::Counterfactual {
@@ -832,7 +870,11 @@ mod tests {
             }],
         };
 
-        prover.report_equality_graph_contradiction(contradiction, &kernel_context);
+        prover.report_equality_graph_contradiction(
+            contradiction,
+            ShallowStatus::Contradiction,
+            &kernel_context,
+        );
 
         let specialization = prover
             .useful_passive

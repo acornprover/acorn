@@ -2,6 +2,7 @@ use ordered_float::OrderedFloat;
 
 use super::features::Features;
 use super::scorer::Scorer;
+use crate::kernel::proof_step::ShallowStatus;
 
 // Each proof step has a score, which encapsulates all heuristic judgments about
 // the proof step.
@@ -11,8 +12,8 @@ pub struct Score {
     // Contradictions are the most important thing
     contradiction: bool,
 
-    // We specifically flag steps with a low depth, to check those first.
-    shallow: bool,
+    // Among non-contradictions, activate the shallowest steps first.
+    shallow_status: ShallowStatus,
 
     // Higher scores are preferred.
     score: OrderedFloat<f32>,
@@ -24,15 +25,14 @@ impl Score {
         if features.is_contradiction {
             return Score {
                 contradiction: true,
-                shallow: true,
+                shallow_status: features.shallow_status,
                 score: OrderedFloat(0.0),
             };
         }
-        let shallow = features.depth < 2;
         let score = scorer.score(features).unwrap();
         Score {
             contradiction: false,
-            shallow,
+            shallow_status: features.shallow_status,
             score: OrderedFloat(score),
         }
     }
@@ -45,13 +45,13 @@ impl Score {
             .zip(floats.iter())
             .map(|(f, &s)| Score {
                 contradiction: f.is_contradiction,
-                shallow: f.depth < 2 || f.is_contradiction,
+                shallow_status: f.shallow_status,
                 score: OrderedFloat(s),
             })
             .collect()
     }
 
     pub fn is_shallow(&self) -> bool {
-        self.shallow
+        self.shallow_status.is_shallow()
     }
 }
