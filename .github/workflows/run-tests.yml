@@ -1,11 +1,20 @@
-name: Run Tests (Linux)
-# This runs Rust unit tests on Linux when a new tag is pushed
+name: CI (Linux)
+# This runs the main Rust and acornlib checks on pull requests, master pushes, and releases.
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - master
   push:
+    branches:
+      - master
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+
+concurrency:
+  group: ci-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-linux:
@@ -32,12 +41,19 @@ jobs:
         with:
           toolchain: stable
           override: true
+          components: rustfmt
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Cargo Check
+        run: cargo check
 
       - name: Run Tests
         run: cargo test
 
-      - name: Build CLI Binary
-        run: cargo build --release --bin=acorn
+      - name: Validate acornlib
+        run: cargo run --profile release --features validate -- --lib vscode/extension/acornlib check
 
       - name: Verify version matches tag
         if: startsWith(github.ref_name, 'v')
@@ -52,9 +68,3 @@ jobs:
             exit 1
           fi
           echo "Version check passed: $ACORN_VERSION"
-
-      - name: Verify acornlib
-        run: |
-          cd vscode/extension/acornlib
-          time ../../../target/release/acorn verify
-          time ../../../target/release/acorn verify --nohash
