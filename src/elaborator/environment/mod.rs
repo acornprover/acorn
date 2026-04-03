@@ -13,7 +13,7 @@ use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::lowering::{lower_fact, lower_goal, LoweredFact};
-use crate::elaborator::names::DefinedName;
+use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
@@ -29,6 +29,9 @@ pub struct CitationStatement {
     /// 1-based line number in the source file.
     pub line: u32,
     pub statement: String,
+    /// The name of the cited theorem, preserving module information.
+    /// This is extracted before expand_citation inlines the theorem body.
+    pub cited_name: Option<ConstantName>,
 }
 
 /// The Environment takes Statements as input and processes them.
@@ -233,10 +236,15 @@ impl Environment {
         }
     }
 
-    pub fn record_citation_statement(&mut self, statement: &Statement) {
+    pub fn record_citation_statement(
+        &mut self,
+        statement: &Statement,
+        cited_name: Option<ConstantName>,
+    ) {
         self.citation_statements.push(CitationStatement {
             line: statement.first_line() + 1,
             statement: statement.to_string(),
+            cited_name,
         });
     }
 
@@ -247,6 +255,22 @@ impl Environment {
                 block.env.append_citation_statements(citations);
             }
         }
+    }
+
+    /// Collect all cited theorem names from this environment (recursively through sub-blocks).
+    pub fn collect_cited_names(&self) -> Vec<ConstantName> {
+        let mut names = Vec::new();
+        for cs in &self.citation_statements {
+            if let Some(ref name) = cs.cited_name {
+                names.push(name.clone());
+            }
+        }
+        for node in &self.nodes {
+            if let Some(block) = node.get_block() {
+                names.extend(block.env.collect_cited_names());
+            }
+        }
+        names
     }
 
     /// Adds a node to the environment tree.

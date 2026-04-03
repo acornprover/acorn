@@ -523,6 +523,7 @@ fn export_node(
     match node {
         Node::Structural(fact, _) => {
             export_fact(
+                project,
                 env,
                 module_id,
                 module_name,
@@ -556,7 +557,7 @@ fn export_node(
 
             let mut codegen = CodeGenerator::new(&env.bindings).with_explicit_numerals();
             let statement = codegen.value_to_code(&prop.value).ok();
-            let dependencies = collect_dependencies(&prop.value);
+            let dependencies = collect_dependencies(&prop.value, project);
             let proof = get_proof_from_worklist(cert_worklist, &goal.name);
 
             theorems.push(ExportedTheorem {
@@ -610,7 +611,11 @@ fn export_node(
                                 Err(_) => (vec![], codegen.value_to_code(&prop.value).ok()),
                             };
 
-                        let dependencies = collect_dependencies(&prop.value);
+                        let stmt_dep_names = collect_dep_names(&prop.value);
+                        let dependencies: Vec<String> = stmt_dep_names
+                            .iter()
+                            .map(|cn| qualify_constant_name(cn, project))
+                            .collect();
                         let proof = get_proof_from_worklist(cert_worklist, name);
                         let source_proof =
                             extract_source_proof(source_lines, block.source_range.as_ref());
@@ -620,8 +625,9 @@ fn export_node(
                             Some(collect_proof_dependencies(
                                 &block.env,
                                 env,
-                                &dependencies,
+                                &stmt_dep_names,
                                 &param_names,
+                                project,
                             ))
                         } else {
                             None
@@ -686,6 +692,7 @@ fn export_node(
             if !handled_as_theorem {
                 if let Some(fact) = external_fact {
                     export_fact(
+                        project,
                         env,
                         module_id,
                         module_name,
@@ -719,6 +726,7 @@ fn export_node(
 }
 
 fn export_fact(
+    project: &Project,
     env: &Environment,
     module_id: ModuleId,
     module_name: &str,
@@ -760,7 +768,7 @@ fn export_fact(
                         Err(_) => (vec![], codegen.value_to_code(&prop.value).ok()),
                     };
 
-                    let dependencies = collect_dependencies(&prop.value);
+                    let dependencies = collect_dependencies(&prop.value, project);
                     let proof = get_proof_from_worklist(cert_worklist, name);
 
                     theorems.push(ExportedTheorem {
@@ -835,18 +843,18 @@ fn export_fact(
 fn collect_proof_dependencies(
     block_env: &Environment,
     parent_env: &Environment,
-    statement_deps: &[String],
+    statement_deps: &BTreeSet<ConstantName>,
     block_arg_names: &[String],
+    project: &Project,
 ) -> Vec<String> {
-    let stmt_set: BTreeSet<&str> = statement_deps.iter().map(|s| s.as_str()).collect();
     let arg_set: BTreeSet<&str> = block_arg_names.iter().map(|s| s.as_str()).collect();
 
     // Collect all names defined locally inside the block (define, let, forall args, etc.)
     let mut local_names = BTreeSet::new();
     collect_local_definitions(&block_env.nodes, &mut local_names);
 
-    // Also collect all module-level theorem/definition names to distinguish
-    // external references from proof-local constants
+    // Collect module-level theorem/definition names to distinguish
+    // external references from proof-local constants (e.g. let ... satisfy variables)
     let mut module_level_names = BTreeSet::new();
     for node in &parent_env.nodes {
         if let Some(name) = node.source_name() {
@@ -859,25 +867,34 @@ fn collect_proof_dependencies(
         collect_node_constants(node, &mut proof_deps);
     }
 
+    // Include cited theorem names (these are lost after expand_citation inlines them)
+    for cited_name in block_env.collect_cited_names() {
+        proof_deps.insert(cited_name);
+    }
+
     // Remove statement-level deps, block argument names, and block-internal definitions.
-    // Also remove unqualified names that are not module-level definitions
-    // (these are proof-local variables from let/forall/if etc.)
     proof_deps
         .into_iter()
         .filter(|dep| {
-            if stmt_set.contains(dep.as_str()) || arg_set.contains(dep.as_str()) {
+            // Remove deps that also appear in the statement
+            if statement_deps.contains(dep) {
                 return false;
             }
-            if local_names.contains(dep.as_str()) {
+            // Remove block argument names (these are Unqualified constants matching arg names)
+            let short = dep.to_string();
+            if arg_set.contains(short.as_str()) {
                 return false;
             }
-            // Qualified names (containing '.') are always external
-            if dep.contains('.') {
-                return true;
+            if local_names.contains(short.as_str()) {
+                return false;
             }
-            // Unqualified names are only kept if they exist at module level
-            module_level_names.contains(dep.as_str())
+            // For Unqualified names (no '.'), only keep if they're module-level definitions
+            if !short.contains('.') {
+                return module_level_names.contains(short.as_str());
+            }
+            true
         })
+        .map(|cn| qualify_constant_name(&cn, project))
         .collect()
 }
 
@@ -907,7 +924,7 @@ fn collect_local_definitions(nodes: &[Node], names: &mut BTreeSet<String>) {
 }
 
 /// Recursively collect all constant names from a node's values.
-fn collect_node_constants(node: &Node, deps: &mut BTreeSet<String>) {
+fn collect_node_constants(node: &Node, deps: &mut BTreeSet<ConstantName>) {
     match node {
         Node::Structural(fact, _) => {
             if let Some(value) = fact_value(fact) {
@@ -1173,16 +1190,34 @@ fn collect_imports(env: &Environment, project: &Project, module_id: ModuleId) ->
     imports.into_iter().collect()
 }
 
-fn collect_dependencies(value: &AcornValue) -> Vec<String> {
-    let mut deps = BTreeSet::new();
-    collect_deps_recursive(value, &mut deps);
-    deps.into_iter().collect()
+/// Produce a module-qualified name for a constant, e.g. "nat.nat_base.add_comm".
+fn qualify_constant_name(name: &ConstantName, project: &Project) -> String {
+    let short = name.to_string();
+    if let Some(module_name) = project.get_module_name_by_id(name.module_id()) {
+        format!("{}.{}", module_name, short)
+    } else {
+        short
+    }
 }
 
-fn collect_deps_recursive(value: &AcornValue, deps: &mut BTreeSet<String>) {
+/// Collect raw ConstantName dependencies from a value.
+fn collect_dep_names(value: &AcornValue) -> BTreeSet<ConstantName> {
+    let mut deps = BTreeSet::new();
+    collect_deps_recursive(value, &mut deps);
+    deps
+}
+
+fn collect_dependencies(value: &AcornValue, project: &Project) -> Vec<String> {
+    collect_dep_names(value)
+        .into_iter()
+        .map(|cn| qualify_constant_name(&cn, project))
+        .collect()
+}
+
+fn collect_deps_recursive(value: &AcornValue, deps: &mut BTreeSet<ConstantName>) {
     match value {
         AcornValue::Constant(ci) => {
-            deps.insert(ci.name.to_string());
+            deps.insert(ci.name.clone());
         }
         AcornValue::Application(app) => {
             collect_deps_recursive(&app.function, deps);

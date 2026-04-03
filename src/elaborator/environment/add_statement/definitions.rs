@@ -302,6 +302,14 @@ impl Environment {
         unbound_claim.check_type(Some(&AcornType::Bool), &ts.claim)?;
 
         let is_citation = self.bindings.is_citation(&unbound_claim, project);
+        let cited_name = if is_citation {
+            unbound_claim
+                .is_named_function_call()
+                .or_else(|| unbound_claim.as_name())
+                .cloned()
+        } else {
+            None
+        };
         if is_citation && ts.body.is_some() {
             return Err(statement.error("citations do not need proof blocks"));
         }
@@ -387,7 +395,7 @@ impl Environment {
         let index = self.add_node(node);
         self.add_node_lines(index, &statement.range());
         if is_citation {
-            self.record_citation_statement(statement);
+            self.record_citation_statement(statement, cited_name);
         }
         if let Some(name_token) = &ts.name_token {
             let name = ConstantName::unqualified(self.module_id, name_token.text());
@@ -691,12 +699,18 @@ impl Environment {
         }
 
         if self.bindings.is_citation(&claim, project) {
+            // Extract the cited theorem name before expand_citation inlines it.
+            let cited_name = claim
+                .is_named_function_call()
+                .or_else(|| claim.as_name())
+                .cloned();
+
             let claim = claim.expand_lambdas(0);
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);
             let prop = Proposition::new(claim, vec![], source);
             let prop = self.bindings.expand_citation(prop, project);
             self.add_node(Node::structural(project, self, prop));
-            self.record_citation_statement(statement);
+            self.record_citation_statement(statement, cited_name);
             self.add_other_lines(statement);
         } else {
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);
