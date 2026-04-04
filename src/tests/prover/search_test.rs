@@ -518,7 +518,6 @@ fn test_proving_removes_duplicates() {
         &[
             "function(x0: Foo) { not f(x0) or g(x0) }(y)",
             "function(x0: Foo) { f(x0) }(y)",
-            "not f(y)",
         ],
     );
 }
@@ -644,14 +643,14 @@ fn test_proving_with_multiple_rewrite() {
             foo
             bar
         }
-            
+
         let f: Foo -> Foo = axiom
         let g: Foo -> Foo = axiom
 
         axiom rule1(x: Foo) {
             f(x) = g(x)
         }
-            
+
         theorem goal(y: Foo) {
             f(f(f(y))) = g(g(g(y)))
         }
@@ -705,6 +704,7 @@ fn test_proving_random_bug() {
             "f(y) != z",
             "h(y) != f(y)",
             "g(y) != f(y)",
+            "g(y) = f(y)",
         ],
     );
 }
@@ -831,8 +831,8 @@ fn test_proving_with_equality_resolution() {
             "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(x, x)",
             "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(g(x), x)",
             "function(x0: Foo, x1: Foo) { g(x0) != g(x1) or f(x0, x1) }(x, x)",
-            "not f(g(x), x)",
             "function(x0: Foo) { f(x0, x0) }(x)",
+            "not f(g(x), x)",
         ],
     );
 }

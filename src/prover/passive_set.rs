@@ -8,7 +8,7 @@ use crate::kernel::fingerprint::FingerprintSpecializer;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, SimplificationInfo};
+use crate::kernel::proof_step::{PremiseMap, ProofStep};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
 use std::collections::hash_map::Entry;
@@ -378,22 +378,20 @@ impl PassiveSet {
             let truthiness = step.truthiness.combine(activated_step.truthiness);
             let proof_size = step.proof_size + activated_step.proof_size;
             let depth = u32::max(step.depth, activated_step.depth);
-
             let pre_norm_context = step.clause.get_local_context().clone();
             // simplifying_ids needs one entry per eliminated literal (same as simp_var_maps)
             let simplifying_ids = vec![activated_id; simp_var_maps.len()];
             let premise_map = PremiseMap::new(simp_var_maps, var_ids, pre_norm_context);
-            let simplified = ProofStep {
-                clause: new_clause,
+            let simplified = ProofStep::simplification(
+                step,
+                simplifying_ids,
+                &[activated_step],
+                new_clause,
                 truthiness,
-                rule: Rule::Simplification(SimplificationInfo {
-                    original: Box::new(step),
-                    simplifying_ids,
-                }),
                 proof_size,
                 depth,
                 premise_map,
-            };
+            );
 
             // Validate the simplified step when the validate feature is enabled
             #[cfg(any(test, feature = "validate"))]
@@ -417,19 +415,15 @@ impl PassiveSet {
         self.push_batch(new_steps, kernel_context);
     }
 
-    // If we don't have both of the clauses, we just return the ones we have.
-    // This is wrong but I'm not sure if we'll ever run into it.
     pub fn get_contradiction(&self) -> Option<Vec<ProofStep>> {
         match self.contradiction {
             None => None,
             Some((id1, id2)) => {
-                let mut steps = vec![];
-                for id in &[id1, id2] {
-                    if let Some((step, _)) = &self.clauses[*id] {
-                        steps.push(step.clone());
-                    }
-                }
-                Some(steps)
+                let (step1, step2) = match (&self.clauses[id1], &self.clauses[id2]) {
+                    (Some((step1, _)), Some((step2, _))) => (step1.clone(), step2.clone()),
+                    _ => return None,
+                };
+                Some(vec![step1, step2])
             }
         }
     }

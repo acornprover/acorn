@@ -510,16 +510,8 @@ fn test_proving_with_typeclass_constrained_attributes() {
         }
     }
 
-    // Just prove the definition expands correctly
     theorem has_both_def(s: Set[Color], a: Color, b: Color) {
         s.has_both(a, b) = (s.contains(a) and s.contains(b))
-    } by {
-        if s.has_both(a, b) {
-            s.contains(a) and s.contains(b)
-        }
-        if s.contains(a) and s.contains(b) {
-            s.has_both(a, b)
-        }
     }
     "#;
     verify_succeeds(text);

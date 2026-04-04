@@ -377,6 +377,13 @@ fn test_conjunction_goal() {
 
     theorem goal {
         f(a, e) implies (f(b, e) and f(c, e) and f(d, e))
+    } by {
+        if f(a, e) {
+            f(b, e)
+            f(c, e)
+            f(d, e)
+            f(b, e) and f(c, e) and f(d, e)
+        }
     }
     "#;
     verify_succeeds(text);

@@ -63,6 +63,43 @@ impl Truthiness {
     }
 }
 
+/// Tracks whether a proof step can still participate in a shallow proof.
+///
+/// "Unspent" means the step is still within the shallow fragment and has not yet used the one
+/// non-reduction search step.
+/// "Spent" means the step is still within the shallow fragment, but that one search step has
+/// already been used.
+/// "Contradiction" means the step closes the proof. Contradictions are always acceptable in
+/// shallow mode, regardless of how they were found.
+/// "Deep" means the step falls outside the shallow fragment.
+///
+/// The declaration order matches activation priority among otherwise comparable steps:
+/// `Deep < Spent < Unspent < Contradiction`.
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
+pub enum ShallowStatus {
+    Deep,
+    Spent,
+    Unspent,
+    Contradiction,
+}
+
+impl ShallowStatus {
+    pub fn is_shallow(self) -> bool {
+        !matches!(self, ShallowStatus::Deep)
+    }
+}
+
+/// Identifies the one non-reduction step that a shallow proof branch has spent.
+///
+/// Multiple `Spent` steps can still remain shallow together if they all trace back to the same
+/// opening. This lets us simplify and discharge a single opened branch without accidentally
+/// merging distinct openings.
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy, Hash)]
+pub enum ShallowOrigin {
+    Resolution { long_id: usize, short_id: usize },
+    Rewrite { pattern_id: usize, target_id: usize },
+}
+
 /// Information about a resolution inference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionInfo {
@@ -593,6 +630,12 @@ pub struct ProofStep {
     /// When we use a rewrite backwards, increasing KBO, that also counts toward depth.
     pub depth: u32,
 
+    /// The explicit shallow/deep classification used by shallow-only search.
+    pub shallow_status: ShallowStatus,
+
+    /// If `shallow_status` is `Spent`, this identifies which single non-reduction step spent it.
+    shallow_origin: Option<ShallowOrigin>,
+
     /// Maps each premise's variables to this step's clause variables.
     /// Used during proof reconstruction to avoid re-unification.
     pub premise_map: PremiseMap,
@@ -612,13 +655,24 @@ impl ProofStep {
         rule: Rule,
         proof_size: u32,
         depth: u32,
+        mut shallow_status: ShallowStatus,
+        mut shallow_origin: Option<ShallowOrigin>,
         premise_map: PremiseMap,
     ) -> ProofStep {
         clause = clause.normalized_preserving_locals();
+        if clause.is_impossible() {
+            shallow_status = ShallowStatus::Contradiction;
+            shallow_origin = None;
+        }
         debug_assert!(
             clause.is_normalized_preserving_locals(),
             "ProofStep clauses must normalize at construction time: {}",
             clause
+        );
+        debug_assert_eq!(
+            matches!(shallow_status, ShallowStatus::Spent),
+            shallow_origin.is_some(),
+            "Spent steps must carry an origin, and non-spent steps must not"
         );
         ProofStep {
             clause,
@@ -626,6 +680,8 @@ impl ProofStep {
             rule,
             proof_size,
             depth,
+            shallow_status,
+            shallow_origin,
             premise_map,
         }
     }
@@ -643,7 +699,16 @@ impl ProofStep {
             context,
         });
 
-        Self::new_with_normalized_clause(clause, truthiness, rule, 0, 0, PremiseMap::empty())
+        Self::new_with_normalized_clause(
+            clause,
+            truthiness,
+            rule,
+            0,
+            0,
+            ShallowStatus::Unspent,
+            None,
+            PremiseMap::empty(),
+        )
     }
 
     /// Construct a new ProofStep that is a direct implication of a single activated step,
@@ -663,6 +728,8 @@ impl ProofStep {
             rule,
             activated_step.proof_size + 1,
             depth,
+            activated_step.shallow_status,
+            activated_step.shallow_origin,
             premise_map,
         )
     }
@@ -685,6 +752,8 @@ impl ProofStep {
             Rule::Specialization(info),
             pattern_step.proof_size + 1,
             pattern_step.depth,
+            pattern_step.shallow_status,
+            pattern_step.shallow_origin,
             premise_map,
         )
     }
@@ -717,8 +786,19 @@ impl ProofStep {
             // statement that we have already fetched.
             long_step.depth
         };
+        let (shallow_status, shallow_origin) =
+            Self::resolution_shallow_data(long_id, long_step, short_id, short_step, &clause);
 
-        Self::new_with_normalized_clause(clause, truthiness, rule, proof_size, depth, premise_map)
+        Self::new_with_normalized_clause(
+            clause,
+            truthiness,
+            rule,
+            proof_size,
+            depth,
+            shallow_status,
+            shallow_origin,
+            premise_map,
+        )
     }
 
     /// Construct a new ProofStep via rewriting.
@@ -784,6 +864,13 @@ impl ProofStep {
         } else {
             dependency_depth + 1
         };
+        let (shallow_status, shallow_origin) = Self::rewrite_shallow_data(
+            pattern_id,
+            pattern_step,
+            target_id,
+            target_step,
+            simplifying,
+        );
 
         Self::new_with_normalized_clause(
             normalized.clause,
@@ -791,6 +878,8 @@ impl ProofStep {
             rule,
             proof_size,
             depth,
+            shallow_status,
+            shallow_origin,
             premise_map,
         )
     }
@@ -802,6 +891,7 @@ impl ProofStep {
         passive_ids: Vec<u32>,
         truthiness: Truthiness,
         depth: u32,
+        shallow_status: ShallowStatus,
     ) -> ProofStep {
         let rule = Rule::MultipleRewrite(MultipleRewriteInfo {
             inequality_id,
@@ -816,7 +906,36 @@ impl ProofStep {
             rule,
             0,
             depth,
+            shallow_status,
+            None,
             PremiseMap::empty(),
+        )
+    }
+
+    pub fn simplification(
+        original: ProofStep,
+        simplifying_ids: Vec<usize>,
+        simplifying_steps: &[&ProofStep],
+        clause: Clause,
+        truthiness: Truthiness,
+        proof_size: u32,
+        depth: u32,
+        premise_map: PremiseMap,
+    ) -> ProofStep {
+        let (shallow_status, shallow_origin) =
+            Self::simplification_shallow_data(&original, simplifying_steps, depth);
+        Self::new_with_normalized_clause(
+            clause,
+            truthiness,
+            Rule::Simplification(SimplificationInfo {
+                original: Box::new(original),
+                simplifying_ids,
+            }),
+            proof_size,
+            depth,
+            shallow_status,
+            shallow_origin,
+            premise_map,
         )
     }
 
@@ -831,6 +950,7 @@ impl ProofStep {
             depth = std::cmp::max(depth, step.depth);
             proof_size += step.proof_size;
         }
+        let (shallow_status, shallow_origin) = Self::combine_shallow_sources(passive_steps.iter());
 
         Self::new_with_normalized_clause(
             Clause::impossible(),
@@ -838,6 +958,8 @@ impl ProofStep {
             rule,
             proof_size,
             depth,
+            shallow_status,
+            shallow_origin,
             PremiseMap::empty(),
         )
     }
@@ -876,7 +998,152 @@ impl ProofStep {
             literals,
             context,
         });
-        Self::new_with_normalized_clause(clause, truthiness, rule, 0, 0, PremiseMap::empty())
+        Self::new_with_normalized_clause(
+            clause,
+            truthiness,
+            rule,
+            0,
+            0,
+            ShallowStatus::Unspent,
+            None,
+            PremiseMap::empty(),
+        )
+    }
+
+    fn combine_shallow_sources<'a>(
+        steps: impl IntoIterator<Item = &'a ProofStep>,
+    ) -> (ShallowStatus, Option<ShallowOrigin>) {
+        use ShallowStatus::{Contradiction, Deep, Spent, Unspent};
+
+        let mut spent_origin = None;
+        for step in steps {
+            match step.shallow_status {
+                Contradiction => return (Contradiction, None),
+                Deep => return (Deep, None),
+                Unspent => {}
+                Spent => match (spent_origin, step.shallow_origin) {
+                    (_, None) => return (Deep, None),
+                    (None, Some(origin)) => {
+                        spent_origin = Some(origin);
+                    }
+                    (Some(existing), Some(origin)) if existing == origin => {}
+                    (Some(_), Some(_)) => return (Deep, None),
+                },
+            };
+        }
+
+        match spent_origin {
+            Some(origin) => (Spent, Some(origin)),
+            None => (Unspent, None),
+        }
+    }
+
+    fn shallow_opening_root(&self, active_id_hint: usize) -> usize {
+        match &self.rule {
+            Rule::Assumption(_) => active_id_hint,
+            Rule::Specialization(info) => info.pattern_id,
+            Rule::EqualityFactoring(info)
+            | Rule::EqualityResolution(info)
+            | Rule::Injectivity(info)
+            | Rule::BooleanReduction(info)
+            | Rule::Extensionality(info) => info.id,
+            Rule::Simplification(info) => info.original.shallow_opening_root(active_id_hint),
+            Rule::Resolution(_)
+            | Rule::Rewrite(_)
+            | Rule::MultipleRewrite(_)
+            | Rule::PassiveContradiction(_) => active_id_hint,
+        }
+    }
+
+    fn resolution_shallow_data(
+        long_id: usize,
+        long_step: &ProofStep,
+        short_id: usize,
+        short_step: &ProofStep,
+        clause: &Clause,
+    ) -> (ShallowStatus, Option<ShallowOrigin>) {
+        use ShallowStatus::{Deep, Spent, Unspent};
+
+        match (long_step.shallow_status, short_step.shallow_status) {
+            (Unspent, Unspent) => {
+                if long_step.truthiness == Truthiness::Counterfactual {
+                    (Unspent, None)
+                } else if short_step.truthiness == Truthiness::Counterfactual {
+                    let long_root = long_step.shallow_opening_root(long_id);
+                    let short_root = short_step.shallow_opening_root(short_id);
+                    (
+                        Spent,
+                        Some(ShallowOrigin::Resolution {
+                            long_id: long_root,
+                            short_id: short_root,
+                        }),
+                    )
+                } else {
+                    (Deep, None)
+                }
+            }
+            (Unspent, Spent)
+                if long_step.truthiness != Truthiness::Counterfactual
+                    && short_step.truthiness == Truthiness::Counterfactual
+                    && clause.atom_count() < long_step.clause.atom_count() =>
+            {
+                (Spent, short_step.shallow_origin)
+            }
+            (Spent, Unspent)
+                if long_step.truthiness == Truthiness::Counterfactual
+                    && short_step.truthiness != Truthiness::Counterfactual
+                    && clause.literals.len() < long_step.clause.literals.len() =>
+            {
+                (Spent, long_step.shallow_origin)
+            }
+            _ => (Deep, None),
+        }
+    }
+
+    fn rewrite_shallow_data(
+        pattern_id: usize,
+        pattern_step: &ProofStep,
+        target_id: usize,
+        target_step: &ProofStep,
+        simplifying: bool,
+    ) -> (ShallowStatus, Option<ShallowOrigin>) {
+        use ShallowStatus::{Deep, Spent, Unspent};
+
+        match (pattern_step.shallow_status, target_step.shallow_status) {
+            (Unspent, Unspent)
+                if simplifying && target_step.truthiness != Truthiness::Counterfactual =>
+            {
+                (Unspent, None)
+            }
+            (Unspent, Unspent)
+                if target_step.truthiness == Truthiness::Counterfactual
+                    && pattern_step.truthiness != Truthiness::Counterfactual =>
+            {
+                let pattern_root = pattern_step.shallow_opening_root(pattern_id);
+                let target_root = target_step.shallow_opening_root(target_id);
+                (
+                    Spent,
+                    Some(ShallowOrigin::Rewrite {
+                        pattern_id: pattern_root,
+                        target_id: target_root,
+                    }),
+                )
+            }
+            _ => (Deep, None),
+        }
+    }
+
+    pub fn simplification_shallow_data(
+        original: &ProofStep,
+        simplifying_steps: &[&ProofStep],
+        _depth: u32,
+    ) -> (ShallowStatus, Option<ShallowOrigin>) {
+        if simplifying_steps.is_empty() {
+            return (original.shallow_status, original.shallow_origin);
+        }
+        Self::combine_shallow_sources(
+            std::iter::once(original).chain(simplifying_steps.iter().copied()),
+        )
     }
 
     /// The ids of the other clauses that this clause depends on.
@@ -924,6 +1191,10 @@ impl ProofStep {
     /// Whether this is the last step of the proof
     pub fn finishes_proof(&self) -> bool {
         self.clause.is_impossible()
+    }
+
+    pub fn is_shallow(&self) -> bool {
+        self.shallow_status.is_shallow()
     }
 
     pub fn automatic_reject(&self) -> bool {

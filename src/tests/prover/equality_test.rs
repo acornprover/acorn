@@ -510,6 +510,7 @@ fn test_proving_using_unimported_function() {
             "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
             "function(x0: Foo) { not f(x0) or lib(foo).g(x0) }(Foo.foo)",
             "not lib(foo).g(Foo.foo)",
+            "lib(foo).g(Foo.foo)",
         ],
     );
 }
@@ -612,10 +613,7 @@ fn test_core_proving_boolean_equality() {
 
 #[test]
 fn test_proving_functional_structure_identity() {
-    let mut p = Project::new_mock();
-    p.mock(
-        "/mock/main.ac",
-        r#"
+    let text = r#"
         type Foo: axiom
 
         structure Bar {
@@ -632,10 +630,9 @@ fn test_proving_functional_structure_identity() {
         theorem goal {
             a = b
         }
-        "#,
-    );
+        "#;
 
-    prove(&mut p, "main", "goal");
+    verify_succeeds(text);
 }
 
 /// Test that extensionality works without requiring a witness for uninhabited types.
@@ -651,10 +648,7 @@ fn test_proving_functional_structure_identity() {
 /// universally quantified clause directly.
 #[test]
 fn test_extensionality_without_witness_for_uninhabited_type() {
-    let mut p = Project::new_mock();
-    p.mock(
-        "/mock/main.ac",
-        r#"
+    let text = r#"
         // Elem is uninhabited - it's an axiom type with no constructors
         type Elem: axiom
 
@@ -675,11 +669,9 @@ fn test_extensionality_without_witness_for_uninhabited_type() {
         theorem goal {
             a = b
         }
-        "#,
-    );
+        "#;
 
-    // This should succeed without needing a witness for Elem
-    prove(&mut p, "main", "goal");
+    verify_succeeds(text);
 }
 
 #[test]

@@ -1,11 +1,18 @@
-name: Run Tests (Linux)
-# This runs Rust unit tests on Linux when a new tag is pushed
+name: CI (Linux)
+# This runs the main Rust and acornlib checks on pull requests and master pushes.
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - master
   push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"
+    branches:
+      - master
+
+concurrency:
+  group: ci-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-linux:
@@ -32,29 +39,16 @@ jobs:
         with:
           toolchain: stable
           override: true
+          components: rustfmt
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Cargo Check
+        run: cargo check
 
       - name: Run Tests
         run: cargo test
 
-      - name: Build CLI Binary
-        run: cargo build --release --bin=acorn
-
-      - name: Verify version matches tag
-        if: startsWith(github.ref_name, 'v')
-        run: |
-          # Extract tag without the 'v' prefix
-          TAG_VERSION=${GITHUB_REF_NAME#v}
-          # Get version from acorn --version (extract just the version number)
-          ACORN_VERSION=$(./target/release/acorn --version | awk '{print $NF}')
-          # Check if versions match
-          if [ "$TAG_VERSION" != "$ACORN_VERSION" ]; then
-            echo "Version mismatch: Tag version '$TAG_VERSION' does not match acorn --version output '$ACORN_VERSION'"
-            exit 1
-          fi
-          echo "Version check passed: $ACORN_VERSION"
-
-      - name: Verify acornlib
-        run: |
-          cd vscode/extension/acornlib
-          time ../../../target/release/acorn verify
-          time ../../../target/release/acorn verify --nohash
+      - name: Validate acornlib
+        run: cargo run --profile release --features validate -- --lib vscode/extension/acornlib check

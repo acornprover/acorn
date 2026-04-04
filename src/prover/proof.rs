@@ -598,8 +598,8 @@ mod tests {
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
+    use crate::kernel::proof_step::SingleSourceInfo;
     use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
-    use crate::kernel::proof_step::{SimplificationInfo, SingleSourceInfo};
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::apply_to_term;
     use crate::kernel::variable_map::VariableMap;
@@ -849,17 +849,16 @@ mod tests {
 
         let simplified_clause =
             Clause::new(vec![Literal::positive(and_term)], &LocalContext::empty());
-        let simplified_step = ProofStep {
-            clause: simplified_clause.clone(),
-            truthiness: original_step.truthiness,
-            rule: Rule::Simplification(SimplificationInfo {
-                original: Box::new(original_step),
-                simplifying_ids: vec![0],
-            }),
-            proof_size: 1,
-            depth: 0,
-            premise_map: PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
-        };
+        let simplified_step = ProofStep::simplification(
+            original_step,
+            vec![0],
+            &[&not_b_step],
+            simplified_clause.clone(),
+            Truthiness::Factual,
+            1,
+            0,
+            PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        );
 
         let reduced_clause = simplified_clause
             .boolean_reductions(&kctx)
@@ -951,22 +950,22 @@ mod tests {
 
         let mut witness_map = VariableMap::new();
         witness_map.set(0, Term::new_true());
-        let simplification_step = ProofStep {
-            clause: Clause::impossible(),
-            truthiness: original_step.truthiness,
-            rule: Rule::Simplification(SimplificationInfo {
-                original: Box::new(original_step),
-                simplifying_ids: vec![0],
-            }),
-            proof_size: 1,
-            depth: 0,
-            premise_map: PremiseMap::new_with_witnesses(
+        let simplification_truthiness = original_step.truthiness;
+        let simplification_step = ProofStep::simplification(
+            original_step,
+            vec![0],
+            &[&source_step],
+            Clause::impossible(),
+            simplification_truthiness,
+            1,
+            0,
+            PremiseMap::new_with_witnesses(
                 vec![VariableMap::new()],
                 vec![],
                 source_clause.get_local_context().clone(),
                 witness_map,
             ),
-        };
+        );
 
         let mut claim_index = HashMap::new();
         let mut steps_in_order = Vec::new();
@@ -1051,23 +1050,22 @@ mod tests {
 
         let mut witness_map = VariableMap::new();
         witness_map.set(0, Term::new_true());
-
-        let final_step = ProofStep {
-            clause: Clause::impossible(),
-            truthiness: original_step.truthiness,
-            rule: Rule::Simplification(SimplificationInfo {
-                original: Box::new(original_step),
-                simplifying_ids: vec![0],
-            }),
-            proof_size: 1,
-            depth: 0,
-            premise_map: PremiseMap::new_with_witnesses(
+        let final_truthiness = original_step.truthiness;
+        let final_step = ProofStep::simplification(
+            original_step,
+            vec![0],
+            &[&simplifying_step],
+            Clause::impossible(),
+            final_truthiness,
+            1,
+            0,
+            PremiseMap::new_with_witnesses(
                 vec![simplifying_var_map],
                 vec![],
                 source_clause.get_local_context().clone(),
                 witness_map,
             ),
-        };
+        );
 
         let mut proof = Proof::new_with_witnesses(&kctx, Some(&witness_registry));
         proof.add_step(ProofStepId::Active(0), &simplifying_step);
@@ -1356,16 +1354,16 @@ mod tests {
                 LocalContext::from_types(vec![Term::bool_type()]),
             ),
         );
-        let simplification_step = ProofStep {
-            clause: Clause::impossible(),
-            truthiness: original_step.truthiness,
-            rule: Rule::Simplification(SimplificationInfo {
-                original: Box::new(original_step),
-                simplifying_ids: vec![0],
-            }),
-            proof_size: 1,
-            depth: 0,
-            premise_map: PremiseMap::new_with_witnesses(
+        let simplification_truthiness = original_step.truthiness;
+        let simplification_step = ProofStep::simplification(
+            original_step,
+            vec![0],
+            &[&source_step],
+            Clause::impossible(),
+            simplification_truthiness,
+            1,
+            0,
+            PremiseMap::new_with_witnesses(
                 vec![VariableMap::new()],
                 vec![],
                 LocalContext::from_types(vec![Term::bool_type()]),
@@ -1375,7 +1373,7 @@ mod tests {
                     witness_map
                 },
             ),
-        };
+        );
         let mut claim_index = HashMap::new();
         let mut steps_in_order = Vec::new();
 
