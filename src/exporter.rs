@@ -487,6 +487,7 @@ fn export_module(
             &cert_worklist,
             &source_lines,
             options,
+            false,
             &mut instances,
             &mut definitions,
             &mut theorems,
@@ -516,6 +517,7 @@ fn export_node(
     cert_worklist: &crate::certificate::CertificateWorklist,
     source_lines: &[String],
     options: &ExportOptions,
+    inside_proof: bool,
     instances: &mut Vec<ExportedInstance>,
     definitions: &mut Vec<ExportedDefinition>,
     theorems: &mut Vec<ExportedTheorem>,
@@ -529,6 +531,7 @@ fn export_node(
                 module_name,
                 fact,
                 cert_worklist,
+                inside_proof,
                 instances,
                 definitions,
                 theorems,
@@ -698,6 +701,7 @@ fn export_node(
                         module_name,
                         fact,
                         cert_worklist,
+                        inside_proof,
                         instances,
                         definitions,
                         theorems,
@@ -706,6 +710,8 @@ fn export_node(
             }
 
             // Recurse into block for nested content
+            // All sub-nodes inside a block are proof-internal;
+            // skip definition exports from them
             for sub_node in &block.env.nodes {
                 export_node(
                     project,
@@ -716,6 +722,7 @@ fn export_node(
                     cert_worklist,
                     source_lines,
                     options,
+                    true,
                     instances,
                     definitions,
                     theorems,
@@ -732,6 +739,7 @@ fn export_fact(
     module_name: &str,
     fact: &Fact,
     cert_worklist: &crate::certificate::CertificateWorklist,
+    inside_proof: bool,
     instances: &mut Vec<ExportedInstance>,
     definitions: &mut Vec<ExportedDefinition>,
     theorems: &mut Vec<ExportedTheorem>,
@@ -802,7 +810,7 @@ fn export_fact(
             });
         }
         Fact::Definition(potential_value, definition, source) => {
-            if source.module_id != module_id {
+            if source.module_id != module_id || inside_proof {
                 return;
             }
             let name = match &source.source_type {
