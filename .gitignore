@@ -1,5 +1,6 @@
 /target
 /files
+/export
 perf.data*
 profile.json*
 .xwin-cache
