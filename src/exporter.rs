@@ -663,6 +663,11 @@ fn export_module(
 
             if start_0 < end_0 && end_0 <= source_lines.len() {
                 let block: String = source_lines[start_0..end_0].join("\n");
+                let block = if let Some(ref num_type) = numerals {
+                    replace_bare_numerals(&block, num_type)
+                } else {
+                    block
+                };
                 match kind {
                     ItemKind::Type => types[item_idx].source_block = Some(block),
                     ItemKind::Typeclass => typeclasses[item_idx].source_block = Some(block),
@@ -1548,6 +1553,91 @@ fn dedent(text: &str) -> String {
         .join("\n")
 }
 
+/// Replace bare numeric literals with qualified form (e.g. `2` → `Nat.2`).
+///
+/// A bare numeral is a sequence of digits that is NOT:
+/// - preceded by `.` (already qualified like `Nat.2`)
+/// - preceded by `_` or an alphanumeric char (part of an identifier like `nat_base` or `T0`)
+/// - followed by `_` or an alphanumeric char
+///
+/// Lines starting with `//` (comments) are skipped.
+fn replace_bare_numerals(source: &str, numeral_type: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            // Skip comment lines
+            if line.trim_start().starts_with("//") {
+                return line.to_string();
+            }
+            replace_numerals_in_line(line, numeral_type)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn replace_numerals_in_line(line: &str, numeral_type: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut result = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Check if we're at the start of a digit sequence
+        if chars[i].is_ascii_digit() {
+            // Check preceding character
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let is_qualified = prev == Some('.');
+            let is_ident = matches!(prev, Some(c) if c.is_alphanumeric() || c == '_');
+
+            // Check if this numeral is the name in a `let` or `define` statement
+            // e.g. "    let 2: Nat = ..." — the `2` is a definition name, not a value
+            let is_let_name = {
+                let prefix = result.trim();
+                prefix == "let" || prefix == "define"
+            };
+
+            if is_qualified || is_ident || is_let_name {
+                // Part of an identifier or already qualified — emit as-is
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // Collect the full number
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+
+            // Check following character
+            let next = if i < chars.len() {
+                Some(chars[i])
+            } else {
+                None
+            };
+            let followed_by_ident = matches!(next, Some(c) if c.is_alphanumeric() || c == '_');
+
+            if followed_by_ident {
+                // Part of identifier — emit as-is
+                for j in start..i {
+                    result.push(chars[j]);
+                }
+            } else {
+                // Bare numeral — qualify it
+                result.push_str(numeral_type);
+                result.push('.');
+                for j in start..i {
+                    result.push(chars[j]);
+                }
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1675,5 +1765,49 @@ mod tests {
         let output = Path::new("/tmp/export");
         let path = module_name_to_path(output, "prelude");
         assert_eq!(path, PathBuf::from("/tmp/export/prelude.jsonl"));
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_basic() {
+        assert_eq!(
+            replace_bare_numerals("1 + 1 = 2", "Nat"),
+            "Nat.1 + Nat.1 = Nat.2"
+        );
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_already_qualified() {
+        assert_eq!(replace_bare_numerals("Nat.0.suc", "Nat"), "Nat.0.suc");
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_in_identifier() {
+        // Don't touch digits in identifiers
+        assert_eq!(
+            replace_bare_numerals("nat_base T0 x2y", "Nat"),
+            "nat_base T0 x2y"
+        );
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_comment_skipped() {
+        assert_eq!(
+            replace_bare_numerals("// 1 + 1 = 2\nlet x = 3", "Nat"),
+            "// 1 + 1 = 2\nlet x = Nat.3"
+        );
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_parens() {
+        assert_eq!(replace_bare_numerals("f(0, 1)", "Nat"), "f(Nat.0, Nat.1)");
+    }
+
+    #[test]
+    fn test_replace_bare_numerals_let_name() {
+        // In "let 2: Nat = ...", the 2 is a definition name, not a numeral value
+        assert_eq!(
+            replace_bare_numerals("    let 2: Nat = Nat.1.suc", "Nat"),
+            "    let 2: Nat = Nat.1.suc"
+        );
     }
 }
