@@ -51,9 +51,18 @@ pub struct ExportedModule {
     pub numerals: Option<String>,
     pub types: Vec<ExportedType>,
     pub typeclasses: Vec<ExportedTypeclass>,
+    pub attributes: Vec<ExportedAttributes>,
     pub instances: Vec<ExportedInstance>,
     pub definitions: Vec<ExportedDefinition>,
     pub theorems: Vec<ExportedTheorem>,
+}
+
+#[derive(Serialize)]
+pub struct ExportedAttributes {
+    pub type_name: String,
+    pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +73,8 @@ pub struct ExportedType {
     pub doc_comments: Vec<String>,
     pub definition_string: Option<String>,
     pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +84,8 @@ pub struct ExportedTypeclass {
     pub attributes: Vec<ExportedTypeclassAttribute>,
     pub doc_comments: Vec<String>,
     pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -87,6 +100,8 @@ pub struct ExportedInstance {
     pub type_name: String,
     pub typeclass: String,
     pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -97,6 +112,8 @@ pub struct ExportedDefinition {
     pub definition_body: Option<String>,
     pub doc_comments: Vec<String>,
     pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -128,6 +145,8 @@ pub struct ExportedTheorem {
     pub statement_annotations: Option<Vec<IdentifierInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_annotations: Option<Vec<IdentifierInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_block: Option<String>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -313,6 +332,9 @@ fn write_jsonl(path: &Path, module: &ExportedModule) -> io::Result<()> {
     for tc in &module.typeclasses {
         write_json_line(&mut writer, "typeclass", tc)?;
     }
+    for attr in &module.attributes {
+        write_json_line(&mut writer, "attributes", attr)?;
+    }
     for inst in &module.instances {
         write_json_line(&mut writer, "instance", inst)?;
     }
@@ -418,6 +440,7 @@ fn export_module(
             doc_comments,
             definition_string,
             line,
+            source_block: None,
         });
     }
 
@@ -466,6 +489,7 @@ fn export_module(
             attributes,
             doc_comments,
             line,
+            source_block: None,
         });
     }
 
@@ -496,12 +520,168 @@ fn export_module(
 
     let numerals = bindings.numerals().map(|dt| dt.name.clone());
 
+    // ── Scan source for `attributes Type { ... }` blocks ────────────────
+    let mut attr_blocks: Vec<ExportedAttributes> = Vec::new();
+    for (i, line) in source_lines.iter().enumerate() {
+        if !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && line.trim_start().starts_with("attributes ")
+        {
+            // Extract type name: "attributes Nat {" -> "Nat"
+            // or "attributes A: AddGroup {" -> "A: AddGroup"
+            let rest = line.trim_start().strip_prefix("attributes ").unwrap_or("");
+            let type_name = rest.split('{').next().unwrap_or("").trim().to_string();
+            attr_blocks.push(ExportedAttributes {
+                type_name,
+                line: (i + 1) as u32,
+                source_block: None,
+            });
+        }
+    }
+
+    // ── Populate source_block for every item ────────────────────────────
+    // Collect (1-based line, kind, index) for each exported item, sort by
+    // line, then slice source_lines between consecutive items.
+    //
+    // Only top-level items (no leading whitespace) participate in the
+    // range calculation. Nested items (definitions inside instance/
+    // attributes blocks) are excluded — they're part of their parent's
+    // source_block.
+    if !source_lines.is_empty() {
+        #[derive(Clone, Copy)]
+        enum ItemKind {
+            Type,
+            Typeclass,
+            Attributes,
+            Instance,
+            Definition,
+            Theorem,
+        }
+
+        let mut entries: Vec<(u32, ItemKind, usize)> = Vec::new();
+        for (i, t) in types.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Type, i));
+            }
+        }
+        for (i, t) in typeclasses.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Typeclass, i));
+            }
+        }
+        for (i, t) in attr_blocks.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Attributes, i));
+            }
+        }
+        for (i, t) in instances.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Instance, i));
+            }
+        }
+        for (i, t) in definitions.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Definition, i));
+            }
+        }
+        for (i, t) in theorems.iter().enumerate() {
+            if t.line > 0 {
+                entries.push((t.line, ItemKind::Theorem, i));
+            }
+        }
+
+        entries.sort_by_key(|(line, _, _)| *line);
+
+        // Determine which entries are top-level (no leading whitespace).
+        let is_top_level: Vec<bool> = entries
+            .iter()
+            .map(|(line, _, _)| {
+                let idx = (*line - 1) as usize;
+                if idx < source_lines.len() {
+                    let first_char = source_lines[idx].chars().next().unwrap_or(' ');
+                    !first_char.is_whitespace()
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        // Collect top-level lines for range boundary calculation.
+        let mut top_level_lines: Vec<u32> = entries
+            .iter()
+            .zip(is_top_level.iter())
+            .filter(|(_, &tl)| tl)
+            .map(|((line, _, _), _)| *line)
+            .collect();
+        top_level_lines.sort();
+        top_level_lines.dedup();
+
+        for idx in 0..entries.len() {
+            let (start_line, kind, item_idx) = entries[idx];
+            let mut start_0 = (start_line - 1) as usize; // to 0-based
+
+            if !is_top_level[idx] {
+                // Nested item: no source_block (it's part of the parent's block)
+                continue;
+            }
+
+            // Walk backwards to include doc comments (///) preceding this item
+            while start_0 > 0 && source_lines[start_0 - 1].trim().starts_with("///") {
+                start_0 -= 1;
+            }
+
+            // Find the next top-level item's line to determine range end
+            let end_0 = match top_level_lines.iter().find(|&&l| l > start_line) {
+                Some(&next_line) => {
+                    let next_line_0 = (next_line - 1) as usize;
+                    // Walk backwards to skip blank lines, imports, numerals,
+                    // and comments between items
+                    let mut end = next_line_0;
+                    while end > start_0 {
+                        let trimmed = source_lines[end - 1].trim();
+                        if trimmed.is_empty()
+                            || trimmed.starts_with("from ")
+                            || trimmed.starts_with("numerals ")
+                            || trimmed.starts_with("//")
+                        {
+                            end -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    end
+                }
+                None => {
+                    // Last top-level item: take to end of file
+                    let mut end = source_lines.len();
+                    while end > start_0 && source_lines[end - 1].trim().is_empty() {
+                        end -= 1;
+                    }
+                    end
+                }
+            };
+
+            if start_0 < end_0 && end_0 <= source_lines.len() {
+                let block: String = source_lines[start_0..end_0].join("\n");
+                match kind {
+                    ItemKind::Type => types[item_idx].source_block = Some(block),
+                    ItemKind::Typeclass => typeclasses[item_idx].source_block = Some(block),
+                    ItemKind::Attributes => attr_blocks[item_idx].source_block = Some(block),
+                    ItemKind::Instance => instances[item_idx].source_block = Some(block),
+                    ItemKind::Definition => definitions[item_idx].source_block = Some(block),
+                    ItemKind::Theorem => theorems[item_idx].source_block = Some(block),
+                }
+            }
+        }
+    }
+
     ExportedModule {
         name: module_name.to_string(),
         imports,
         numerals,
         types,
         typeclasses,
+        attributes: attr_blocks,
         instances,
         definitions,
         theorems,
@@ -578,6 +758,7 @@ fn export_node(
                 elaborated_proof: None,
                 statement_annotations: None,
                 proof_annotations: None,
+                source_block: None,
             });
         }
         Node::Block(block, external_fact, _) => {
@@ -686,6 +867,7 @@ fn export_node(
                             elaborated_proof,
                             statement_annotations,
                             proof_annotations,
+                            source_block: None,
                         });
                     }
                 }
@@ -794,6 +976,7 @@ fn export_fact(
                         elaborated_proof: None,
                         statement_annotations: None,
                         proof_annotations: None,
+                        source_block: None,
                     });
                 }
                 _ => {}
@@ -807,6 +990,7 @@ fn export_fact(
                 type_name: datatype.name.clone(),
                 typeclass: typeclass.name.clone(),
                 line: source.range.start.line + 1,
+                source_block: None,
             });
         }
         Fact::Definition(potential_value, definition, source) => {
@@ -837,6 +1021,7 @@ fn export_fact(
                 definition_body: def_body,
                 doc_comments,
                 line: source.range.start.line + 1,
+                source_block: None,
             });
         }
         Fact::Extends(_, _, _, _) => {}
