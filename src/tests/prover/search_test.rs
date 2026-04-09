@@ -836,3 +836,41 @@ fn test_proving_with_equality_resolution() {
         ],
     );
 }
+
+#[test]
+fn test_nested_define_expansion() {
+    // Regression test for https://github.com/acornprover/acorn/issues/42
+    // When an inner define has a complex exists-forall body, expanding the
+    // outer define must stay shallow so the prover finds the proof within
+    // the shallow activation budget.
+    let text = r#"
+        type Elem: axiom
+        let s: Elem -> Bool = axiom
+        let f: Elem -> Elem = axiom
+        let close: (Elem, Elem, Elem) -> Bool = axiom
+        let pos: Elem -> Bool = axiom
+
+        define inner(x: Elem) -> Bool {
+            s(x) and
+            forall(eps: Elem) {
+                pos(eps) implies exists(delta: Elem) {
+                    pos(delta) and forall(x1: Elem) {
+                        s(x1) and close(x1, x, delta) implies
+                        close(f(x1), f(x), eps)
+                    }
+                }
+            }
+        }
+
+        define outer(dummy: Elem) -> Bool {
+            forall(x: Elem) {
+                s(x) implies inner(x)
+            }
+        }
+
+        theorem goal(x: Elem) {
+            outer(x) and s(x) implies inner(x)
+        }
+        "#;
+    verify_succeeds(text);
+}
