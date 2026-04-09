@@ -1129,6 +1129,26 @@ impl ProofStep {
                     }),
                 )
             }
+            // Allow non-simplifying rewrites from factual definitions into
+            // hypothetical terms to remain shallow. Definition expansion is a
+            // fundamental proof step that should be explored early; marking it
+            // Deep causes the prover to exhaust its activation budget on other
+            // clauses before ever expanding nested definitions.
+            (Unspent, Unspent)
+                if !simplifying
+                    && pattern_step.truthiness == Truthiness::Factual
+                    && target_step.truthiness == Truthiness::Hypothetical =>
+            {
+                let pattern_root = pattern_step.shallow_opening_root(pattern_id);
+                let target_root = target_step.shallow_opening_root(target_id);
+                (
+                    Spent,
+                    Some(ShallowOrigin::Rewrite {
+                        pattern_id: pattern_root,
+                        target_id: target_root,
+                    }),
+                )
+            }
             _ => (Deep, None),
         }
     }
