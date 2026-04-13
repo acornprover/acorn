@@ -825,11 +825,8 @@ fn test_citing_two_theorems_into_conjunction_goal() {
                 forall(t: Foo) { p(g(f(t))) }
             )
         } by {
-            if forall(t: Foo) { p(f(t)) }
-               and forall(t: Foo) { p(g(t)) } {
-                fwd(f, g, p)
-                fwd(g, f, p)
-            }
+            fwd(f, g, p)
+            fwd(g, f, p)
         }
         "#,
     );
