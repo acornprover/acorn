@@ -109,13 +109,77 @@ fn validate_print_proof_flag(
     print_proof: bool,
     line_selection: &Option<LineSelection>,
 ) -> Result<(), String> {
-    if print_proof && !matches!(line_selection, Some(LineSelection::Single(_))) {
-        return Err(
-            "--print-proof requires a single line selection via TARGET:LINE or --line LINE"
-                .to_string(),
-        );
+    if print_proof && matches!(line_selection, Some(LineSelection::Range(_, _))) {
+        return Err("--print-proof does not support line ranges".to_string());
     }
     Ok(())
+}
+
+fn resolve_print_proof_line_selection(
+    start_path: &std::path::Path,
+    target: Option<&str>,
+    line_selection: Option<LineSelection>,
+    print_proof: bool,
+) -> Result<Option<LineSelection>, String> {
+    if !print_proof || line_selection.is_some() {
+        return Ok(line_selection);
+    }
+
+    let target = target.ok_or_else(|| {
+        "--print-proof without TARGET:LINE requires a target with exactly one goal".to_string()
+    })?;
+
+    if target == "-" || target.starts_with("-:") {
+        return Err("--print-proof requires an explicit line when reading from stdin".to_string());
+    }
+
+    let config = ProjectConfig {
+        use_filesystem: true,
+        read_cache: false,
+        write_cache: false,
+    };
+    let mut project = Project::new_local(start_path, config).map_err(|e| e.to_string())?;
+
+    let descriptor = if target.ends_with(".ac") {
+        let path = std::path::PathBuf::from(target);
+        project
+            .add_target_by_path(&path)
+            .map_err(|e| format!("Error loading module: {}", e))?;
+        project
+            .descriptor_from_path(&path)
+            .map_err(|e| format!("Error resolving module '{}': {}", target, e))?
+    } else {
+        project
+            .add_target_by_name(target)
+            .map_err(|e| format!("Error loading module '{}': {}", target, e))?;
+        let path = project
+            .path_from_module_name(target)
+            .map_err(|e| format!("Error resolving module '{}': {}", target, e))?;
+        project
+            .descriptor_from_path(&path)
+            .map_err(|e| format!("Error resolving module '{}': {}", target, e))?
+    };
+
+    let env = project
+        .get_env(&descriptor)
+        .ok_or_else(|| format!("Error loading target '{}'", target))?;
+    let goal_lines: Vec<u32> = env
+        .iter_goals()
+        .map(|cursor| cursor.goal().unwrap().first_line + 1)
+        .collect();
+
+    match goal_lines.as_slice() {
+        [] => Err(format!(
+            "--print-proof target '{}' has no goals; use TARGET:LINE for a specific goal",
+            target
+        )),
+        [line] => Ok(Some(LineSelection::Single(*line))),
+        _ => Err(format!(
+            "--print-proof target '{}' has {} goals; use TARGET:LINE to choose one",
+            target,
+            goal_lines.len()
+        )),
+    }
 }
 
 fn validate_activations_flag(activations: Option<u32>) -> Result<(), String> {
@@ -283,10 +347,10 @@ enum Command {
         )]
         verbose: bool,
 
-        /// Print the detailed proof found by the prover for a single selected goal
+        /// Print the detailed proof found by the prover for a selected goal, or for the only goal in the target
         #[clap(
             long = "print-proof",
-            help = "Print the detailed proof found by the prover for a single selected goal."
+            help = "Print the detailed proof found by the prover for a selected goal, or for the only goal in the target."
         )]
         print_proof: bool,
     },
@@ -547,6 +611,19 @@ async fn main() {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
+
+            let line_sel = match resolve_print_proof_line_selection(
+                &current_dir,
+                target.as_deref(),
+                line_sel,
+                print_proof,
+            ) {
+                Ok(selection) => selection,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
             // Verify command doesn't support line ranges
             let line_selection = match line_sel {
@@ -1133,12 +1210,14 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use acorn::interfaces::GoalInfo;
+    use assert_fs::prelude::*;
     use clap::{error::ErrorKind, Parser};
+    use tempfile::TempDir;
 
     use super::{
-        filter_selected_goals, validate_activations_flag, validate_goal_flag,
-        validate_goal_requires_single_line, validate_print_proof_flag, validate_verbose_flag, Args,
-        Command, LineSelection,
+        filter_selected_goals, resolve_print_proof_line_selection, validate_activations_flag,
+        validate_goal_flag, validate_goal_requires_single_line, validate_print_proof_flag,
+        validate_verbose_flag, Args, Command, LineSelection,
     };
 
     #[test]
@@ -1151,10 +1230,44 @@ mod tests {
 
     #[test]
     fn test_print_proof_flag_requires_single_line() {
-        assert!(validate_print_proof_flag(true, &None).is_err());
+        assert!(validate_print_proof_flag(true, &None).is_ok());
         assert!(validate_print_proof_flag(true, &Some(LineSelection::Range(10, 12))).is_err());
         assert!(validate_print_proof_flag(true, &Some(LineSelection::Single(10))).is_ok());
         assert!(validate_print_proof_flag(false, &None).is_ok());
+    }
+
+    fn setup_project() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        temp.child("acorn.toml").write_str("").unwrap();
+        temp.child("src").create_dir_all().unwrap();
+        temp.child("build").create_dir_all().unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_resolve_print_proof_line_selection_uses_only_goal_in_target() {
+        let temp = setup_project();
+        temp.child("src/one.ac")
+            .write_str("theorem only_goal { true }\n")
+            .unwrap();
+
+        let selection =
+            resolve_print_proof_line_selection(temp.path(), Some("one"), None, true).unwrap();
+
+        assert!(matches!(selection, Some(LineSelection::Single(1))));
+    }
+
+    #[test]
+    fn test_resolve_print_proof_line_selection_rejects_ambiguous_target() {
+        let temp = setup_project();
+        temp.child("src/two.ac")
+            .write_str("theorem first { true }\ntheorem second { true }\n")
+            .unwrap();
+
+        let error =
+            resolve_print_proof_line_selection(temp.path(), Some("two"), None, true).unwrap_err();
+
+        assert!(error.contains("has 2 goals"));
     }
 
     #[test]
