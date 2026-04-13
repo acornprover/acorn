@@ -1113,7 +1113,11 @@ impl ProofStep {
             (Unspent, Unspent)
                 if simplifying && target_step.truthiness != Truthiness::Counterfactual =>
             {
-                (Unspent, None)
+                if cfg!(feature = "dsr") {
+                    (Deep, None)
+                } else {
+                    (Unspent, None)
+                }
             }
             (Unspent, Unspent)
                 if target_step.truthiness == Truthiness::Counterfactual

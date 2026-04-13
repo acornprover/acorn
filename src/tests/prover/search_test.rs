@@ -67,7 +67,11 @@ fn test_verify_fimp_expansion() {
         axiom fimpa { fimp(a) }
         theorem thm { f(a) implies (g(a) and h(a)) }
         "#;
-    verify_succeeds(text);
+    if cfg!(feature = "dsr") {
+        verify_fails(text);
+    } else {
+        verify_succeeds(text);
+    }
 }
 
 #[test]
