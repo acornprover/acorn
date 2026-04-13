@@ -105,6 +105,19 @@ fn validate_verbose_flag(
     Ok(())
 }
 
+fn validate_print_proof_flag(
+    print_proof: bool,
+    line_selection: &Option<LineSelection>,
+) -> Result<(), String> {
+    if print_proof && !matches!(line_selection, Some(LineSelection::Single(_))) {
+        return Err(
+            "--print-proof requires a single line selection via TARGET:LINE or --line LINE"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_activations_flag(activations: Option<u32>) -> Result<(), String> {
     if matches!(activations, Some(0)) {
         return Err("--activations must be at least 1".to_string());
@@ -269,6 +282,13 @@ enum Command {
             help = "Print the activated proof steps and final contradiction details for a single selected goal."
         )]
         verbose: bool,
+
+        /// Print the detailed proof found by the prover for a single selected goal
+        #[clap(
+            long = "print-proof",
+            help = "Print the detailed proof found by the prover for a single selected goal."
+        )]
+        print_proof: bool,
     },
 
     /// Check all goals, erroring if any goal requires a search
@@ -504,6 +524,7 @@ async fn main() {
             timeout,
             activations,
             verbose,
+            print_proof,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -515,6 +536,10 @@ async fn main() {
             };
 
             if let Err(e) = validate_verbose_flag(verbose, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_print_proof_flag(print_proof, &line_sel) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -547,7 +572,8 @@ async fn main() {
                 }
             };
 
-            verifier.builder.print_proof = line_selection.is_some();
+            verifier.builder.print_proof = line_selection.is_some() && !print_proof;
+            verifier.builder.print_found_proof = print_proof;
             verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false;
@@ -1111,7 +1137,8 @@ mod tests {
 
     use super::{
         filter_selected_goals, validate_activations_flag, validate_goal_flag,
-        validate_goal_requires_single_line, validate_verbose_flag, Args, Command, LineSelection,
+        validate_goal_requires_single_line, validate_print_proof_flag, validate_verbose_flag, Args,
+        Command, LineSelection,
     };
 
     #[test]
@@ -1120,6 +1147,14 @@ mod tests {
         assert!(validate_verbose_flag(true, &Some(LineSelection::Range(10, 12))).is_err());
         assert!(validate_verbose_flag(true, &Some(LineSelection::Single(10))).is_ok());
         assert!(validate_verbose_flag(false, &None).is_ok());
+    }
+
+    #[test]
+    fn test_print_proof_flag_requires_single_line() {
+        assert!(validate_print_proof_flag(true, &None).is_err());
+        assert!(validate_print_proof_flag(true, &Some(LineSelection::Range(10, 12))).is_err());
+        assert!(validate_print_proof_flag(true, &Some(LineSelection::Single(10))).is_ok());
+        assert!(validate_print_proof_flag(false, &None).is_ok());
     }
 
     #[test]

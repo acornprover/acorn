@@ -201,9 +201,13 @@ pub struct Builder<'a> {
     /// Line numbers are internal (0-based).
     pub goal_filter: Option<GoalFilter>,
 
-    /// Print the final proof and the checked, human-readable proof display for successful searches.
+    /// Print the checked, human-readable proof display for successful verification.
     /// Don't set it from within the language server.
     pub print_proof: bool,
+
+    /// Print the detailed proof found by the prover for a successful search.
+    /// Don't set it from within the language server.
+    pub print_found_proof: bool,
 
     /// Print every activated clause in quoted source syntax after a search.
     /// Don't set it from within the language server.
@@ -436,6 +440,7 @@ impl<'a> Builder<'a> {
             used_cert_counts: HashMap::new(),
             goal_filter: None,
             print_proof: false,
+            print_found_proof: false,
             verbose: false,
             cancellation_token,
             cert_override: None,
@@ -827,84 +832,86 @@ impl<'a> Builder<'a> {
             }
         }
 
-        // Check for a cached cert
-        let indexes = worklist.get_indexes(&goal.name);
-        for i in indexes {
-            let cert = worklist.get_cert(*i).unwrap().clone();
+        if !self.print_found_proof {
+            // Check for a cached cert
+            let indexes = worklist.get_indexes(&goal.name);
+            for i in indexes {
+                let cert = worklist.get_cert(*i).unwrap().clone();
 
-            // If clean_certs is enabled, clean the certificate
-            let normalized_goal =
-                lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
-            let goal_kernel_context = &normalized_goal.kernel_context;
-            let (cert_to_use, check_result) = if self.clean_certs {
-                match processor.clean_cert(
-                    cert,
-                    Some(normalized_goal),
-                    goal_kernel_context,
-                    self.project,
-                    bindings,
-                ) {
-                    Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
-                    Err(e) => {
+                // If clean_certs is enabled, clean the certificate
+                let normalized_goal =
+                    lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
+                let goal_kernel_context = &normalized_goal.kernel_context;
+                let (cert_to_use, check_result) = if self.clean_certs {
+                    match processor.clean_cert(
+                        cert,
+                        Some(normalized_goal),
+                        goal_kernel_context,
+                        self.project,
+                        bindings,
+                    ) {
+                        Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
+                        Err(e) => {
+                            return Err(BuildError::goal(
+                                goal,
+                                format!("failed to clean certificate: {}", e),
+                            ))
+                        }
+                    }
+                } else {
+                    // Normal path: just check the certificate
+                    let result = processor.check_cert_with_usage(
+                        &cert,
+                        Some(normalized_goal),
+                        goal_kernel_context,
+                        self.project,
+                        bindings,
+                    );
+                    match result {
+                        Ok(checked_cert) => (
+                            cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
+                            Ok(checked_cert.lines),
+                        ),
+                        Err(e) => (cert, Err(e)),
+                    }
+                };
+
+                match check_result {
+                    Ok(_steps) => {
+                        self.metrics.certs_cached += 1;
+                        self.metrics.goals_done += 1;
+                        self.metrics.goals_success += 1;
+                        self.log_verified(goal.first_line, goal.last_line);
+                        new_certs.push(cert_to_use.clone());
+                        worklist.remove(&goal.name, *i);
+
+                        return Ok(());
+                    }
+                    Err(e) if self.check_mode => {
+                        // In check mode, a bad cert is an error
+                        if false {
+                            // Print a command to reproduce this failure
+                            let module_name = self
+                                .current_module
+                                .as_ref()
+                                .map(|m| m.to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let external_line = goal.first_line + 1;
+                            let cert_json = serde_json::to_string(&cert_to_use).unwrap_or_default();
+                            self.log_global(format!(
+                                "To reproduce: acorn check {} --line {} --cert '{}'",
+                                module_name, external_line, cert_json
+                            ));
+                        }
                         return Err(BuildError::goal(
                             goal,
-                            format!("failed to clean certificate: {}", e),
-                        ))
-                    }
-                }
-            } else {
-                // Normal path: just check the certificate
-                let result = processor.check_cert_with_usage(
-                    &cert,
-                    Some(normalized_goal),
-                    goal_kernel_context,
-                    self.project,
-                    bindings,
-                );
-                match result {
-                    Ok(checked_cert) => (
-                        cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
-                        Ok(checked_cert.lines),
-                    ),
-                    Err(e) => (cert, Err(e)),
-                }
-            };
-
-            match check_result {
-                Ok(_steps) => {
-                    self.metrics.certs_cached += 1;
-                    self.metrics.goals_done += 1;
-                    self.metrics.goals_success += 1;
-                    self.log_verified(goal.first_line, goal.last_line);
-                    new_certs.push(cert_to_use.clone());
-                    worklist.remove(&goal.name, *i);
-
-                    return Ok(());
-                }
-                Err(e) if self.check_mode => {
-                    // In check mode, a bad cert is an error
-                    if false {
-                        // Print a command to reproduce this failure
-                        let module_name = self
-                            .current_module
-                            .as_ref()
-                            .map(|m| m.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let external_line = goal.first_line + 1;
-                        let cert_json = serde_json::to_string(&cert_to_use).unwrap_or_default();
-                        self.log_global(format!(
-                            "To reproduce: acorn check {} --line {} --cert '{}'",
-                            module_name, external_line, cert_json
+                            format!("certificate failed to verify: {}", e),
                         ));
                     }
-                    return Err(BuildError::goal(
-                        goal,
-                        format!("certificate failed to verify: {}", e),
-                    ));
-                }
-                Err(_) => {
-                    // The cert is bad, but maybe another one is good.
-                    // That can happen with code edits.
+                    Err(_) => {
+                        // The cert is bad, but maybe another one is good.
+                        // That can happen with code edits.
+                    }
                 }
             }
         }
@@ -938,7 +945,7 @@ impl<'a> Builder<'a> {
         }
         if outcome == Outcome::Success {
             let cert_result = catch_unwind(AssertUnwindSafe(|| {
-                processor.make_cert(bindings, goal_kernel_context, false)
+                processor.make_cert(bindings, goal_kernel_context, self.print_found_proof)
             }));
             match cert_result {
                 Err(payload) => {
