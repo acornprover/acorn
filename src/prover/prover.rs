@@ -69,6 +69,14 @@ pub struct Prover {
 }
 
 impl Prover {
+    fn verbose_depth_label(step: &ProofStep) -> String {
+        if step.is_shallow() {
+            "shallow".to_string()
+        } else {
+            format!("depth {}", step.depth)
+        }
+    }
+
     fn goal_name_for_trace(&self) -> &str {
         self.goal
             .as_ref()
@@ -268,9 +276,9 @@ impl Prover {
 
             writeln!(
                 output,
-                "Clause {}, depth {}, {:?}, by {}:",
+                "Clause {}, {}, {:?}, by {}:",
                 id,
-                step.depth,
+                Self::verbose_depth_label(step),
                 step.truthiness,
                 step.rule.name().to_lowercase()
             )
@@ -282,8 +290,8 @@ impl Prover {
         if let Some(final_step) = &self.final_step {
             writeln!(
                 output,
-                "final contradiction, depth {}, {:?}, by {}:",
-                final_step.depth,
+                "final contradiction, {}, {:?}, by {}:",
+                Self::verbose_depth_label(final_step),
                 final_step.truthiness,
                 final_step.rule.name().to_lowercase()
             )
@@ -1018,9 +1026,29 @@ mod tests {
         let formatted = prover.format_active_steps(Outcome::Success, &bindings, &kernel_context);
 
         assert!(formatted.contains("search outcome: Success"));
-        assert!(formatted.contains("final contradiction"));
+        assert!(formatted.contains("final contradiction, shallow"));
         assert!(formatted.contains("passive contradiction clauses:"));
         assert!(formatted.contains("Passive 0: false = true"));
         assert!(formatted.contains("Passive 1: not false"));
+    }
+
+    #[test]
+    fn test_format_active_steps_labels_shallow_activated_steps() {
+        let mut kernel_context = KernelContext::new();
+        let step = ProofStep::mock("true = false", &kernel_context);
+
+        let mut prover = Prover::new(vec![]);
+        prover.active_set.activate(
+            step,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let formatted = prover.format_active_steps(Outcome::Exhausted, &bindings, &kernel_context);
+
+        assert!(formatted.contains("Clause 0, shallow, Factual, by assumption:"));
+        assert!(!formatted.contains("Clause 0, depth 0, Factual, by assumption:"));
     }
 }
