@@ -801,3 +801,36 @@ fn test_type_only_theorem_citation_expands() {
         proposition_values
     );
 }
+
+#[test]
+#[ignore]
+fn test_citing_two_theorems_into_conjunction_goal() {
+    verify_succeeds(
+        r#"
+        type Foo: axiom
+
+        axiom fwd(f: Foo -> Foo, g: Foo -> Foo, p: Foo -> Bool) {
+            forall(t: Foo) { p(f(t)) } and forall(t: Foo) { p(g(t)) }
+            implies
+            forall(t: Foo) { p(f(g(t))) }
+        }
+
+        theorem combined(f: Foo -> Foo, g: Foo -> Foo, p: Foo -> Bool) {
+            forall(t: Foo) { p(f(t)) }
+            and forall(t: Foo) { p(g(t)) }
+            implies
+            (
+                forall(t: Foo) { p(f(g(t))) }
+                and
+                forall(t: Foo) { p(g(f(t))) }
+            )
+        } by {
+            if forall(t: Foo) { p(f(t)) }
+               and forall(t: Foo) { p(g(t)) } {
+                fwd(f, g, p)
+                fwd(g, f, p)
+            }
+        }
+        "#,
+    );
+}
