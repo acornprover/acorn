@@ -804,36 +804,28 @@ fn test_type_only_theorem_citation_expands() {
 
 #[test]
 #[ignore]
-fn test_citing_two_theorems_into_conjunction_goal() {
+fn test_conjunction_of_forall() {
     verify_succeeds_verbose(
         r#"
         type Foo: axiom
 
-        axiom fwd(f: Foo -> Foo, g: Foo -> Foo, p: Foo -> Bool) {
-            forall(t: Foo) { p(f(t)) } and forall(t: Foo) { p(g(t)) }
-            implies
-            forall(t: Foo) { p(f(g(t))) }
-        }
-
-        let f: Foo -> Foo = axiom
-        let g: Foo -> Foo = axiom
+        let b: Bool = axiom
         let p: Foo -> Bool = axiom
+        let q: Foo -> Bool = axiom
 
-        axiom a1(t: Foo) {
-            p(f(t))
+        axiom a1 {
+            b implies forall(t: Foo) { p(t) }
         }
 
-        axiom a2(t: Foo) {
-            p(g(t))
+        axiom a2 {
+            b implies forall(t: Foo) { q(t) }
         }
 
         theorem combined {
-            forall(t: Foo) { p(f(g(t))) }
+            b implies
+            forall(t: Foo) { p(t) }
             and
-            forall(t: Foo) { p(g(f(t))) }
-        } by {
-            fwd(f, g, p)
-            fwd(g, f, p)
+            forall(t: Foo) { q(t) }
         }
         "#,
     );
