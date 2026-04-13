@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::code_generator::CodeGenerator;
+use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::proposition::Proposition;
 use crate::module::ModuleId;
@@ -16,6 +17,11 @@ pub struct Goal {
 
     // The proposition to be proved.
     pub proposition: Arc<Proposition>,
+
+    // An optional theorem-alias form for this goal, e.g. `thm(args...)`.
+    // This is used for internal theorem-block goals, where proving the theorem body
+    // can also be viewed as refuting the theorem alias directly.
+    pub theorem_alias: Option<AcornValue>,
 
     // Whether it's okay if we discover an inconsistency in the provided facts.
     // If it's not okay, we warn the user.
@@ -37,6 +43,7 @@ impl Goal {
     fn new(
         env: &Environment,
         prop: Arc<Proposition>,
+        theorem_alias: Option<AcornValue>,
         first_line: u32,
         last_line: u32,
     ) -> Result<Goal, String> {
@@ -65,6 +72,7 @@ impl Goal {
             module_id: env.module_id,
             name,
             proposition: prop,
+            theorem_alias,
             inconsistency_okay: env.includes_explicit_false || env.will_include_explicit_false,
             first_line,
             last_line,
@@ -75,13 +83,17 @@ impl Goal {
     pub fn block(env: &Environment, prop: Arc<Proposition>) -> Result<Goal, String> {
         let first_line = env.first_line;
         let last_line = env.last_line();
-        Self::new(env, prop, first_line, last_line)
+        Self::new(env, prop, None, first_line, last_line)
     }
 
     /// Creates a Goal for a proposition that is inside a block (or standalone).
-    pub fn interior(env: &Environment, prop: Arc<Proposition>) -> Result<Goal, String> {
+    pub fn interior(
+        env: &Environment,
+        prop: Arc<Proposition>,
+        theorem_alias: Option<AcornValue>,
+    ) -> Result<Goal, String> {
         let first_line = prop.source.range.start.line;
         let last_line = prop.source.range.end.line;
-        Self::new(env, prop, first_line, last_line)
+        Self::new(env, prop, theorem_alias, first_line, last_line)
     }
 }

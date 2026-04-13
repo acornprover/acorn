@@ -11,6 +11,7 @@ use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::names::DefinedName;
 use crate::elaborator::node::Node;
+use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::atom::AtomId;
@@ -158,6 +159,7 @@ impl Block {
             internal_args.push(potential.force_value());
         }
 
+        let mut theorem_alias = None;
         let goal_prop = match params {
             BlockParams::Conditional(condition, range) => {
                 let source = Source::premise(env.module_id, range, subenv.depth);
@@ -171,6 +173,21 @@ impl Block {
                     // with propositions to define its identity.
                     // This makes it less annoying to define inductive hypotheses.
                     subenv.add_definition(&DefinedName::unqualified(env.module_id, name));
+
+                    let theorem_value = subenv
+                        .bindings
+                        .get_constant_value(&DefinedName::unqualified(env.module_id, name))
+                        .map_err(|e| error::Error::new(first_token, last_token, &e))?;
+                    let applied = match theorem_value {
+                        PotentialValue::Resolved(value) if internal_args.is_empty() => Some(value),
+                        PotentialValue::Resolved(value) => Some(value.check_apply(
+                            internal_args.clone(),
+                            Some(&AcornType::Bool),
+                            first_token,
+                        )?),
+                        PotentialValue::Unresolved(_) => None,
+                    };
+                    theorem_alias = applied;
                 }
 
                 if let Some((unbound_premise, premise_range)) = premise {
@@ -293,7 +310,7 @@ impl Block {
         if let Some(prop) = goal_prop {
             let goal_range = prop.source.range;
             let prop = Arc::new(prop);
-            let goal = Goal::interior(&subenv, prop.clone())
+            let goal = Goal::interior(&subenv, prop.clone(), theorem_alias)
                 .map_err(|e| error::Error::new(first_token, last_token, &e))?;
             let fact = Fact::Proposition(prop);
             let goal_node = Node::Claim(goal, fact, None, None);
@@ -308,7 +325,7 @@ impl Block {
                 for constraint in constraints {
                     let source = Source::block_goal(env.module_id, range, env.depth);
                     let prop = Arc::new(Proposition::new(constraint, vec![], source));
-                    let goal = Goal::interior(&subenv, prop.clone())
+                    let goal = Goal::interior(&subenv, prop.clone(), None)
                         .map_err(|e| error::Error::new(first_token, last_token, &e))?;
                     let fact = Fact::Proposition(prop);
                     let goal_node = Node::Claim(goal, fact, None, None);

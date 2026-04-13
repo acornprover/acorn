@@ -67,7 +67,7 @@ impl Node {
         let _ = project;
         let prop = env.bindings.canonicalize_proposition(prop);
         let prop = Arc::new(prop);
-        let goal = Goal::interior(env, prop.clone())?;
+        let goal = Goal::interior(env, prop.clone(), None)?;
         let fact = Fact::Proposition(prop);
         Ok(Node::Claim(goal, fact, None, None))
     }

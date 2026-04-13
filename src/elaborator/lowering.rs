@@ -309,6 +309,15 @@ impl KernelContext {
         .with_arg_count(prop.arg_count);
         let fact = Fact::Proposition(Arc::new(counterfactual_prop));
         steps.extend(self.lower_fact(&fact)?.steps);
+        if let Some(theorem_alias) = &goal.theorem_alias {
+            let alias_counterfactual_prop = Proposition::new(
+                theorem_alias.clone().negate(),
+                vec![],
+                prop.source.as_negated_goal(),
+            );
+            let fact = Fact::Proposition(Arc::new(alias_counterfactual_prop));
+            steps.extend(self.lower_fact(&fact)?.steps);
+        }
 
         Ok(LoweredGoal {
             goal: goal.clone(),
