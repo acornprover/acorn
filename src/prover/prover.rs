@@ -811,7 +811,26 @@ impl Prover {
 
         let start_time = std::time::Instant::now();
         loop {
-            if shallow_only && !self.passive_set.all_shallow {
+            if shallow_only && !self.passive_set.can_pop_for_verification() {
+                if let Some(passive_steps) = self.passive_set.get_contradiction() {
+                    trace!(
+                        target: "acorn::prover::activation",
+                        goal = self.goal_name_for_trace(),
+                        passive_count = passive_steps.len(),
+                        "found passive contradiction at shallow frontier"
+                    );
+                    self.report_passive_contradiction(passive_steps, kernel_context);
+                    let final_step = self.final_step.as_ref().unwrap();
+                    if final_step.truthiness == Truthiness::Counterfactual {
+                        return Outcome::Success;
+                    }
+                    if let Some(goal) = &self.goal {
+                        if goal.inconsistency_okay {
+                            return Outcome::Success;
+                        }
+                    }
+                    return Outcome::Inconsistent;
+                }
                 trace!(
                     target: "acorn::prover::activation",
                     goal = self.goal_name_for_trace(),

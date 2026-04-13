@@ -648,6 +648,33 @@ impl fmt::Display for ProofStep {
 }
 
 impl ProofStep {
+    fn is_definition_assumption(&self) -> bool {
+        matches!(
+            &self.rule,
+            Rule::Assumption(AssumptionInfo {
+                source: Source {
+                    source_type: SourceType::TypeDefinition(_, _)
+                        | SourceType::ConstantDefinition(_, _),
+                    ..
+                },
+                ..
+            })
+        )
+    }
+
+    fn is_negated_goal_assumption(&self) -> bool {
+        matches!(
+            &self.rule,
+            Rule::Assumption(AssumptionInfo {
+                source: Source {
+                    source_type: SourceType::NegatedGoal,
+                    ..
+                },
+                ..
+            })
+        )
+    }
+
     #[track_caller]
     fn new_with_normalized_clause(
         mut clause: Clause,
@@ -1110,6 +1137,14 @@ impl ProofStep {
         use ShallowStatus::{Deep, Spent, Unspent};
 
         match (pattern_step.shallow_status, target_step.shallow_status) {
+            (Unspent, Unspent)
+                if !simplifying
+                    && pattern_step.is_definition_assumption()
+                    && target_step.truthiness == Truthiness::Counterfactual
+                    && target_step.is_negated_goal_assumption() =>
+            {
+                (Unspent, None)
+            }
             (Unspent, Unspent)
                 if simplifying && target_step.truthiness != Truthiness::Counterfactual =>
             {
