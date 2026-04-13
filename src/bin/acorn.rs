@@ -263,10 +263,10 @@ enum Command {
         )]
         activations: Option<u32>,
 
-        /// Print every activated proof step for a single selected goal
+        /// Print the activated proof steps and final contradiction details for a single selected goal
         #[clap(
             long,
-            help = "Print every activated proof step for a single selected goal."
+            help = "Print the activated proof steps and final contradiction details for a single selected goal."
         )]
         verbose: bool,
     },
@@ -362,10 +362,10 @@ enum Command {
         )]
         reverse: bool,
 
-        /// Print every activated proof step for a single selected goal
+        /// Print the activated proof steps and final contradiction details for a single selected goal
         #[clap(
             long,
-            help = "Print every activated proof step for a single selected goal."
+            help = "Print the activated proof steps and final contradiction details for a single selected goal."
         )]
         verbose: bool,
     },

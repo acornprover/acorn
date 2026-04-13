@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
@@ -232,18 +233,27 @@ impl Prover {
             })
     }
 
-    /// Prints every activated proof step in activation order.
-    pub fn print_active_steps(&self, bindings: &BindingMap, kernel_context: &KernelContext) {
+    /// Formats the verbose search trace for a single goal.
+    pub fn format_active_steps(
+        &self,
+        outcome: Outcome,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) -> String {
         let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
+        let mut output = String::new();
 
-        println!(
+        writeln!(output, "search outcome: {}", outcome).unwrap();
+        writeln!(
+            output,
             "activated {} proof steps ({} non-factual, {} passive remain):",
             self.active_set.len(),
             self.nonfactual_activations,
             self.passive_set.len()
-        );
-        println!();
+        )
+        .unwrap();
+        writeln!(output).unwrap();
 
         for (id, step) in self.iter_active_steps() {
             let clause_text = if step.clause.is_impossible() {
@@ -256,16 +266,58 @@ impl Prover {
                 )
             };
 
-            println!(
+            writeln!(
+                output,
                 "Clause {}, depth {}, {:?}, by {}:",
                 id,
                 step.depth,
                 step.truthiness,
                 step.rule.name().to_lowercase()
-            );
-            println!("    {}", clause_text);
-            println!();
+            )
+            .unwrap();
+            writeln!(output, "    {}", clause_text).unwrap();
+            writeln!(output).unwrap();
         }
+
+        if let Some(final_step) = &self.final_step {
+            writeln!(
+                output,
+                "final contradiction, depth {}, {:?}, by {}:",
+                final_step.depth,
+                final_step.truthiness,
+                final_step.rule.name().to_lowercase()
+            )
+            .unwrap();
+            writeln!(output, "    contradiction").unwrap();
+
+            if matches!(final_step.rule, Rule::PassiveContradiction(_)) {
+                writeln!(output).unwrap();
+                writeln!(output, "passive contradiction clauses:").unwrap();
+                for (i, step) in self.useful_passive.iter().enumerate() {
+                    let clause_text = self.clause_text(
+                        &step.clause,
+                        cert_bindings.as_ref(),
+                        effective_kernel_context,
+                    );
+                    writeln!(output, "    Passive {}: {}", i, clause_text).unwrap();
+                }
+            }
+        }
+
+        output
+    }
+
+    /// Prints every activated proof step in activation order.
+    pub fn print_active_steps(
+        &self,
+        outcome: Outcome,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) {
+        print!(
+            "{}",
+            self.format_active_steps(outcome, bindings, kernel_context)
+        );
     }
 
     /// Prints the proof in a human-readable form.
@@ -942,11 +994,33 @@ mod tests {
 
         let bindings = BindingMap::new(ModuleId::default());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prover.print_active_steps(&bindings, &stale_kernel_context);
+            prover.print_active_steps(Outcome::Success, &bindings, &stale_kernel_context);
         }));
         assert!(
             result.is_ok(),
             "print_active_steps should quote named witnesses with the prover-owned search context"
         );
+    }
+
+    #[test]
+    fn test_format_active_steps_shows_passive_contradiction_clauses() {
+        let kernel_context = KernelContext::new();
+
+        let positive = ProofStep::mock("true = false", &kernel_context);
+        let negative = ProofStep::mock("true != false", &kernel_context);
+        let final_step = ProofStep::passive_contradiction(&[positive.clone(), negative.clone()]);
+
+        let mut prover = Prover::new(vec![]);
+        prover.useful_passive = vec![positive, negative];
+        prover.final_step = Some(final_step);
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let formatted = prover.format_active_steps(Outcome::Success, &bindings, &kernel_context);
+
+        assert!(formatted.contains("search outcome: Success"));
+        assert!(formatted.contains("final contradiction"));
+        assert!(formatted.contains("passive contradiction clauses:"));
+        assert!(formatted.contains("Passive 0: false = true"));
+        assert!(formatted.contains("Passive 1: not false"));
     }
 }

@@ -65,7 +65,7 @@ fn test_verify_fimp_expansion() {
         let h: Nat -> Bool = axiom
         define fimp(x: Nat) -> Bool { f(x) implies (g(x) and h(x)) }
         axiom fimpa { fimp(a) }
-        theorem goal { f(a) implies (g(a) and h(a)) }
+        theorem thm { f(a) implies (g(a) and h(a)) }
         "#;
     verify_succeeds(text);
 }

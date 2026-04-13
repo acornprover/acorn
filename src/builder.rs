@@ -934,7 +934,7 @@ impl<'a> Builder<'a> {
         if self.verbose {
             processor
                 .prover()
-                .print_active_steps(bindings, goal_kernel_context);
+                .print_active_steps(outcome, bindings, goal_kernel_context);
         }
         if outcome == Outcome::Success {
             let cert_result = catch_unwind(AssertUnwindSafe(|| {
