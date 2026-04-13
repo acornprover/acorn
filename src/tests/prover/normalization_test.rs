@@ -815,15 +815,22 @@ fn test_citing_two_theorems_into_conjunction_goal() {
             forall(t: Foo) { p(f(g(t))) }
         }
 
-        theorem combined(f: Foo -> Foo, g: Foo -> Foo, p: Foo -> Bool) {
-            forall(t: Foo) { p(f(t)) }
-            and forall(t: Foo) { p(g(t)) }
-            implies
-            (
-                forall(t: Foo) { p(f(g(t))) }
-                and
-                forall(t: Foo) { p(g(f(t))) }
-            )
+        let f: Foo -> Foo = axiom
+        let g: Foo -> Foo = axiom
+        let p: Foo -> Bool = axiom
+
+        axiom a1(t: Foo) {
+            p(f(t))
+        }
+
+        axiom a2(t: Foo) {
+            p(g(t))
+        }
+
+        theorem combined {
+            forall(t: Foo) { p(f(g(t))) }
+            and
+            forall(t: Foo) { p(g(f(t))) }
         } by {
             fwd(f, g, p)
             fwd(g, f, p)
