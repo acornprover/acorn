@@ -805,7 +805,7 @@ fn test_type_only_theorem_citation_expands() {
 #[test]
 #[ignore]
 fn test_citing_two_theorems_into_conjunction_goal() {
-    verify_succeeds(
+    verify_succeeds_verbose(
         r#"
         type Foo: axiom
 

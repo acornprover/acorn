@@ -7,6 +7,25 @@ use std::sync::Once;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static TEST_TRACING_INIT: Once = Once::new();
+const DEEP_VERIFY_TIMEOUT_SECS: f32 = 5.0;
+const DEEP_VERIFY_ACTIVATION_LIMIT: i32 = 2000;
+
+#[derive(Clone, Copy)]
+struct VerifyOptions {
+    verbose: bool,
+    deep_followup_on_failure: bool,
+}
+
+struct VerifyFailure {
+    goal_name: String,
+    shallow_outcome: Outcome,
+    deep_outcome: Option<Outcome>,
+}
+
+enum VerifyResult {
+    Success,
+    Failure(VerifyFailure),
+}
 
 fn init_test_tracing() {
     TEST_TRACING_INIT.call_once(|| {
@@ -89,8 +108,7 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
     panic!("goal '{}' not found in text", goal_name);
 }
 
-// Verifies all the goals in the provided text, returning any non-Success outcome.
-pub fn verify(text: &str) -> Result<Outcome, String> {
+fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResult, String> {
     init_test_tracing();
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
@@ -105,7 +123,7 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
     let mut last_goal_top_index: Option<usize> = None;
 
     for cursor in env.iter_goals() {
-        let _goal = cursor.goal().unwrap();
+        let goal = cursor.goal().unwrap();
 
         // Track the top-level index of this goal
         let path = cursor.path();
@@ -122,12 +140,75 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         processor.set_lowered_goal(normalized_goal);
         let goal_kernel_context = &normalized_goal.kernel_context;
 
+        if options.verbose {
+            println!("verbose trace for goal `{}`:", goal.name);
+        }
+
         // This is a key difference between our verification tests, and our real verification.
         // This helps us test that verification fails in cases where we do have an
         // infinite rabbit hole we could go down.
-        let outcome = processor.search(ProverMode::Test, goal_kernel_context);
-        if outcome != Outcome::Success {
-            return Ok(outcome);
+        let shallow_outcome = processor.search(ProverMode::Test, goal_kernel_context);
+        if options.verbose {
+            processor.prover().print_active_steps(
+                shallow_outcome,
+                cursor.bindings(),
+                goal_kernel_context,
+            );
+        }
+
+        if shallow_outcome != Outcome::Success {
+            let deep_outcome = if options.deep_followup_on_failure
+                && matches!(
+                    shallow_outcome,
+                    Outcome::Exhausted | Outcome::Timeout | Outcome::Constrained
+                ) {
+                let deep_outcome = processor.search(
+                    ProverMode::Interactive {
+                        timeout_secs: DEEP_VERIFY_TIMEOUT_SECS,
+                        activation_limit: DEEP_VERIFY_ACTIVATION_LIMIT,
+                    },
+                    goal_kernel_context,
+                );
+                if options.verbose {
+                    println!(
+                        "deep follow-up trace for goal `{}` after shallow {}:",
+                        goal.name, shallow_outcome
+                    );
+                    processor.prover().print_active_steps(
+                        deep_outcome,
+                        cursor.bindings(),
+                        goal_kernel_context,
+                    );
+                }
+                if deep_outcome == Outcome::Success {
+                    println!(
+                        "shallow verification failed for goal `{}` with {}, but deep search succeeded.\nprinting deep proof:",
+                        goal.name, shallow_outcome
+                    );
+                    let cert = processor
+                        .prover()
+                        .make_cert(cursor.bindings(), goal_kernel_context, true)
+                        .map_err(|e| e.to_string())?;
+                    if let Err(e) = processor.check_cert(
+                        &cert,
+                        None,
+                        goal_kernel_context,
+                        &project,
+                        cursor.bindings(),
+                    ) {
+                        panic!("check_cert failed: {}", e);
+                    }
+                }
+                Some(deep_outcome)
+            } else {
+                None
+            };
+
+            return Ok(VerifyResult::Failure(VerifyFailure {
+                goal_name: goal.name.to_string(),
+                shallow_outcome,
+                deep_outcome,
+            }));
         }
         let cert = processor
             .prover()
@@ -158,17 +239,59 @@ pub fn verify(text: &str) -> Result<Outcome, String> {
         }
     }
 
-    Ok(Outcome::Success)
+    Ok(VerifyResult::Success)
+}
+
+// Verifies all the goals in the provided text, returning any non-Success outcome.
+pub fn verify(text: &str) -> Result<Outcome, String> {
+    match verify_with_options(
+        text,
+        VerifyOptions {
+            verbose: false,
+            deep_followup_on_failure: false,
+        },
+    )? {
+        VerifyResult::Success => Ok(Outcome::Success),
+        VerifyResult::Failure(failure) => Ok(failure.shallow_outcome),
+    }
+}
+
+fn expect_verify_success(result: Result<VerifyResult, String>) {
+    match result.expect("verification errored") {
+        VerifyResult::Success => {}
+        VerifyResult::Failure(failure) => {
+            if let Some(deep_outcome) = failure.deep_outcome {
+                panic!(
+                    "We expected verification to return Success, but shallow search for goal '{}' returned {} and deep search returned {}.",
+                    failure.goal_name, failure.shallow_outcome, deep_outcome
+                );
+            }
+            panic!(
+                "We expected verification to return Success, but we got {}.",
+                failure.shallow_outcome
+            );
+        }
+    }
 }
 
 pub fn verify_succeeds(text: &str) {
-    let outcome = verify(text).expect("verification errored");
-    if outcome != Outcome::Success {
-        panic!(
-            "We expected verification to return Success, but we got {}.",
-            outcome
-        );
-    }
+    expect_verify_success(verify_with_options(
+        text,
+        VerifyOptions {
+            verbose: false,
+            deep_followup_on_failure: true,
+        },
+    ));
+}
+
+pub fn verify_succeeds_verbose(text: &str) {
+    expect_verify_success(verify_with_options(
+        text,
+        VerifyOptions {
+            verbose: true,
+            deep_followup_on_failure: true,
+        },
+    ));
 }
 
 pub fn verify_fails(text: &str) {
