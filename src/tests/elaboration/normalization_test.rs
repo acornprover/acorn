@@ -3,6 +3,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::module::LoadState;
 use crate::project::Project;
 
+#[cfg(not(feature = "kfc"))]
 fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
     clause.literals.iter().any(|lit| {
         lit.is_signed_term()
@@ -13,12 +14,40 @@ fn has_inline_exists(clause: &crate::kernel::clause::Clause) -> bool {
     })
 }
 
+#[cfg(not(feature = "kfc"))]
 fn get_inline_exists_body(
     clause: &crate::kernel::clause::Clause,
 ) -> Option<crate::kernel::term::Term> {
     clause.literals.iter().find_map(|lit| {
         if lit.is_signed_term() {
             if let crate::kernel::term::Decomposition::Exists(_, body) =
+                lit.left.as_ref().decompose()
+            {
+                return Some(body.to_owned());
+            }
+        }
+        None
+    })
+}
+
+#[cfg(feature = "kfc")]
+fn has_inline_forall(clause: &crate::kernel::clause::Clause) -> bool {
+    clause.literals.iter().any(|lit| {
+        lit.is_signed_term()
+            && matches!(
+                lit.left.as_ref().decompose(),
+                crate::kernel::term::Decomposition::ForAll(_, _)
+            )
+    })
+}
+
+#[cfg(feature = "kfc")]
+fn get_inline_forall_body(
+    clause: &crate::kernel::clause::Clause,
+) -> Option<crate::kernel::term::Term> {
+    clause.literals.iter().find_map(|lit| {
+        if lit.is_signed_term() {
+            if let crate::kernel::term::Decomposition::ForAll(_, body) =
                 lit.left.as_ref().decompose()
             {
                 return Some(body.to_owned());
@@ -189,14 +218,30 @@ fn test_normalizes_quantifier_bodies_before_clausification() {
     let clauses = norm.get_all_clauses(&env);
     assert_eq!(clauses.len(), 1, "expected a single clause");
     let clause = &clauses[0];
+    let bound = crate::kernel::term::Term::atom(crate::kernel::atom::Atom::BoundVariable(0));
+    #[cfg(not(feature = "kfc"))]
+    let expected = crate::kernel::term::Term::and(bound.clone(), bound.clone());
+    #[cfg(feature = "kfc")]
+    let expected = crate::kernel::term::Term::or(
+        crate::kernel::term::Term::not(bound.clone()),
+        crate::kernel::term::Term::not(bound.clone()),
+    );
+    #[cfg(not(feature = "kfc"))]
     assert!(
         has_inline_exists(clause),
         "expected an inline exists: {:?}",
         clause
     );
+    #[cfg(not(feature = "kfc"))]
     let body = get_inline_exists_body(clause).expect("expected exists body");
-    let bound = crate::kernel::term::Term::atom(crate::kernel::atom::Atom::BoundVariable(0));
-    let expected = crate::kernel::term::Term::and(bound.clone(), bound);
+    #[cfg(feature = "kfc")]
+    assert!(
+        has_inline_forall(clause),
+        "expected an inline forall: {:?}",
+        clause
+    );
+    #[cfg(feature = "kfc")]
+    let body = get_inline_forall_body(clause).expect("expected forall body");
     assert_eq!(body, expected);
 }
 
