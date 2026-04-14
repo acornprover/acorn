@@ -1248,6 +1248,36 @@ fn test_kfc_clause_lowering_distinguishes_bare_and_grouped_forall() {
     );
 }
 
+#[cfg(feature = "kfc")]
+#[test]
+#[ignore]
+fn test_kernel_clause_roundtrip_open_clause_with_closed_inner_forall_literal() {
+    let mut kernel_context = KernelContext::new();
+    add_named_global_constant(&mut kernel_context, "g0", "(Bool, Bool) -> Bool");
+    let g0 = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(ModuleId(0), "g0"))
+        .expect("g0 should be registered");
+    let outer_x = Term::new_variable(0);
+    let inner_x = Term::atom(Atom::BoundVariable(0));
+    let inner_body = Term::atom(Atom::Symbol(crate::kernel::symbol::Symbol::Not))
+        .apply(&[Term::atom(Atom::Symbol(g0)).apply(&[outer_x, inner_x])]);
+    let clause = Clause::from_literals_unnormalized(
+        vec![Literal::positive(Term::forall(Term::bool_type(), inner_body))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    )
+    .normalized_preserving_locals();
+
+    assert_eq!(
+        clause,
+        clause.normalized_preserving_locals(),
+        "constructed clause should already be normalized-preserving-locals before the roundtrip check"
+    );
+    kernel_context.validate_clause_roundtrip(&clause).expect(
+        "an open outer clause with a closed inner forall literal should satisfy the normalized clause quote/lower roundtrip",
+    );
+}
+
 #[test]
 fn test_prover_generated_steps_are_normalized() {
     for case in PROVER_PAIR_CASES {
