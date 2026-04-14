@@ -485,9 +485,6 @@ fn test_named_function_witness_can_match_implying_claim() {
         ModuleId::default(),
     )
     .expect("witness emitter should build");
-    #[cfg(not(feature = "kfc"))]
-    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
-    #[cfg(feature = "kfc")]
     assert_eq!(emitter.replacement_indices.get(&local_id), Some(&0));
 }
 
@@ -513,13 +510,8 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
     )
     .expect("duplicate matching claims should still anchor successfully");
 
-    #[cfg(not(feature = "kfc"))]
-    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
-    #[cfg(feature = "kfc")]
-    {
-        assert_eq!(emitter.anchor_indices.get(&local_id), None);
-        assert_eq!(emitter.replacement_indices.get(&local_id), None);
-    }
+    assert_eq!(emitter.anchor_indices.get(&local_id), None);
+    assert_eq!(emitter.replacement_indices.get(&local_id), None);
 }
 
 #[test]
@@ -545,27 +537,14 @@ fn test_emit_named_function_witness_keeps_explicit_specialized_claim() {
     )
     .expect("named witness emission should succeed");
 
-    #[cfg(not(feature = "kfc"))]
-    assert_eq!(
-        emitted.len(),
-        3,
-        "the explicit specialized claim should remain in the emitted proof"
-    );
-    #[cfg(feature = "kfc")]
     assert_eq!(
         emitted.len(),
         2,
-        "under kfc the implying claim is still replaced, but the explicit specialized claim remains"
+        "the implying claim is replaced, but the explicit specialized claim remains"
     );
-    #[cfg(not(feature = "kfc"))]
-    assert!(
-        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
-        "expected the anchoring claim to remain ahead of the witness declaration"
-    );
-    #[cfg(feature = "kfc")]
     assert!(
         matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration to replace the implying claim under kfc"
+        "expected the witness declaration to replace the implying claim"
     );
     assert!(
         matches!(
@@ -574,15 +553,9 @@ fn test_emit_named_function_witness_keeps_explicit_specialized_claim() {
         ),
         "expected the witness declaration or explicit specialized claim in the second position"
     );
-    #[cfg(not(feature = "kfc"))]
-    assert!(
-        matches!(emitted.get(2), Some(CertificateStep::Claim(_))),
-        "expected the specialized claim to remain after the witness declaration"
-    );
-    #[cfg(feature = "kfc")]
     assert!(
         matches!(emitted.get(1), Some(CertificateStep::Claim(_))),
-        "expected the specialized claim to remain after the witness declaration under kfc"
+        "expected the specialized claim to remain after the witness declaration"
     );
 }
 

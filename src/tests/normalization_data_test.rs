@@ -1177,7 +1177,6 @@ fn test_kernel_clause_roundtrip_cases() {
     }
 }
 
-#[cfg(feature = "kfc")]
 #[test]
 fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
     let mut kernel_context = KernelContext::new();
@@ -1204,7 +1203,6 @@ fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
     );
 }
 
-#[cfg(feature = "kfc")]
 #[test]
 fn test_kfc_clause_lowering_distinguishes_bare_and_eq_true_forall() {
     use crate::kernel::symbol_table::NewConstantType;
@@ -1248,7 +1246,6 @@ fn test_kfc_clause_lowering_distinguishes_bare_and_eq_true_forall() {
     );
 }
 
-#[cfg(feature = "kfc")]
 #[test]
 fn test_kernel_clause_roundtrip_open_clause_with_closed_inner_forall_literal() {
     let mut kernel_context = KernelContext::new();

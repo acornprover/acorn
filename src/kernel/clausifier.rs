@@ -589,29 +589,11 @@ impl<'a> Clausifier<'a> {
         match term.as_ref().decompose() {
             crate::kernel::term::Decomposition::ForAll(_, _) => {
                 if !negate {
-                    #[cfg(feature = "kfc")]
-                    {
-                        // Only leading universals should open into the clause context during
-                        // proposition lowering. Non-leading positive universals stay inline so
-                        // they can still match their surface negated form during proof search.
-                        let literal = Literal::from_signed_term(term.clone(), true);
-                        Ok(Cnf::from_literal(literal))
-                    }
-                    #[cfg(not(feature = "kfc"))]
-                    {
-                        let (binder_type, body) = term
-                            .as_ref()
-                            .split_forall()
-                            .expect("ForAll decomposition should split");
-                        self.forall_term_to_cnf(
-                            &binder_type.to_owned(),
-                            &body.to_owned(),
-                            false,
-                            stack,
-                            next_var_id,
-                            context,
-                        )
-                    }
+                    // Only leading universals should open into the clause context during
+                    // proposition lowering. Non-leading positive universals stay inline so
+                    // they can still match their surface negated form during proof search.
+                    let literal = Literal::from_signed_term(term.clone(), true);
+                    Ok(Cnf::from_literal(literal))
                 } else {
                     // Keep negated universals inline so later boolean reductions can
                     // open them via existential structure without introducing witnesses here.
@@ -774,27 +756,6 @@ impl<'a> Clausifier<'a> {
         let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
         let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
         Ok(left.and(right))
-    }
-
-    #[cfg(not(feature = "kfc"))]
-    fn forall_term_to_cnf(
-        &mut self,
-        binder_type: &Term,
-        body: &Term,
-        negate: bool,
-        stack: &mut Vec<TermBinding>,
-        next_var_id: &mut AtomId,
-        context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
-        let var_id = *next_var_id;
-        *next_var_id += 1;
-        context.push_type(binder_type.clone());
-        let var = Term::new_variable(var_id);
-        stack.push(TermBinding::Free);
-        let opened_body = self.open_binder_body(body, &var);
-        let result = self.term_to_cnf(&opened_body, negate, stack, next_var_id, context)?;
-        stack.pop();
-        Ok(result)
     }
 
     fn term_or_to_cnf(
@@ -1611,7 +1572,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "kfc")]
     #[test]
     fn test_nonleading_positive_forall_stays_inline_in_clause_literal() {
         let mut kernel_context = KernelContext::new();

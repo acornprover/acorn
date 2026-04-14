@@ -1027,7 +1027,6 @@ impl Clause {
         Some((reduced, output_context))
     }
 
-    #[cfg(feature = "kfc")]
     fn reduce_positive_forall(term: &Term, context: &LocalContext) -> Option<(Term, LocalContext)> {
         let (binder_type, body) = term.as_ref().split_forall()?;
         let mut output_context = context.clone();
@@ -1252,7 +1251,6 @@ impl Clause {
                 }
 
                 if literal.positive {
-                    #[cfg(feature = "kfc")]
                     if let Some((reduced, output_context)) =
                         Self::reduce_positive_forall(&literal.left, &self.context)
                     {
@@ -1926,7 +1924,6 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
-    #[cfg(feature = "kfc")]
     #[test]
     fn test_boolean_reduction_positive_forall_opens_to_free_variable() {
         let mut kctx = KernelContext::new();
@@ -1947,7 +1944,6 @@ mod tests {
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
-    #[cfg(feature = "kfc")]
     #[test]
     fn test_boolean_reduction_positive_forall_opens_inside_mixed_clause() {
         let mut kctx = KernelContext::new();

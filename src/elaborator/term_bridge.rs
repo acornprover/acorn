@@ -900,7 +900,6 @@ impl<'a> TermBridge<'a> {
         );
         if literal.right.is_true() {
             if literal.positive {
-                #[cfg(feature = "kfc")]
                 if matches!(
                     literal.left.as_ref().decompose(),
                     crate::kernel::term::Decomposition::ForAll(_, _)
