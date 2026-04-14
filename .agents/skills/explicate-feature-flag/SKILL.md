@@ -12,6 +12,8 @@ Use it when:
 - the right response is to add explicit proof steps to acornlib source, not to debug prover internals yet
 
 This skill is for the `acorn` repo. Use `cargo run`, not the installed `acorn` binary.
+Edit proofs only in the sibling library repo at `../acornlib/src`.
+Do **not** edit the bundled copy under `vscode/extension/acornlib`.
 
 ## Scope
 
