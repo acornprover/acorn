@@ -426,6 +426,7 @@ pub(crate) fn normalize_signed_clause_term(term: &Term, positive: bool) -> (Term
         return (Term::and(left, right), !positive);
     }
 
+    #[cfg(not(feature = "kfc"))]
     if let Decomposition::ForAll(binder_type, body) = term.as_ref().decompose() {
         let binder_type = normalize_clause_term(&binder_type.to_owned());
         let body = normalize_clause_term_with_polarity(&body.to_owned(), false);

@@ -1027,6 +1027,19 @@ impl Clause {
         Some((reduced, output_context))
     }
 
+    #[cfg(feature = "kfc")]
+    fn reduce_positive_forall(term: &Term, context: &LocalContext) -> Option<(Term, LocalContext)> {
+        let (binder_type, body) = term.as_ref().split_forall()?;
+        let mut output_context = context.clone();
+        let fresh_var = output_context.push_type(binder_type.to_owned()) as AtomId;
+        let replacement = Term::new_variable(fresh_var);
+        let reduced = body
+            .to_owned()
+            .substitute_bound(0, &replacement)
+            .shift_bound(0, -1);
+        Some((reduced, output_context))
+    }
+
     /// Return the one top-level positive existential that may be opened as a named witness.
     pub fn positive_exists_reduction(
         &self,
@@ -1239,6 +1252,19 @@ impl Clause {
                 }
 
                 if literal.positive {
+                    #[cfg(feature = "kfc")]
+                    if self.literals.len() == 1 {
+                        if let Some((reduced, output_context)) =
+                            Self::reduce_positive_forall(&literal.left, &self.context)
+                        {
+                            answer.extend(self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &output_context,
+                            ));
+                            continue;
+                        }
+                    }
                     if let Some((_witness, reduced)) =
                         Self::reduce_exists_with_obvious_witness(&literal.left)
                     {
@@ -1895,6 +1921,27 @@ mod tests {
         let clause = Clause::new(vec![Literal::negative(exists_term)], &LocalContext::empty());
         let expected = Clause::new(
             vec![Literal::negative(
+                kctx.parse_term("g0").apply(&[Term::new_variable(0)]),
+            )],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
+    }
+
+    #[cfg(feature = "kfc")]
+    #[test]
+    fn test_boolean_reduction_positive_forall_opens_to_free_variable() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g0", "Bool -> Bool");
+
+        let forall_term = Term::forall(
+            Term::bool_type(),
+            kctx.parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clause = Clause::new(vec![Literal::positive(forall_term)], &LocalContext::empty());
+        let expected = Clause::new(
+            vec![Literal::positive(
                 kctx.parse_term("g0").apply(&[Term::new_variable(0)]),
             )],
             &LocalContext::from_types(vec![Term::bool_type()]),

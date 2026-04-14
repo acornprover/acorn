@@ -284,6 +284,7 @@ pub fn verify_succeeds(text: &str) {
     ));
 }
 
+#[allow(dead_code)]
 pub fn verify_succeeds_verbose(text: &str) {
     expect_verify_success(verify_with_options(
         text,

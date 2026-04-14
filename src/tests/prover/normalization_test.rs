@@ -802,10 +802,10 @@ fn test_type_only_theorem_citation_expands() {
     );
 }
 
+#[cfg(feature = "kfc")]
 #[test]
-#[ignore]
 fn test_conjunction_of_forall() {
-    verify_succeeds_verbose(
+    verify_succeeds(
         r#"
         type Foo: axiom
 

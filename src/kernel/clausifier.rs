@@ -587,16 +587,31 @@ impl<'a> Clausifier<'a> {
         context: &mut LocalContext,
     ) -> Result<Cnf, String> {
         match term.as_ref().decompose() {
-            crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
+            crate::kernel::term::Decomposition::ForAll(_, _) => {
                 if !negate {
-                    self.forall_term_to_cnf(
-                        &binder_type.to_owned(),
-                        &body.to_owned(),
-                        false,
-                        stack,
-                        next_var_id,
-                        context,
-                    )
+                    #[cfg(feature = "kfc")]
+                    {
+                        // Only leading universals should open into the clause context during
+                        // proposition lowering. Non-leading positive universals stay inline so
+                        // they can still match their surface negated form during proof search.
+                        let literal = Literal::from_signed_term(term.clone(), true);
+                        Ok(Cnf::from_literal(literal))
+                    }
+                    #[cfg(not(feature = "kfc"))]
+                    {
+                        let (binder_type, body) = term
+                            .as_ref()
+                            .split_forall()
+                            .expect("ForAll decomposition should split");
+                        self.forall_term_to_cnf(
+                            &binder_type.to_owned(),
+                            &body.to_owned(),
+                            false,
+                            stack,
+                            next_var_id,
+                            context,
+                        )
+                    }
                 } else {
                     // Keep negated universals inline so later boolean reductions can
                     // open them via existential structure without introducing witnesses here.
@@ -746,6 +761,22 @@ impl<'a> Clausifier<'a> {
         }
     }
 
+    fn term_and_to_cnf(
+        &mut self,
+        left: &Term,
+        right: &Term,
+        negate_left: bool,
+        negate_right: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        context: &mut LocalContext,
+    ) -> Result<Cnf, String> {
+        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
+        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
+        Ok(left.and(right))
+    }
+
+    #[cfg(not(feature = "kfc"))]
     fn forall_term_to_cnf(
         &mut self,
         binder_type: &Term,
@@ -764,21 +795,6 @@ impl<'a> Clausifier<'a> {
         let result = self.term_to_cnf(&opened_body, negate, stack, next_var_id, context)?;
         stack.pop();
         Ok(result)
-    }
-
-    fn term_and_to_cnf(
-        &mut self,
-        left: &Term,
-        right: &Term,
-        negate_left: bool,
-        negate_right: bool,
-        stack: &mut Vec<TermBinding>,
-        next_var_id: &mut AtomId,
-        context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
-        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
-        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
-        Ok(left.and(right))
     }
 
     fn term_or_to_cnf(
@@ -1541,6 +1557,94 @@ mod tests {
             ),
             "expected literal to keep the forall term inline: {:?}",
             clauses[0].literals[0]
+        );
+    }
+
+    #[test]
+    fn test_leading_positive_forall_opens_into_clause_context() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constant("g0", "Bool -> Bool");
+
+        let term = Term::forall(
+            Term::bool_type(),
+            kernel_context
+                .parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&term, None)
+            .expect("leading forall should clausify");
+
+        assert_eq!(clauses.len(), 1, "expected a single clause");
+        assert_eq!(clauses[0].context.len(), 1, "expected opened forall binder");
+        assert_eq!(clauses[0].literals.len(), 1, "expected a single literal");
+        assert_eq!(
+            clauses[0].literals[0],
+            Literal::positive(
+                kernel_context
+                    .parse_term("g0")
+                    .apply(&[Term::new_variable(0)])
+            ),
+            "expected leading forall body to open into the clause context"
+        );
+    }
+
+    #[cfg(feature = "kfc")]
+    #[test]
+    fn test_nonleading_positive_forall_stays_inline_in_clause_literal() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0"], "Bool");
+        kernel_context.parse_constant("g0", "Bool -> Bool");
+
+        let forall_term = Term::forall(
+            Term::bool_type(),
+            kernel_context
+                .parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let term = Term::or(
+            Term::not(kernel_context.parse_term("c0")),
+            forall_term.clone(),
+        );
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&term, None)
+            .expect("non-leading forall should clausify");
+
+        assert_eq!(clauses.len(), 1, "expected a single clause");
+        assert_eq!(
+            clauses[0].context.len(),
+            0,
+            "expected non-leading forall to stay out of the clause context"
+        );
+        assert_eq!(
+            clauses[0].literals.len(),
+            2,
+            "expected two disjunctive literals"
+        );
+        assert!(
+            clauses[0].literals.iter().any(|literal| literal.positive
+                && matches!(
+                    literal.left.as_ref().decompose(),
+                    Decomposition::ForAll(_, _)
+                )),
+            "expected a positive inline forall literal: {:?}",
+            clauses[0]
+        );
+        assert!(
+            clauses[0]
+                .literals
+                .iter()
+                .any(|literal| !literal.positive && literal.left == kernel_context.parse_term("c0")),
+            "expected the negated boolean disjunct to remain alongside the inline forall: {:?}",
+            clauses[0]
+        );
+        assert!(
+            clauses[0]
+                .literals
+                .iter()
+                .any(|literal| literal.positive && literal.left == forall_term),
+            "expected the original forall term to remain intact: {:?}",
+            clauses[0]
         );
     }
 
