@@ -485,7 +485,10 @@ fn test_named_function_witness_can_match_implying_claim() {
         ModuleId::default(),
     )
     .expect("witness emitter should build");
+    #[cfg(not(feature = "kfc"))]
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
+    #[cfg(feature = "kfc")]
+    assert_eq!(emitter.replacement_indices.get(&local_id), Some(&0));
 }
 
 #[test]
@@ -510,7 +513,13 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
     )
     .expect("duplicate matching claims should still anchor successfully");
 
+    #[cfg(not(feature = "kfc"))]
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
+    #[cfg(feature = "kfc")]
+    {
+        assert_eq!(emitter.anchor_indices.get(&local_id), None);
+        assert_eq!(emitter.replacement_indices.get(&local_id), None);
+    }
 }
 
 #[test]
@@ -536,15 +545,29 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
     )
     .expect("named witness emission should succeed");
 
+    #[cfg(not(feature = "kfc"))]
     assert_eq!(
         emitted.len(),
         2,
         "redundant specialized claim should be skipped"
     );
+    #[cfg(feature = "kfc")]
+    assert_eq!(
+        emitted.len(),
+        1,
+        "the implying claim is replaced by the witness declaration under kfc"
+    );
+    #[cfg(not(feature = "kfc"))]
     assert!(
         matches!(emitted.first(), Some(CertificateStep::Claim(_))),
         "expected the anchoring claim to remain ahead of the witness declaration"
     );
+    #[cfg(feature = "kfc")]
+    assert!(
+        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration to replace the implying claim under kfc"
+    );
+    #[cfg(not(feature = "kfc"))]
     assert!(
         matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
         "expected the witness declaration after the anchoring claim"
