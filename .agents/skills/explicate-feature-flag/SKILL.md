@@ -1,5 +1,5 @@
 ---
-name: "Explicate Feature Flag"
+name: explicate-feature-flag
 description: "Use when a proof/module verifies in baseline mode but reproving under a prover-affecting feature flag fails. Add explicit proof detail based on the working baseline proof until `cargo run --features <feature> -- verify ...` succeeds."
 ---
 
