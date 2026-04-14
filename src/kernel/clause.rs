@@ -199,8 +199,30 @@ impl Clause {
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
+        #[cfg(feature = "kfc")]
+        self.normalize_leading_positive_forall();
         self.literals.sort();
         self.literals.dedup();
+    }
+
+    #[cfg(feature = "kfc")]
+    fn normalize_leading_positive_forall(&mut self) {
+        if self.literals.len() != 1 {
+            return;
+        }
+        let Some(literal) = self.literals.first() else {
+            return;
+        };
+        if !literal.positive || !literal.right.is_true() {
+            return;
+        }
+        let Some((reduced, output_context)) =
+            Self::reduce_positive_forall(&literal.left, &self.context)
+        else {
+            return;
+        };
+        self.literals = vec![Literal::positive(reduced)];
+        self.context = output_context;
     }
 
     /// Normalizes the variable IDs in the literals, keeping the first `pinned` variables
@@ -1253,17 +1275,15 @@ impl Clause {
 
                 if literal.positive {
                     #[cfg(feature = "kfc")]
-                    if self.literals.len() == 1 {
-                        if let Some((reduced, output_context)) =
-                            Self::reduce_positive_forall(&literal.left, &self.context)
-                        {
-                            answer.extend(self.with_replaced_literal_and_context(
-                                i,
-                                vec![vec![Literal::positive(reduced)]],
-                                &output_context,
-                            ));
-                            continue;
-                        }
+                    if let Some((reduced, output_context)) =
+                        Self::reduce_positive_forall(&literal.left, &self.context)
+                    {
+                        answer.extend(self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![Literal::positive(reduced)]],
+                            &output_context,
+                        ));
+                        continue;
                     }
                     if let Some((_witness, reduced)) =
                         Self::reduce_exists_with_obvious_witness(&literal.left)
@@ -1930,7 +1950,7 @@ mod tests {
 
     #[cfg(feature = "kfc")]
     #[test]
-    fn test_boolean_reduction_positive_forall_opens_to_free_variable() {
+    fn test_single_positive_forall_clause_normalizes_to_free_variable() {
         let mut kctx = KernelContext::new();
         kctx.parse_constant("g0", "Bool -> Bool");
 
@@ -1944,6 +1964,35 @@ mod tests {
             vec![Literal::positive(
                 kctx.parse_term("g0").apply(&[Term::new_variable(0)]),
             )],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        assert_eq!(clause, expected);
+    }
+
+    #[cfg(feature = "kfc")]
+    #[test]
+    fn test_boolean_reduction_positive_forall_opens_inside_mixed_clause() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("g1", "Bool");
+        kctx.parse_constant("g0", "Bool -> Bool");
+
+        let forall_term = Term::forall(
+            Term::bool_type(),
+            kctx.parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        );
+        let clause = Clause::new(
+            vec![
+                Literal::positive(kctx.parse_term("g1")),
+                Literal::positive(forall_term),
+            ],
+            &LocalContext::empty(),
+        );
+        let expected = Clause::new(
+            vec![
+                Literal::positive(kctx.parse_term("g1")),
+                Literal::positive(kctx.parse_term("g0").apply(&[Term::new_variable(0)])),
+            ],
             &LocalContext::from_types(vec![Term::bool_type()]),
         );
         assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
