@@ -13,12 +13,19 @@ use crate::module::ModuleId;
 
 #[derive(Clone)]
 pub struct WitnessEntry {
+    /// The scoped constant introduced for this witness, such as `w0` or `w0(x0)`.
     pub symbol: Symbol,
+    /// The source-level constant name used when emitting a certificate step.
     pub name: ConstantName,
+    /// The theorem/proof locals that were in scope when the witness was opened.
     pub ambient_context: LocalContext,
+    /// The binder type of the existential that introduced this witness.
     pub return_type: Term,
+    /// The existential body before substituting the witness term for its bound variable.
     pub body: Term,
+    /// The normalized clause whose top-level existential was opened.
     pub general_clause: Clause,
+    /// The exact clause produced by substituting the witness term during proof search.
     pub specialized_clause: Clause,
 }
 

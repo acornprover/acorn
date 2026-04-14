@@ -592,6 +592,28 @@ fn test_named_function_witness_uses_fresh_result_binder_name() {
 }
 
 #[test]
+fn test_named_function_witness_replays_exact_open_clause() {
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (_local_id, witness) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+    let justification = Claim::new(source_clause.normalized(), VariableMap::new())
+        .expect("justification should normalize");
+
+    let step = Certificate::witness_entry_to_step(witness, justification, &kernel_context)
+        .expect("witness step should build");
+
+    assert_eq!(step.witness_clauses.len(), 1);
+    assert_eq!(step.witness_clauses[0].get_local_context().len(), 1);
+    assert!(
+        !format!("{}", step.witness_clauses[0]).contains("forall"),
+        "function witness replay should keep an open clause, not a closed forall"
+    );
+}
+
+#[test]
 fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
     use crate::prover::synthetic::WitnessRegistry;
 

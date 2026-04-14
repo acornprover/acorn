@@ -398,11 +398,14 @@ impl Certificate {
                 &specialized_condition,
                 &type_params,
             )?;
-            let witness_clauses = Self::checker_clauses_for_proposition(
+            let witness_clauses = Self::exact_witness_clauses_for_proposition(
                 &mut checker_kernel_context,
                 &specialized_condition,
                 &type_params,
-            )?;
+            )?
+            .into_iter()
+            .filter(|clause| specialized_clause.as_ref() != Some(clause))
+            .collect();
             (
                 specialized_condition,
                 None,
@@ -420,7 +423,7 @@ impl Certificate {
                 &specialized_value,
                 &type_params,
             )?;
-            let witness_clauses = Self::checker_clauses_for_proposition(
+            let witness_clauses = Self::exact_witness_clauses_for_proposition(
                 &mut checker_kernel_context,
                 &specialized_value,
                 &type_params,
@@ -659,8 +662,11 @@ impl Certificate {
         ClaimCodec::claim_from_plain_term(&term, kernel_context)
     }
 
-    /// Lower a parsed certificate proposition to the checker clauses introduced by `satisfy`.
-    fn checker_clauses_for_proposition(
+    /// Lower a witness proposition to the exact clause shape inserted when the witness opens.
+    ///
+    /// This opens only the leading `forall`s and keeps the remaining proposition as one initial
+    /// clause, which matches the clause introduced by proof-time witness opening.
+    fn exact_witness_clauses_for_proposition(
         kernel_context: &mut KernelContext,
         value: &AcornValue,
         type_params: &[TypeParam],
@@ -669,7 +675,7 @@ impl Certificate {
         let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         Ok(kernel_context
-            .term_to_checker_clauses(&term, type_var_map)
+            .lower_normalized_term_to_clauses(&term, type_var_map)
             .map_err(CodeGenError::GeneratedBadCode)?
             .into_iter()
             .map(|clause| clause.normalized())
@@ -820,16 +826,19 @@ impl Certificate {
         let general_claim = AcornValue::Exists(quant_types, Box::new(general_condition));
         let justification =
             Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
-        let witness_clauses = Self::checker_clauses_for_proposition(
-            kernel_context,
-            &specific_condition,
-            &type_params,
-        )?;
         let specialized_clause = Self::maybe_specialized_clause_for_proposition(
             kernel_context,
             &specific_condition,
             &type_params,
         )?;
+        let witness_clauses = Self::exact_witness_clauses_for_proposition(
+            kernel_context,
+            &specific_condition,
+            &type_params,
+        )?
+        .into_iter()
+        .filter(|clause| specialized_clause.as_ref() != Some(clause))
+        .collect();
 
         for param in type_params.iter().rev() {
             bindings.remove_type(&param.name);
@@ -932,7 +941,7 @@ impl Certificate {
             AcornValue::ForAll(arg_types.clone(), Box::new(specialized_condition.clone()));
         let justification =
             Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
-        let witness_clauses = Self::checker_clauses_for_proposition(
+        let witness_clauses = Self::exact_witness_clauses_for_proposition(
             kernel_context,
             &specialized_claim,
             &type_params,
