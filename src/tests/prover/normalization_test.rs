@@ -829,3 +829,63 @@ fn test_conjunction_of_forall() {
         "#,
     );
 }
+
+#[test]
+#[ignore]
+fn test_defined_goal_conjunction_of_forall_issue_44_repro() {
+    verify_succeeds(
+        r#"
+        define compose[X, Y, Z](f: Y -> Z, g: X -> Y) -> X -> Z {
+            function(x: X) {
+                f(g(x))
+            }
+        }
+
+        define are_two_sided_inverses[X, Y](f: X -> Y, g: Y -> X) -> Bool {
+            forall(y: Y) { f(g(y)) = y } and forall(x: X) { g(f(x)) = x }
+        }
+
+        theorem fwd[X, Y, Z](
+            f: X -> Y, g: Y -> Z, invf: Y -> X, invg: Z -> Y
+        ) {
+            are_two_sided_inverses(f, invf)
+            and are_two_sided_inverses(g, invg)
+            implies
+            forall(z: Z) { compose(compose(g, f), compose(invf, invg))(z) = z }
+        } by {
+            forall(z: Z) {
+                compose(compose(g, f), compose(invf, invg))(z) = g(f(invf(invg(z))))
+                f(invf(invg(z))) = invg(z)
+                g(invg(z)) = z
+            }
+        }
+
+        theorem bwd[X, Y, Z](
+            f: X -> Y, g: Y -> Z, invf: Y -> X, invg: Z -> Y
+        ) {
+            are_two_sided_inverses(f, invf)
+            and are_two_sided_inverses(g, invg)
+            implies
+            forall(x: X) { compose(compose(invf, invg), compose(g, f))(x) = x }
+        } by {
+            forall(x: X) {
+                compose(compose(invf, invg), compose(g, f))(x) = invf(invg(g(f(x))))
+                invg(g(f(x))) = f(x)
+                invf(f(x)) = x
+            }
+        }
+
+        theorem combined[X, Y, Z](
+            f: X -> Y, g: Y -> Z, invf: Y -> X, invg: Z -> Y
+        ) {
+            are_two_sided_inverses(f, invf)
+            and are_two_sided_inverses(g, invg)
+            implies
+            are_two_sided_inverses(compose(g, f), compose(invf, invg))
+        } by {
+            fwd(f, g, invf, invg)
+            bwd(f, g, invf, invg)
+        }
+        "#,
+    );
+}
