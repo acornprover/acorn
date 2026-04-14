@@ -900,6 +900,13 @@ impl<'a> TermBridge<'a> {
         );
         if literal.right.is_true() {
             if literal.positive {
+                #[cfg(feature = "kfc")]
+                if matches!(
+                    literal.left.as_ref().decompose(),
+                    crate::kernel::term::Decomposition::ForAll(_, _)
+                ) {
+                    return AcornValue::equals(left, AcornValue::Bool(true));
+                }
                 if literal.left == Term::new_false() {
                     return AcornValue::equals(AcornValue::Bool(false), AcornValue::Bool(true));
                 }
@@ -1023,16 +1030,7 @@ impl<'a> TermBridge<'a> {
             })
             .collect();
 
-        #[cfg(feature = "kfc")]
-        let body = if var_types.is_empty() && matches!(disjunction, AcornValue::ForAll(_, _)) {
-            AcornValue::grouped(disjunction)
-        } else {
-            disjunction
-        };
-        #[cfg(not(feature = "kfc"))]
-        let body = disjunction;
-
-        AcornValue::forall(var_types, body)
+        AcornValue::forall(var_types, disjunction)
     }
 
     pub fn quote_type_with_context(

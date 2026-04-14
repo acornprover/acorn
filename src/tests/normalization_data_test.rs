@@ -1206,7 +1206,7 @@ fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
 
 #[cfg(feature = "kfc")]
 #[test]
-fn test_kfc_clause_lowering_distinguishes_bare_and_grouped_forall() {
+fn test_kfc_clause_lowering_distinguishes_bare_and_eq_true_forall() {
     use crate::kernel::symbol_table::NewConstantType;
 
     let (mut kernel_context, bare_value) = load_target_clause(
@@ -1228,29 +1228,28 @@ fn test_kfc_clause_lowering_distinguishes_bare_and_grouped_forall() {
         "bare forall should open into the clause context"
     );
 
-    let (mut kernel_context, grouped_value) = load_target_clause(
+    let (mut kernel_context, eq_true_value) = load_target_clause(
         r#"
             let g0: Bool -> Bool = axiom
-            let target: Bool = (forall(x: Bool) { g0(x) })
+            let target: Bool = forall(x: Bool) { g0(x) } = true
         "#,
     );
-    let grouped_clause = kernel_context
-        .lower_clause(&grouped_value, NewConstantType::Local, None)
-        .expect("grouped forall should lower to a clause");
-    assert_eq!(grouped_clause.context.len(), 0);
-    assert_eq!(grouped_clause.literals.len(), 1);
+    let eq_true_clause = kernel_context
+        .lower_clause(&eq_true_value, NewConstantType::Local, None)
+        .expect("forall = true should lower to a clause");
+    assert_eq!(eq_true_clause.context.len(), 0);
+    assert_eq!(eq_true_clause.literals.len(), 1);
     assert!(
         matches!(
-            grouped_clause.literals[0].left.as_ref().decompose(),
+            eq_true_clause.literals[0].left.as_ref().decompose(),
             crate::kernel::term::Decomposition::ForAll(_, _)
         ),
-        "grouped forall should remain a closed literal-headed forall term"
+        "forall = true should remain a closed literal-headed forall term"
     );
 }
 
 #[cfg(feature = "kfc")]
 #[test]
-#[ignore]
 fn test_kernel_clause_roundtrip_open_clause_with_closed_inner_forall_literal() {
     let mut kernel_context = KernelContext::new();
     add_named_global_constant(&mut kernel_context, "g0", "(Bool, Bool) -> Bool");
@@ -1263,7 +1262,10 @@ fn test_kernel_clause_roundtrip_open_clause_with_closed_inner_forall_literal() {
     let inner_body = Term::atom(Atom::Symbol(crate::kernel::symbol::Symbol::Not))
         .apply(&[Term::atom(Atom::Symbol(g0)).apply(&[outer_x, inner_x])]);
     let clause = Clause::from_literals_unnormalized(
-        vec![Literal::positive(Term::forall(Term::bool_type(), inner_body))],
+        vec![Literal::positive(Term::forall(
+            Term::bool_type(),
+            inner_body,
+        ))],
         &LocalContext::from_types(vec![Term::bool_type()]),
     )
     .normalized_preserving_locals();

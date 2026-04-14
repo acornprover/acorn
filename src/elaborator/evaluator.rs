@@ -1605,34 +1605,10 @@ impl<'a> Evaluator<'a> {
                     if token.token_type.is_operator_ref() {
                         self.operator_ref_value(token, stack.len(), expected_type, false)?
                     } else {
-                        let value = self.evaluate_value_with_stack(stack, e, expected_type)?;
-                        #[cfg(feature = "kfc")]
-                        {
-                            if matches!(value, AcornValue::ForAll(_, _)) {
-                                AcornValue::grouped(value)
-                            } else {
-                                value
-                            }
-                        }
-                        #[cfg(not(feature = "kfc"))]
-                        {
-                            value
-                        }
+                        self.evaluate_value_with_stack(stack, e, expected_type)?
                     }
                 } else {
-                    let value = self.evaluate_value_with_stack(stack, e, expected_type)?;
-                    #[cfg(feature = "kfc")]
-                    {
-                        if matches!(value, AcornValue::ForAll(_, _)) {
-                            AcornValue::grouped(value)
-                        } else {
-                            value
-                        }
-                    }
-                    #[cfg(not(feature = "kfc"))]
-                    {
-                        value
-                    }
+                    self.evaluate_value_with_stack(stack, e, expected_type)?
                 }
             }
             Expression::Binder(token, args, body, _) => {
