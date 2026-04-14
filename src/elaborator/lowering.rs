@@ -153,8 +153,18 @@ impl KernelContext {
         }
         assert!(value.is_bool_type());
 
-        let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
-        self.lower_normalized_term_to_clause(&term, type_var_map)
+        #[cfg(feature = "kfc")]
+        let preserve_leading_foralls = matches!(value, AcornValue::Grouping(_));
+        #[cfg(not(feature = "kfc"))]
+        let preserve_leading_foralls = false;
+
+        let lowered_value = value.strip_grouping();
+        let term = lower_value_to_term(self, lowered_value, ctype, type_var_map.as_ref())?;
+        if preserve_leading_foralls {
+            self.lower_normalized_term_to_clause_preserving_leading_foralls(&term, type_var_map)
+        } else {
+            self.lower_normalized_term_to_clause(&term, type_var_map)
+        }
     }
 
     #[cfg(any(test, feature = "validate"))]
@@ -173,13 +183,23 @@ impl KernelContext {
         }
         assert!(value.is_bool_type());
 
+        #[cfg(feature = "kfc")]
+        let preserve_leading_foralls = matches!(value, AcornValue::Grouping(_));
+        #[cfg(not(feature = "kfc"))]
+        let preserve_leading_foralls = false;
+
+        let lowered_value = value.strip_grouping();
         let term = lower_value_to_term_preserving_alias_spelling(
             self,
-            value,
+            lowered_value,
             ctype,
             type_var_map.as_ref(),
         )?;
-        self.lower_normalized_term_to_clause(&term, type_var_map)
+        if preserve_leading_foralls {
+            self.lower_normalized_term_to_clause_preserving_leading_foralls(&term, type_var_map)
+        } else {
+            self.lower_normalized_term_to_clause(&term, type_var_map)
+        }
     }
 
     /// A single fact can turn into a bunch of proof steps.

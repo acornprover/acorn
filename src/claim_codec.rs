@@ -894,6 +894,9 @@ impl ClaimCodec {
                 arg_types.clone(),
                 Self::rebase_value_to_standalone(body, removed_prefix_len)?,
             ),
+            AcornValue::Grouping(value) => {
+                AcornValue::grouped(Self::rebase_value_to_standalone(value, removed_prefix_len)?)
+            }
             AcornValue::Bool(value) => AcornValue::Bool(*value),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(Self::rebase_value_to_standalone(cond, removed_prefix_len)?),
@@ -974,6 +977,9 @@ impl ClaimCodec {
             AcornValue::Exists(arg_types, body) => {
                 AcornValue::exists(arg_types.clone(), Self::shift_value_variables(body, amount))
             }
+            AcornValue::Grouping(value) => {
+                AcornValue::grouped(Self::shift_value_variables(value, amount))
+            }
             AcornValue::Bool(value) => AcornValue::Bool(*value),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(Self::shift_value_variables(cond, amount)),
@@ -1009,6 +1015,7 @@ impl ClaimCodec {
             AcornValue::Lambda(_, body)
             | AcornValue::ForAll(_, body)
             | AcornValue::Exists(_, body)
+            | AcornValue::Grouping(body)
             | AcornValue::Not(body)
             | AcornValue::Try(body, _) => Self::value_has_variable(body),
             AcornValue::Binary(_, left, right) => {

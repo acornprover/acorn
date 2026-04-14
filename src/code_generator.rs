@@ -327,7 +327,7 @@ impl CodeGenerator<'_> {
         param_names: &[String],
     ) -> Result<(Vec<(String, String)>, String)> {
         let mut params = vec![];
-        let mut current = value;
+        let mut current = value.strip_grouping();
         let mut name_idx = 0;
 
         while let AcornValue::ForAll(quants, body) = current {
@@ -342,7 +342,7 @@ impl CodeGenerator<'_> {
                 let type_str = self.type_to_code(arg_type)?;
                 params.push((var_name, type_str));
             }
-            current = body;
+            current = body.strip_grouping();
         }
 
         let body_expr = self.value_to_expr(current, false)?;
@@ -1617,6 +1617,11 @@ impl CodeGenerator<'_> {
                 let x = self.value_to_expr(x, false)?;
                 Ok(Expression::generate_unary(TokenType::Not, x))
             }
+            AcornValue::Grouping(value) => Ok(Expression::Grouping(
+                TokenType::LeftParen.generate(),
+                Box::new(self.value_to_expr(value, false)?),
+                TokenType::RightParen.generate(),
+            )),
             AcornValue::Try(x, _) => {
                 let x = self.value_to_expr(x, false)?;
                 Ok(Expression::generate_unary(TokenType::QuestionMark, x))

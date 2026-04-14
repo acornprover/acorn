@@ -1321,10 +1321,17 @@ impl<'a> Clausifier<'a> {
     }
 
     /// Lower a normalized clause-shaped term into exactly one normalized clause.
-    fn lower_normalized_term_to_clause(&mut self, term: &Term) -> Result<Clause, String> {
+    fn lower_normalized_term_to_clause_with_opening_policy(
+        &mut self,
+        term: &Term,
+        open_leading_foralls: bool,
+    ) -> Result<Clause, String> {
         let (mut context, mut next_var_id) = self.initial_exact_clause_context();
-        let opened =
-            self.open_leading_foralls_preserving_local_slots(term, &mut context, &mut next_var_id);
+        let opened = if open_leading_foralls {
+            self.open_leading_foralls_preserving_local_slots(term, &mut context, &mut next_var_id)
+        } else {
+            term.clone()
+        };
         if opened == Term::new_false() {
             return Ok(Clause {
                 literals: vec![],
@@ -1333,6 +1340,10 @@ impl<'a> Clausifier<'a> {
         }
         let literals = self.exact_clause_literals_from_term(&opened)?;
         Ok(Clause::from_literals_unnormalized(literals, &context).normalized_preserving_locals())
+    }
+
+    fn lower_normalized_term_to_clause(&mut self, term: &Term) -> Result<Clause, String> {
+        self.lower_normalized_term_to_clause_with_opening_policy(term, true)
     }
 
     /// Interpret a normalized term as the exact disjunction shape used by quoted clauses.
@@ -1486,6 +1497,17 @@ impl KernelContext {
     ) -> Result<Clause, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
         view.lower_normalized_term_to_clause(term)
+    }
+
+    /// Kernel-owned entry point for lowering an already-normalized clause-shaped term while
+    /// preserving a leading `forall` literal instead of opening it into the clause context.
+    pub fn lower_normalized_term_to_clause_preserving_leading_foralls(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Clause, String> {
+        let mut view = Clausifier::new_mut(self, type_var_map);
+        view.lower_normalized_term_to_clause_with_opening_policy(term, false)
     }
 
     /// Kernel-owned entry point for converting a term to the checker's single-term inline form.

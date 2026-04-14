@@ -56,6 +56,9 @@ impl TerminationChecker {
                 self.traverse(value);
                 self.substructure_map.truncate(stack_size);
             }
+            AcornValue::Grouping(value) => {
+                self.traverse(value);
+            }
             AcornValue::Not(value) => {
                 self.traverse(value);
             }

@@ -1265,6 +1265,9 @@ fn collect_identifiers_recursive(
                 seen,
             );
         }
+        AcornValue::Grouping(value) => {
+            collect_identifiers_recursive(value, bindings, var_names, var_offset, seen);
+        }
         AcornValue::Binary(_, left, right) => {
             collect_identifiers_recursive(left, bindings, var_names, var_offset, seen);
             collect_identifiers_recursive(right, bindings, var_names, var_offset, seen);
@@ -1438,6 +1441,9 @@ fn collect_deps_recursive(value: &AcornValue, deps: &mut BTreeSet<ConstantName>)
         }
         AcornValue::ForAll(_, body) | AcornValue::Exists(_, body) => {
             collect_deps_recursive(body, deps);
+        }
+        AcornValue::Grouping(value) => {
+            collect_deps_recursive(value, deps);
         }
         AcornValue::IfThenElse(cond, then_val, else_val) => {
             collect_deps_recursive(cond, deps);

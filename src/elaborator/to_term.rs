@@ -139,6 +139,7 @@ fn try_lower_partial_logical_lambda(
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value)
+            | AcornValue::Grouping(value)
             | AcornValue::Not(value)
             | AcornValue::Try(value, _) => references_stack_range(value, start, end),
             AcornValue::Binary(_, left, right) => {
@@ -456,6 +457,13 @@ fn lower_value_to_term_with_stack(
             prefer_instance_aliases,
             stack,
             BinderKind::Exists,
+        ),
+        AcornValue::Grouping(value) => lower_value_to_term_with_stack(
+            kernel_context,
+            value,
+            type_var_map,
+            prefer_instance_aliases,
+            stack,
         ),
         AcornValue::Binary(op, left, right) => {
             let left_term = lower_value_to_term_with_stack(

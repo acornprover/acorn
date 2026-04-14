@@ -1179,7 +1179,6 @@ fn test_kernel_clause_roundtrip_cases() {
 
 #[cfg(feature = "kfc")]
 #[test]
-#[ignore]
 fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
     let mut kernel_context = KernelContext::new();
     add_named_global_constant(&mut kernel_context, "g0", "Bool -> Bool");
@@ -1202,6 +1201,50 @@ fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
     );
     kernel_context.validate_clause_roundtrip(&clause).expect(
         "closed singleton positive forall literal should satisfy the normalized clause quote/lower roundtrip",
+    );
+}
+
+#[cfg(feature = "kfc")]
+#[test]
+fn test_kfc_clause_lowering_distinguishes_bare_and_grouped_forall() {
+    use crate::kernel::symbol_table::NewConstantType;
+
+    let (mut kernel_context, bare_value) = load_target_clause(
+        r#"
+            let g0: Bool -> Bool = axiom
+            let target: Bool = forall(x: Bool) { g0(x) }
+        "#,
+    );
+    let bare_clause = kernel_context
+        .lower_clause(&bare_value, NewConstantType::Local, None)
+        .expect("bare forall should lower to a clause");
+    assert_eq!(bare_clause.context.len(), 1);
+    assert_eq!(bare_clause.literals.len(), 1);
+    assert!(
+        !matches!(
+            bare_clause.literals[0].left.as_ref().decompose(),
+            crate::kernel::term::Decomposition::ForAll(_, _)
+        ),
+        "bare forall should open into the clause context"
+    );
+
+    let (mut kernel_context, grouped_value) = load_target_clause(
+        r#"
+            let g0: Bool -> Bool = axiom
+            let target: Bool = (forall(x: Bool) { g0(x) })
+        "#,
+    );
+    let grouped_clause = kernel_context
+        .lower_clause(&grouped_value, NewConstantType::Local, None)
+        .expect("grouped forall should lower to a clause");
+    assert_eq!(grouped_clause.context.len(), 0);
+    assert_eq!(grouped_clause.literals.len(), 1);
+    assert!(
+        matches!(
+            grouped_clause.literals[0].left.as_ref().decompose(),
+            crate::kernel::term::Decomposition::ForAll(_, _)
+        ),
+        "grouped forall should remain a closed literal-headed forall term"
     );
 }
 

@@ -376,6 +376,10 @@ pub enum AcornValue {
     ForAll(Vec<AcornType>, Box<AcornValue>),
     Exists(Vec<AcornType>, Box<AcornValue>),
 
+    /// A parenthesized value that must remain distinguishable in exact clause codecs.
+    /// This is semantically transparent outside those codecs.
+    Grouping(Box<AcornValue>),
+
     /// A plain old bool. True or false
     Bool(bool),
 
@@ -468,6 +472,9 @@ impl fmt::Display for Subvalue<'_> {
             }
             AcornValue::ForAll(args, body) => fmt_binder(f, "forall", args, body, self.stack_size),
             AcornValue::Exists(args, body) => fmt_binder(f, "exists", args, body, self.stack_size),
+            AcornValue::Grouping(value) => {
+                write!(f, "({})", Subvalue::new(value, self.stack_size))
+            }
             AcornValue::Constant(c) => {
                 write!(f, "{}", c)
             }
@@ -539,6 +546,20 @@ impl fmt::Display for AcornValue {
 }
 
 impl AcornValue {
+    pub fn grouped(value: AcornValue) -> AcornValue {
+        match value {
+            AcornValue::Grouping(_) => value,
+            _ => AcornValue::Grouping(Box::new(value)),
+        }
+    }
+
+    pub fn strip_grouping(&self) -> &AcornValue {
+        match self {
+            AcornValue::Grouping(value) => value.strip_grouping(),
+            _ => self,
+        }
+    }
+
     pub fn get_type(&self) -> AcornType {
         match self {
             AcornValue::Variable(_, t) => t.clone(),
@@ -552,6 +573,7 @@ impl AcornValue {
             AcornValue::Try(_, unwrapped_type) => unwrapped_type.clone(),
             AcornValue::ForAll(_, _) => AcornType::Bool,
             AcornValue::Exists(_, _) => AcornType::Bool,
+            AcornValue::Grouping(value) => value.get_type(),
             AcornValue::Constant(c) => c.instance_type.clone(),
             AcornValue::Bool(_) => AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.get_type(),
@@ -582,6 +604,7 @@ impl AcornValue {
             AcornValue::Try(_, unwrapped_type) => unwrapped_type == t,
             AcornValue::ForAll(_, _) => *t == AcornType::Bool,
             AcornValue::Exists(_, _) => *t == AcornType::Bool,
+            AcornValue::Grouping(value) => value.is_type(t),
             AcornValue::Constant(c) => c.instance_type == *t,
             AcornValue::Bool(_) => *t == AcornType::Bool,
             AcornValue::IfThenElse(_, if_value, _) => if_value.is_type(t),
@@ -637,6 +660,7 @@ impl AcornValue {
         match self {
             AcornValue::Application(app) => app.function.unapply(),
             AcornValue::TypeApplication(app) => app.function.unapply(),
+            AcornValue::Grouping(value) => value.unapply(),
             _ => self,
         }
     }
@@ -756,6 +780,7 @@ impl AcornValue {
             AcornValue::Try(inner, _) => inner.is_term(),
             AcornValue::ForAll(_, _) => false,
             AcornValue::Exists(_, _) => false,
+            AcornValue::Grouping(value) => value.is_term(),
             AcornValue::Constant(_) => true,
 
             // Bit of a weird case. "true" is a term but "false" is not.
@@ -769,6 +794,7 @@ impl AcornValue {
     /// Negates this value
     pub fn negate(self) -> AcornValue {
         match self {
+            AcornValue::Grouping(x) => AcornValue::Grouping(Box::new(x.negate())),
             AcornValue::Not(x) => *x,
             AcornValue::Binary(BinaryOp::Equals, x, y) => {
                 AcornValue::Binary(BinaryOp::NotEquals, x, y)
@@ -784,6 +810,7 @@ impl AcornValue {
     /// Negates, but pushes the negation inwards when possible.
     pub fn pretty_negate(self) -> AcornValue {
         match self {
+            AcornValue::Grouping(x) => AcornValue::Grouping(Box::new(x.pretty_negate())),
             AcornValue::Not(x) => *x,
             AcornValue::Binary(BinaryOp::Equals, x, y) => {
                 AcornValue::Binary(BinaryOp::NotEquals, x, y)
@@ -900,6 +927,11 @@ impl AcornValue {
                     Box::new(value.bind_values(first_binding_index, value_stack_size, values)),
                 )
             }
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(value.bind_values(
+                first_binding_index,
+                stack_size,
+                values,
+            ))),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.bind_values(first_binding_index, stack_size, values)),
                 Box::new(if_value.bind_values(first_binding_index, stack_size, values)),
@@ -990,6 +1022,9 @@ impl AcornValue {
             AcornValue::Exists(quants, value) => {
                 AcornValue::Exists(quants, Box::new(value.insert_stack(index, increment)))
             }
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.insert_stack(index, increment)))
+            }
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.insert_stack(index, increment)),
                 Box::new(if_value.insert_stack(index, increment)),
@@ -1064,6 +1099,9 @@ impl AcornValue {
                     quants.clone(),
                     Box::new(value.expand_lambdas(new_stack_size)),
                 )
+            }
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.expand_lambdas(stack_size)))
             }
             AcornValue::Lambda(args, value) => {
                 let new_stack_size = stack_size + args.len() as AtomId;
@@ -1173,6 +1211,9 @@ impl AcornValue {
                     value.replace_constants(stack_size + quants.len() as AtomId, replacer);
                 AcornValue::Exists(quants.clone(), Box::new(new_value))
             }
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.replace_constants(stack_size, replacer)))
+            }
             AcornValue::Constant(c) => replacer(c).unwrap_or_else(|| self.clone()),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
                 Box::new(cond.replace_constants(stack_size, replacer)),
@@ -1247,6 +1288,7 @@ impl AcornValue {
                 stack.truncate(original_len);
                 answer
             }
+            AcornValue::Grouping(value) => value.validate_against_stack(stack),
             AcornValue::Binary(_, left, right) => {
                 left.validate_against_stack(stack)?;
                 right.validate_against_stack(stack)
@@ -1369,6 +1411,9 @@ impl AcornValue {
                     .collect::<Vec<_>>(),
                 Box::new(value.instantiate(params)),
             ),
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.instantiate(params)))
+            }
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
                 Box::new(left.instantiate(params)),
@@ -1421,6 +1466,7 @@ impl AcornValue {
             | AcornValue::Exists(args, value) => {
                 args.iter().any(|x| x.has_generic()) || value.has_generic()
             }
+            AcornValue::Grouping(value) => value.has_generic(),
             AcornValue::Binary(_, left, right) => left.has_generic() || right.has_generic(),
             AcornValue::IfThenElse(cond, if_value, else_value) => {
                 cond.has_generic() || if_value.has_generic() || else_value.has_generic()
@@ -1451,6 +1497,7 @@ impl AcornValue {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value) => value.has_arbitrary(),
+            AcornValue::Grouping(value) => value.has_arbitrary(),
             AcornValue::Binary(_, left, right) => left.has_arbitrary() || right.has_arbitrary(),
             AcornValue::IfThenElse(cond, if_value, else_value) => {
                 cond.has_arbitrary() || if_value.has_arbitrary() || else_value.has_arbitrary()
@@ -1484,6 +1531,7 @@ impl AcornValue {
             AcornValue::Lambda(_, value)
             | AcornValue::ForAll(_, value)
             | AcornValue::Exists(_, value) => value.for_each_constant(f),
+            AcornValue::Grouping(value) => value.for_each_constant(f),
             AcornValue::Binary(_, left, right) => {
                 left.for_each_constant(f);
                 right.for_each_constant(f);
@@ -1544,6 +1592,7 @@ impl AcornValue {
                 }
                 value.for_each_type(f);
             }
+            AcornValue::Grouping(value) => value.for_each_type(f),
             AcornValue::Binary(_, left, right) => {
                 left.for_each_type(f);
                 right.for_each_type(f);
@@ -1619,6 +1668,7 @@ impl AcornValue {
                 args.iter().map(|x| x.to_arbitrary()).collect(),
                 Box::new(value.to_arbitrary()),
             ),
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(value.to_arbitrary())),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
                 Box::new(left.to_arbitrary()),
@@ -1678,6 +1728,7 @@ impl AcornValue {
                 args.iter().map(|x| x.genericize(params)).collect(),
                 Box::new(value.genericize(params)),
             ),
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(value.genericize(params))),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
                 Box::new(left.genericize(params)),
@@ -1750,6 +1801,9 @@ impl AcornValue {
             }
             AcornValue::Exists(args, value) => {
                 AcornValue::Exists(args, Box::new(value.set_params(name, params)))
+            }
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.set_params(name, params)))
             }
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 op,
@@ -1965,6 +2019,9 @@ impl AcornValue {
                 for arg_type in args {
                     arg_type.find_type_vars(vars, source)?;
                 }
+                value.find_type_vars(vars, source)?;
+            }
+            AcornValue::Grouping(value) => {
                 value.find_type_vars(vars, source)?;
             }
             AcornValue::Binary(_, left, right) => {

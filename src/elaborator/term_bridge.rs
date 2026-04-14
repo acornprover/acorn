@@ -1023,7 +1023,16 @@ impl<'a> TermBridge<'a> {
             })
             .collect();
 
-        AcornValue::forall(var_types, disjunction)
+        #[cfg(feature = "kfc")]
+        let body = if var_types.is_empty() && matches!(disjunction, AcornValue::ForAll(_, _)) {
+            AcornValue::grouped(disjunction)
+        } else {
+            disjunction
+        };
+        #[cfg(not(feature = "kfc"))]
+        let body = disjunction;
+
+        AcornValue::forall(var_types, body)
     }
 
     pub fn quote_type_with_context(
