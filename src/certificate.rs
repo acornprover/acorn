@@ -1287,8 +1287,6 @@ struct WitnessEmitter<'a> {
     buffered: Vec<usize>,
     emitted: Vec<bool>,
     in_progress: HashSet<AtomId>,
-    specializable_witness_clauses: Vec<(AtomId, Clause)>,
-    emitted_witness_clause_specializations: HashSet<(Clause, AtomId)>,
     output: Vec<CertificateStep>,
 }
 
@@ -1342,8 +1340,6 @@ impl<'a> WitnessEmitter<'a> {
             buffered: Vec::new(),
             emitted: vec![false; num_steps],
             in_progress: HashSet::new(),
-            specializable_witness_clauses: Vec::new(),
-            emitted_witness_clause_specializations: HashSet::new(),
             output: Vec::new(),
         };
         for ids in emitter.referenced_ids.clone() {
@@ -1434,15 +1430,6 @@ impl<'a> WitnessEmitter<'a> {
                     CertificateStep::Satisfy(rewritten_step),
                     Some(parent_local_id),
                 )?;
-                self.emitted[index] = true;
-                return Ok(());
-            }
-            if self.is_redundant_specialized_claim(claim, &self.referenced_ids[index]) {
-                self.emitted[index] = true;
-                return Ok(());
-            }
-            self.emit_supporting_witness_clause_specializations(claim)?;
-            if self.output.contains(&step) {
                 self.emitted[index] = true;
                 return Ok(());
             }
@@ -1594,88 +1581,11 @@ impl<'a> WitnessEmitter<'a> {
         step: CertificateStep,
         parent_local_id: Option<AtomId>,
     ) -> Result<(), CodeGenError> {
-        let CertificateStep::Satisfy(satisfy_step) = &step else {
-            panic!("expected satisfy step");
-        };
-        let satisfy_step = satisfy_step.clone();
+        assert!(matches!(step, CertificateStep::Satisfy(_)));
         self.push_output_step(step)?;
         self.declared.insert(local_id);
-        self.record_specializable_witness_clauses(local_id, &satisfy_step);
-        if let Some(parent_local_id) = parent_local_id {
-            self.emit_followup_specializations(parent_local_id, local_id)?;
-        }
+        let _ = parent_local_id;
         Ok(())
-    }
-
-    /// Remember unary witness clauses so a later synthetic witness can specialize them directly.
-    fn record_specializable_witness_clauses(&mut self, local_id: AtomId, step: &SatisfyStep) {
-        self.specializable_witness_clauses.extend(
-            step.witness_clauses
-                .iter()
-                .filter(|clause| clause.get_local_context().len() == 1)
-                .cloned()
-                .map(|clause| (local_id, clause)),
-        );
-    }
-
-    /// Replay any previously emitted unary witness clauses that mention `parent_local_id` at the
-    /// newly introduced `local_id`.
-    fn emit_followup_specializations(
-        &mut self,
-        parent_local_id: AtomId,
-        local_id: AtomId,
-    ) -> Result<(), CodeGenError> {
-        let witness_term = Term::atom(Atom::Symbol(Symbol::ScopedConstant(local_id)));
-        let candidate_clauses = self.specializable_witness_clauses.clone();
-
-        for (origin_local_id, clause) in candidate_clauses {
-            if origin_local_id == local_id {
-                continue;
-            }
-            if !clause
-                .iter_atoms()
-                .any(|atom| atom == &Atom::Symbol(Symbol::ScopedConstant(parent_local_id)))
-            {
-                continue;
-            }
-            if !self
-                .emitted_witness_clause_specializations
-                .insert((clause.clone(), local_id))
-            {
-                continue;
-            }
-
-            let claim = Self::claim_from_unary_witness_clause(clause.clone(), witness_term.clone())
-                .map_err(CodeGenError::GeneratedBadCode)?;
-            self.push_output_step(CertificateStep::Claim(claim.clone()))?;
-            if let Some((synthetic_local_id, parent_local_id, step)) =
-                self.specialized_positive_exists_step(&claim)?
-            {
-                self.emit_witness_step(
-                    synthetic_local_id,
-                    CertificateStep::Satisfy(step),
-                    Some(parent_local_id),
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn is_redundant_specialized_claim(&self, claim: &Claim, referenced_ids: &[AtomId]) -> bool {
-        referenced_ids.iter().any(|local_id| {
-            let Some(witness) = self.witness_registry.get(*local_id) else {
-                return false;
-            };
-            let Some(witness_step) = self.witness_steps.get(local_id) else {
-                return false;
-            };
-            claim.clause() == &witness.specialized_clause
-                && !witness_step
-                    .witness_clauses
-                    .iter()
-                    .any(|clause| clause == claim.clause())
-        })
     }
 
     fn claim_specialization_source_local_id(claim: &Claim) -> Option<AtomId> {
@@ -1687,15 +1597,6 @@ impl<'a> WitnessEmitter<'a> {
             Decomposition::Atom(Atom::Symbol(Symbol::ScopedConstant(local_id))) => Some(*local_id),
             _ => None,
         }
-    }
-
-    fn claim_from_unary_witness_clause(
-        clause: Clause,
-        witness_term: Term,
-    ) -> Result<Claim, String> {
-        let mut var_map = VariableMap::new();
-        var_map.set(0, witness_term);
-        Claim::new(clause, var_map)
     }
 
     fn witness_module_id(&self, parent_local_id: AtomId) -> ModuleId {
@@ -1719,57 +1620,6 @@ impl<'a> WitnessEmitter<'a> {
         if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
             for local_id in local_ids {
                 self.emit_witness(local_id)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn emit_supporting_witness_clause_specializations(
-        &mut self,
-        claim: &Claim,
-    ) -> Result<(), CodeGenError> {
-        let candidate_clauses = self.specializable_witness_clauses.clone();
-        let candidate_terms: Vec<Term> = claim
-            .var_map()
-            .iter()
-            .map(|(_, term)| term.clone())
-            .collect();
-
-        for (_origin_local_id, clause) in candidate_clauses {
-            let expected_type = clause
-                .get_local_context()
-                .get_var_type(0)
-                .expect("unary witness clause should bind one local");
-            for candidate_term in &candidate_terms {
-                if candidate_term
-                    .get_type_with_context(&LocalContext::empty(), &self.kernel_context)
-                    != expected_type.to_owned()
-                {
-                    continue;
-                }
-                let support_claim = match Self::claim_from_unary_witness_clause(
-                    clause.clone(),
-                    candidate_term.clone(),
-                ) {
-                    Ok(claim) => claim,
-                    Err(_) => continue,
-                };
-                if self
-                    .output
-                    .contains(&CertificateStep::Claim(support_claim.clone()))
-                {
-                    continue;
-                }
-                self.push_output_step(CertificateStep::Claim(support_claim.clone()))?;
-                if let Some((synthetic_local_id, parent_local_id, step)) =
-                    self.specialized_positive_exists_step(&support_claim)?
-                {
-                    self.emit_witness_step(
-                        synthetic_local_id,
-                        CertificateStep::Satisfy(step),
-                        Some(parent_local_id),
-                    )?;
-                }
             }
         }
         Ok(())

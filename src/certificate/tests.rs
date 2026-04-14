@@ -523,7 +523,7 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
 }
 
 #[test]
-fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
+fn test_emit_named_function_witness_keeps_explicit_specialized_claim() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
     let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
     let (_local_id, witness) = witness_registry
@@ -548,14 +548,14 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
     #[cfg(not(feature = "kfc"))]
     assert_eq!(
         emitted.len(),
-        2,
-        "redundant specialized claim should be skipped"
+        3,
+        "the explicit specialized claim should remain in the emitted proof"
     );
     #[cfg(feature = "kfc")]
     assert_eq!(
         emitted.len(),
-        1,
-        "the implying claim is replaced by the witness declaration under kfc"
+        2,
+        "under kfc the implying claim is still replaced, but the explicit specialized claim remains"
     );
     #[cfg(not(feature = "kfc"))]
     assert!(
@@ -567,10 +567,22 @@ fn test_emit_named_function_witness_skips_redundant_specialized_claim() {
         matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
         "expected the witness declaration to replace the implying claim under kfc"
     );
+    assert!(
+        matches!(
+            emitted.get(1),
+            Some(CertificateStep::Satisfy(_)) | Some(CertificateStep::Claim(_))
+        ),
+        "expected the witness declaration or explicit specialized claim in the second position"
+    );
     #[cfg(not(feature = "kfc"))]
     assert!(
-        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration after the anchoring claim"
+        matches!(emitted.get(2), Some(CertificateStep::Claim(_))),
+        "expected the specialized claim to remain after the witness declaration"
+    );
+    #[cfg(feature = "kfc")]
+    assert!(
+        matches!(emitted.get(1), Some(CertificateStep::Claim(_))),
+        "expected the specialized claim to remain after the witness declaration under kfc"
     );
 }
 
