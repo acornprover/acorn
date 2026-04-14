@@ -199,30 +199,8 @@ impl Clause {
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
-        #[cfg(feature = "kfc")]
-        self.normalize_leading_positive_forall();
         self.literals.sort();
         self.literals.dedup();
-    }
-
-    #[cfg(feature = "kfc")]
-    fn normalize_leading_positive_forall(&mut self) {
-        if self.literals.len() != 1 {
-            return;
-        }
-        let Some(literal) = self.literals.first() else {
-            return;
-        };
-        if !literal.positive || !literal.right.is_true() {
-            return;
-        }
-        let Some((reduced, output_context)) =
-            Self::reduce_positive_forall(&literal.left, &self.context)
-        else {
-            return;
-        };
-        self.literals = vec![Literal::positive(reduced)];
-        self.context = output_context;
     }
 
     /// Normalizes the variable IDs in the literals, keeping the first `pinned` variables
@@ -1950,7 +1928,7 @@ mod tests {
 
     #[cfg(feature = "kfc")]
     #[test]
-    fn test_single_positive_forall_clause_normalizes_to_free_variable() {
+    fn test_boolean_reduction_positive_forall_opens_to_free_variable() {
         let mut kctx = KernelContext::new();
         kctx.parse_constant("g0", "Bool -> Bool");
 
@@ -1966,7 +1944,7 @@ mod tests {
             )],
             &LocalContext::from_types(vec![Term::bool_type()]),
         );
-        assert_eq!(clause, expected);
+        assert_eq!(clause.boolean_reductions(&kctx), vec![expected]);
     }
 
     #[cfg(feature = "kfc")]

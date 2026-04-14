@@ -1177,6 +1177,34 @@ fn test_kernel_clause_roundtrip_cases() {
     }
 }
 
+#[cfg(feature = "kfc")]
+#[test]
+#[ignore]
+fn test_kernel_clause_roundtrip_closed_singleton_positive_forall_literal() {
+    let mut kernel_context = KernelContext::new();
+    add_named_global_constant(&mut kernel_context, "g0", "Bool -> Bool");
+
+    let clause = Clause::from_literals_unnormalized(
+        vec![Literal::positive(Term::forall(
+            Term::bool_type(),
+            kernel_context
+                .parse_term("g0")
+                .apply(&[Term::atom(Atom::BoundVariable(0))]),
+        ))],
+        &LocalContext::empty(),
+    )
+    .normalized_preserving_locals();
+
+    assert_eq!(
+        clause,
+        clause.normalized_preserving_locals(),
+        "constructed closed singleton forall clause should be internally normalized before the roundtrip check"
+    );
+    kernel_context.validate_clause_roundtrip(&clause).expect(
+        "closed singleton positive forall literal should satisfy the normalized clause quote/lower roundtrip",
+    );
+}
+
 #[test]
 fn test_prover_generated_steps_are_normalized() {
     for case in PROVER_PAIR_CASES {
