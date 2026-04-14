@@ -140,6 +140,38 @@ fn test_prover_gets_structural_induction() {
 }
 
 #[test]
+fn test_prover_typical_induction_pattern() {
+    // This is how you'd typically expect induction proofs to be written.
+    let text = r#"
+    inductive Nat {
+        zero
+        suc(Nat)
+    }
+    let f: Nat -> Bool = axiom
+    let g: Nat -> Bool = axiom
+    axiom base {
+        f(Nat.zero)
+    }
+    axiom step_first_half(k: Nat) {
+        f(k) implies g(k)
+    }
+    axiom step_second_half(k: Nat) {
+        g(k) implies f(k.suc)
+    }
+    theorem goal(n: Nat) {
+        f(n)
+    } by {
+        forall(k: Nat) {
+            if f(k) {
+                f(k.suc)
+            }
+        }
+    }
+    "#;
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
+}
+
+#[test]
 fn test_proving_parametric_theorem_basic() {
     let text = r#"
     theorem goal[T](a: T, b: T, c: T) {
