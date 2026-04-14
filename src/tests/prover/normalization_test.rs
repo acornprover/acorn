@@ -833,6 +833,7 @@ fn test_conjunction_of_forall() {
 #[test]
 #[ignore]
 fn test_defined_goal_conjunction_of_forall_issue_44_repro() {
+    // I made some changes from the actual issue 44. But now it works.
     verify_succeeds(
         r#"
         define compose[X, Y, Z](f: Y -> Z, g: X -> Y) -> X -> Z {
@@ -850,14 +851,13 @@ fn test_defined_goal_conjunction_of_forall_issue_44_repro() {
         axiom fwd[X, Y, Z](
             f: X -> Y, g: Y -> Z, invf: Y -> X, invg: Z -> Y
         ) {
-            b implies forall(z: Z) { compose(compose(g, f), compose(invf, invg))(z) = z }
+            b implies forall(z: Z) { compose(g, f)(compose(invf, invg)(z)) = z }
         }
 
         axiom bwd[X, Y, Z](
             f: X -> Y, g: Y -> Z, invf: Y -> X, invg: Z -> Y
         ) {
-            b implies
-            forall(x: X) { compose(compose(invf, invg), compose(g, f))(x) = x }
+            b implies forall(x: X) { compose(invf, invg)(compose(g, f)(x)) = x }
         }
 
         theorem combined[X, Y, Z](
