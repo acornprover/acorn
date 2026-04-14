@@ -99,7 +99,7 @@ Actions:
 - Extract failing module/theorem/line from the failing output.
 - Reproduce quickly with no-write checks:
   - `cargo run --profile release -- verify <module> --ignore-hash --read-only --fail-fast`
-  - `cargo run --profile release --features <feature>,validate -- verify <module> --ignore-hash --read-only --fail-fast`
+  - `cargo run --profile release --features <feature> -- verify <module> --ignore-hash --read-only --fail-fast`
 
 Outcomes:
 - If failure is reproduced in feature mode: go to `S3_edit`.
@@ -134,7 +134,7 @@ Required commands:
 - Default mode module check (no-write):
   - `cargo run --profile release -- verify <module> --ignore-hash --read-only --fail-fast`
 - Feature mode module check (no-write):
-  - `cargo run --profile release --features <feature>,validate -- verify <module> --ignore-hash --read-only --fail-fast`
+  - `cargo run --profile release --features <feature> -- verify <module> --ignore-hash --read-only --fail-fast`
 
 Conditional command:
 - If and only if this iteration included explicit edits under `../acornlib/src` for this module:
@@ -156,7 +156,7 @@ Purpose:
 - Decide whether to continue module loop or exit to review.
 
 Required command:
-- `cargo run --profile release --features <feature>,validate -- verify --ignore-hash --read-only --fail-fast`
+- `cargo run --profile release --features <feature> -- verify --ignore-hash --read-only --fail-fast`
 
 Outcomes:
 - If success: go to `S4`.
@@ -166,6 +166,8 @@ Outcomes:
 
 Hard guard:
 - During all `S3_*` states, feature-mode `check` may fail on old cert format. Do not use it as pass/fail.
+- During all `S3_*` states, do not use `validate` as the iterative proof-migration driver. The proof-edit loop optimizes for fast repro and shaping, not prover-internals checking.
+- Use feature+validate again only for the upfront `S2` probe and before claiming success in `S4`.
 
 Blocked-condition diagnostics (required when entering `S_blocked_feature_bug`):
 - collect these before any further proof edits
