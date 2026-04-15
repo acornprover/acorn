@@ -1088,7 +1088,10 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
 
-        Rc::make_mut(&mut processor).add_imports_from_bindings(cursor.bindings(), self.project)?;
+        if !processor.has_imports_for_bindings(cursor.bindings()) {
+            Rc::make_mut(&mut processor)
+                .add_imports_from_bindings(cursor.bindings(), self.project)?;
+        }
 
         if cursor.num_children() > 0 {
             // We need to recurse into children
@@ -1195,11 +1198,19 @@ impl<'a> Builder<'a> {
         if !env.nodes.is_empty() {
             self.module_proving_started(target.clone());
             let mut cursor = NodeCursor::new(env, 0);
-            let processor = Processor::with_imports(
-                Some(self.cancellation_token.clone()),
-                cursor.bindings(),
-                self.project,
-            )?;
+            let processor = if self.check_mode {
+                Processor::with_imports_for_checking(
+                    Some(self.cancellation_token.clone()),
+                    cursor.bindings(),
+                    self.project,
+                )?
+            } else {
+                Processor::with_imports(
+                    Some(self.cancellation_token.clone()),
+                    cursor.bindings(),
+                    self.project,
+                )?
+            };
             let mut processor = Rc::new(processor);
 
             // Loop over all the nodes that are right below the top level.

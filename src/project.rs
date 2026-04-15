@@ -1457,10 +1457,11 @@ impl Project {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
 
-        let mut processor = match Processor::with_imports(None, cursor.bindings(), self) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
+        let mut processor =
+            match Processor::with_imports_for_checking(None, cursor.bindings(), self) {
+                Ok(p) => p,
+                Err(_) => return None,
+            };
         if processor.add_module_facts(cursor).is_err() {
             return None;
         }

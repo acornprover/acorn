@@ -19,12 +19,26 @@ use tokio_util::sync::CancellationToken;
 /// The processor represents what we do with a stream of facts.
 #[derive(Clone)]
 pub struct Processor {
-    prover: Prover,
+    prover: Option<Prover>,
     checker: Checker,
     imported_modules: HashSet<ModuleId>,
 }
 
 impl Processor {
+    fn new_with_optional_prover(
+        cancellation_token: Option<CancellationToken>,
+        prover: bool,
+    ) -> Processor {
+        Processor {
+            prover: prover.then(|| match cancellation_token {
+                Some(token) => Prover::new(vec![token]),
+                None => Prover::new(vec![]),
+            }),
+            checker: Checker::new(),
+            imported_modules: HashSet::new(),
+        }
+    }
+
     pub(crate) fn bindings_with_type_params<'a>(
         bindings: &'a BindingMap,
         type_params: &[TypeParam],
@@ -50,19 +64,11 @@ impl Processor {
     }
 
     pub fn new() -> Processor {
-        Processor {
-            prover: Prover::new(vec![]),
-            checker: Checker::new(),
-            imported_modules: HashSet::new(),
-        }
+        Self::new_with_optional_prover(None, true)
     }
 
     pub fn with_token(cancellation_token: CancellationToken) -> Processor {
-        Processor {
-            prover: Prover::new(vec![cancellation_token]),
-            checker: Checker::new(),
-            imported_modules: HashSet::new(),
-        }
+        Self::new_with_optional_prover(Some(cancellation_token), true)
     }
 
     /// Creates a new Processor with the imports visible through these bindings.
@@ -71,14 +77,18 @@ impl Processor {
         bindings: &BindingMap,
         project: &Project,
     ) -> Result<Processor, BuildError> {
-        let mut processor = Processor {
-            prover: match cancellation_token {
-                Some(token) => Prover::new(vec![token]),
-                None => Prover::new(vec![]),
-            },
-            checker: Checker::new(),
-            imported_modules: HashSet::new(),
-        };
+        let mut processor = Self::new_with_optional_prover(cancellation_token, true);
+        processor.add_imports_from_bindings(bindings, project)?;
+        Ok(processor)
+    }
+
+    /// Creates a new Processor for certificate checking only.
+    pub fn with_imports_for_checking(
+        cancellation_token: Option<CancellationToken>,
+        bindings: &BindingMap,
+        project: &Project,
+    ) -> Result<Processor, BuildError> {
+        let mut processor = Self::new_with_optional_prover(cancellation_token, false);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
     }
@@ -88,15 +98,11 @@ impl Processor {
         bindings: &BindingMap,
         project: &Project,
     ) -> Result<(), BuildError> {
-        let direct_dependencies = bindings.direct_dependencies();
-        if direct_dependencies
-            .iter()
-            .all(|dep_id| self.imported_modules.contains(dep_id))
-        {
+        if self.has_imports_for_bindings(bindings) {
             return Ok(());
         }
 
-        for dep_id in direct_dependencies {
+        for dep_id in bindings.direct_dependencies() {
             for module_id in project
                 .all_dependencies(dep_id)
                 .into_iter()
@@ -106,6 +112,13 @@ impl Processor {
             }
         }
         Ok(())
+    }
+
+    pub fn has_imports_for_bindings(&self, bindings: &BindingMap) -> bool {
+        bindings
+            .direct_dependencies()
+            .into_iter()
+            .all(|dep_id| self.imported_modules.contains(&dep_id))
     }
 
     fn add_imported_module(
@@ -140,7 +153,9 @@ impl Processor {
     }
 
     pub fn prover(&self) -> &Prover {
-        &self.prover
+        self.prover
+            .as_ref()
+            .expect("processor was created without prover support")
     }
     pub fn checker(&self) -> &Checker {
         &self.checker
@@ -169,8 +184,9 @@ impl Processor {
                 kernel_context,
             );
         }
-        self.prover
-            .add_steps(normalized.steps.clone(), kernel_context);
+        if let Some(prover) = self.prover.as_mut() {
+            prover.add_steps(normalized.steps.clone(), kernel_context);
+        }
         Ok(())
     }
 
@@ -192,16 +208,21 @@ impl Processor {
                 kernel_context,
             );
         }
-        self.prover.set_goal(
-            normalized.goal.clone(),
-            normalized.steps.clone(),
-            kernel_context,
-        );
+        if let Some(prover) = self.prover.as_mut() {
+            prover.set_goal(
+                normalized.goal.clone(),
+                normalized.steps.clone(),
+                kernel_context,
+            );
+        }
     }
 
     /// Forwards a search request to the underlying prover.
     pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
-        self.prover.search(mode, kernel_context)
+        self.prover
+            .as_mut()
+            .expect("processor was created without prover support")
+            .search(mode, kernel_context)
     }
 
     /// Creates a certificate from the current proof state.
@@ -211,7 +232,10 @@ impl Processor {
         kernel_context: &KernelContext,
         print: bool,
     ) -> Result<Certificate, Error> {
-        self.prover.make_cert(bindings, kernel_context, print)
+        self.prover
+            .as_ref()
+            .expect("processor was created without prover support")
+            .make_cert(bindings, kernel_context, print)
     }
 
     /// Checks a certificate.
@@ -288,7 +312,11 @@ impl Processor {
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
             effective_kernel_context = &normalized_goal.kernel_context;
-        } else if let Some(type_params) = self.prover.goal_type_params() {
+        } else if let Some(type_params) = self
+            .prover
+            .as_ref()
+            .and_then(|prover| prover.goal_type_params())
+        {
             cert_bindings = Self::bindings_with_type_params(bindings, type_params);
             effective_kernel_context = kernel_context;
         } else {
@@ -347,7 +375,11 @@ impl Processor {
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
             effective_kernel_context = &normalized_goal.kernel_context;
-        } else if let Some(type_params) = self.prover.goal_type_params() {
+        } else if let Some(type_params) = self
+            .prover
+            .as_ref()
+            .and_then(|prover| prover.goal_type_params())
+        {
             cert_bindings = Self::bindings_with_type_params(bindings, type_params);
             effective_kernel_context = kernel_context;
         } else {
@@ -405,5 +437,58 @@ impl Processor {
 
         Certificate::parse_code_line(code, &project, &mut bindings_cow, &mut kernel_context_cow)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::LoadState;
+
+    #[test]
+    fn check_only_processor_can_verify_a_generated_certificate() {
+        let mut project = Project::new_mock();
+        project.mock(
+            "/mock/main.ac",
+            r#"
+            theorem goal {
+                true
+            }
+            "#,
+        );
+
+        let module_id = project.load_module_by_name("main").expect("load failed");
+        let env = match project.get_module_by_id(module_id) {
+            LoadState::Ok(env) => env,
+            LoadState::Error(e) => panic!("error: {}", e),
+            _ => panic!("no module"),
+        };
+
+        let cursor = env.get_node_by_goal_name("goal");
+        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+        let goal_kernel_context = &normalized_goal.kernel_context;
+
+        let mut proving = Processor::with_imports(None, cursor.bindings(), &project)
+            .expect("proving processor creation failed");
+        proving.add_module_facts(&cursor).unwrap();
+        proving.set_lowered_goal(normalized_goal);
+        let outcome = proving.search(ProverMode::Test, goal_kernel_context);
+        assert_eq!(outcome, Outcome::Success);
+        let cert = proving
+            .make_cert(cursor.bindings(), goal_kernel_context, false)
+            .expect("certificate generation failed");
+
+        let mut checking = Processor::with_imports_for_checking(None, cursor.bindings(), &project)
+            .expect("checking processor creation failed");
+        checking.add_module_facts(&cursor).unwrap();
+        checking
+            .check_cert(
+                &cert,
+                Some(normalized_goal),
+                goal_kernel_context,
+                &project,
+                cursor.bindings(),
+            )
+            .expect("certificate verification failed");
     }
 }
