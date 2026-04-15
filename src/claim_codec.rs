@@ -5,7 +5,6 @@ use crate::elaborator::acorn_type::{AcornType, PotentialType, TypeParam, Typecla
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
-use crate::elaborator::lowering::TypeVarMap;
 use crate::elaborator::stack::Stack;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::Claim;
@@ -16,7 +15,6 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
-use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -584,7 +582,9 @@ impl ClaimCodec {
         let clause = kernel_context
             .lower_clause(&quoted_clause, NewConstantType::Local, type_var_map)
             .map_err(CodeGenError::GeneratedBadCode)?;
-        let var_map = Self::build_claim_var_map(type_args, args, kernel_context)?;
+        let var_map = kernel_context
+            .lower_claim_var_map(type_args, args)
+            .map_err(CodeGenError::GeneratedBadCode)?;
         Self::claim_with_var_map(clause, var_map)
     }
 
@@ -1031,58 +1031,10 @@ impl ClaimCodec {
         args: &[AcornValue],
         kernel_context: &mut KernelContext,
     ) -> Result<Claim, CodeGenError> {
-        let var_map = Self::build_claim_var_map(type_args, args, kernel_context)?;
+        let var_map = kernel_context
+            .lower_claim_var_map(type_args, args)
+            .map_err(CodeGenError::GeneratedBadCode)?;
         Self::claim_with_var_map(clause, var_map)
-    }
-
-    /// Lower type and value arguments into the claim variable map.
-    fn build_claim_var_map(
-        type_args: &[AcornType],
-        args: &[AcornValue],
-        kernel_context: &mut KernelContext,
-    ) -> Result<VariableMap, CodeGenError> {
-        let mut var_map = VariableMap::new();
-        let mut type_var_map = TypeVarMap::new();
-        for (var_id, acorn_type) in type_args.iter().enumerate() {
-            let type_term = match acorn_type {
-                AcornType::Variable(type_param) => {
-                    let kind_term = if let Some(typeclass) = &type_param.typeclass {
-                        let typeclass_id = kernel_context.type_store.add_typeclass(typeclass);
-                        Term::typeclass(typeclass_id)
-                    } else {
-                        Term::type_sort()
-                    };
-                    type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
-                    Term::atom(Atom::FreeVariable(var_id as AtomId))
-                }
-                _ => kernel_context
-                    .type_store
-                    .to_type_term_with_vars(acorn_type, None),
-            };
-            var_map.set(var_id as AtomId, type_term);
-        }
-
-        let type_var_map = (!type_var_map.is_empty()).then_some(type_var_map);
-        let value_offset = var_map.len();
-        let initial_stack: Vec<Term> = (0..args.len())
-            .map(|i| Term::new_variable((value_offset + i) as AtomId))
-            .collect();
-        for (var_id, arg) in args.iter().enumerate() {
-            kernel_context.symbol_table.add_from(
-                arg,
-                NewConstantType::Local,
-                &mut kernel_context.type_store,
-            );
-            let term = kernel_context.lower_term_existing_with_stack(
-                arg,
-                type_var_map.as_ref(),
-                &initial_stack,
-            )?;
-            let term = normalize_term(&term);
-            let term = kernel_context.term_to_claim_arg(&term)?;
-            var_map.set((value_offset + var_id) as AtomId, term);
-        }
-        Ok(var_map)
     }
 
     /// Construct a claim that has no extra argument map entries.

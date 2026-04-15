@@ -37,6 +37,7 @@ This document uses the Rust boundary names directly. The boundary surface today 
 - `KernelContext::lower_theorem_to_clauses(...)`
 - `KernelContext::lower_proposition_to_clauses(...)`
 - `KernelContext::lower_clause(...)`
+- `KernelContext::lower_claim_var_map(...)`
 - `KernelContext::quote_term_with_context(...)`
 - `KernelContext::quote_clause(...)`
 
@@ -72,6 +73,14 @@ is the `KernelContext` surface above.
 - it reconstructs exactly one `Clause`
 - it does not first apply the semantic normalization used by `lower_proposition_to_clauses`
 
+`lower_claim_var_map` is a special-purpose claim-codec operation:
+
+- it lowers the type/value argument lists used by claim-with-args serialization
+- it is not general proposition or clause lowering
+- it interprets value args in the preloaded namespace where the claim's generic value binders are
+  already available as free variables
+- it produces the canonical `VariableMap` expected by `Claim`
+
 `quote_term_with_context` is general term-to-surface reconstruction.
 
 `quote_clause` is the clause codec paired with `lower_clause`.
@@ -83,5 +92,13 @@ Only clause lowering has a global exact roundtrip requirement.
 The required contract is:
 
 - `lower_clause(quote_clause(c)) == c` for normalized clauses `c`
+
+Claim-with-args has one additional exact codec requirement:
+
+- if claim serialization emits a quoted clause together with type/value args, then
+  `Claim::new(lower_clause(quoted_clause), lower_claim_var_map(type_args, value_args))`
+  must reconstruct the canonical claim chosen by the serializer
+- equivalently, canonical claim-with-args serialization must satisfy
+  `deserialize_claim_with_args(serialize_claim_with_args(claim)) == claim`
 
 Theorem lowering and proposition lowering are semantic lowerings, not exact serialization codecs.

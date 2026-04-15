@@ -3,9 +3,10 @@
 //! This module owns the implementation of these conceptual operations:
 //!
 //! - `lower_term`: `AcornValue -> Term`
-//! - `lower_theorem`: theorem propositions to proof-input clauses
-//! - `lower_proposition`: boolean propositions to proof-input clauses
+//! - `lower_theorem_to_clauses`: theorem propositions to proof-input clauses
+//! - `lower_proposition_to_clauses`: boolean propositions to proof-input clauses
 //! - `lower_clause`: quoted clause values back to exactly one normalized clause
+//! - `lower_claim_var_map`: claim-with-args type/value arguments to a canonical `VariableMap`
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
 //!
 //! The contract-level description of these operations lives in `docs/lowering.md`.
@@ -32,6 +33,7 @@ use crate::elaborator::source::SourceType;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::lower_value_to_term;
+#[cfg(test)]
 use crate::elaborator::to_term::lower_value_to_term_existing;
 #[cfg(test)]
 use crate::elaborator::to_term::lower_value_to_term_existing_preserving_alias_spelling;
@@ -46,6 +48,7 @@ use crate::kernel::proof_step::{ProofStep, Truthiness};
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
+use crate::kernel::variable_map::VariableMap;
 use std::collections::HashMap;
 use tracing::trace;
 
@@ -100,6 +103,15 @@ pub fn lower_theorem_to_clauses(
     kernel_context.lower_theorem_to_clauses(theorem)
 }
 
+/// Lower claim-with-args type/value arguments to a canonical variable map.
+pub fn lower_claim_var_map(
+    kernel_context: &mut KernelContext,
+    type_args: &[AcornType],
+    args: &[AcornValue],
+) -> Result<VariableMap, String> {
+    kernel_context.lower_claim_var_map(type_args, args)
+}
+
 impl KernelContext {
     fn is_theorem_proposition(proposition: &Proposition) -> bool {
         matches!(
@@ -151,6 +163,7 @@ impl KernelContext {
 
     /// Lower an `AcornValue` to a kernel `Term` assuming all referenced symbols are already
     /// present in the kernel tables.
+    #[cfg(test)]
     pub(crate) fn lower_term_existing(
         &mut self,
         value: &AcornValue,
@@ -162,7 +175,7 @@ impl KernelContext {
 
     /// Lower an `AcornValue` to a kernel `Term` with a pre-populated stack of already-open
     /// free variables.
-    pub(crate) fn lower_term_existing_with_stack(
+    fn lower_term_existing_with_stack(
         &mut self,
         value: &AcornValue,
         type_var_map: Option<&TypeVarMap>,
@@ -184,7 +197,7 @@ impl KernelContext {
     }
 
     /// Lower an already-normalized proposition-shaped kernel term into proof-input clauses.
-    pub(crate) fn lower_normalized_proposition_term_to_clauses(
+    fn lower_normalized_proposition_term_to_clauses(
         &mut self,
         term: &Term,
         type_var_map: Option<TypeVarMap>,
@@ -264,6 +277,52 @@ impl KernelContext {
 
         let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
         self.lower_normalized_clause_term(&term, type_var_map)
+    }
+
+    /// Lower claim-with-args type/value arguments to the canonical claim variable map.
+    ///
+    /// This is the lowering half of the claim-with-args certificate codec. The value args are
+    /// interpreted in the preloaded namespace where the claim's generic value binders are already
+    /// available as free variables, then converted to checker claim-argument form.
+    pub fn lower_claim_var_map(
+        &mut self,
+        type_args: &[AcornType],
+        args: &[AcornValue],
+    ) -> Result<VariableMap, String> {
+        let mut var_map = VariableMap::new();
+        let mut type_var_map = TypeVarMap::new();
+        for (var_id, acorn_type) in type_args.iter().enumerate() {
+            let type_term = match acorn_type {
+                AcornType::Variable(type_param) => {
+                    let kind_term = if let Some(typeclass) = &type_param.typeclass {
+                        let typeclass_id = self.type_store.add_typeclass(typeclass);
+                        Term::typeclass(typeclass_id)
+                    } else {
+                        Term::type_sort()
+                    };
+                    type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
+                    Term::atom(Atom::FreeVariable(var_id as AtomId))
+                }
+                _ => self.type_store.to_type_term_with_vars(acorn_type, None),
+            };
+            var_map.set(var_id as AtomId, type_term);
+        }
+
+        let type_var_map = (!type_var_map.is_empty()).then_some(type_var_map);
+        let value_offset = var_map.len();
+        let initial_stack: Vec<Term> = (0..args.len())
+            .map(|i| Term::new_variable((value_offset + i) as AtomId))
+            .collect();
+        for (var_id, arg) in args.iter().enumerate() {
+            self.symbol_table
+                .add_from(arg, NewConstantType::Local, &mut self.type_store);
+            let term =
+                self.lower_term_existing_with_stack(arg, type_var_map.as_ref(), &initial_stack)?;
+            let term = normalize_term(&term);
+            let term = self.term_to_claim_arg(&term)?;
+            var_map.set((value_offset + var_id) as AtomId, term);
+        }
+        Ok(var_map)
     }
 
     #[cfg(any(test, feature = "validate"))]
@@ -761,5 +820,25 @@ mod tests {
             .lower_theorem_to_clauses(&proposition)
             .expect_err("non-theorem proposition should be rejected");
         assert!(err.contains("expected theorem-shaped proposition"));
+    }
+
+    #[test]
+    fn test_lower_claim_var_map_uses_preloaded_value_namespace() {
+        let mut kernel_context = KernelContext::new();
+        let var_map = kernel_context
+            .lower_claim_var_map(
+                &[],
+                &[
+                    AcornValue::Variable(1, AcornType::Bool),
+                    AcornValue::Not(Box::new(AcornValue::Variable(0, AcornType::Bool))),
+                ],
+            )
+            .expect("claim arg lowering should succeed");
+
+        assert_eq!(var_map.get_mapping(0), Some(&Term::new_variable(1)));
+        assert_eq!(
+            var_map.get_mapping(1),
+            Some(&Term::not(Term::new_variable(0)))
+        );
     }
 }
