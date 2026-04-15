@@ -7,9 +7,13 @@
 //! - `lower_clause`: quoted clause values back to exactly one normalized clause
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
 //!
-//! These are contract names, not necessarily one public Rust function per bullet.
-//! Callers that need to cross the elaborator/kernel boundary should prefer this module's
-//! interface over reaching into `to_term` or kernel clausifier helpers directly.
+//! The contract-level description of these operations lives in `docs/lowering.md`.
+//!
+//! This module is the only sanctioned elaborator/kernel boundary.
+//! Callers that need to cross that boundary should use this module's interface rather than
+//! reaching into `to_term`, `term_bridge`, or kernel clausifier helpers directly.
+//! Expanding this boundary should be rare and deliberate; otherwise lowering semantics sprawl
+//! across the codebase and become harder to reason about and maintain.
 //!
 //! The elaborator does not define the normalization policy. Kernel term normalization
 //! lives in `kernel::term_normalization`, and theorem/proposition/clause lowering lives in the
@@ -33,7 +37,6 @@ use crate::elaborator::to_term::lower_value_to_term_existing_preserving_alias_sp
 use crate::elaborator::to_term::lower_value_to_term_existing_with_stack;
 #[cfg(any(test, feature = "validate"))]
 use crate::elaborator::to_term::lower_value_to_term_preserving_alias_spelling;
-use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -45,6 +48,8 @@ use crate::kernel::term_normalization::normalize_term;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::trace;
+
+pub(crate) use crate::elaborator::to_term::TypeVarMap;
 
 /// A fact that has been lowered into proof steps.
 #[derive(Clone)]
@@ -155,16 +160,24 @@ impl KernelContext {
         lower_value_to_term_existing_preserving_alias_spelling(self, value, type_var_map)
     }
 
-    /// Lower a term-level proposition into clauses.
-    ///
-    /// This is the term-native backend for proposition lowering.
-    fn lower_term_to_clauses(
+    /// Lower an already-normalized proposition-shaped kernel term into proof-input clauses.
+    pub(crate) fn lower_normalized_proposition_term_to_clauses(
         &mut self,
         term: &Term,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+        type_var_map: Option<TypeVarMap>,
     ) -> Result<Vec<Clause>, String> {
         term.validate();
         self.lower_normalized_term_to_clauses(term, type_var_map)
+    }
+
+    /// Lower an already-normalized clause-shaped kernel term into exactly one normalized clause.
+    pub(crate) fn lower_normalized_clause_term(
+        &mut self,
+        term: &Term,
+        type_var_map: Option<TypeVarMap>,
+    ) -> Result<Clause, String> {
+        term.validate();
+        self.lower_normalized_term_to_clause(term, type_var_map)
     }
 
     /// Lowers a boolean proposition to clauses via:
@@ -179,7 +192,7 @@ impl KernelContext {
 
         let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        self.lower_term_to_clauses(&term, type_var_map)
+        self.lower_normalized_proposition_term_to_clauses(&term, type_var_map)
     }
 
     /// Lowers a quoted clause value to exactly one normalized clause.
@@ -194,7 +207,7 @@ impl KernelContext {
         assert!(value.is_bool_type());
 
         let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
-        self.lower_normalized_term_to_clause(&term, type_var_map)
+        self.lower_normalized_clause_term(&term, type_var_map)
     }
 
     #[cfg(any(test, feature = "validate"))]
@@ -214,7 +227,7 @@ impl KernelContext {
             ctype,
             type_var_map.as_ref(),
         )?;
-        self.lower_normalized_term_to_clause(&term, type_var_map)
+        self.lower_normalized_clause_term(&term, type_var_map)
     }
 
     /// A single fact can turn into a bunch of proof steps.

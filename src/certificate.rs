@@ -674,7 +674,7 @@ impl Certificate {
         let term = kernel_context.lower_term_existing(value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         Ok(kernel_context
-            .lower_normalized_term_to_clauses(&term, type_var_map)
+            .lower_normalized_proposition_term_to_clauses(&term, type_var_map)
             .map_err(CodeGenError::GeneratedBadCode)?
             .into_iter()
             .map(|clause| clause.normalized())

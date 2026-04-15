@@ -1,103 +1,8 @@
 # Normalization
 
-This document defines the contract between the surface-language layers and the kernel layers.
-It is the main reference for quoting, lowering, and normalization requirements.
+This document defines normalized kernel objects and normalized certificate claims.
 
-The source implementation for kernel term normalization lives in
-`src/kernel/term_normalization.rs`, but the contracts here are broader than that one file.
-
-## Layers
-
-The system moves between these representations:
-
-1. Source text: `String`
-2. Parsed syntax: `Expression`
-3. Elaborated surface value: `AcornValue`
-4. Kernel term: `Term`
-5. Kernel clauses: `Vec<Clause>` or a single `Clause`
-
-## Operations Between Layers
-
-These are the conceptual names for the layer transitions:
-
-- `parse: String -> Expression`
-- `elaborate: Expression -> AcornValue`
-- `lower_term: AcornValue -> Term`
-- `lower_theorem: theorem-shaped AcornValue -> Vec<Clause>`
-- `lower_proposition: proposition-shaped AcornValue -> Vec<Clause>`
-- `lower_clause: clause-shaped AcornValue -> Clause`
-- `quote_term: Term -> AcornValue`
-- `quote_clause: Clause -> AcornValue`
-
-These names describe contracts, not necessarily one public Rust function per line.
-The current code already has all of these behaviors, even if some of them are implemented
-by differently named or distributed APIs:
-
-- `lower_term` is implemented today by `lower_value_to_term(...)`
-- theorem lowering is not one public function today; it is distributed across
-  `lower_fact(...)` / `lower_goal(...)` and their `KernelContext` methods
-- proposition lowering currently flows through
-  `KernelContext::lower_proposition_to_clauses(...)`
-- `lower_clause` is implemented today by `KernelContext::lower_clause(...)`
-- `quote_term` is implemented today by `KernelContext::quote_term_with_context(...)`
-- `quote_clause` is implemented today by `KernelContext::quote_clause(...)`
-
-The important point is conceptual, not just API naming: theorem lowering, proposition lowering,
-and clause lowering are not the same contract.
-
-Code generation is a separate step after quoting:
-
-- `AcornValue -> String`
-
-That step is not part of normalization.
-
-## The Three Lowerings
-
-There are three different boolean-lowering operations that matter.
-
-`lower_term` is structure-preserving:
-
-- `forall(...) { ... }` stays a kernel `ForAll`
-- `exists(...) { ... }` stays a kernel `Exists`
-- lambda structure stays lambda structure
-- logical surface forms become their kernel logical heads
-
-`lower_theorem` lowers a theorem as theorem syntax:
-
-- theorem statement arguments are statement-level binders
-- those binders become free variables in the lowered clause context
-- theorem lowering is allowed to interpret the theorem-specific outer binder structure
-
-Today theorem statements are first encoded into an external leading-`forall` form, and the
-current clausifier opens those leading `forall`s as free variables. So today theorem lowering
-reuses the same internal machinery as proposition lowering, but it is still a distinct concept.
-
-`lower_proposition` is logical lowering:
-
-- it starts from a boolean `AcornValue`
-- it lowers to a `Term`
-- it term-normalizes that `Term`
-- it then lowers/clausifies into clauses
-- top-level proposition structure may be opened, especially leading universals
-
-`lower_clause` is the certificate/parsing case:
-
-- it starts from a quoted clause-shaped `AcornValue`
-- it reconstructs exactly one `Clause`
-- it does not first apply the semantic term-normalization pass used by `lower_proposition`
-- it is not merely “any proposition that happens to lower to clauses”
-- this is the only lowering operation with an exact quote/lower roundtrip requirement
-
-So:
-
-- `lower_term` is the faithful surface-to-kernel term bridge
-- `lower_theorem` and `lower_proposition` are semantic/logical lowerings
-- `lower_clause` is the exact inverse of `quote_clause` for normalized clauses
-
-Likewise, `quote_term` and `quote_clause` are related but not identical contracts:
-
-- `quote_term` is general term-to-surface reconstruction
-- `quote_clause` is the exact clause codec that must satisfy the clause roundtrip contract
+Layer transitions and quote/lower roundtrip contracts live in [`lowering.md`](lowering.md).
 
 ## Term Normalization
 
@@ -132,33 +37,6 @@ It may:
 Clause normalization does not justify changing the generic local-variable slots of a certificate
 claim. Certificate normalization must preserve those slots.
 
-## Roundtrip Contracts
-
-Only clause lowering has a global exact roundtrip requirement.
-
-The required contract is:
-
-- normalized clause contract:
-  quoting a normalized clause must produce a clause-shaped `AcornValue` whose clause-lowering
-  result is exactly one normalized clause, and that clause must equal the original `c`
-
-Equivalently:
-
-- `lower_clause(quote_clause(c)) == c`
-
-Theorem lowering and proposition lowering do not need to be exact inverses of quoting. They are
-semantic lowerings, not exact serialization codecs.
-
-The term bridge may still have its own local tests and expectations, but the system-wide exact
-roundtrip requirement in this document is for clauses.
-
-Example:
-
-- a clause with one local variable of type `Nat` and body `foo(x0)` quotes to a value shaped like
-  `forall(x: Nat) { foo(x) }`
-- `lower_clause` must reopen that binder and recover the original clause with one free variable in
-  its local context
-
 ## Global Requirements
 
 The system-wide normalization requirements are:
@@ -187,7 +65,7 @@ For certificate claims:
 - the `var_map` is part of the canonical object
 - `claim-with-args` syntax is only a surface serialization of that canonical `(clause, var_map)`
   object
-- “display shape” is not a substitute for canonical normalization
+- "display shape" is not a substitute for canonical normalization
 - parser or codegen conveniences should not introduce a second, fuzzier notion of normalized form
 - serializing a `claim-with-args` must use the normal quote/lower bridge:
   the generic body comes from `quote_clause`, and each mapped value argument uses the usual
@@ -203,16 +81,16 @@ treated as technical debt, not as a new normalization layer.
 
 ## Change Checklist
 
-If you change anything related to normalization, clausification, quoting, claim serialization, or
-claim parsing, check all of the following:
+If you change anything related to normalization, lowering, quoting, claim serialization, or claim
+parsing, check all of the following:
 
 - term normalization still normalizes all subterms
 - normalization is still idempotent
 - proof-step clauses are still normalized
-- normalized clauses still satisfy the `quote_clause + lower_clause` roundtrip contract
+- the clause codec still satisfies the `quote_clause + lower_clause` roundtrip contract
 - certificate `(clause, var_map)` pairs still round-trip exactly in normalized form
 - any special-case equivalence is really required by the surface syntax, not just convenient
 - the tests cover the specific normalized shape that is being protected
 
-If the intended contract changes, update this document and the leading comments in
-`src/kernel/term_normalization.rs` together.
+If the intended contract changes, update this document, [`lowering.md`](lowering.md), and the
+leading comments in `src/kernel/term_normalization.rs` together.

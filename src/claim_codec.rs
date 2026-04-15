@@ -5,8 +5,8 @@ use crate::elaborator::acorn_type::{AcornType, PotentialType, TypeParam, Typecla
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
+use crate::elaborator::lowering::TypeVarMap;
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::Claim;
 use crate::kernel::clause::Clause;
@@ -509,7 +509,7 @@ impl ClaimCodec {
         }
 
         let clause = kernel_context
-            .lower_normalized_term_to_clause(term, None)
+            .lower_normalized_clause_term(term, None)
             .map_err(CodeGenError::GeneratedBadCode)?;
         if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
             let checker_term = kernel_context.term_to_checker_term(term, None)?;

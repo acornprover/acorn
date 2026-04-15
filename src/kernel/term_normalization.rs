@@ -1,55 +1,18 @@
 //! Kernel term normalization is only one part of the surface/kernel contract.
 //!
-//! The full model is documented in `docs/normalization.md`. At a high level, the conceptual
-//! layer transitions are:
-//!
-//! - `parse: String -> Expression`
-//! - `elaborate: Expression -> AcornValue`
-//! - `lower_term: AcornValue -> Term`
-//! - `lower_theorem: theorem-shaped AcornValue -> Vec<Clause>`
-//! - `lower_proposition: proposition-shaped AcornValue -> Vec<Clause>`
-//! - `lower_clause: clause-shaped AcornValue -> Clause`
-//! - `quote_term: Term -> AcornValue`
-//! - `quote_clause: Clause -> AcornValue`
-//!
-//! These names describe contracts, not necessarily one public Rust function per line.
+//! Layer transitions and quote/lower roundtrip contracts are documented in `docs/lowering.md`.
+//! Normalized-form invariants are documented in `docs/normalization.md`.
 //!
 //! This file owns only the recursive, structure-preserving normalization of [`Term`]s.
 //! It must normalize every subterm of a normalized term.
 //!
 //! It does not own:
 //!
-//! - theorem lowering (`lower_theorem`)
-//! - proposition lowering (`lower_proposition`)
-//! - clause lowering (`lower_clause`)
+//! - theorem lowering
+//! - proposition lowering
+//! - clause lowering
 //! - clause normalization
 //! - surface quoting or code generation
-//!
-//! The system-wide exact roundtrip contract is for normalized clauses:
-//!
-//! - `lower_clause(quote_clause(c)) == c`
-//!
-//! Theorem lowering and proposition lowering are semantic lowerings and are not required to be
-//! exact inverses of quoting.
-//!
-//! The global requirements are:
-//!
-//! - Every `ProofStep` must have its clause normalized.
-//! - In a normalized term or clause, every subterm must also be normalized.
-//! - For certificates, the generic clause in a `(clause, var_map)` claim must be normalized.
-//! - For certificates, each mapped term in a claim `var_map` must be term-normalized.
-//! - Parsing a non-normalized certificate claim must normalize into that canonical
-//!   `(clause, var_map)` object rather than preserving a merely display-equivalent surface shape.
-//! - For certificates, serializing a `(clause, var_map)` pair and then deserializing it
-//!   must recover the exact same normalized generic `(clause, var_map)` pair.
-//! - `claim-with-args` is only surface syntax for that canonical certificate object:
-//!   its generic body must follow `quote_clause`, and its mapped value arguments must
-//!   follow the usual quoted-term form.
-//! - Normalization canonicalizes the built-in commutative operators `=`, `and`, and `or`
-//!   up to commutativity only.
-//! - Clause normalization may deterministically renumber free variables to a preferred
-//!   numbering, but this is best-effort only.
-//! - Normalization must be idempotent.
 use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::literal::Literal;
