@@ -509,20 +509,9 @@ impl ClaimCodec {
             return Self::claim_from_clause(clause);
         }
 
-        let clauses = kernel_context.term_to_checker_clauses(term, None)?;
-        if clauses.len() != 1 {
-            let checker_term = kernel_context.term_to_checker_term(term, None)?;
-            let clause = Clause::from_literals_unnormalized(
-                vec![Literal::positive(checker_term)],
-                &LocalContext::empty(),
-            );
-            return Self::claim_from_clause(clause);
-        }
-
-        let clause = clauses
-            .into_iter()
-            .next()
-            .expect("clauses has exactly one element");
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(term, None)
+            .map_err(CodeGenError::GeneratedBadCode)?;
         if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
             let checker_term = kernel_context.term_to_checker_term(term, None)?;
             let literal = Self::try_term_to_single_checker_literal(&checker_term)

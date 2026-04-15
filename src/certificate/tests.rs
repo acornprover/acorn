@@ -1140,6 +1140,55 @@ fn test_parse_code_line_preserves_plain_negated_exists_literal() {
 }
 
 #[test]
+fn test_parse_code_line_keeps_plain_non_cnf_literal_shape() {
+    let code = r#"
+        let a: Bool = axiom
+        let b: Bool = axiom
+
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step = Certificate::parse_code_line(
+        "not (a and b)",
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect("plain non-CNF claim should parse");
+
+    let claim = expect_claim(step);
+    assert_eq!(
+        claim.clause().literals.len(),
+        1,
+        "plain claim should stay as one literal"
+    );
+    assert!(
+        !claim.clause().literals[0].positive,
+        "plain claim should remain a negative literal"
+    );
+    let (head, args) = claim.clause().literals[0]
+        .left
+        .as_ref()
+        .split_application_multi()
+        .expect("negative literal should remain an application term");
+    assert_eq!(
+        *head.get_head_atom(),
+        crate::kernel::atom::Atom::Symbol(crate::kernel::symbol::Symbol::And),
+        "plain claim should not be CNF-rewritten into separate disjuncts"
+    );
+    assert_eq!(
+        args.len(),
+        2,
+        "conjunction literal should keep both operands"
+    );
+}
+
+#[test]
 fn test_parse_code_line_canonicalizes_plain_claim_equality() {
     let code = r#"
         theorem goal {
