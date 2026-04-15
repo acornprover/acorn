@@ -1301,10 +1301,10 @@ impl<'a> Clausifier<'a> {
         Literal::positive(term.clone())
     }
 
-    /// Convert a term expression into the checker's inline single-term form.
+    /// Convert a term expression into the inline body form used by a single literal.
     ///
     /// This only succeeds for terms that are representable without introducing clause structure.
-    fn term_to_checker_inline_term(&mut self, term: &Term) -> Result<Term, String> {
+    fn term_to_inline_literal_body(&mut self, term: &Term) -> Result<Term, String> {
         match self.try_inline_term_to_signed_term(term)? {
             Some((term, true)) => Ok(term),
             // `false` is represented as `not true` in signed-term form.
@@ -1319,7 +1319,7 @@ impl<'a> Clausifier<'a> {
                     return Ok(term.clone());
                 }
                 Err(format!(
-                    "term cannot be represented as a checker inline term (has_free_var={}, has_bound_var={})",
+                    "term cannot be represented as an inline literal body (has_free_var={}, has_bound_var={})",
                     term.has_free_variable(),
                     term.has_bound_variable()
                 ))
@@ -1329,11 +1329,11 @@ impl<'a> Clausifier<'a> {
 
     /// Convert a claim argument term for `claim_with_args` parsing.
     ///
-    /// Prefer inline checker-term encoding when available (to preserve existing certificate shape),
-    /// but allow richer terms when inline encoding is unavailable so cert parsing can round-trip
-    /// generated witnesses, including lambdas that still refer to other claim locals.
+    /// Prefer inline literal-body encoding when available (to preserve existing certificate
+    /// shape), but allow richer terms when inline encoding is unavailable so cert parsing can
+    /// round-trip generated witnesses, including lambdas that still refer to other claim locals.
     fn term_to_claim_arg_shape(&mut self, term: &Term) -> Result<Term, String> {
-        match self.term_to_checker_inline_term(term) {
+        match self.term_to_inline_literal_body(term) {
             Ok(inline_term) => Ok(inline_term),
             Err(_) => Ok(term.clone()),
         }
@@ -1431,14 +1431,15 @@ impl KernelContext {
         view.lower_normalized_term_to_clause_with_opening_policy(term, false)
     }
 
-    /// Kernel-owned entry point for converting a term to the checker's single-term inline form.
-    pub fn term_to_checker_term(
+    /// Kernel-owned entry point for converting a term to the inline body form of a single
+    /// literal.
+    pub fn term_to_inline_literal_body(
         &mut self,
         term: &Term,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Term, String> {
         let mut view = Clausifier::new_mut(self, type_var_map);
-        view.term_to_checker_inline_term(term)
+        view.term_to_inline_literal_body(term)
     }
 
     /// Kernel-owned entry point for converting a term to claim-argument form.

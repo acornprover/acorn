@@ -699,7 +699,7 @@ impl Certificate {
             .collect())
     }
 
-    /// Lower a parsed certificate proposition to a single closed checker clause.
+    /// Lower a parsed certificate proposition to a single closed inline-literal clause.
     fn maybe_specialized_clause_for_proposition(
         kernel_context: &mut KernelContext,
         value: &AcornValue,
@@ -709,13 +709,14 @@ impl Certificate {
         let term =
             kernel_context.lower_term(value, NewConstantType::Local, type_var_map.as_ref())?;
         let term = normalize_term(&term);
-        let checker_term = match kernel_context.term_to_checker_term(&term, type_var_map) {
-            Ok(term) => term,
-            Err(_) => return Ok(None),
-        };
+        let inline_literal_body =
+            match kernel_context.term_to_inline_literal_body(&term, type_var_map) {
+                Ok(term) => term,
+                Err(_) => return Ok(None),
+            };
         Ok(Some(
             Clause::from_literals_unnormalized(
-                vec![Literal::positive(checker_term)],
+                vec![Literal::positive(inline_literal_body)],
                 &LocalContext::empty(),
             )
             .normalized(),
