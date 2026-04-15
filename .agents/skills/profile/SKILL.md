@@ -13,7 +13,19 @@ Use this skill when the user asks to profile the Acorn prover or verifier. The g
 - Use this skill for profiling and performance-breakdown requests, not for generic benchmarking.
 - If the target is not specified, ask whether to profile `profile_reprove` or `profile_check`.
 - In sandboxed Codex runs, if `perf`, `cargo install samply`, or profile recording is blocked, request escalated permissions instead of working around it.
-- After every profiling run, update `PROFILE.md` in the repo root.
+- After every successful profiling run, update `PROFILE.md` in the repo root.
+
+## Guardrail: abort on certificate-check failures
+
+If a profiling run fails because certificate checking fails, the run is not a valid performance baseline.
+
+When that happens:
+
+- stop immediately
+- tell the user the failing target and error
+- do not continue profiling other targets in the same batch
+- do not update `PROFILE.md`
+- do not summarize the failed run as if it were a meaningful regression datapoint
 
 ## Available profiling targets
 
@@ -22,14 +34,14 @@ Use this skill when the user asks to profile the Acorn prover or verifier. The g
 
 ## Recording results in `PROFILE.md`
 
-`PROFILE.md` is the persistent record of the latest profiling baseline for each profiling target. Keep it updated after every profiling run.
+`PROFILE.md` is the persistent record of the latest successful profiling baseline for each profiling target. Keep it updated after every successful profiling run.
 
 The file should have a separate section for each profile script:
 
 - `profile_reprove`
 - `profile_check`
 
-When you profile one target, update that target's section with the latest run instead of leaving stale data in place.
+When you profile one target successfully, update that target's section with the latest run instead of leaving stale data in place.
 
 Each section should include at least:
 

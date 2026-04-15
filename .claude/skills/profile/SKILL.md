@@ -17,16 +17,24 @@ Use this skill when the user asks to profile the Acorn prover. This generates a 
 
 Ask the user which target to profile if not specified.
 
+## Guardrail: abort on certificate-check failures
+
+If a profiling run hits a certificate-check failure, stop immediately and report it.
+
+- Do not continue to other profiling targets in the same batch.
+- Do not update `PROFILE.md`.
+- Do not treat the failed run as a usable performance baseline.
+
 ## Recording results in `PROFILE.md`
 
-After every profiling run, update `PROFILE.md` in the repo root.
+After every successful profiling run, update `PROFILE.md` in the repo root.
 
 Keep one section per profile script:
 
 - `profile_reprove`
 - `profile_check`
 
-For the target you just profiled, replace stale results with the latest run details. Include the date, git hash, machine summary, exact command, runtime numbers, and a brief summary of the top-down breakdown so later runs can be compared for regressions.
+For the target you just profiled successfully, replace stale results with the latest run details. Include the date, git hash, machine summary, exact command, runtime numbers, and a brief summary of the top-down breakdown so later runs can be compared for regressions.
 
 ## Platform detection
 
