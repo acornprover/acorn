@@ -166,6 +166,11 @@ impl VariableMap {
         // subterms match structurally, their types are guaranteed to match.
         match (general.decompose(), special.decompose()) {
             (Decomposition::Atom(Atom::FreeVariable(i)), _) => {
+                if special.to_owned().has_escaping_bound_variable() {
+                    // A free pattern variable cannot be instantiated with a term that only
+                    // makes sense relative to an ambient binder.
+                    return false;
+                }
                 // When matching a variable, we must verify type compatibility.
                 // Get the variable's type directly from the context (cheap lookup)
                 // rather than computing it via get_type_with_context.
@@ -577,7 +582,12 @@ impl VariableMap {
     /// General's FreeVariables get bound; all other atoms are compared for equality.
     fn match_term_no_type_check(&mut self, general: TermRef, special: TermRef) -> bool {
         match (general.decompose(), special.decompose()) {
-            (Decomposition::Atom(Atom::FreeVariable(i)), _) => self.match_var(*i, special),
+            (Decomposition::Atom(Atom::FreeVariable(i)), _) => {
+                if special.to_owned().has_escaping_bound_variable() {
+                    return false;
+                }
+                self.match_var(*i, special)
+            }
             (Decomposition::Atom(g_atom), Decomposition::Atom(s_atom)) => g_atom == s_atom,
             (
                 Decomposition::Application(g_func, g_arg),
@@ -711,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_match_terms_with_lambda_bound_variable_does_not_panic() {
+    fn test_match_terms_rejects_specialization_to_escaping_bound_variable() {
         let kctx = KernelContext::new();
         let general_context = LocalContext::from_types(vec![Term::bool_type()]);
         let special_context = LocalContext::empty();
@@ -732,12 +742,9 @@ mod tests {
 
         assert!(result.is_ok(), "match_terms should not panic under binders");
         assert!(
-            result.unwrap(),
-            "lambda pattern should match lambda with bound body"
+            !result.unwrap(),
+            "lambda pattern should not match by binding a free variable to an escaping bound variable"
         );
-        assert_eq!(
-            var_map.get_mapping(0),
-            Some(&Term::atom(Atom::BoundVariable(0)))
-        );
+        assert_eq!(var_map.get_mapping(0), None);
     }
 }

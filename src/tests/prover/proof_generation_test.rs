@@ -131,6 +131,35 @@ fn test_specializing_to_bound_variable() {
 }
 
 #[test]
+fn test_specializing_to_term_containing_bound_variable() {
+    let text = r#"
+    type Elem: axiom
+
+    define app_equal(f: Elem -> Elem, a: Elem, b: Elem) -> Bool {
+        f(a) = f(b)
+    }
+
+    define is_constant(f: Elem -> Elem) -> Bool {
+        forall(a: Elem, b: Elem) {
+            app_equal(f, a, b)
+        }
+    }
+
+    theorem const_fn_is_const(c: Elem) {
+        is_constant(function(x: Elem) { c })
+    }
+
+    let g: Elem -> Elem = axiom
+
+    theorem should_fail {
+        is_constant(function(x: Elem) { g(x) })
+    }
+    "#;
+
+    verify_fails(text);
+}
+
+#[test]
 fn test_assuming_lhs_of_implication() {
     verify_succeeds(
         r#"

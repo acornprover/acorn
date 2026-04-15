@@ -279,6 +279,11 @@ fn build_bindings(
 
     // Add structural replacements to bindings
     for (i, replacement) in structural_replacements.iter().enumerate() {
+        if replacement.to_owned().has_escaping_bound_variable() {
+            // Rewrites may not instantiate a free pattern variable with a term that only
+            // has meaning relative to an enclosing binder in the query.
+            return None;
+        }
         bindings.insert(i as AtomId, replacement.to_owned());
     }
 

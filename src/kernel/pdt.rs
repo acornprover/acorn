@@ -1157,6 +1157,11 @@ fn verify_type_compatibility(
 ) -> bool {
     let pattern_var_types = metadata.context.get_var_types();
     for (i, &replacement) in replacements.iter().enumerate() {
+        if replacement.to_owned().has_escaping_bound_variable() {
+            // Pattern variables may not bind to terms that depend on an ambient binder
+            // outside the matched subterm.
+            return false;
+        }
         if i >= pattern_var_types.len() {
             // Pattern didn't have this many variables - that's fine
             continue;
@@ -1444,6 +1449,7 @@ pub fn compute_unbound_var_remap(
 mod tests {
     use super::*;
     use crate::kernel::atom::Atom as KernelAtom;
+    use crate::kernel::literal::Literal;
 
     #[test]
     fn test_stack_limit_warning_message_is_capped() {
@@ -1918,6 +1924,31 @@ mod tests {
     }
 
     #[test]
+    fn test_literal_set_rejects_specialization_to_escaping_bound_variable() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "(Bool -> Bool) -> Bool");
+
+        let mut literals = LiteralSet::new();
+        let pattern_context = LocalContext::from_types(vec![Term::bool_type()]);
+        let pattern = Literal::positive(
+            Term::parse("c0").apply(&[Term::lambda(Term::bool_type(), Term::new_variable(0))]),
+        );
+        literals.insert(&pattern, 0, &pattern_context);
+
+        let query_context = LocalContext::empty();
+        let query = Literal::positive(Term::parse("c0").apply(&[Term::lambda(
+            Term::bool_type(),
+            Term::atom(KernelAtom::BoundVariable(0)),
+        )]));
+
+        assert_eq!(
+            literals.find_generalization_with_map(&query, &query_context, &kctx),
+            None,
+            "free pattern variables should not bind to escaping bound variables"
+        );
+    }
+
+    #[test]
     fn test_pdt_typesort_should_not_match_type_variable() {
         // Tests that TypeSort (Type itself) should NOT match a pattern type variable.
         //
@@ -1968,10 +1999,11 @@ mod tests {
     }
 
     #[test]
-    fn test_pdt_matching_bound_variable_under_lambda_does_not_panic() {
+    fn test_pdt_rejects_specialization_to_escaping_bound_variable_under_lambda() {
         // Pattern: lambda(Bool => x0), with x0 : Bool.
         // Query:   lambda(Bool => b0), where b0 is bound by the lambda.
-        // Matching should not panic when checking replacement types.
+        // Matching should not panic, and it should reject the escaping-bound-variable
+        // specialization instead of treating it as a valid binding for x0.
         let kctx = KernelContext::new();
         let pattern_lctx = kctx.parse_local(&["Bool"]);
         let pattern_term = Term::lambda(Term::bool_type(), Term::atom(KernelAtom::FreeVariable(0)));
@@ -1992,6 +2024,6 @@ mod tests {
         });
 
         assert!(result.is_ok(), "PDT match should not panic under binders");
-        assert_eq!(result.unwrap(), Some(&"lambda_pattern"));
+        assert_eq!(result.unwrap(), None);
     }
 }
