@@ -355,7 +355,7 @@ impl Environment {
                 None,
                 doc_comments,
                 Some(name_range),
-                statement.to_string(),
+                ts.statement_string(),
             );
         }
 

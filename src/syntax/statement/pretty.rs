@@ -33,6 +33,28 @@ impl TypeclassCondition {
     }
 }
 
+impl TheoremStatement {
+    pub fn statement_string(&self) -> String {
+        let allocator = Arena::<()>::new();
+        let mut doc = if self.axiomatic {
+            allocator.text("axiom")
+        } else {
+            allocator.text("theorem")
+        };
+        if let Some(name_token) = &self.name_token {
+            doc = doc
+                .append(allocator.text(" "))
+                .append(allocator.text(name_token.text()));
+        }
+        doc = write_theorem_pretty(&allocator, doc, &self.type_params, &self.args, &self.claim);
+
+        let mut output = String::new();
+        doc.render_fmt(PRINT_WIDTH, &mut output)
+            .expect("writing theorem statement string should succeed");
+        output
+    }
+}
+
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let allocator = Arena::<()>::new();

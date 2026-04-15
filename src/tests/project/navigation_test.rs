@@ -165,6 +165,59 @@ fn test_hover_with_imports() {
 }
 
 #[test]
+fn test_theorem_hover_and_definition_omit_proof_body() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/main.ac",
+        indoc! {r#"
+        theorem helper {                 // line 1
+            true                         // line 2
+        } by {                           // line 3
+            let hidden: Bool = true      // line 4
+        }
+        // 3456789012345678901234567890
+        theorem uses_helper {            // line 7
+            helper                       // line 8
+        }
+        "#},
+    );
+    p.expect_ok("main");
+    let desc = ModuleDescriptor::name("main");
+    let env = p.get_env(&desc).expect("no env for main");
+
+    let helper_name = ConstantName::Unqualified(env.module_id, "helper".to_string());
+    let definition = p
+        .get_constant_definition_string(&env, &helper_name)
+        .expect("helper should have a definition string");
+    assert!(definition.contains("theorem helper"));
+    assert!(definition.contains("true"));
+    assert!(!definition.contains("} by {"));
+    assert!(!definition.contains("let hidden: Bool = true"));
+
+    let mut hover = None;
+    for line in 7..=9 {
+        for character in 0..20 {
+            let Some(candidate) = p.hover(&env, line, character) else {
+                continue;
+            };
+            let candidate = format!("{:?}", candidate);
+            if candidate.contains("theorem helper") {
+                hover = Some(candidate);
+                break;
+            }
+        }
+        if hover.is_some() {
+            break;
+        }
+    }
+    let hover = hover.expect("hover should exist");
+    assert!(hover.contains("theorem helper"));
+    assert!(hover.contains("true"));
+    assert!(!hover.contains("} by {"));
+    assert!(!hover.contains("let hidden: Bool = true"));
+}
+
+#[test]
 fn test_definition_location_basic() {
     let mut p = Project::new_mock();
     p.mock(
