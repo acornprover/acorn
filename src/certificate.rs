@@ -606,14 +606,10 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
-                let term =
-                    kernel_context
-                        .to_mut()
-                        .lower_term(&value, NewConstantType::Local, None)?;
-                let term = normalize_term(&term);
-                Ok(CertificateStep::Claim(ClaimCodec::claim_from_plain_term(
-                    &term,
+                Ok(CertificateStep::Claim(Self::claim_from_clause_value(
                     kernel_context.to_mut(),
+                    &value,
+                    None,
                 )?))
             };
 
@@ -654,6 +650,18 @@ impl Certificate {
         Some(map)
     }
 
+    /// Lower a clause-shaped certificate value to the canonical empty-map claim form.
+    fn claim_from_clause_value(
+        kernel_context: &mut KernelContext,
+        value: &AcornValue,
+        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
+    ) -> Result<Claim, CodeGenError> {
+        let clause = kernel_context
+            .lower_clause(value, NewConstantType::Local, type_var_map)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        Claim::new(clause, VariableMap::new()).map_err(CodeGenError::GeneratedBadCode)
+    }
+
     /// Wrap a certificate-local boolean value as a proposition so it can use proposition lowering.
     fn local_certificate_proposition(value: &AcornValue, type_params: &[TypeParam]) -> Proposition {
         Proposition::new(
@@ -670,10 +678,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Claim, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term =
-            kernel_context.lower_term(value, NewConstantType::Local, type_var_map.as_ref())?;
-        let term = normalize_term(&term);
-        ClaimCodec::claim_from_plain_term(&term, kernel_context)
+        Self::claim_from_clause_value(kernel_context, value, type_var_map)
     }
 
     /// Lower a witness proposition to the exact clause shape inserted when the witness opens.

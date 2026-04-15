@@ -6,15 +6,13 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::stack::Stack;
-use crate::kernel::atom::{Atom, AtomId};
+use crate::kernel::atom::AtomId;
 use crate::kernel::certificate_step::Claim;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
-use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
-use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -489,35 +487,6 @@ impl ClaimCodec {
         let (function_value, args) =
             Self::evaluate_claim_expression_shape(shape, project, bindings)?;
         Self::claim_from_function_value(function_value, args, kernel_context).map(Some)
-    }
-
-    /// Build a plain claim from an already-lowered boolean term.
-    pub(crate) fn claim_from_plain_term(
-        term: &Term,
-        kernel_context: &mut KernelContext,
-    ) -> Result<Claim, CodeGenError> {
-        if Self::should_preserve_single_literal_claim(term) {
-            if let Some(clause) = Self::try_deserialize_single_literal_clause(term, &[]) {
-                return Self::claim_from_clause(clause);
-            }
-        }
-        if let Some(clause) = Self::try_deserialize_exists_literal_clause(term, &[], kernel_context)
-        {
-            return Self::claim_from_clause(clause);
-        }
-
-        let clause = kernel_context
-            .lower_normalized_clause_term(term, None)
-            .map_err(CodeGenError::GeneratedBadCode)?;
-        if !clause.get_local_context().is_empty() && !Self::clause_references_local_vars(&clause) {
-            let checker_term = kernel_context.term_to_checker_term(term, None)?;
-            let literal = Self::try_term_to_single_checker_literal(&checker_term)
-                .unwrap_or_else(|| Literal::positive(checker_term));
-            let clause = Clause::from_literals_unnormalized(vec![literal], &LocalContext::empty());
-            return Self::claim_from_clause(clause);
-        }
-
-        Self::claim_from_clause(clause)
     }
 
     /// Pick a stable in-scope type when a quoted type parameter needs a concrete instantiation.
@@ -1037,11 +1006,6 @@ impl ClaimCodec {
         Self::claim_with_var_map(clause, var_map)
     }
 
-    /// Construct a claim that has no extra argument map entries.
-    fn claim_from_clause(clause: Clause) -> Result<Claim, CodeGenError> {
-        Claim::new(clause, VariableMap::new()).map_err(CodeGenError::GeneratedBadCode)
-    }
-
     /// Construct a claim from a clause and an explicit variable map.
     fn claim_with_var_map(clause: Clause, var_map: VariableMap) -> Result<Claim, CodeGenError> {
         Claim::new(clause, var_map).map_err(CodeGenError::GeneratedBadCode)
@@ -1054,169 +1018,6 @@ impl ClaimCodec {
             current = inner;
         }
         current
-    }
-
-    /// Detect when a plain claim must preserve its single-literal shape.
-    fn should_preserve_single_literal_claim(term: &Term) -> bool {
-        let body = Self::strip_foralls(term);
-        if let Some(literal) = Self::try_term_to_single_checker_literal(&body) {
-            let mentions_local = literal
-                .left
-                .iter_atoms()
-                .chain(literal.right.iter_atoms())
-                .any(|atom| matches!(atom, Atom::FreeVariable(_) | Atom::BoundVariable(_)));
-            let contains_inline_binder = matches!(
-                literal.left.as_ref().decompose(),
-                Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _)
-                    | Decomposition::Lambda(_, _)
-            ) || matches!(
-                literal.right.as_ref().decompose(),
-                Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _)
-                    | Decomposition::Lambda(_, _)
-            );
-            if contains_inline_binder {
-                return true;
-            }
-            if mentions_local {
-                return true;
-            }
-        }
-
-        let eq_term = if let Some(args) = Self::split_symbol_application(&body, Symbol::Not, 1) {
-            args[0].clone()
-        } else {
-            body
-        };
-        let Some(args) = Self::split_symbol_application(&eq_term, Symbol::Eq, 3) else {
-            return false;
-        };
-        args[0].as_ref().split_pi().is_some()
-            || args[0]
-                .iter_atoms()
-                .any(|atom| matches!(atom, Atom::FreeVariable(_) | Atom::BoundVariable(_)))
-    }
-
-    /// Strip leading `forall`s when checking whether a plain claim should stay literal-shaped.
-    fn strip_foralls(term: &Term) -> Term {
-        let mut body = term.clone();
-        while let Some((_binder_type, binder_body)) = body.as_ref().split_forall() {
-            body = binder_body.to_owned();
-        }
-        body
-    }
-
-    /// Rebuild a single literal clause from a term that already uses checker inline syntax.
-    fn try_deserialize_single_literal_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let mut body = generic_term.clone();
-        while let Some((binder_type, binder_body)) = body.as_ref().split_forall() {
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-        let literal = Self::try_term_to_single_checker_literal(&body)?;
-        Some(Clause::from_literals_unnormalized(
-            vec![literal],
-            &local_context,
-        ))
-    }
-
-    /// Rebuild a single-literal negated-existential claim as a checker clause.
-    fn try_deserialize_exists_literal_clause(
-        generic_term: &Term,
-        type_param_kinds: &[Term],
-        kernel_context: &KernelContext,
-    ) -> Option<Clause> {
-        let mut local_context = LocalContext::empty();
-        for kind in type_param_kinds {
-            local_context.push_type(kind.clone());
-        }
-
-        let args = Self::split_symbol_application(generic_term, Symbol::Not, 1)?;
-        let negate_literal = true;
-        let mut body = args[0].clone();
-
-        let mut saw_exists = false;
-        while let Some((binder_type, binder_body)) = body.as_ref().split_exists() {
-            saw_exists = true;
-            let fresh_var = local_context.push_type(binder_type.to_owned()) as AtomId;
-            body = binder_body
-                .to_owned()
-                .substitute_bound(0, &Term::new_variable(fresh_var))
-                .shift_bound(0, -1);
-        }
-        if !saw_exists {
-            return None;
-        }
-
-        let mut literal = Self::try_term_to_single_checker_literal(&body)?;
-        if negate_literal {
-            literal = literal.negate();
-        }
-        let clause = Clause::from_literals_unnormalized(vec![literal], &local_context);
-        let quoted = kernel_context.quote_clause(&clause, None, None, false);
-        if quoted.has_arbitrary() {
-            return None;
-        }
-        Some(clause)
-    }
-
-    /// Detect whether a quoted plain-claim clause still mentions its local variables.
-    fn clause_references_local_vars(clause: &Clause) -> bool {
-        (0..clause.context.len()).any(|var_id| {
-            clause.literals.iter().any(|literal| {
-                literal.left.has_variable(var_id as AtomId)
-                    || literal.right.has_variable(var_id as AtomId)
-            })
-        })
-    }
-
-    /// Split an application headed by a specific builtin symbol.
-    fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
-        let (head, args) = term.as_ref().split_application_multi()?;
-        if args.len() != arity {
-            return None;
-        }
-        match head.get_head_atom() {
-            Atom::Symbol(s) if *s == symbol => Some(args),
-            _ => None,
-        }
-    }
-
-    /// Convert a checker-inline term back into a single literal when possible.
-    fn try_term_to_single_checker_literal(term: &Term) -> Option<Literal> {
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Not, 1) {
-            if let Some(eq_args) = Self::split_symbol_application(&args[0], Symbol::Eq, 3) {
-                return Some(Literal::not_equals(eq_args[1].clone(), eq_args[2].clone()));
-            }
-            return Some(Literal::negative(args[0].clone()));
-        }
-        if let Some(args) = Self::split_symbol_application(term, Symbol::Eq, 3) {
-            return Some(Literal::equals(args[1].clone(), args[2].clone()));
-        }
-        if Self::split_symbol_application(term, Symbol::And, 2).is_some()
-            || Self::split_symbol_application(term, Symbol::Or, 2).is_some()
-            || matches!(
-                term.as_ref().decompose(),
-                Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _)
-                    | Decomposition::Lambda(_, _)
-            )
-        {
-            return None;
-        }
-        Some(Literal::positive(term.clone()))
     }
 
     /// Return the fixed roundtrip error prefix for claim-with-args serialization.
