@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
-use crate::kernel::cnf::Cnf;
 use crate::kernel::extended_term::ExtendedTerm;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -15,6 +14,136 @@ use crate::kernel::term::Term;
 enum TermBinding {
     Bound,
     Free,
+}
+
+type ClauseLiterals = Vec<Vec<Literal>>;
+
+fn clauses_true() -> ClauseLiterals {
+    vec![]
+}
+
+fn clauses_false() -> ClauseLiterals {
+    vec![vec![]]
+}
+
+fn clauses_from_literal(literal: Literal) -> ClauseLiterals {
+    if literal.is_true_value() {
+        clauses_true()
+    } else if literal.is_false_value() {
+        clauses_false()
+    } else {
+        vec![vec![literal]]
+    }
+}
+
+fn clauses_and(mut left: ClauseLiterals, right: ClauseLiterals) -> ClauseLiterals {
+    left.extend(right);
+    left
+}
+
+fn clauses_and_all(formulas: impl Iterator<Item = ClauseLiterals>) -> ClauseLiterals {
+    let mut result = clauses_true();
+    for formula in formulas {
+        result = clauses_and(result, formula);
+    }
+    result
+}
+
+fn clauses_or(left: ClauseLiterals, right: ClauseLiterals) -> ClauseLiterals {
+    let mut result = vec![];
+    for left_clause in &left {
+        for right_clause in &right {
+            let mut combined = left_clause.clone();
+            combined.extend(right_clause.clone());
+            result.push(combined);
+        }
+    }
+    result
+}
+
+fn clauses_or_all(formulas: impl Iterator<Item = ClauseLiterals>) -> ClauseLiterals {
+    let mut result = clauses_false();
+    for formula in formulas {
+        result = clauses_or(result, formula);
+    }
+    result
+}
+
+fn negate_clauses(clauses: &ClauseLiterals) -> ClauseLiterals {
+    clauses_or_all(
+        clauses.iter().map(|clause| {
+            clauses_and_all(clause.iter().map(|lit| clauses_from_literal(lit.negate())))
+        }),
+    )
+}
+
+fn clauses_to_literal(clauses: ClauseLiterals) -> Option<Literal> {
+    if clauses.is_empty() {
+        Some(Literal::true_value())
+    } else if clauses.len() == 1 && clauses[0].is_empty() {
+        Some(Literal::false_value())
+    } else if clauses.len() == 1 && clauses[0].len() == 1 {
+        Some(
+            clauses
+                .into_iter()
+                .next()
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap(),
+        )
+    } else {
+        None
+    }
+}
+
+fn clauses_as_signed_term(clauses: &ClauseLiterals) -> Option<(&Term, bool)> {
+    if clauses.len() != 1 || clauses[0].len() != 1 {
+        return None;
+    }
+    let literal = &clauses[0][0];
+    if literal.is_signed_term() {
+        Some((&literal.left, literal.positive))
+    } else {
+        None
+    }
+}
+
+fn clauses_match_negated<'a>(
+    clauses: &'a ClauseLiterals,
+    other: &'a ClauseLiterals,
+) -> Option<(&'a Term, bool)> {
+    let (term, sign) = clauses_as_signed_term(clauses)?;
+    let (other_term, other_sign) = clauses_as_signed_term(other)?;
+    if term == other_term && sign != other_sign {
+        Some((term, sign))
+    } else {
+        None
+    }
+}
+
+fn clauses_into_clauses_with_pinned(
+    clauses: ClauseLiterals,
+    local_context: &LocalContext,
+    pinned: usize,
+) -> Vec<Clause> {
+    clauses
+        .into_iter()
+        .filter(|literals| !literals.iter().any(|l| l.is_tautology()))
+        .map(|literals| Clause::new_with_pinned_vars(literals, local_context, pinned))
+        .collect()
+}
+
+fn clause_set_if(
+    condition: Literal,
+    then_clauses: ClauseLiterals,
+    else_clauses: ClauseLiterals,
+) -> ClauseLiterals {
+    let not_condition = clauses_from_literal(condition.negate());
+    let condition = clauses_from_literal(condition);
+    let then_implication = clauses_or(not_condition, then_clauses);
+    let else_implication = clauses_or(condition, else_clauses);
+    clauses_and(then_implication, else_implication)
 }
 
 /// A Clausifier holds state for a single clausification operation.
@@ -147,8 +276,9 @@ impl<'a> Clausifier<'a> {
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
     ) -> Result<Literal, String> {
-        let cnf = self.term_to_cnf(term, !positive, stack, next_var_id, context)?;
-        if let Some(literal) = cnf.to_literal() {
+        if let Some(literal) =
+            self.try_term_to_single_literal(term, positive, stack, next_var_id, context)?
+        {
             return Ok(literal);
         }
 
@@ -306,8 +436,8 @@ impl<'a> Clausifier<'a> {
         }
 
         Ok(self
-            .term_to_cnf(term, !positive, stack, next_var_id, context)?
-            .into_clauses_with_pinned(context, pinned))
+            .term_to_clause_set(term, !positive, stack, next_var_id, context)
+            .map(|clauses| clauses_into_clauses_with_pinned(clauses, context, pinned))?)
     }
 
     fn shallow_clausify_term(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
@@ -337,7 +467,7 @@ impl<'a> Clausifier<'a> {
             if self.split_match_eliminator_application(&args[1]).is_some()
                 || self.split_match_eliminator_application(&args[2]).is_some()
             {
-                // Match eliminator equalities still rely on the old equality-to-CNF lowering
+                // Match eliminator equalities still rely on the old guarded-case clause-set lowering
                 // to produce constructor-guarded case clauses.
                 return self.shallow_clausify_term(term);
             }
@@ -569,23 +699,22 @@ impl<'a> Clausifier<'a> {
             term.get_type_with_context(context, self.kernel_context())
         }
     }
-    /// Term-native CNF conversion.
+    /// Convert an elaborated kernel `Term` into a raw set of literal clauses.
     ///
-    /// This converts an elaborated kernel `Term` into CNF.
-    /// `true` is `[]`, `false` is `[[]]`, and we intentionally leave tautologies
-    /// and redundancy for later clause normalization.
+    /// `true` is `[]`, `false` is `[[]]`, and we intentionally leave tautologies and
+    /// redundancy for later clause normalization.
     ///
     /// The `stack` plays the same role as in value normalization:
     /// `TermBinding::Free` tracks forall-introduced variables and
     /// `TermBinding::Bound` tracks instantiated binder arguments.
-    fn term_to_cnf(
+    fn term_to_clause_set(
         &mut self,
         term: &Term,
         negate: bool,
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
+    ) -> Result<ClauseLiterals, String> {
         match term.as_ref().decompose() {
             crate::kernel::term::Decomposition::ForAll(_, _) => {
                 if !negate {
@@ -593,12 +722,12 @@ impl<'a> Clausifier<'a> {
                     // proposition lowering. Non-leading positive universals stay inline so
                     // they can still match their surface negated form during proof search.
                     let literal = Literal::from_signed_term(term.clone(), true);
-                    Ok(Cnf::from_literal(literal))
+                    Ok(clauses_from_literal(literal))
                 } else {
                     // Keep negated universals inline so later boolean reductions can
                     // open them via existential structure without introducing witnesses here.
                     let literal = Literal::from_signed_term(term.clone(), false);
-                    Ok(Cnf::from_literal(literal))
+                    Ok(clauses_from_literal(literal))
                 }
             }
             crate::kernel::term::Decomposition::Exists(_, _) => {
@@ -606,22 +735,22 @@ impl<'a> Clausifier<'a> {
                     // Keep positive existential formulas inline as signed terms.
                     // This avoids introducing witness terms during clausification.
                     let literal = Literal::from_signed_term(term.clone(), true);
-                    Ok(Cnf::from_literal(literal))
+                    Ok(clauses_from_literal(literal))
                 } else {
                     // Preserve negated existentials inline so they can meet positive
                     // existential conclusions in the indexed resolution path.
                     let literal = Literal::from_signed_term(term.clone(), false);
-                    Ok(Cnf::from_literal(literal))
+                    Ok(clauses_from_literal(literal))
                 }
             }
             _ => {
                 // Builtin logical atoms are recognized by head symbol + arity.
                 if let Some(args) = self.split_symbol_application(term, Symbol::Not, 1) {
-                    return self.term_to_cnf(&args[0], !negate, stack, next_var_id, context);
+                    return self.term_to_clause_set(&args[0], !negate, stack, next_var_id, context);
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::And, 2) {
                     if !negate {
-                        return self.term_and_to_cnf(
+                        return self.term_and_to_clause_set(
                             &args[0],
                             &args[1],
                             false,
@@ -631,7 +760,7 @@ impl<'a> Clausifier<'a> {
                             context,
                         );
                     }
-                    return self.term_or_to_cnf(
+                    return self.term_or_to_clause_set(
                         &args[0],
                         &args[1],
                         true,
@@ -654,11 +783,11 @@ impl<'a> Clausifier<'a> {
                         let inline_term =
                             self.term_to_inline_term(term, stack, next_var_id, context)?;
                         let literal = Literal::from_signed_term(inline_term, !negate);
-                        return Ok(Cnf::from_literal(literal));
+                        return Ok(clauses_from_literal(literal));
                     }
 
                     if !negate {
-                        return self.term_or_to_cnf(
+                        return self.term_or_to_clause_set(
                             &args[0],
                             &args[1],
                             false,
@@ -668,7 +797,7 @@ impl<'a> Clausifier<'a> {
                             context,
                         );
                     }
-                    return self.term_and_to_cnf(
+                    return self.term_and_to_clause_set(
                         &args[0],
                         &args[1],
                         true,
@@ -679,7 +808,7 @@ impl<'a> Clausifier<'a> {
                     );
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::Eq, 3) {
-                    return self.term_eq_to_cnf(
+                    return self.term_eq_to_clause_set(
                         &args[1],
                         &args[2],
                         negate,
@@ -689,16 +818,16 @@ impl<'a> Clausifier<'a> {
                     );
                 }
                 if let Some(args) = self.split_symbol_application(term, Symbol::Ite, 4) {
-                    let cond_cnf =
-                        self.term_to_cnf(&args[1], false, stack, next_var_id, context)?;
-                    let Some(cond_lit) = cond_cnf.to_literal() else {
+                    let cond_clauses =
+                        self.term_to_clause_set(&args[1], false, stack, next_var_id, context)?;
+                    let Some(cond_lit) = clauses_to_literal(cond_clauses) else {
                         return Err("term 'ite' condition is too complicated".to_string());
                     };
-                    let then_cnf =
-                        self.term_to_cnf(&args[2], negate, stack, next_var_id, context)?;
-                    let else_cnf =
-                        self.term_to_cnf(&args[3], negate, stack, next_var_id, context)?;
-                    return Ok(Cnf::cnf_if(cond_lit, then_cnf, else_cnf));
+                    let then_clauses =
+                        self.term_to_clause_set(&args[2], negate, stack, next_var_id, context)?;
+                    let else_clauses =
+                        self.term_to_clause_set(&args[3], negate, stack, next_var_id, context)?;
+                    return Ok(clause_set_if(cond_lit, then_clauses, else_clauses));
                 }
 
                 if let Some((function, args)) = term.as_ref().split_application_multi() {
@@ -711,8 +840,13 @@ impl<'a> Clausifier<'a> {
                             for _ in args.iter().take(consumed) {
                                 stack.push(TermBinding::Bound);
                             }
-                            let answer =
-                                self.term_to_cnf(&applied, negate, stack, next_var_id, context);
+                            let answer = self.term_to_clause_set(
+                                &applied,
+                                negate,
+                                stack,
+                                next_var_id,
+                                context,
+                            );
                             stack.truncate(stack.len().saturating_sub(consumed));
                             return answer;
                         }
@@ -722,28 +856,28 @@ impl<'a> Clausifier<'a> {
 
                 if term == &Term::new_true() {
                     return if negate {
-                        Ok(Cnf::false_value())
+                        Ok(clauses_false())
                     } else {
-                        Ok(Cnf::true_value())
+                        Ok(clauses_true())
                     };
                 }
                 if term == &Term::new_false() {
                     return if negate {
-                        Ok(Cnf::true_value())
+                        Ok(clauses_true())
                     } else {
-                        Ok(Cnf::false_value())
+                        Ok(clauses_false())
                     };
                 }
 
                 // Everything else must normalize to a single signed literal.
                 let inline_term = self.term_to_inline_term(term, stack, next_var_id, context)?;
                 let literal = Literal::from_signed_term(inline_term, !negate);
-                Ok(Cnf::from_literal(literal))
+                Ok(clauses_from_literal(literal))
             }
         }
     }
 
-    fn term_and_to_cnf(
+    fn term_and_to_clause_set(
         &mut self,
         left: &Term,
         right: &Term,
@@ -752,13 +886,13 @@ impl<'a> Clausifier<'a> {
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
-        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
-        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
-        Ok(left.and(right))
+    ) -> Result<ClauseLiterals, String> {
+        let left = self.term_to_clause_set(left, negate_left, stack, next_var_id, context)?;
+        let right = self.term_to_clause_set(right, negate_right, stack, next_var_id, context)?;
+        Ok(clauses_and(left, right))
     }
 
-    fn term_or_to_cnf(
+    fn term_or_to_clause_set(
         &mut self,
         left: &Term,
         right: &Term,
@@ -767,10 +901,10 @@ impl<'a> Clausifier<'a> {
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
-        let left = self.term_to_cnf(left, negate_left, stack, next_var_id, context)?;
-        let right = self.term_to_cnf(right, negate_right, stack, next_var_id, context)?;
-        Ok(left.or(right))
+    ) -> Result<ClauseLiterals, String> {
+        let left = self.term_to_clause_set(left, negate_left, stack, next_var_id, context)?;
+        let right = self.term_to_clause_set(right, negate_right, stack, next_var_id, context)?;
+        Ok(clauses_or(left, right))
     }
 
     fn try_inline_term_to_term(&self, term: &Term) -> Result<Option<Term>, String> {
@@ -779,6 +913,96 @@ impl<'a> Clausifier<'a> {
             Some((_t, false)) => Ok(None),
             None => Ok(None),
         }
+    }
+
+    /// Try to lower a top-level boolean term directly to one literal, without going through the
+    /// general clause-set expansion path.
+    ///
+    /// This keeps ordinary proposition lowering shallow: either we recognize one literal
+    /// directly, or we leave the boolean formula inline as a signed term.
+    fn try_term_to_single_literal(
+        &mut self,
+        term: &Term,
+        positive: bool,
+        stack: &mut Vec<TermBinding>,
+        next_var_id: &mut AtomId,
+        context: &mut LocalContext,
+    ) -> Result<Option<Literal>, String> {
+        let Some(args) = self.split_symbol_application(term, Symbol::Eq, 3) else {
+            return Ok(None);
+        };
+
+        // Equality against match eliminators is the remaining case that still genuinely wants
+        // multi-clause guarded-case output. Keep those on the explicit clause-set path.
+        if self.split_match_eliminator_application(&args[1]).is_some()
+            || self.split_match_eliminator_application(&args[2]).is_some()
+        {
+            return Ok(None);
+        }
+
+        let left = &args[1];
+        let right = &args[2];
+        let left_type = self.term_type_for_normalization(left, context);
+        let mut fn_arg_types = vec![];
+        let mut result_type = left_type.clone();
+        while let Some((input, output)) = result_type.as_ref().split_pi() {
+            fn_arg_types.push(input.to_owned());
+            result_type = output.to_owned();
+        }
+
+        if !fn_arg_types.is_empty() {
+            if positive {
+                let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
+                let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
+                let mut args = vec![];
+                for arg_type_term in &fn_arg_types {
+                    let var_id = *next_var_id;
+                    *next_var_id += 1;
+                    context.push_type(arg_type_term.clone());
+                    args.push(Term::new_variable(var_id));
+                }
+                let left = self.extended_term_to_term(left.apply(&args), context)?;
+                let right = self.extended_term_to_term(right.apply(&args), context)?;
+                if result_type == Term::bool_type() {
+                    if let Some(literal) =
+                        self.bool_equality_to_single_literal(&left, &right, true)?
+                    {
+                        return Ok(Some(literal));
+                    }
+                }
+                return Ok(Some(Literal::equals(left, right)));
+            }
+
+            let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
+            let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
+            let left = self.extended_term_to_term(left, context)?;
+            let right = self.extended_term_to_term(right, context)?;
+            return Ok(Some(Literal::not_equals(left, right)));
+        }
+
+        if left_type == Term::bool_type() {
+            if let Some(literal) = self.bool_equality_to_single_literal(left, right, positive)? {
+                return Ok(Some(literal));
+            }
+        }
+
+        Ok(Some(Literal::new(positive, left.clone(), right.clone())))
+    }
+
+    fn bool_equality_to_single_literal(
+        &self,
+        left: &Term,
+        right: &Term,
+        positive: bool,
+    ) -> Result<Option<Literal>, String> {
+        let Some((left_term, left_sign)) = self.try_inline_term_to_signed_term(left)? else {
+            return Ok(None);
+        };
+        let Some((right_term, right_sign)) = self.try_inline_term_to_signed_term(right)? else {
+            return Ok(None);
+        };
+        let literal_positive = (left_sign == right_sign) == positive;
+        Ok(Some(Literal::new(literal_positive, left_term, right_term)))
     }
 
     fn try_inline_term_to_signed_term(&self, term: &Term) -> Result<Option<(Term, bool)>, String> {
@@ -836,7 +1060,7 @@ impl<'a> Clausifier<'a> {
         }
     }
 
-    fn apply_term_to_cnf(
+    fn apply_term_to_clause_set(
         &mut self,
         function: &Term,
         args: Vec<ExtendedTerm>,
@@ -844,7 +1068,7 @@ impl<'a> Clausifier<'a> {
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
+    ) -> Result<ClauseLiterals, String> {
         match function.as_ref().decompose() {
             crate::kernel::term::Decomposition::Lambda(_, _)
             | crate::kernel::term::Decomposition::ForAll(_, _)
@@ -857,7 +1081,7 @@ impl<'a> Clausifier<'a> {
                 for _ in arg_terms.iter().take(consumed) {
                     stack.push(TermBinding::Bound);
                 }
-                let answer = self.term_to_cnf(&applied, negate, stack, next_var_id, context);
+                let answer = self.term_to_clause_set(&applied, negate, stack, next_var_id, context);
                 stack.truncate(stack.len().saturating_sub(consumed));
                 return answer;
             }
@@ -869,18 +1093,18 @@ impl<'a> Clausifier<'a> {
         match extended {
             ExtendedTerm::Term(term) => {
                 let literal = Literal::from_signed_term(term, !negate);
-                Ok(Cnf::from_literal(literal))
+                Ok(clauses_from_literal(literal))
             }
             _ => Err("unhandled case: non-term application".to_string()),
         }
     }
 
-    /// Convert `left = right` (or `!=` when `negate`) to CNF.
+    /// Convert `left = right` (or `!=` when `negate`) to a raw set of literal clauses.
     ///
     /// For function-typed terms, this performs extensional reasoning by applying
     /// fresh variables to both sides, then reducing to equality on results.
     /// Negated higher-order equalities stay as direct literals.
-    fn term_eq_to_cnf(
+    fn term_eq_to_clause_set(
         &mut self,
         left: &Term,
         right: &Term,
@@ -888,11 +1112,11 @@ impl<'a> Clausifier<'a> {
         stack: &mut Vec<TermBinding>,
         next_var_id: &mut AtomId,
         context: &mut LocalContext,
-    ) -> Result<Cnf, String> {
+    ) -> Result<ClauseLiterals, String> {
         if let Some((type_args, scrutinee, cases)) = self.split_match_eliminator_application(right)
         {
             let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
-            let mut answer = Cnf::true_value();
+            let mut answer = clauses_true();
             for (constructor_symbol, case_term) in &cases {
                 let stack_len = stack.len();
                 let (pattern, case_value) = self.instantiate_match_case(
@@ -903,11 +1127,23 @@ impl<'a> Clausifier<'a> {
                     next_var_id,
                     context,
                 )?;
-                let condition =
-                    self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
-                let conclusion =
-                    self.term_eq_to_cnf(left, &case_value, negate, stack, next_var_id, context)?;
-                answer = answer.and(condition.negate().or(conclusion));
+                let condition = self.term_eq_to_clause_set(
+                    &scrutinee,
+                    &pattern,
+                    false,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                let conclusion = self.term_eq_to_clause_set(
+                    left,
+                    &case_value,
+                    negate,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                answer = clauses_and(answer, clauses_or(negate_clauses(&condition), conclusion));
 
                 stack.truncate(stack_len);
             }
@@ -916,7 +1152,7 @@ impl<'a> Clausifier<'a> {
 
         if let Some((type_args, scrutinee, cases)) = self.split_match_eliminator_application(left) {
             let datatype_type_args = type_args[..type_args.len().saturating_sub(1)].to_vec();
-            let mut answer = Cnf::true_value();
+            let mut answer = clauses_true();
             for (constructor_symbol, case_term) in &cases {
                 let stack_len = stack.len();
                 let (pattern, case_value) = self.instantiate_match_case(
@@ -927,11 +1163,23 @@ impl<'a> Clausifier<'a> {
                     next_var_id,
                     context,
                 )?;
-                let condition =
-                    self.term_eq_to_cnf(&scrutinee, &pattern, false, stack, next_var_id, context)?;
-                let conclusion =
-                    self.term_eq_to_cnf(right, &case_value, negate, stack, next_var_id, context)?;
-                answer = answer.and(condition.negate().or(conclusion));
+                let condition = self.term_eq_to_clause_set(
+                    &scrutinee,
+                    &pattern,
+                    false,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                let conclusion = self.term_eq_to_clause_set(
+                    right,
+                    &case_value,
+                    negate,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                answer = clauses_and(answer, clauses_or(negate_clauses(&condition), conclusion));
 
                 stack.truncate(stack_len);
             }
@@ -952,7 +1200,7 @@ impl<'a> Clausifier<'a> {
                 let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
                 let left = self.extended_term_to_term(left, context)?;
                 let right = self.extended_term_to_term(right, context)?;
-                return Ok(Cnf::from_literal(Literal::new(false, left, right)));
+                return Ok(clauses_from_literal(Literal::new(false, left, right)));
             }
 
             if result_type == Term::bool_type() {
@@ -965,11 +1213,23 @@ impl<'a> Clausifier<'a> {
                     context.push_type(arg_type_term.clone());
                     args.push(ExtendedTerm::Term(Term::new_variable(var_id)));
                 }
-                let left_pos =
-                    self.apply_term_to_cnf(left, args.clone(), false, stack, next_var_id, context)?;
-                let left_neg =
-                    self.apply_term_to_cnf(left, args.clone(), true, stack, next_var_id, context)?;
-                let right_pos = self.apply_term_to_cnf(
+                let left_pos = self.apply_term_to_clause_set(
+                    left,
+                    args.clone(),
+                    false,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                let left_neg = self.apply_term_to_clause_set(
+                    left,
+                    args.clone(),
+                    true,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                let right_pos = self.apply_term_to_clause_set(
                     right,
                     args.clone(),
                     false,
@@ -978,23 +1238,26 @@ impl<'a> Clausifier<'a> {
                     context,
                 )?;
                 let right_neg =
-                    self.apply_term_to_cnf(right, args, true, stack, next_var_id, context)?;
+                    self.apply_term_to_clause_set(right, args, true, stack, next_var_id, context)?;
 
-                let result = if let Some((left_term, left_sign)) = left_pos.match_negated(&left_neg)
+                let result = if let Some((left_term, left_sign)) =
+                    clauses_match_negated(&left_pos, &left_neg)
                 {
-                    if let Some((right_term, right_sign)) = right_pos.match_negated(&right_neg) {
+                    if let Some((right_term, right_sign)) =
+                        clauses_match_negated(&right_pos, &right_neg)
+                    {
                         let positive = left_sign == right_sign;
                         let literal = Literal::new(positive, left_term.clone(), right_term.clone());
-                        Cnf::from_literal(literal)
+                        clauses_from_literal(literal)
                     } else {
-                        let l_imp_r = left_neg.or(right_pos);
-                        let r_imp_l = left_pos.or(right_neg);
-                        l_imp_r.and(r_imp_l)
+                        let l_imp_r = clauses_or(left_neg, right_pos);
+                        let r_imp_l = clauses_or(left_pos, right_neg);
+                        clauses_and(l_imp_r, r_imp_l)
                     }
                 } else {
-                    let l_imp_r = left_neg.or(right_pos);
-                    let r_imp_l = left_pos.or(right_neg);
-                    l_imp_r.and(r_imp_l)
+                    let l_imp_r = clauses_or(left_neg, right_pos);
+                    let r_imp_l = clauses_or(left_pos, right_neg);
+                    clauses_and(l_imp_r, r_imp_l)
                 };
                 return Ok(result);
             }
@@ -1009,7 +1272,9 @@ impl<'a> Clausifier<'a> {
                 context.push_type(arg_type_term.clone());
                 args.push(Term::new_variable(var_id));
             }
-            return left.apply(&args).eq_to_cnf(right.apply(&args), false);
+            return left
+                .apply(&args)
+                .eq_to_clause_set(right.apply(&args), false);
         }
 
         if left_type == Term::bool_type() {
@@ -1019,28 +1284,42 @@ impl<'a> Clausifier<'a> {
                 {
                     let positive = (left_sign == right_sign) ^ negate;
                     let literal = Literal::new(positive, left_term, right_term);
-                    return Ok(Cnf::from_literal(literal));
+                    return Ok(clauses_from_literal(literal));
                 }
             }
 
             if negate {
-                let some =
-                    self.term_or_to_cnf(left, right, true, true, stack, next_var_id, context)?;
-                let not_both =
-                    self.term_or_to_cnf(left, right, false, false, stack, next_var_id, context)?;
-                return Ok(some.and(not_both));
+                let some = self.term_or_to_clause_set(
+                    left,
+                    right,
+                    true,
+                    true,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                let not_both = self.term_or_to_clause_set(
+                    left,
+                    right,
+                    false,
+                    false,
+                    stack,
+                    next_var_id,
+                    context,
+                )?;
+                return Ok(clauses_and(some, not_both));
             }
 
             let l_imp_r =
-                self.term_or_to_cnf(left, right, true, false, stack, next_var_id, context)?;
+                self.term_or_to_clause_set(left, right, true, false, stack, next_var_id, context)?;
             let r_imp_l =
-                self.term_or_to_cnf(left, right, false, true, stack, next_var_id, context)?;
-            return Ok(l_imp_r.and(r_imp_l));
+                self.term_or_to_clause_set(left, right, false, true, stack, next_var_id, context)?;
+            return Ok(clauses_and(l_imp_r, r_imp_l));
         }
 
         let left = self.term_to_extended_term(left, stack, next_var_id, context)?;
         let right = self.term_to_extended_term(right, stack, next_var_id, context)?;
-        left.eq_to_cnf(right, negate)
+        left.eq_to_clause_set(right, negate)
     }
 
     fn arg_term_to_extended(
@@ -1602,6 +1881,29 @@ mod tests {
             .expect("term lowering should succeed");
         assert_eq!(clauses.len(), 1);
         assert_eq!(clauses[0].literals.len(), 2);
+    }
+
+    #[test]
+    fn test_boolean_equality_with_negated_side_canonicalizes_to_inequality_literal() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1"], "Bool");
+        let term = Term::eq(
+            Term::bool_type(),
+            Term::not(kernel_context.parse_term("c0")),
+            kernel_context.parse_term("c1"),
+        );
+
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&term, None)
+            .expect("boolean equality should clausify");
+
+        assert_eq!(clauses.len(), 1, "expected a single clause");
+        assert_eq!(clauses[0].literals.len(), 1, "expected a single literal");
+        assert_eq!(
+            clauses[0].literals[0],
+            Literal::not_equals(kernel_context.parse_term("c0"), kernel_context.parse_term("c1")),
+            "expected boolean equality with negated side to collapse to a canonical inequality literal"
+        );
     }
 
     #[test]

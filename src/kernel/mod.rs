@@ -4,7 +4,6 @@ pub mod checker;
 pub mod clause;
 pub mod clause_set;
 pub mod clausifier;
-pub mod cnf;
 pub mod concrete_proof;
 pub mod display;
 pub mod equality_graph;

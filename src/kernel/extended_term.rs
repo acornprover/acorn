@@ -1,10 +1,40 @@
 use crate::kernel::atom::AtomId;
-use crate::kernel::cnf::Cnf;
 use crate::kernel::literal::Literal;
 use crate::kernel::term::Term;
 
-// An ExtendedTerm is like a term in the sense that a comparison between two of them can be converted
-// into a CNF formula.
+type ClauseLiterals = Vec<Vec<Literal>>;
+
+fn clauses_true() -> ClauseLiterals {
+    vec![]
+}
+
+fn clauses_false() -> ClauseLiterals {
+    vec![vec![]]
+}
+
+fn clauses_from_literal(literal: Literal) -> ClauseLiterals {
+    if literal.is_true_value() {
+        clauses_true()
+    } else if literal.is_false_value() {
+        clauses_false()
+    } else {
+        vec![vec![literal]]
+    }
+}
+
+fn literal_if_clauses(
+    condition: Literal,
+    consequence: Literal,
+    alternative: Literal,
+) -> ClauseLiterals {
+    vec![
+        vec![condition.negate(), consequence],
+        vec![condition, alternative],
+    ]
+}
+
+// An ExtendedTerm is like a term in the sense that a comparison between two of them can be
+// converted into a raw set of literal clauses.
 // They can be Boolean or have non-Boolean types.
 #[derive(Clone, Debug)]
 pub enum ExtendedTerm {
@@ -88,17 +118,18 @@ impl ExtendedTerm {
         }
     }
 
-    /// Convert an equality comparison between this ExtendedTerm and a Term into CNF.
-    fn eq_term_to_cnf(self, term: Term, negate: bool) -> Result<Cnf, String> {
+    /// Convert an equality comparison between this ExtendedTerm and a Term into raw clause
+    /// literals.
+    fn eq_term_to_clause_set(self, term: Term, negate: bool) -> Result<ClauseLiterals, String> {
         match self {
             ExtendedTerm::Term(left) => {
                 let literal = Literal::new(!negate, left, term);
-                Ok(Cnf::from_literal(literal))
+                Ok(clauses_from_literal(literal))
             }
             ExtendedTerm::If(cond, then_t, else_t) => {
                 let then_lit = Literal::new(!negate, then_t, term.clone());
                 let else_lit = Literal::new(!negate, else_t, term);
-                Ok(Cnf::literal_if(cond, then_lit, else_lit))
+                Ok(literal_if_clauses(cond, then_lit, else_lit))
             }
             ExtendedTerm::Lambda(_, t) => Err(format!(
                 "comparison to {} should have been normalized upstream",
@@ -107,11 +138,15 @@ impl ExtendedTerm {
         }
     }
 
-    /// Convert an equality comparison between two ExtendedTerms into CNF.
-    pub fn eq_to_cnf(self, other: ExtendedTerm, negate: bool) -> Result<Cnf, String> {
+    /// Convert an equality comparison between two ExtendedTerms into raw clause literals.
+    pub fn eq_to_clause_set(
+        self,
+        other: ExtendedTerm,
+        negate: bool,
+    ) -> Result<ClauseLiterals, String> {
         match (self, other) {
-            (left, ExtendedTerm::Term(right)) => left.eq_term_to_cnf(right, negate),
-            (ExtendedTerm::Term(left), right) => right.eq_term_to_cnf(left, negate),
+            (left, ExtendedTerm::Term(right)) => left.eq_term_to_clause_set(right, negate),
+            (ExtendedTerm::Term(left), right) => right.eq_term_to_clause_set(left, negate),
             (left, right) => Err(format!(
                 "cannot normalize comparison: {} {} {}",
                 left,
