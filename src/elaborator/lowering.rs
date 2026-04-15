@@ -3,6 +3,7 @@
 //! This module owns the implementation of these conceptual operations:
 //!
 //! - `lower_term`: `AcornValue -> Term`
+//! - `lower_theorem`: theorem propositions to proof-input clauses
 //! - `lower_proposition`: boolean propositions to proof-input clauses
 //! - `lower_clause`: quoted clause values back to exactly one normalized clause
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
@@ -27,7 +28,7 @@ use crate::elaborator::goal::Goal;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
-use crate::elaborator::source::Source;
+use crate::elaborator::source::SourceType;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::lower_value_to_term;
@@ -46,7 +47,6 @@ use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_term;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::trace;
 
 pub(crate) use crate::elaborator::to_term::TypeVarMap;
@@ -84,7 +84,30 @@ pub fn lower_goal(
     kernel_context.lower_goal(goal)
 }
 
+/// Lower one proposition to normalized clauses using kernel context state.
+pub fn lower_proposition_to_clauses(
+    kernel_context: &mut KernelContext,
+    proposition: &Proposition,
+) -> Result<Vec<Clause>, String> {
+    kernel_context.lower_proposition_to_clauses(proposition)
+}
+
+/// Lower one theorem-shaped proposition to normalized clauses using kernel context state.
+pub fn lower_theorem_to_clauses(
+    kernel_context: &mut KernelContext,
+    theorem: &Proposition,
+) -> Result<Vec<Clause>, String> {
+    kernel_context.lower_theorem_to_clauses(theorem)
+}
+
 impl KernelContext {
+    fn is_theorem_proposition(proposition: &Proposition) -> bool {
+        matches!(
+            proposition.source.source_type,
+            SourceType::Axiom(_) | SourceType::Theorem(_)
+        )
+    }
+
     /// Registers an arbitrary type with the type store.
     /// This is needed for certificate checking where type parameters defined
     /// in a let...satisfy statement need to be available for subsequent steps.
@@ -180,9 +203,9 @@ impl KernelContext {
         self.lower_normalized_term_to_clause(term, type_var_map)
     }
 
-    /// Lowers a boolean proposition to clauses via:
+    /// Lowers a proposition value to clauses via:
     /// `AcornValue --elaborate--> Term --kernel normalize--> clauses`.
-    fn lower_proposition_to_clauses(
+    fn lower_value_to_clauses(
         &mut self,
         value: &AcornValue,
         ctype: NewConstantType,
@@ -193,6 +216,39 @@ impl KernelContext {
         let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         self.lower_normalized_proposition_term_to_clauses(&term, type_var_map)
+    }
+
+    /// Lowers a proposition to normalized clauses.
+    pub fn lower_proposition_to_clauses(
+        &mut self,
+        proposition: &Proposition,
+    ) -> Result<Vec<Clause>, String> {
+        let type_var_map = build_type_var_map(self, &proposition.params);
+        let type_var_map = if type_var_map.is_empty() {
+            None
+        } else {
+            Some(type_var_map)
+        };
+        let ctype = if proposition.source.truthiness() == Truthiness::Factual {
+            NewConstantType::Global
+        } else {
+            NewConstantType::Local
+        };
+        self.lower_value_to_clauses(&proposition.value, ctype, type_var_map)
+    }
+
+    /// Lowers a theorem-shaped proposition to normalized clauses.
+    pub fn lower_theorem_to_clauses(
+        &mut self,
+        theorem: &Proposition,
+    ) -> Result<Vec<Clause>, String> {
+        if !Self::is_theorem_proposition(theorem) {
+            return Err(format!(
+                "expected theorem-shaped proposition, got {}",
+                theorem.source.description()
+            ));
+        }
+        self.lower_proposition_to_clauses(theorem)
     }
 
     /// Lowers a quoted clause value to exactly one normalized clause.
@@ -230,6 +286,28 @@ impl KernelContext {
         self.lower_normalized_clause_term(&term, type_var_map)
     }
 
+    fn lower_proposition_to_steps(
+        &mut self,
+        proposition: &Proposition,
+    ) -> Result<Vec<ProofStep>, BuildError> {
+        let clauses = if Self::is_theorem_proposition(proposition) {
+            self.lower_theorem_to_clauses(proposition)
+        } else {
+            self.lower_proposition_to_clauses(proposition)
+        }
+        .map_err(|msg| BuildError::new(proposition.source.range, msg))?;
+
+        let mut steps = vec![];
+        for clause in &clauses {
+            trace!(clause = %clause, "normalized to clause");
+        }
+        for clause in clauses {
+            clause.validate(self);
+            steps.push(ProofStep::assumption(&proposition.source, clause));
+        }
+        Ok(steps)
+    }
+
     /// A single fact can turn into a bunch of proof steps.
     pub fn lower_fact(&mut self, fact: &Fact) -> Result<LoweredFact, BuildError> {
         let mut steps = vec![];
@@ -261,14 +339,10 @@ impl KernelContext {
         }
 
         let source = fact.source().clone();
-        let range = source.range;
 
         {
-            // We keep track of type params to build the type_var_map
-            let propositions: Vec<(AcornValue, Vec<TypeParam>, Source)> = match fact {
-                Fact::Proposition(prop) => {
-                    vec![(prop.value.clone(), prop.params.clone(), prop.source.clone())]
-                }
+            let propositions: Vec<Proposition> = match fact {
+                Fact::Proposition(prop) => vec![prop.as_ref().clone()],
                 Fact::Definition(potential, definition, source) => {
                     let (params, constant) = match potential {
                         PotentialValue::Unresolved(u) => {
@@ -277,8 +351,7 @@ impl KernelContext {
                         PotentialValue::Resolved(c) => (vec![], c.clone()),
                     };
                     let claim = constant.inflate_function_definition(definition.clone());
-                    let prop = Proposition::new(claim, params, source.clone());
-                    vec![(prop.value, prop.params, prop.source)]
+                    vec![Proposition::new(claim, params, source.clone())]
                 }
                 Fact::Extends(..) | Fact::Instance(..) => {
                     // These don't produce propositions
@@ -286,30 +359,8 @@ impl KernelContext {
                 }
             };
 
-            for (value, type_params, source) in propositions {
-                let type_var_map = build_type_var_map(self, &type_params);
-
-                let type_var_map_opt = if type_var_map.is_empty() {
-                    None
-                } else {
-                    Some(type_var_map)
-                };
-                let ctype = if source.truthiness() == Truthiness::Factual {
-                    NewConstantType::Global
-                } else {
-                    NewConstantType::Local
-                };
-                let clauses = self
-                    .lower_proposition_to_clauses(&value, ctype, type_var_map_opt.clone())
-                    .map_err(|msg| BuildError::new(range, msg))?;
-                for clause in &clauses {
-                    trace!(clause = %clause, "normalized to clause");
-                }
-                for clause in clauses {
-                    clause.validate(self);
-                    let step = ProofStep::assumption(&source, clause);
-                    steps.push(step);
-                }
+            for proposition in &propositions {
+                steps.extend(self.lower_proposition_to_steps(proposition)?);
             }
         }
 
@@ -345,8 +396,7 @@ impl KernelContext {
             // Preserve type parameters when creating hypothesis fact
             let hypo_prop = Proposition::new(hypo, prop.params.clone(), prop.source.clone())
                 .with_arg_count(prop.arg_count);
-            let fact = Fact::Proposition(Arc::new(hypo_prop));
-            steps.extend(self.lower_fact(&fact)?.steps);
+            steps.extend(self.lower_proposition_to_steps(&hypo_prop)?);
         }
         // Preserve type parameters when creating counterfactual fact
         let counterfactual_prop = Proposition::new(
@@ -355,16 +405,14 @@ impl KernelContext {
             prop.source.as_negated_goal(),
         )
         .with_arg_count(prop.arg_count);
-        let fact = Fact::Proposition(Arc::new(counterfactual_prop));
-        steps.extend(self.lower_fact(&fact)?.steps);
+        steps.extend(self.lower_proposition_to_steps(&counterfactual_prop)?);
         if let Some(theorem_alias) = &goal.theorem_alias {
             let alias_counterfactual_prop = Proposition::new(
                 theorem_alias.clone().negate(),
                 vec![],
                 prop.source.as_negated_goal(),
             );
-            let fact = Fact::Proposition(Arc::new(alias_counterfactual_prop));
-            steps.extend(self.lower_fact(&fact)?.steps);
+            steps.extend(self.lower_proposition_to_steps(&alias_counterfactual_prop)?);
         }
 
         Ok(LoweredGoal {
@@ -600,7 +648,7 @@ impl KernelContext {
         use crate::kernel::display::DisplayClause;
 
         let actual = self
-            .lower_proposition_to_clauses(value, NewConstantType::Local, None)
+            .lower_value_to_clauses(value, NewConstantType::Local, None)
             .unwrap();
         if actual.len() != expected.len() {
             panic!(
@@ -670,5 +718,48 @@ impl KernelContext {
             }
         }
         clauses
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elaborator::environment::Environment;
+    use crate::elaborator::source::Source;
+
+    #[test]
+    fn test_lower_theorem_to_clauses_accepts_theorem_proposition() {
+        let mut env = Environment::test();
+        env.add("theorem goal(a: Bool) { a }");
+        let theorem = env
+            .nodes
+            .last()
+            .and_then(|node| node.proposition())
+            .expect("expected theorem proposition")
+            .clone();
+
+        let mut theorem_context = KernelContext::new();
+        let theorem_clauses = theorem_context
+            .lower_theorem_to_clauses(&theorem)
+            .expect("theorem lowering should succeed");
+
+        let mut proposition_context = KernelContext::new();
+        let proposition_clauses = proposition_context
+            .lower_proposition_to_clauses(&theorem)
+            .expect("proposition lowering should also succeed");
+
+        assert_eq!(theorem_clauses, proposition_clauses);
+        assert_eq!(theorem_clauses.len(), 1);
+        assert_eq!(theorem_clauses[0].get_local_context().len(), 1);
+    }
+
+    #[test]
+    fn test_lower_theorem_to_clauses_rejects_non_theorem_proposition() {
+        let proposition = Proposition::new(AcornValue::Bool(true), vec![], Source::mock());
+        let mut kernel_context = KernelContext::new();
+        let err = kernel_context
+            .lower_theorem_to_clauses(&proposition)
+            .expect_err("non-theorem proposition should be rejected");
+        assert!(err.contains("expected theorem-shaped proposition"));
     }
 }

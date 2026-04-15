@@ -5,6 +5,10 @@ This document defines the only sanctioned elaborator/kernel boundary.
 Lowering starts at `AcornValue`. Parsing, syntax, and elaboration are separate concerns and are
 not part of this document.
 
+Term lowering crosses the boundary directly from `AcornValue`.
+Proposition and theorem lowering use `Proposition` so type parameters and source/truthiness stay
+attached to the value being lowered.
+
 All conversions between `AcornValue` and kernel `Term`/`Clause` objects must go through
 `src/elaborator/lowering.rs`.
 
@@ -27,16 +31,17 @@ Normalized-form invariants live in [`normalization.md`](normalization.md).
 
 ## Boundary API
 
-These are the conceptual lowering operations:
+This document uses the Rust boundary names directly. The boundary surface today is:
 
-- `lower_term: AcornValue -> Term`
-- `lower_theorem: theorem-shaped AcornValue -> Vec<Clause>`
-- `lower_proposition: proposition-shaped AcornValue -> Vec<Clause>`
-- `lower_clause: clause-shaped AcornValue -> Clause`
-- `quote_term: Term -> AcornValue`
-- `quote_clause: Clause -> AcornValue`
+- `KernelContext::lower_term(...)`
+- `KernelContext::lower_theorem_to_clauses(...)`
+- `KernelContext::lower_proposition_to_clauses(...)`
+- `KernelContext::lower_clause(...)`
+- `KernelContext::quote_term_with_context(...)`
+- `KernelContext::quote_clause(...)`
 
-These are contract names, not necessarily one public Rust function per line.
+There are also top-level wrappers for proposition and theorem lowering, but the core boundary API
+is the `KernelContext` surface above.
 
 ## Contracts
 
@@ -47,15 +52,15 @@ These are contract names, not necessarily one public Rust function per line.
 - lambda structure stays lambda structure
 - logical surface forms become their kernel logical heads
 
-`lower_theorem` lowers theorem syntax:
+`lower_theorem_to_clauses` lowers theorem syntax:
 
 - theorem binders become free variables in the lowered clause context
 - theorem-specific outer binder structure may be interpreted
 - it is distinct from proposition lowering even when the implementation shares machinery
 
-`lower_proposition` is semantic boolean lowering:
+`lower_proposition_to_clauses` is semantic boolean lowering:
 
-- it starts from a boolean `AcornValue`
+- it starts from a `Proposition`
 - it lowers to a `Term`
 - it normalizes that `Term`
 - it lowers the normalized term to clauses
@@ -65,9 +70,9 @@ These are contract names, not necessarily one public Rust function per line.
 
 - it starts from a quoted clause-shaped `AcornValue`
 - it reconstructs exactly one `Clause`
-- it does not first apply the semantic normalization used by `lower_proposition`
+- it does not first apply the semantic normalization used by `lower_proposition_to_clauses`
 
-`quote_term` is general term-to-surface reconstruction.
+`quote_term_with_context` is general term-to-surface reconstruction.
 
 `quote_clause` is the clause codec paired with `lower_clause`.
 
