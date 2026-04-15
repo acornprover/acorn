@@ -104,6 +104,33 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
 }
 
 #[test]
+fn test_specializing_to_bound_variable() {
+    let text = r#"
+    type Elem: axiom
+
+    define app_equal(f: Elem -> Elem, a: Elem, b: Elem) -> Bool {
+        f(a) = f(b)
+    }
+
+    define is_constant(f: Elem -> Elem) -> Bool {
+        forall(a: Elem, b: Elem) {
+            app_equal(f, a, b)
+        }
+    }
+
+    theorem const_fn_is_const(c: Elem) {
+        is_constant(function(x: Elem) { c })
+    }
+
+    theorem should_fail {
+        is_constant(function(x: Elem) { x })
+    }
+    "#;
+
+    verify_fails(text);
+}
+
+#[test]
 fn test_assuming_lhs_of_implication() {
     verify_succeeds(
         r#"
