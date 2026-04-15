@@ -327,24 +327,19 @@ impl<'a> Proof<'a> {
         let reconstructed_steps = concrete_steps.clone();
 
         // Skip direct concrete assumptions because the checker already has them.
+        // Skip fully concrete boolean-reduction outputs only when their source
+        // clause is itself emitted into the certificate. If the source is a
+        // skipped direct assumption, we still need the reduction explicitly.
         // Do not skip simplified outputs of assumptions: those are derived clauses,
         // and later certificate steps may depend on them as prerequisites.
         let mut skip_clauses: HashSet<Clause> = HashSet::new();
-        for (ps_id, step) in &self.steps {
+        let mut skipped_steps: HashMap<ProofStepId, bool> = HashMap::new();
+        for (ps_id, _) in &self.steps {
             let concrete_id = ConcreteStepId::ProofStep(*ps_id);
-            let has_type_params = step
-                .clause
-                .get_local_context()
-                .get_var_types()
-                .iter()
-                .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()));
-            let should_skip = step.rule.is_assumption()
-                && step
-                    .clause
-                    .positive_exists_reduction(kernel_context)
-                    .is_none();
+            let should_skip =
+                should_skip_reconstructed_step(self, *ps_id, kernel_context, &mut skipped_steps)?;
 
-            if should_skip && !step.clause.has_any_variable() && !has_type_params {
+            if should_skip {
                 let Some(cs) = concrete_steps.remove(&concrete_id) else {
                     continue;
                 };
@@ -430,6 +425,54 @@ impl<'a> Proof<'a> {
 
         Ok(ConcreteProof { goal, claims })
     }
+}
+
+fn clause_has_type_params(clause: &Clause) -> bool {
+    clause
+        .get_local_context()
+        .get_var_types()
+        .iter()
+        .any(|t| t.as_ref().is_some_and(|t| t.as_ref().is_type_param_kind()))
+}
+
+fn should_skip_reconstructed_step(
+    proof: &Proof<'_>,
+    step_id: ProofStepId,
+    kernel_context: &KernelContext,
+    skipped_steps: &mut HashMap<ProofStepId, bool>,
+) -> Result<bool, Error> {
+    if let Some(should_skip) = skipped_steps.get(&step_id) {
+        return Ok(*should_skip);
+    }
+
+    let step = proof
+        .step_map
+        .get(&step_id)
+        .ok_or_else(|| Error::internal(format!("missing proof step {step_id:?}")))?;
+    let is_fully_concrete =
+        !step.clause.has_any_variable() && !clause_has_type_params(&step.clause);
+    let should_skip = match &step.rule {
+        Rule::Assumption(_) => {
+            is_fully_concrete
+                && step
+                    .clause
+                    .positive_exists_reduction(kernel_context)
+                    .is_none()
+        }
+        Rule::BooleanReduction(info) => {
+            is_fully_concrete
+                && !should_skip_reconstructed_step(
+                    proof,
+                    ProofStepId::Active(info.id),
+                    kernel_context,
+                    skipped_steps,
+                )?
+        }
+        _ => false,
+    };
+
+    skipped_steps.insert(step_id, should_skip);
+    Ok(should_skip)
 }
 
 // Given a varmap for the conclusion of a proof step, reconstruct varmaps for
@@ -868,7 +911,7 @@ mod tests {
         let final_step = ProofStep::direct(
             &simplified_step,
             Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
-            reduced_clause,
+            reduced_clause.clone(),
             PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
         );
 
@@ -888,6 +931,16 @@ mod tests {
             concrete_clauses.contains(&simplified_clause),
             "expected reconstructed clauses to keep simplified assumption output {}\nactual clauses:\n{}",
             simplified_clause,
+            concrete_clauses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            !concrete_clauses.contains(&reduced_clause),
+            "expected reconstructed clauses to omit redundant boolean reduction {}\nactual clauses:\n{}",
+            reduced_clause,
             concrete_clauses
                 .iter()
                 .map(ToString::to_string)

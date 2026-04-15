@@ -437,8 +437,6 @@ fn test_proving_exact_clause_match() {
             "not h(Foo.foo)",
             "g(Foo.foo) or f(Foo.foo)",
             "not f(Foo.foo) and not g(Foo.foo)",
-            "not g(Foo.foo)",
-            "not f(Foo.foo)",
             "f(Foo.foo)",
         ]
     );
