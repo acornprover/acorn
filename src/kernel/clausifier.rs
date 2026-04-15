@@ -1251,36 +1251,6 @@ impl<'a> Clausifier<'a> {
         self.extended_term_to_term(ext, context)
     }
 
-    /// Lower a normalized clause-shaped term into pre-normalized clauses.
-    ///
-    /// This keeps the full clause structure intact: literals are sorted and the clause context
-    /// is built, but tautologies are preserved and variable IDs are not yet canonicalized.
-    fn term_to_pre_normalized_clauses(&mut self, term: &Term) -> Result<Vec<Clause>, String> {
-        let mut output = vec![];
-        let mut context = LocalContext::empty();
-
-        // In polymorphic mode, pre-allocate space for type variables
-        // This ensures value variable IDs don't collide with type variable IDs
-        let mut next_var_id = if let Some(type_var_map) = self.type_var_map() {
-            // Pre-populate local_context with the type of each type variable.
-            let mut entries: Vec<_> = type_var_map.values().collect();
-            entries.sort_by_key(|(id, _)| *id);
-            for (_, var_type) in entries {
-                context.push_type(var_type.clone());
-            }
-            type_var_map.len() as AtomId
-        } else {
-            0
-        };
-
-        let cnf = self.term_to_cnf(term, false, &mut vec![], &mut next_var_id, &mut context)?;
-        for mut literals in cnf.into_iter() {
-            literals.sort();
-            output.push(Clause::from_literals_unnormalized(literals, &context));
-        }
-        Ok(output)
-    }
-
     /// Lower a normalized clause-shaped term into exactly one normalized clause.
     fn lower_normalized_term_to_clause_with_opening_policy(
         &mut self,
@@ -1439,16 +1409,6 @@ impl KernelContext {
         view.lower_normalized_term_to_clauses(term)
     }
 
-    /// Kernel-owned entry point for converting a term to the checker's pre-normalized clause form.
-    pub fn term_to_checker_clauses(
-        &mut self,
-        term: &Term,
-        type_var_map: Option<HashMap<String, (AtomId, Term)>>,
-    ) -> Result<Vec<Clause>, String> {
-        let mut view = Clausifier::new_mut(self, type_var_map);
-        view.term_to_pre_normalized_clauses(term)
-    }
-
     /// Kernel-owned entry point for lowering an already-normalized clause-shaped term to
     /// exactly one normalized clause.
     pub fn lower_normalized_term_to_clause(
@@ -1490,7 +1450,6 @@ impl KernelContext {
 
 #[cfg(test)]
 mod tests {
-    use super::Clausifier;
     use crate::elaborator::acorn_type::{AcornType, Datatype};
     use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase};
     use crate::elaborator::names::ConstantName;
@@ -1516,11 +1475,9 @@ mod tests {
                 .parse_term("g0")
                 .apply(&[Term::atom(Atom::BoundVariable(0))]),
         );
-        let clauses = {
-            let mut view = Clausifier::new_mut(&mut kernel_context, None);
-            view.term_to_pre_normalized_clauses(&Term::not(forall_term))
-                .expect("negated forall should clausify")
-        };
+        let clauses = kernel_context
+            .lower_normalized_term_to_clauses(&Term::not(forall_term), None)
+            .expect("negated forall should clausify");
 
         assert_eq!(
             clauses.len(),
