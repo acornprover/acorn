@@ -13,9 +13,20 @@ Use this skill when the user asks to profile the Acorn prover. This generates a 
 ## Available profiling targets
 
 - `profile_reprove` - Profiles reproving `real.double_sum` module (representative prover workload)
-- `profile_reverify` - Profiles reverification
+- `profile_check` - Profiles check mode
 
 Ask the user which target to profile if not specified.
+
+## Recording results in `PROFILE.md`
+
+After every profiling run, update `PROFILE.md` in the repo root.
+
+Keep one section per profile script:
+
+- `profile_reprove`
+- `profile_check`
+
+For the target you just profiled, replace stale results with the latest run details. Include the date, git hash, machine summary, exact command, runtime numbers, and a brief summary of the top-down breakdown so later runs can be compared for regressions.
 
 ## Platform detection
 
@@ -33,7 +44,7 @@ uname -s
 
 ## Build with frame pointers
 
-Frame pointers are required for accurate call graph profiling. Replace `TARGET` with `reprove` or `reverify`:
+Frame pointers are required for accurate call graph profiling. Replace `TARGET` with `reprove` or `check`:
 
 ```bash
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_TARGET --profile=fastdev
@@ -78,7 +89,7 @@ cargo install samply
 cargo build --bin=profile_TARGET --profile=fastdev
 ```
 
-Replace `TARGET` with `reprove` or `reverify`.
+Replace `TARGET` with `reprove` or `check`.
 
 ## Record profile with samply
 
@@ -108,7 +119,7 @@ The script automatically uses the `.syms.json` file for symbol resolution.
 - Drill down into any component that is >= 10% of total
 - Use indentation to show the call hierarchy
 
-### Example output for `profile_reverify`:
+### Example output for `profile_check`:
 
 ```
 Top-Down Breakdown

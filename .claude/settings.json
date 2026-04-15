@@ -16,7 +16,7 @@
       "Bash(RUSTFLAGS=* cargo build:*)",
       "Bash(RUSTFLAGS=\"-C force-frame-pointers=yes\" cargo build:*)",
       "Bash(time target/fastdev/profile_reprove:*)",
-      "Bash(time target/fastdev/profile_reverify:*)",
+      "Bash(time target/fastdev/profile_check:*)",
       "Bash(perf record:*)",
       "Bash(perf report:*)",
       "Bash(wc:*)",

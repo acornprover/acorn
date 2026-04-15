@@ -61,7 +61,7 @@ name = "profile_scorer"
 test = false
 
 [[bin]]
-name = "profile_reverify"
+name = "profile_check"
 test = false
 
 # Fast, but including debug info.

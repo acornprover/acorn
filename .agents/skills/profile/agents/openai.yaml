@@ -1,0 +1,3 @@
+interface:
+  display_name: "Profile"
+  short_description: "Profile Acorn runs and summarize where time is spent"
