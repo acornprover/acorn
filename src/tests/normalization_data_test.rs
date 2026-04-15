@@ -4,9 +4,6 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::names::DefinedName;
-use crate::elaborator::to_term::{
-    lower_value_to_term_existing, lower_value_to_term_existing_preserving_alias_spelling,
-};
 use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -852,7 +849,8 @@ fn load_target_value(code: &str) -> (KernelContext, AcornValue) {
 fn load_target_term(code: &str) -> (KernelContext, Term) {
     let (mut kernel_context, value) = load_target_value(code);
     value.validate().expect("target value should validate");
-    let term = lower_value_to_term_existing(&mut kernel_context, &value, None)
+    let term = kernel_context
+        .lower_term_existing(&value, None)
         .expect("target should lower to a term");
     (kernel_context, term)
 }
@@ -1041,7 +1039,8 @@ fn test_term_normalization_cases() {
             .expect("quoted normalized term should validate");
 
         let mut roundtrip_context = kernel_context.clone();
-        let lowered_again = lower_value_to_term_existing(&mut roundtrip_context, &quoted, None)
+        let lowered_again = roundtrip_context
+            .lower_term_existing(&quoted, None)
             .expect("quoted normalized term should lower again");
         assert_term_is_already_normalized(&lowered_again, case.name, "roundtripped term");
         assert_eq!(
@@ -1064,12 +1063,9 @@ fn test_kernel_term_roundtrip_cases() {
             .validate()
             .expect("quoted kernel term should validate");
 
-        let roundtripped = lower_value_to_term_existing_preserving_alias_spelling(
-            &mut kernel_context,
-            &quoted,
-            None,
-        )
-        .expect("quoted kernel term should lower again");
+        let roundtripped = kernel_context
+            .lower_term_existing_preserving_alias_spelling(&quoted, None)
+            .expect("quoted kernel term should lower again");
         assert_term_is_already_normalized(&roundtripped, case.name, "roundtripped term");
         assert_eq!(
             term, roundtripped,

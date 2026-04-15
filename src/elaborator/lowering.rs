@@ -8,6 +8,8 @@
 //! - `quote_term` / `quote_clause`: kernel objects back to `AcornValue`
 //!
 //! These are contract names, not necessarily one public Rust function per bullet.
+//! Callers that need to cross the elaborator/kernel boundary should prefer this module's
+//! interface over reaching into `to_term` or kernel clausifier helpers directly.
 //!
 //! The elaborator does not define the normalization policy. Kernel term normalization
 //! lives in `kernel::term_normalization`, and theorem/proposition/clause lowering lives in the
@@ -25,8 +27,13 @@ use crate::elaborator::source::Source;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::lower_value_to_term;
+use crate::elaborator::to_term::lower_value_to_term_existing;
+#[cfg(test)]
+use crate::elaborator::to_term::lower_value_to_term_existing_preserving_alias_spelling;
+use crate::elaborator::to_term::lower_value_to_term_existing_with_stack;
 #[cfg(any(test, feature = "validate"))]
 use crate::elaborator::to_term::lower_value_to_term_preserving_alias_spelling;
+use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -103,6 +110,51 @@ impl KernelContext {
 }
 
 impl KernelContext {
+    /// Lower an `AcornValue` to a kernel `Term`, registering any referenced constants and types.
+    pub fn lower_term(
+        &mut self,
+        value: &AcornValue,
+        ctype: NewConstantType,
+        type_var_map: Option<&TypeVarMap>,
+    ) -> Result<Term, String> {
+        value.validate()?;
+        lower_value_to_term(self, value, ctype, type_var_map)
+    }
+
+    /// Lower an `AcornValue` to a kernel `Term` assuming all referenced symbols are already
+    /// present in the kernel tables.
+    pub(crate) fn lower_term_existing(
+        &mut self,
+        value: &AcornValue,
+        type_var_map: Option<&TypeVarMap>,
+    ) -> Result<Term, String> {
+        value.validate()?;
+        lower_value_to_term_existing(self, value, type_var_map)
+    }
+
+    /// Lower an `AcornValue` to a kernel `Term` with a pre-populated stack of already-open
+    /// free variables.
+    pub(crate) fn lower_term_existing_with_stack(
+        &mut self,
+        value: &AcornValue,
+        type_var_map: Option<&TypeVarMap>,
+        initial_stack: &[Term],
+    ) -> Result<Term, String> {
+        lower_value_to_term_existing_with_stack(self, value, type_var_map, initial_stack)
+    }
+
+    #[cfg(test)]
+    /// Lower an already-registered `AcornValue` while preserving original instance alias spelling
+    /// for exact roundtrip checks.
+    pub(crate) fn lower_term_existing_preserving_alias_spelling(
+        &mut self,
+        value: &AcornValue,
+        type_var_map: Option<&TypeVarMap>,
+    ) -> Result<Term, String> {
+        value.validate()?;
+        lower_value_to_term_existing_preserving_alias_spelling(self, value, type_var_map)
+    }
+
     /// Lower a term-level proposition into clauses.
     ///
     /// This is the term-native backend for proposition lowering.
@@ -123,15 +175,9 @@ impl KernelContext {
         ctype: NewConstantType,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Vec<Clause>, String> {
-        if let Err(e) = value.validate() {
-            return Err(format!(
-                "validation error: {} while normalizing: {}",
-                e, value
-            ));
-        }
         assert!(value.is_bool_type());
 
-        let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         self.lower_term_to_clauses(&term, type_var_map)
     }
@@ -145,15 +191,9 @@ impl KernelContext {
         ctype: NewConstantType,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Clause, String> {
-        if let Err(e) = value.validate() {
-            return Err(format!(
-                "validation error: {} while lowering clause value: {}",
-                e, value
-            ));
-        }
         assert!(value.is_bool_type());
 
-        let term = lower_value_to_term(self, value, ctype, type_var_map.as_ref())?;
+        let term = self.lower_term(value, ctype, type_var_map.as_ref())?;
         self.lower_normalized_term_to_clause(&term, type_var_map)
     }
 
@@ -165,14 +205,9 @@ impl KernelContext {
         ctype: NewConstantType,
         type_var_map: Option<HashMap<String, (AtomId, Term)>>,
     ) -> Result<Clause, String> {
-        if let Err(e) = value.validate() {
-            return Err(format!(
-                "validation error: {} while lowering clause value: {}",
-                e, value
-            ));
-        }
         assert!(value.is_bool_type());
 
+        value.validate()?;
         let term = lower_value_to_term_preserving_alias_spelling(
             self,
             value,

@@ -6,7 +6,6 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::lower_value_to_term_existing_with_stack;
 use crate::elaborator::to_term::TypeVarMap;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::Claim;
@@ -1074,8 +1073,7 @@ impl ClaimCodec {
                 NewConstantType::Local,
                 &mut kernel_context.type_store,
             );
-            let term = lower_value_to_term_existing_with_stack(
-                kernel_context,
+            let term = kernel_context.lower_term_existing_with_stack(
                 arg,
                 type_var_map.as_ref(),
                 &initial_stack,

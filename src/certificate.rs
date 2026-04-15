@@ -16,7 +16,6 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::stack::Stack;
-use crate::elaborator::to_term::lower_value_to_term_existing;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
@@ -605,7 +604,7 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
-                let term = lower_value_to_term_existing(kernel_context.to_mut(), &value, None)?;
+                let term = kernel_context.to_mut().lower_term_existing(&value, None)?;
                 let term = normalize_term(&term);
                 Ok(CertificateStep::Claim(ClaimCodec::claim_from_plain_term(
                     &term,
@@ -657,7 +656,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Claim, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = kernel_context.lower_term_existing(value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         ClaimCodec::claim_from_plain_term(&term, kernel_context)
     }
@@ -672,7 +671,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Vec<Clause>, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = kernel_context.lower_term_existing(value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         Ok(kernel_context
             .lower_normalized_term_to_clauses(&term, type_var_map)
@@ -689,7 +688,7 @@ impl Certificate {
         type_params: &[TypeParam],
     ) -> Result<Option<Clause>, CodeGenError> {
         let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
-        let term = lower_value_to_term_existing(kernel_context, value, type_var_map.as_ref())?;
+        let term = kernel_context.lower_term_existing(value, type_var_map.as_ref())?;
         let term = normalize_term(&term);
         let checker_term = match kernel_context.term_to_checker_term(&term, type_var_map) {
             Ok(term) => term,
