@@ -1306,6 +1306,7 @@ struct WitnessEmitter<'a> {
     buffered: Vec<usize>,
     emitted: Vec<bool>,
     in_progress: HashSet<AtomId>,
+    emitted_witnesses: Vec<AtomId>,
     output: Vec<CertificateStep>,
 }
 
@@ -1359,6 +1360,7 @@ impl<'a> WitnessEmitter<'a> {
             buffered: Vec::new(),
             emitted: vec![false; num_steps],
             in_progress: HashSet::new(),
+            emitted_witnesses: Vec::new(),
             output: Vec::new(),
         };
         for ids in emitter.referenced_ids.clone() {
@@ -1378,6 +1380,7 @@ impl<'a> WitnessEmitter<'a> {
             self.schedule_step(index, index)?;
             self.flush_buffered(index)?;
         }
+        self.compact_witness_names()?;
         Ok((self.output, self.kernel_context))
     }
 
@@ -1603,7 +1606,178 @@ impl<'a> WitnessEmitter<'a> {
         assert!(matches!(step, CertificateStep::Satisfy(_)));
         self.push_output_step(step)?;
         self.declared.insert(local_id);
+        self.emitted_witnesses.push(local_id);
         let _ = parent_local_id;
+        Ok(())
+    }
+
+    fn emitted_witness_name_order(&self) -> Vec<AtomId> {
+        let mut ordered = self.emitted_witnesses.clone();
+        let emitted: HashSet<_> = ordered.iter().copied().collect();
+
+        let mut remaining: Vec<_> = self
+            .witness_registry
+            .iter()
+            .map(|(&local_id, _)| local_id)
+            .chain(
+                self.synthetic_witness_registry
+                    .iter()
+                    .map(|(&local_id, _)| local_id),
+            )
+            .filter(|local_id| !emitted.contains(local_id))
+            .collect();
+        remaining.sort_unstable();
+        remaining.dedup();
+        ordered.extend(remaining);
+        ordered
+    }
+
+    fn next_compact_witness_name(
+        &self,
+        next_index: &mut u32,
+        module_id: ModuleId,
+        renamed_locals: &HashSet<AtomId>,
+        assigned_names: &HashSet<ConstantName>,
+    ) -> ConstantName {
+        loop {
+            let candidate = ConstantName::unqualified(module_id, &format!("w{}", *next_index));
+            *next_index += 1;
+            if assigned_names.contains(&candidate) {
+                continue;
+            }
+            match self.kernel_context.symbol_table.get_symbol(&candidate) {
+                None => return candidate,
+                Some(Symbol::ScopedConstant(local_id)) if renamed_locals.contains(&local_id) => {
+                    return candidate;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn compact_witness_names(&mut self) -> Result<(), CodeGenError> {
+        if self.emitted_witnesses.is_empty() {
+            return Ok(());
+        }
+
+        let ordered_locals = self.emitted_witness_name_order();
+        let renamed_locals: HashSet<_> = ordered_locals.iter().copied().collect();
+        let mut assigned_names = HashSet::new();
+        let mut final_names = HashMap::new();
+        let mut original_names = HashMap::new();
+        let mut next_index = 0;
+
+        for &local_id in &ordered_locals {
+            let old_name = self
+                .kernel_context
+                .symbol_table
+                .name_for_local_id(local_id)
+                .clone();
+            original_names.insert(local_id, old_name.clone());
+            let new_name = self.next_compact_witness_name(
+                &mut next_index,
+                old_name.module_id(),
+                &renamed_locals,
+                &assigned_names,
+            );
+            assigned_names.insert(new_name.clone());
+            final_names.insert(local_id, new_name);
+        }
+
+        let mut assigned_temp_names = HashSet::new();
+        let mut next_temp_index = 0;
+        let mut temp_names = HashMap::new();
+        for &local_id in &ordered_locals {
+            let module_id = self
+                .kernel_context
+                .symbol_table
+                .name_for_local_id(local_id)
+                .module_id();
+            let temp_name = loop {
+                let candidate =
+                    ConstantName::unqualified(module_id, &format!("w_tmp{}", next_temp_index));
+                next_temp_index += 1;
+                if assigned_temp_names.contains(&candidate) {
+                    continue;
+                }
+                if self
+                    .kernel_context
+                    .symbol_table
+                    .get_symbol(&candidate)
+                    .is_none()
+                {
+                    break candidate;
+                }
+            };
+            assigned_temp_names.insert(temp_name.clone());
+            temp_names.insert(local_id, temp_name);
+        }
+
+        for &local_id in &ordered_locals {
+            let temp_name = temp_names
+                .get(&local_id)
+                .expect("every renamed witness should have a temporary name");
+            self.kernel_context
+                .symbol_table
+                .rename_scoped_constant(local_id, temp_name.clone())
+                .map_err(CodeGenError::GeneratedBadCode)?;
+        }
+
+        for &local_id in &ordered_locals {
+            let final_name = final_names
+                .get(&local_id)
+                .expect("every renamed witness should have a final name");
+            self.kernel_context
+                .symbol_table
+                .rename_scoped_constant(local_id, final_name.clone())
+                .map_err(CodeGenError::GeneratedBadCode)?;
+        }
+
+        let old_to_new: HashMap<ConstantName, ConstantName> = original_names
+            .into_iter()
+            .map(|(local_id, old_name)| {
+                (
+                    old_name,
+                    final_names
+                        .get(&local_id)
+                        .expect("every renamed witness should have a final name")
+                        .clone(),
+                )
+            })
+            .collect();
+
+        let mut emitted_iter = self.emitted_witnesses.iter().copied();
+        for step in &mut self.output {
+            let CertificateStep::Satisfy(satisfy_step) = step else {
+                continue;
+            };
+            let local_id = emitted_iter
+                .next()
+                .expect("every emitted satisfy step should have a witness local id");
+            let renamed_name = final_names
+                .get(&local_id)
+                .expect("emitted witness should have a compacted name");
+            let ConstantName::Unqualified(_, base_name) = renamed_name else {
+                panic!("witness names should remain unqualified");
+            };
+            satisfy_step.name = base_name.clone();
+            satisfy_step.condition = satisfy_step.condition.replace_constants(0, &|constant| {
+                old_to_new.get(&constant.name).map(|new_name| {
+                    AcornValue::constant(
+                        new_name.clone(),
+                        constant.params.clone(),
+                        constant.instance_type.clone(),
+                        constant.generic_type.clone(),
+                        constant.type_param_names.clone(),
+                    )
+                })
+            });
+            if satisfy_step.return_name.is_some() {
+                satisfy_step.return_name = Some(format!("{}_result", base_name));
+            }
+        }
+        debug_assert!(emitted_iter.next().is_none());
+
         Ok(())
     }
 

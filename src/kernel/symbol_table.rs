@@ -819,6 +819,43 @@ impl SymbolTable {
         &self.scoped_constants[atom_id as usize].as_ref().unwrap()
     }
 
+    /// Rename one scoped constant while preserving its local id and type.
+    pub fn rename_scoped_constant(
+        &mut self,
+        atom_id: AtomId,
+        new_name: ConstantName,
+    ) -> Result<(), String> {
+        let Some(old_name) = self.scoped_constants[atom_id as usize].as_ref().cloned() else {
+            return Err(format!(
+                "scoped constant {} has no registered name",
+                atom_id
+            ));
+        };
+        if old_name == new_name {
+            return Ok(());
+        }
+
+        let symbol = Symbol::ScopedConstant(atom_id);
+        if let Some(existing) = self.name_to_symbol.get(&new_name) {
+            if *existing != symbol {
+                return Err(format!(
+                    "cannot rename scoped constant {} from '{}' to '{}': name already maps to {:?}",
+                    atom_id, old_name, new_name, existing
+                ));
+            }
+        }
+
+        self.name_to_symbol.remove(&old_name);
+        self.name_to_symbol.insert(new_name.clone(), symbol);
+        self.scoped_constants[atom_id as usize] = Some(new_name.clone());
+
+        if let Some(poly_info) = self.polymorphic_info.remove(&old_name) {
+            self.polymorphic_info.insert(new_name, poly_info);
+        }
+
+        Ok(())
+    }
+
     /// Make this constant instance an alias for the given name.
     /// If neither of the names map to anything, we create a new entry.
     /// This is rare but can happen if we're aliasing something that was structurally generated.

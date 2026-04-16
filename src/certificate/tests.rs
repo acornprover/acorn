@@ -577,6 +577,99 @@ fn test_named_function_witness_uses_fresh_result_binder_name() {
 }
 
 #[test]
+fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
+    use crate::code_generator::CodeGenerator;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::symbol::Symbol;
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let (_project, bindings, _) = setup_claim_codec_env(
+        r#"
+        theorem goal {
+            true
+        }
+    "#,
+    );
+    let module_id = bindings.module_id();
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let mut kernel_context = KernelContext::new();
+    let exists_reduction = source_clause
+        .positive_exists_reduction(&kernel_context)
+        .expect("expected positive exists reduction");
+    let mut witness_registry = WitnessRegistry::new();
+    let mut last_local_id = None;
+
+    for _ in 0..34 {
+        let opening = witness_registry.open_positive_exists(
+            &mut kernel_context,
+            module_id,
+            &source_clause,
+            &exists_reduction,
+        );
+        last_local_id = opening.term.iter_atoms().find_map(|atom| match atom {
+            Atom::Symbol(Symbol::ScopedConstant(local_id)) => Some(*local_id),
+            _ => None,
+        });
+    }
+    let last_local_id = last_local_id.expect("expected a final witness local id");
+    let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
+    let witness = witness_registry
+        .get(last_local_id)
+        .expect("expected the last witness to remain registered");
+    let specialized_claim = Claim::new(witness.specialized_clause.clone(), VariableMap::new())
+        .expect("specialized witness clause should normalize");
+
+    let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
+        vec![
+            CertificateStep::Claim(candidate_claim),
+            CertificateStep::Claim(specialized_claim),
+        ],
+        &witness_registry,
+        kernel_context,
+        module_id,
+    )
+    .expect("named witness emission should succeed");
+
+    let mut generator = CodeGenerator::new_for_certificate(&bindings);
+    let proof: Vec<_> = emitted
+        .iter()
+        .map(|step| {
+            Certificate::serialize_certificate_step(
+                step,
+                &mut generator,
+                &updated_kernel_context,
+                &bindings,
+            )
+            .expect("certificate step should serialize")
+        })
+        .collect();
+
+    assert_eq!(
+        updated_kernel_context
+            .symbol_table
+            .name_for_local_id(last_local_id)
+            .to_string(),
+        "w0"
+    );
+    let CertificateStep::Satisfy(step) = &emitted[0] else {
+        panic!("expected first emitted step to be the witness declaration");
+    };
+    assert_eq!(step.name, "w0");
+    assert!(
+        proof[0].starts_with("let w0"),
+        "expected compact witness declaration, got {proof:?}"
+    );
+    assert!(
+        proof[1].contains("w0"),
+        "expected later claims to use the compact witness name, got {proof:?}"
+    );
+    assert!(
+        proof.iter().all(|line| !line.contains("w33")),
+        "expected sparse internal witness names to stay out of the emitted proof: {proof:?}"
+    );
+}
+
+#[test]
 fn test_named_function_witness_replays_exact_open_clause() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
     let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
