@@ -641,11 +641,12 @@ impl Prover {
             self.nonfactual_activations += 1;
         }
 
-        if step.clause.is_impossible() {
-            return self.maybe_finish_with_step(step, shallow_only);
-        }
-
-        self.activate(step, kernel_context, shallow_only)
+        let finished = if step.clause.is_impossible() {
+            self.maybe_finish_with_step(step, shallow_only)
+        } else {
+            self.activate(step, kernel_context, shallow_only)
+        };
+        finished
     }
 
     /// Generates new passive clauses, simplifying appropriately, and adds them to the passive set.

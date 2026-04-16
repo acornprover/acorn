@@ -1151,8 +1151,8 @@ impl ProofStep {
                 (Deep, None)
             }
             (Unspent, Unspent)
-                if target_step.truthiness == Truthiness::Counterfactual
-                    && pattern_step.truthiness != Truthiness::Counterfactual =>
+                if pattern_step.is_definition_assumption()
+                    && target_step.truthiness == Truthiness::Counterfactual =>
             {
                 let pattern_root = pattern_step.shallow_opening_root(pattern_id);
                 let target_root = target_step.shallow_opening_root(target_id);
@@ -1163,15 +1163,6 @@ impl ProofStep {
                         target_id: target_root,
                     }),
                 )
-            }
-            // Keep hypothetical rewrites out of the shallow fragment so they
-            // don't consume shallow-search budget.
-            (Unspent, Unspent)
-                if !simplifying
-                    && pattern_step.truthiness == Truthiness::Factual
-                    && target_step.truthiness == Truthiness::Hypothetical =>
-            {
-                (Deep, None)
             }
             _ => (Deep, None),
         }
