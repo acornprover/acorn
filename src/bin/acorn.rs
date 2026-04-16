@@ -115,6 +115,15 @@ fn validate_print_proof_flag(
     Ok(())
 }
 
+fn resolve_target_path(start_path: &std::path::Path, target: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(target);
+    if path.is_relative() {
+        start_path.join(path)
+    } else {
+        path
+    }
+}
+
 fn resolve_print_proof_line_selection(
     start_path: &std::path::Path,
     target: Option<&str>,
@@ -141,7 +150,7 @@ fn resolve_print_proof_line_selection(
     let mut project = Project::new_local(start_path, config).map_err(|e| e.to_string())?;
 
     let descriptor = if target.ends_with(".ac") {
-        let path = std::path::PathBuf::from(target);
+        let path = resolve_target_path(start_path, target);
         project
             .add_target_by_path(&path)
             .map_err(|e| format!("Error loading module: {}", e))?;
@@ -897,7 +906,7 @@ async fn main() {
             // Add target and resolve path, same way as verify does
             let path = if module.ends_with(".ac") {
                 // Treat as a filename
-                let path = std::path::PathBuf::from(&module);
+                let path = resolve_target_path(&current_dir, &module);
                 if let Err(e) = project.add_target_by_path(&path) {
                     println!("Error loading module: {}", e);
                     std::process::exit(1);

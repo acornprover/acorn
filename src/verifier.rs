@@ -7,6 +7,15 @@ use tokio_util::sync::CancellationToken;
 use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder};
 use crate::project::{Project, ProjectConfig};
 
+fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
+    let path = PathBuf::from(target);
+    if path.is_relative() {
+        start_path.join(path)
+    } else {
+        path
+    }
+}
+
 /// Output from running the verifier
 #[derive(Debug)]
 pub struct VerifierOutput {
@@ -76,6 +85,7 @@ impl Verifier {
         target: Option<String>,
     ) -> Result<Self, String> {
         let mut project = Project::new_local(&start_path, config.clone())?;
+        let mut normalized_target = target.clone();
 
         // Add targets to the project
         if let Some(ref target) = target {
@@ -87,8 +97,9 @@ impl Verifier {
                 project.add_target_by_path(&path)?;
             } else if target.ends_with(".ac") {
                 // Looks like a filename
-                let path = PathBuf::from(target);
+                let path = resolve_target_path(&start_path, target);
                 project.add_target_by_path(&path)?;
+                normalized_target = Some(path.to_string_lossy().into_owned());
             } else {
                 project.add_target_by_name(target)?;
             }
@@ -119,7 +130,7 @@ impl Verifier {
 
         Ok(Self {
             project_ptr,
-            target: target.clone(),
+            target: normalized_target,
             line_selection: None,
             goal_index: None,
             exit_on_warning: false,
@@ -439,6 +450,52 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_relative_src_path_uses_canonical_module_cache() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem simple_truth {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier1 = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("src/foo.ac".to_string()),
+        )
+        .unwrap();
+        verifier1.builder.check_hashes = false;
+
+        let output1 = verifier1.run().unwrap();
+        assert_eq!(output1.status, BuildStatus::Good);
+        assert_eq!(output1.metrics.certs_cached, 0);
+        assert_eq!(output1.metrics.searches_total, 1);
+
+        assert!(
+            build.child("foo.jsonl").exists(),
+            "relative src/ path should write the canonical build cache file"
+        );
+
+        let mut verifier2 = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("foo".to_string()),
+        )
+        .unwrap();
+        verifier2.builder.check_hashes = false;
+
+        let output2 = verifier2.run().unwrap();
+        assert_eq!(output2.status, BuildStatus::Good);
+        assert_eq!(output2.metrics.certs_cached, 1);
+        assert_eq!(output2.metrics.searches_total, 0);
+    }
+
+    #[test]
     fn test_single_line_goal_index_selects_specific_goal() {
         let (acornlib, src, _build) = setup();
 
@@ -498,6 +555,39 @@ instance Nat: Two
 
         let error = verifier.run().unwrap_err();
         assert!(error.contains("out of range"));
+    }
+
+    #[test]
+    fn test_single_line_verification_accepts_relative_file_target() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"
+                theorem first {
+                    true
+                }
+
+                theorem second {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("src/test.ac".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(6));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.goals_total, 2);
+        assert_eq!(output.metrics.goals_success, 1);
     }
 
     #[cfg(feature = "validate")]

@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -709,16 +710,7 @@ impl<'a> Builder<'a> {
         // Convert from 1-based (external) to 0-based (internal) line number
         let internal_line_number = external_line_number - 1;
 
-        let module_id = self
-            .project
-            .get_module_id_by_name(target)
-            .ok_or_else(|| format!("Module '{}' not found", target))?;
-
-        let module_descriptor = self
-            .project
-            .get_module_descriptor(module_id)
-            .ok_or_else(|| format!("No descriptor found for module '{}'", target))?
-            .clone();
+        let module_descriptor = self.target_descriptor(target)?;
 
         self.goal_filter = Some(GoalFilter::SingleLine {
             module: module_descriptor,
@@ -743,16 +735,7 @@ impl<'a> Builder<'a> {
         let internal_start = external_start - 1;
         let internal_end = external_end - 1;
 
-        let module_id = self
-            .project
-            .get_module_id_by_name(target)
-            .ok_or_else(|| format!("Module '{}' not found", target))?;
-
-        let module_descriptor = self
-            .project
-            .get_module_descriptor(module_id)
-            .ok_or_else(|| format!("No descriptor found for module '{}'", target))?
-            .clone();
+        let module_descriptor = self.target_descriptor(target)?;
 
         self.goal_filter = Some(GoalFilter::LineRange {
             module: module_descriptor,
@@ -761,6 +744,25 @@ impl<'a> Builder<'a> {
         });
         self.single_line_goal_count = 0;
         Ok(())
+    }
+
+    fn target_descriptor(&self, target: &str) -> Result<ModuleDescriptor, String> {
+        if target.ends_with(".ac") {
+            return self
+                .project
+                .descriptor_from_path(Path::new(target))
+                .map_err(|e| format!("Module '{}' not found: {}", target, e));
+        }
+
+        let module_id = self
+            .project
+            .get_module_id_by_name(target)
+            .ok_or_else(|| format!("Module '{}' not found", target))?;
+
+        self.project
+            .get_module_descriptor(module_id)
+            .cloned()
+            .ok_or_else(|| format!("No descriptor found for module '{}'", target))
     }
 
     pub fn validate_goal_filter(&self) -> Result<(), String> {
