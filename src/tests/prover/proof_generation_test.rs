@@ -104,6 +104,40 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
 }
 
 #[test]
+fn test_replay_of_a_let_satisfy_cert_line() {
+    verify_succeeds(
+        r#"
+        type Thing: axiom
+        type Nat: axiom
+        let zero: Nat = axiom
+        let p: Nat -> Bool = axiom
+        let q: (Thing, Nat) -> Bool = axiom
+
+        axiom pos_implies_nonzero(n: Nat) {
+            p(n) implies n != zero
+        }
+
+        axiom exists_helper(t: Thing) {
+            exists(n: Nat) {
+                p(n) and q(t, n)
+            }
+        }
+
+        theorem goal(t: Thing) {
+            exists(n: Nat) {
+                n != zero and q(t, n)
+            }
+        } by {
+            let (n: Nat) satisfy {
+                p(n) and q(t, n)
+            }
+            n != zero
+        }
+    "#,
+    );
+}
+
+#[test]
 fn test_specializing_to_bound_variable() {
     let text = r#"
     type Elem: axiom

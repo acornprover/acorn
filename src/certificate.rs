@@ -1407,6 +1407,7 @@ impl<'a> WitnessEmitter<'a> {
         if let Some(local_id) = self.claim_replacements.get(&index).copied() {
             self.emit_witness(local_id)?;
             self.emitted[index] = true;
+            self.emit_anchors_for_step(index)?;
             return Ok(());
         }
 
@@ -1519,15 +1520,14 @@ impl<'a> WitnessEmitter<'a> {
         match placement {
             WitnessPlacement::Standalone => {}
             WitnessPlacement::Replace(index) => {
-                if let Some(existing) = self.claim_replacements.insert(index, local_id) {
-                    return Err(CodeGenError::GeneratedBadCode(format!(
-                        "certificate claim {} would introduce both witness x{} and witness x{}",
-                        index + 1,
-                        existing,
-                        local_id
-                    )));
+                if let Some(existing) = self.claim_replacements.get(&index).copied() {
+                    self.claim_anchors.entry(index).or_default().push(local_id);
+                    self.anchor_indices.insert(local_id, index);
+                    debug_assert_ne!(existing, local_id);
+                } else {
+                    self.claim_replacements.insert(index, local_id);
+                    self.replacement_indices.insert(local_id, index);
                 }
-                self.replacement_indices.insert(local_id, index);
             }
             WitnessPlacement::Anchor(index) => {
                 self.claim_anchors.entry(index).or_default().push(local_id);
@@ -1691,27 +1691,36 @@ impl<'a> WitnessEmitter<'a> {
         general_clause: &Clause,
         _witness_name: &impl std::fmt::Display,
     ) -> Result<WitnessPlacement, CodeGenError> {
-        let matching_claims: Vec<usize> = self
+        let exact_specialized_matches: Vec<usize> = self
+            .claim_clauses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                (clause.as_ref() == Some(general_clause)).then_some(index)
+            })
+            .collect();
+        if exact_specialized_matches.len() == 1 {
+            return Ok(WitnessPlacement::Replace(exact_specialized_matches[0]));
+        }
+        if let Some(index) = exact_specialized_matches.first().copied() {
+            // Exact matching claims can legitimately repeat in the displayed proof.
+            // In that case, keep the old anchored behavior instead of deleting an
+            // arbitrary duplicate.
+            return Ok(WitnessPlacement::Anchor(index));
+        }
+
+        let exact_generic_matches: Vec<usize> = self
             .claim_generic_clauses
             .iter()
             .enumerate()
             .filter_map(|(index, clause)| {
-                if self.claim_replacements.contains_key(&index) {
-                    return None;
-                }
-                if clause.as_ref() == Some(general_clause)
-                    || self.claim_clauses[index].as_ref() == Some(general_clause)
-                {
-                    Some(index)
-                } else {
-                    None
-                }
+                (clause.as_ref() == Some(general_clause)).then_some(index)
             })
             .collect();
-        if let Some(index) = matching_claims.first().copied() {
-            // Exact matching claims can legitimately repeat in the displayed proof.
-            // Anchoring at the earliest surviving claim keeps the witness declaration
-            // close to the original justification without requiring uniqueness.
+        if let Some(index) = exact_generic_matches.first().copied() {
+            // Replacing a claim that only matches in generic form can drop a needed
+            // specialization later in the proof, so keep the original claim and
+            // anchor the witness next to it.
             return Ok(WitnessPlacement::Anchor(index));
         }
 
