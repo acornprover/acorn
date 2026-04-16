@@ -4,6 +4,7 @@
 
 <script lang="ts">
   import { onMount } from "svelte";
+  import Citation from "./Citation.svelte";
   import Selection from "./Selection.svelte";
 
   // These are updated to reflect the last valid responses from the extension.
@@ -11,7 +12,7 @@
   let help: Help | null = null;
 
   function handleSelectionResponse(response: SelectionResponse) {
-    if (response.failure || response.goals.length === 0) {
+    if (response.failure || (response.goals.length === 0 && response.citation === null)) {
       // Failure responses should not reach this point.
       console.error("unexpected upstream failure:", response.failure);
       return;
@@ -40,8 +41,16 @@
 </script>
 
 <main>
-  {#if selectionResponse !== null && selectionResponse.goals.length > 0}
-    <Selection {selectionResponse} {showLocation} />
+  {#if selectionResponse !== null && (selectionResponse.goals.length > 0 || selectionResponse.citation !== null)}
+    {#if selectionResponse.citation !== null}
+      <Citation
+        citation={selectionResponse.citation}
+        uri={selectionResponse.uri}
+        {showLocation}
+      />
+    {:else}
+      <Selection {selectionResponse} {showLocation} />
+    {/if}
   {:else}
     {#if help !== null && help.noSelection}
       Select a proposition to see its proof.

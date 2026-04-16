@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::{HoverContents, Location, MarkedString, Position, Rang
 
 use crate::elaborator::names::ConstantName;
 use crate::module::ModuleDescriptor;
-use crate::project::{localize_mock_filename, Project, ProjectConfig};
+use crate::project::{localize_mock_filename, Project, ProjectConfig, SelectionInfo};
 use indoc::indoc;
 
 use super::support::expect_build_ok;
@@ -1107,7 +1107,13 @@ fn test_handle_selection_typeclass_attribute() {
         "handle_selection should succeed: {:?}",
         result.err()
     );
-    let (goal_infos, goal_range) = result.unwrap();
+    let (goal_infos, goal_range) = match result.unwrap() {
+        SelectionInfo::Goals {
+            goal_infos,
+            goal_range,
+        } => (goal_infos, goal_range),
+        SelectionInfo::Citation(_) => panic!("expected goal selection"),
+    };
 
     // Verify we got exactly one goal
     assert_eq!(goal_infos.len(), 1, "Expected exactly one goal");
@@ -1141,5 +1147,71 @@ fn test_handle_selection_typeclass_attribute() {
         main_step.reason.contains("foo_general"),
         "Reason should refer to 'foo_general', not 'foo_specific'. Got: {}",
         main_step.reason
+    );
+}
+
+#[test]
+fn test_handle_selection_citation_returns_expansion() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_dir = temp.path().join("src");
+    let build_dir = temp.path().join("build");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
+
+    let test_file = src_dir.join("main.ac");
+    let content = indoc! {r#"
+        type Nat: axiom
+
+        let foo: Nat -> Bool = axiom
+        let bar: Nat -> Bool = axiom
+        let baz: Nat -> Bool = axiom
+        let a: Nat = axiom
+
+        axiom base_helper(x: Nat) {
+            foo(x) and bar(x) implies baz(x)
+        }
+
+        theorem helper(x: Nat) {
+            foo(x) and bar(x) implies baz(x)
+        } by {
+            if foo(x) and bar(x) {
+                base_helper(x)
+                baz(x)
+            }
+        }
+
+        theorem goal {
+            foo(a) and bar(a) implies baz(a)
+        } by {
+            if foo(a) and bar(a) {
+                helper(a)
+                baz(a)
+            }
+        }
+    "#};
+    std::fs::write(&test_file, content).unwrap();
+
+    let mut project =
+        Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    project.add_target_by_path(&test_file).unwrap();
+    expect_build_ok(&mut project);
+
+    let selection = project
+        .handle_selection(&test_file, 24)
+        .expect("citation selection should succeed");
+    let citation = match selection {
+        SelectionInfo::Citation(citation) => citation,
+        SelectionInfo::Goals { .. } => panic!("expected citation selection"),
+    };
+
+    assert_eq!(citation.selection_text, "helper(a)");
+    assert_eq!(citation.theorem_name.as_deref(), Some("helper"));
+    assert!(citation.theorem_location.is_some());
+    assert!(
+        citation.expansion.contains("foo(a)")
+            && citation.expansion.contains("bar(a)")
+            && citation.expansion.contains("baz(a)"),
+        "expected instantiated normalized expansion, got {}",
+        citation.expansion
     );
 }

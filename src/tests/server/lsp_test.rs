@@ -735,6 +735,83 @@ async fn test_selection_inside_partially_complete_proof() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_selection_returns_citation_payload() {
+    use crate::interfaces::SelectionParams;
+    use indoc::indoc;
+
+    let fx = TestFixture::new();
+
+    let content = indoc! {"
+        type Nat: axiom
+
+        let foo: Nat -> Bool = axiom
+        let bar: Nat -> Bool = axiom
+        let baz: Nat -> Bool = axiom
+        let a: Nat = axiom
+
+        axiom base_helper(x: Nat) {
+            foo(x) and bar(x) implies baz(x)
+        }
+
+        theorem helper(x: Nat) {
+            foo(x) and bar(x) implies baz(x)
+        } by {
+            if foo(x) and bar(x) {
+                base_helper(x)
+                baz(x)
+            }
+        }
+
+        theorem goal {
+            foo(a) and bar(a) implies baz(a)
+        } by {
+            if foo(a) and bar(a) {
+                helper(a)
+                baz(a)
+            }
+        }
+    "};
+    fx.open("test.ac", content, 1).await;
+    fx.save("test.ac", content).await;
+    fx.assert_build_completes().await;
+
+    let url = fx.url("test.ac");
+    let response = fx
+        .server
+        .handle_selection_request(SelectionParams {
+            uri: url,
+            version: 1,
+            selected_line: 24,
+            id: 1,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        response.failure.is_none(),
+        "unexpected failure: {:?}",
+        response.failure
+    );
+    assert!(
+        response.goals.is_empty(),
+        "citation selection should not return goals"
+    );
+    let citation = response
+        .citation
+        .expect("expected citation payload for citation selection");
+    assert_eq!(citation.selection_text, "helper(a)");
+    assert_eq!(citation.theorem_name.as_deref(), Some("helper"));
+    assert!(citation.theorem_location.is_some());
+    assert!(
+        citation.expansion.contains("foo(a)")
+            && citation.expansion.contains("bar(a)")
+            && citation.expansion.contains("baz(a)"),
+        "unexpected citation expansion: {}",
+        citation.expansion
+    );
+}
+
 /// Test that the `building` flag is set to false after a build completes,
 /// even when write_cache is false (bundled library mode).
 /// This was a bug where `building` stayed true forever in bundled mode.

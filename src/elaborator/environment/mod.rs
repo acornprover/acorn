@@ -29,6 +29,8 @@ pub struct CitationStatement {
     /// 1-based line number in the source file.
     pub line: u32,
     pub statement: String,
+    /// The node produced by lowering this citation statement.
+    pub node_index: usize,
     /// The name of the cited theorem, preserving module information.
     /// This is extracted before expand_citation inlines the theorem body.
     pub cited_name: Option<ConstantName>,
@@ -240,10 +242,12 @@ impl Environment {
         &mut self,
         statement: &Statement,
         cited_name: Option<ConstantName>,
+        node_index: usize,
     ) {
         self.citation_statements.push(CitationStatement {
             line: statement.first_line() + 1,
             statement: statement.to_string(),
+            node_index,
             cited_name,
         });
     }
@@ -562,6 +566,47 @@ impl Environment {
         }
 
         panic!("no context found for {} in:\n{}\n", name, names.join("\n"));
+    }
+
+    /// Returns the citation statement and cursor for the selected zero-based line.
+    pub fn citation_cursor_for_line(
+        &self,
+        line: u32,
+    ) -> Option<(NodeCursor<'_>, &CitationStatement)> {
+        fn helper<'a>(
+            env: &'a Environment,
+            line: u32,
+            path: &mut Vec<usize>,
+        ) -> Option<(Vec<usize>, &'a CitationStatement)> {
+            for citation in &env.citation_statements {
+                if citation.line == line + 1 {
+                    let mut full_path = path.clone();
+                    full_path.push(citation.node_index);
+                    return Some((full_path, citation));
+                }
+            }
+
+            for (index, node) in env.nodes.iter().enumerate() {
+                let Some(block) = node.get_block() else {
+                    continue;
+                };
+                if !block.env.covers_line(line) {
+                    continue;
+                }
+
+                path.push(index);
+                if let Some(found) = helper(&block.env, line, path) {
+                    return Some(found);
+                }
+                path.pop();
+            }
+
+            None
+        }
+
+        let mut path = Vec::new();
+        let (path, citation) = helper(self, line, &mut path)?;
+        Some((NodeCursor::from_path(self, &path), citation))
     }
 
     /// Returns the path to a given zero-based line.

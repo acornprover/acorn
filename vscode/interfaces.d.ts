@@ -48,6 +48,14 @@ interface GoalInfo {
   steps: Array<Step> | null;
 }
 
+interface CitationInfo {
+  selectionText: string;
+  range: Range;
+  theoremName: string | null;
+  theoremLocation: Location | null;
+  expansion: string;
+}
+
 interface SelectionResponse {
   uri: string;
   version: number;
@@ -56,6 +64,7 @@ interface SelectionResponse {
   building: boolean;
   goalRange: Range | null;
   goals: Array<GoalInfo>;
+  citation: CitationInfo | null;
   id: number;
 }
 

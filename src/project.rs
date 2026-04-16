@@ -19,8 +19,8 @@ use crate::elaborator::error;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::named_entity::NamedEntity;
-use crate::elaborator::names::ConstantName;
-use crate::interfaces::{GoalInfo, Location, Step};
+use crate::elaborator::names::{ConstantName, DefinedName};
+use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
@@ -33,6 +33,15 @@ pub struct LibraryCitation {
     pub path: String,
     pub line: u32,
     pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionInfo {
+    Goals {
+        goal_infos: Vec<GoalInfo>,
+        goal_range: Option<lsp_types::Range>,
+    },
+    Citation(CitationInfo),
 }
 
 // The Project is responsible for importing different files and assigning them module ids.
@@ -1487,18 +1496,12 @@ impl Project {
     }
 
     /// Handle a selection request for a given file and line number.
-    /// Returns (goal_name, goal_range, steps) or an error message.
+    /// Returns either goal information or citation information for the selected line.
     pub fn handle_selection(
         &self,
         path: &Path,
         selected_line: u32,
-    ) -> Result<
-        (
-            Vec<crate::interfaces::GoalInfo>,
-            Option<tower_lsp::lsp_types::Range>,
-        ),
-        String,
-    > {
+    ) -> Result<SelectionInfo, String> {
         let descriptor = self
             .descriptor_from_path(path)
             .map_err(|e| format!("descriptor_from_path failed: {:?}", e))?;
@@ -1507,6 +1510,12 @@ impl Project {
             LoadState::Ok(env) => env,
             _ => return Err(format!("could not load module from {:?}", descriptor)),
         };
+
+        if let Some((cursor, citation)) = env.citation_cursor_for_line(selected_line) {
+            return Ok(SelectionInfo::Citation(
+                self.create_citation_info(citation, &cursor)?,
+            ));
+        }
 
         let node_path = env
             .path_for_line(selected_line)
@@ -1567,7 +1576,10 @@ impl Project {
             return Err("no goal at this location".to_string());
         }
 
-        Ok((goal_infos, goal_range))
+        Ok(SelectionInfo::Goals {
+            goal_infos,
+            goal_range,
+        })
     }
 
     // Helper function to create a GoalInfo from a goal, its environment, and cursor
@@ -1590,15 +1602,9 @@ impl Project {
                         .source_index
                         .and_then(|i| certificate_steps.get(i))
                         .and_then(|cert_step| match &cert_step.reason {
-                            StepReason::Assumption(source) => self
-                                .path_from_module_id(source.module_id)
-                                .and_then(|path| {
-                                    tower_lsp::lsp_types::Url::from_file_path(path).ok()
-                                })
-                                .map(|uri| Location {
-                                    uri,
-                                    range: source.range,
-                                }),
+                            StepReason::Assumption(source) => {
+                                self.location_from_module_range(source.module_id, source.range)
+                            }
                             _ => None,
                         });
 
@@ -1620,6 +1626,69 @@ impl Project {
             has_cached_proof,
             steps,
         }
+    }
+
+    fn create_citation_info(
+        &self,
+        citation: &crate::elaborator::environment::CitationStatement,
+        cursor: &crate::elaborator::node::NodeCursor,
+    ) -> Result<CitationInfo, String> {
+        let proposition = cursor
+            .node()
+            .proposition()
+            .ok_or_else(|| "citation node does not contain a proposition".to_string())?;
+
+        let mut generator = CodeGenerator::new(cursor.bindings());
+        let mut rendered_clauses = Vec::new();
+        if let Some(lowered_fact) = cursor.node().lowered_fact() {
+            for step in &lowered_fact.steps {
+                let quoted =
+                    lowered_fact
+                        .kernel_context
+                        .quote_clause(&step.clause, None, None, true);
+                rendered_clauses.push(
+                    generator
+                        .value_to_code(&quoted)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+        }
+        if rendered_clauses.is_empty() {
+            rendered_clauses.push(
+                generator
+                    .value_to_code(&proposition.value)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+
+        Ok(CitationInfo {
+            selection_text: citation.statement.trim().to_string(),
+            range: proposition.source.range,
+            theorem_name: citation.cited_name.as_ref().map(|name| name.to_string()),
+            theorem_location: citation
+                .cited_name
+                .as_ref()
+                .and_then(|name| self.definition_location_for_constant(name)),
+            expansion: rendered_clauses.join("\n"),
+        })
+    }
+
+    fn definition_location_for_constant(&self, name: &ConstantName) -> Option<Location> {
+        let module_id = name.module_id();
+        let env = self.get_env_by_id(module_id)?;
+        let range = *env
+            .bindings
+            .get_definition_range(&DefinedName::Constant(name.clone()))?;
+        self.location_from_module_range(module_id, range)
+    }
+
+    fn location_from_module_range(
+        &self,
+        module_id: ModuleId,
+        range: lsp_types::Range,
+    ) -> Option<Location> {
+        let uri = Url::from_file_path(self.path_from_module_id(module_id)?).ok()?;
+        Some(Location { uri, range })
     }
 
     // path is the file we're in.

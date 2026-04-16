@@ -107,6 +107,25 @@ pub struct GoalInfo {
     pub steps: Option<Vec<Step>>,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationInfo {
+    // The selected citation statement, shown in the header.
+    pub selection_text: String,
+
+    // The range of the selected citation in the source document.
+    pub range: Range,
+
+    // The cited theorem name, if available.
+    pub theorem_name: Option<String>,
+
+    // The definition location of the cited theorem, if available.
+    pub theorem_location: Option<Location>,
+
+    // The lowered-and-quoted normalized expansion of the citation.
+    pub expansion: String,
+}
+
 // The SelectionResponse is sent from language server -> extension with information about what
 // is at the selected line, without starting a proof search.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -133,6 +152,9 @@ pub struct SelectionResponse {
     // Information about all goals at this location
     pub goals: Vec<GoalInfo>,
 
+    // Citation information when the selected line is a direct theorem citation.
+    pub citation: Option<CitationInfo>,
+
     // The id for the selection, provided by the extension
     pub id: u32,
 }
@@ -147,6 +169,7 @@ impl SelectionResponse {
             building: false,
             goal_range: None,
             goals: vec![],
+            citation: None,
             id: params.id,
         }
     }

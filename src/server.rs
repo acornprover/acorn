@@ -20,7 +20,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::interfaces::{
     DocumentProgress, ProgressParams, ProgressResponse, SelectionParams, SelectionResponse,
 };
-use crate::project::{Project, ProjectConfig};
+use crate::project::{Project, ProjectConfig, SelectionInfo};
 
 // Trait abstracting the LSP client methods we need
 #[async_trait::async_trait]
@@ -479,7 +479,10 @@ impl AcornLanguageServer {
         }
 
         match project.handle_selection(&path, params.selected_line) {
-            Ok((goal_infos, goal_range)) => {
+            Ok(SelectionInfo::Goals {
+                goal_infos,
+                goal_range,
+            }) => {
                 log(&format!(
                     "selection: {} at line {}, version {}, found {} goal(s)",
                     path.file_name().unwrap().to_string_lossy(),
@@ -489,6 +492,15 @@ impl AcornLanguageServer {
                 ));
                 response.goals = goal_infos;
                 response.goal_range = goal_range;
+            }
+            Ok(SelectionInfo::Citation(citation)) => {
+                log(&format!(
+                    "selection: {} at line {}, version {}, citation",
+                    path.file_name().unwrap().to_string_lossy(),
+                    params.selected_line,
+                    params.version,
+                ));
+                response.citation = Some(citation);
             }
             Err(e) => {
                 // This happens a lot when you click somewhere that doesn't match a goal.

@@ -5,7 +5,7 @@ use acorn::cleaner::{ModuleCleaner, ProjectCleaner};
 use acorn::doc_generator::DocGenerator;
 use acorn::interfaces::GoalInfo;
 use acorn::module::ModuleDescriptor;
-use acorn::project::{Project, ProjectConfig};
+use acorn::project::{Project, ProjectConfig, SelectionInfo};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -928,7 +928,7 @@ async fn main() {
             };
 
             match project.handle_selection(&path, line - 1) {
-                Ok((goal_infos, _range)) => {
+                Ok(SelectionInfo::Goals { goal_infos, .. }) => {
                     let (goal_infos, selected_goal_number) =
                         match filter_selected_goals(goal_infos, goal) {
                             Ok(result) => result,
@@ -997,6 +997,28 @@ async fn main() {
                             }
                         }
                     }
+                }
+                Ok(SelectionInfo::Citation(citation)) => {
+                    if goal.is_some() {
+                        println!("Error: --goal only applies to goal selections");
+                        std::process::exit(1);
+                    }
+
+                    let selection_text = citation.selection_text;
+                    let theorem_name = citation.theorem_name;
+                    let expansion = citation.expansion;
+
+                    println!("{}", selection_text);
+                    println!();
+                    match theorem_name {
+                        Some(theorem_name) => {
+                            println!("Citation of {} expands to:\n", theorem_name);
+                        }
+                        None => {
+                            println!("Citation expands to:\n");
+                        }
+                    }
+                    println!("{}", expansion);
                 }
                 Err(e) => {
                     println!("Error: {}", e);
