@@ -1,10 +1,13 @@
 use im::HashMap;
 use tower_lsp::lsp_types::{HoverContents, Location, MarkedString, Position, Range, Url};
 
+use crate::builder::Builder;
+use crate::elaborator::acorn_type::{AcornType, PotentialType};
 use crate::elaborator::names::ConstantName;
 use crate::module::ModuleDescriptor;
 use crate::project::{localize_mock_filename, Project, ProjectConfig, SelectionInfo};
 use indoc::indoc;
+use tokio_util::sync::CancellationToken;
 
 use super::support::expect_build_ok;
 
@@ -1212,6 +1215,240 @@ fn test_handle_selection_citation_returns_expansion() {
             && citation.expansion.contains("bar(a)")
             && citation.expansion.contains("baz(a)"),
         "expected instantiated normalized expansion, got {}",
+        citation.expansion
+    );
+}
+
+#[test]
+fn test_citation_expansion_prefers_operator_syntax_for_imported_instances() {
+    fn build_allowing_warnings(project: &mut Project) {
+        let mut builder = Builder::new(project, CancellationToken::new(), |_event| {});
+        builder.build();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let src_dir = temp.path().join("src");
+    let build_dir = temp.path().join("build");
+    std::fs::create_dir_all(src_dir.join("myint")).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
+
+    std::fs::write(
+        src_dir.join("zero.ac"),
+        indoc! {r#"
+            typeclass Z: Zero {
+                0: Z
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("add.ac"),
+        indoc! {r#"
+            typeclass A: Add {
+                add: (A, A) -> A
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("mul.ac"),
+        indoc! {r#"
+            typeclass A: Mul {
+                mul: (A, A) -> A
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("lte.ac"),
+        indoc! {r#"
+            typeclass A: LTE {
+                lte: (A, A) -> Bool
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("order.ac"),
+        indoc! {r#"
+            from lte import LTE
+
+            typeclass P: PartialOrder extends LTE
+
+            attributes P: PartialOrder {
+                define lt(self, other: P) -> Bool {
+                    self <= other and self != other
+                }
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("myint/lattice.ac"),
+        indoc! {r#"
+            from add import Add
+            from mul import Mul
+            from lte import LTE
+            from order import PartialOrder
+            from zero import Zero
+
+            type Int: axiom
+            numerals Int
+            let int_zero: Int = axiom
+            let int_add: (Int, Int) -> Int = axiom
+            let int_mul: (Int, Int) -> Int = axiom
+            let int_lte: (Int, Int) -> Bool = axiom
+
+            instance Int: Zero {
+                let 0: Int = int_zero
+            }
+
+            instance Int: Add {
+                define add(self, other: Int) -> Int {
+                    int_add(self, other)
+                }
+            }
+
+            instance Int: Mul {
+                define mul(self, other: Int) -> Int {
+                    int_mul(self, other)
+                }
+            }
+
+            instance Int: LTE {
+                define lte(self, other: Int) -> Bool {
+                    int_lte(self, other)
+                }
+            }
+
+            instance Int: PartialOrder
+
+            theorem division_theorem(m: Int, n: Int) {
+                exists(q: Int, r: Int) {
+                    0 <= r and r < n and m = q * n + r
+                }
+            }
+        "#},
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("myint/default.ac"),
+        indoc! {r#"
+            from myint.lattice import Int, division_theorem
+        "#},
+    )
+    .unwrap();
+
+    let main_content = indoc! {r#"
+        from myint import Int, division_theorem
+        from order import PartialOrder
+
+        let m: Int = axiom
+        let n: Int = axiom
+
+        theorem goal {
+            true
+        } by {
+            division_theorem(m, n)
+            true
+        }
+    "#};
+    let main_path = src_dir.join("main.ac");
+    std::fs::write(&main_path, main_content).unwrap();
+
+    let mut project =
+        Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    project.add_target_by_path(&main_path).unwrap();
+    project.expect_ok("myint.lattice");
+    project.expect_ok("myint");
+    project.expect_ok("main");
+    build_allowing_warnings(&mut project);
+
+    let main_env = project
+        .get_env(&ModuleDescriptor::name("main"))
+        .expect("main env should load");
+    let int_datatype = match main_env
+        .bindings
+        .get_type_for_typename("Int")
+        .expect("Int type should be in scope")
+    {
+        PotentialType::Resolved(AcornType::Data(datatype, params)) if params.is_empty() => {
+            datatype.clone()
+        }
+        other => panic!("expected bare Int datatype, got {:?}", other),
+    };
+    let instance_typeclasses: Vec<_> = main_env
+        .bindings
+        .get_instance_typeclasses(&int_datatype)
+        .map(|tc| tc.name.as_str())
+        .collect();
+    assert!(
+        instance_typeclasses.contains(&"Zero")
+            && instance_typeclasses.contains(&"Add")
+            && instance_typeclasses.contains(&"Mul")
+            && instance_typeclasses.contains(&"LTE"),
+        "expected imported Int metadata to keep Zero/Add/Mul/LTE instances, got {:?}",
+        instance_typeclasses
+    );
+
+    let citation_line = main_content
+        .lines()
+        .enumerate()
+        .find_map(|(i, line)| line.contains("division_theorem(m, n)").then_some(i as u32))
+        .expect("citation line should exist");
+    let citation_cursor = main_env
+        .citation_cursor_for_line(citation_line)
+        .expect("citation line should resolve to a citation cursor")
+        .0;
+    let cursor_typeclasses: Vec<_> = citation_cursor
+        .bindings()
+        .get_instance_typeclasses(&int_datatype)
+        .map(|tc| tc.name.as_str())
+        .collect();
+    assert!(
+        cursor_typeclasses.contains(&"Zero")
+            && cursor_typeclasses.contains(&"Add")
+            && cursor_typeclasses.contains(&"Mul")
+            && cursor_typeclasses.contains(&"LTE"),
+        "expected selected cursor bindings to keep Zero/Add/Mul/LTE instances, got {:?}",
+        cursor_typeclasses
+    );
+
+    let selection = project
+        .handle_selection(&main_path, citation_line)
+        .expect("citation selection should succeed");
+    let citation = match selection {
+        SelectionInfo::Citation(citation) => citation,
+        SelectionInfo::Goals { .. } => panic!("expected citation selection"),
+    };
+
+    assert!(
+        citation.expansion.contains("<="),
+        "expected <= to render in operator syntax, got {}",
+        citation.expansion
+    );
+    assert!(
+        citation.expansion.contains("k1 < n"),
+        "expected < to render in operator syntax, got {}",
+        citation.expansion
+    );
+    assert!(
+        citation.expansion.contains('*') && citation.expansion.contains('+'),
+        "expected + and * to render in operator syntax, got {}",
+        citation.expansion
+    );
+    assert!(
+        !citation.expansion.contains("LTE.lte[")
+            && !citation.expansion.contains("Zero.0[")
+            && !citation.expansion.contains("Add.add[")
+            && !citation.expansion.contains("Mul.mul["),
+        "expected concrete instance implementations to render via operators, got {}",
         citation.expansion
     );
 }

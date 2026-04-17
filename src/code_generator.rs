@@ -45,6 +45,27 @@ pub struct CodeGenerator<'a> {
 }
 
 impl CodeGenerator<'_> {
+    fn public_typeclass_value_for_instance_impl(value: &AcornValue) -> Option<AcornValue> {
+        let AcornValue::Constant(c) = value else {
+            return None;
+        };
+        let ConstantName::InstanceAttribute(_, inst) = &c.name else {
+            return None;
+        };
+
+        Some(AcornValue::constant(
+            ConstantName::typeclass_attr(
+                inst.typeclass.module_id,
+                inst.typeclass.clone(),
+                &inst.attribute,
+            ),
+            vec![AcornType::Data(inst.datatype.clone(), vec![])],
+            c.instance_type.clone(),
+            c.generic_type.clone(),
+            c.type_param_names.clone(),
+        ))
+    }
+
     fn clause_has_only_type_param_locals(clause: &Clause) -> bool {
         clause
             .get_local_context()
@@ -1455,6 +1476,15 @@ impl CodeGenerator<'_> {
                 ))
             }
             AcornValue::Application(fa) => {
+                if let Some(public_function) =
+                    Self::public_typeclass_value_for_instance_impl(&fa.function)
+                {
+                    return self.value_to_expr(
+                        &AcornValue::apply(public_function, fa.args.clone()),
+                        false,
+                    );
+                }
+
                 let mut arg_exprs = vec![];
                 for arg in &fa.args {
                     // We currently never infer the type of arguments from the type of the function.
@@ -1647,22 +1677,8 @@ impl CodeGenerator<'_> {
                 Ok(Expression::Singleton(token))
             }
             AcornValue::Constant(c) => {
-                if let ConstantName::InstanceAttribute(_, inst) = &c.name {
-                    let public_name = ConstantName::typeclass_attr(
-                        inst.typeclass.module_id,
-                        inst.typeclass.clone(),
-                        &inst.attribute,
-                    );
-                    let public_constant = ConstantInstance {
-                        name: public_name,
-                        params: vec![],
-                        instance_type: c.instance_type.clone(),
-                        generic_type: c.instance_type.clone(),
-                        type_param_names: vec![],
-                    };
-                    let const_expr = self.const_to_expr(&public_constant)?;
-                    let datatype = AcornType::Data(inst.datatype.clone(), vec![]);
-                    return self.parametrize_expr(const_expr, &[datatype]);
+                if let Some(public_value) = Self::public_typeclass_value_for_instance_impl(value) {
+                    return self.value_to_expr(&public_value, false);
                 }
 
                 if c.params.len() == 1 {

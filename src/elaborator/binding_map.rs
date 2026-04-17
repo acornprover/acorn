@@ -22,7 +22,7 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::termination_checker::TerminationChecker;
 use crate::elaborator::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
-use crate::module::ModuleId;
+use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::{self, Token, TokenType};
@@ -1616,6 +1616,11 @@ impl BindingMap {
             Some(b) => b,
             None => return Err(name_token.error("could not load bindings for imported module")),
         };
+        if let Some(ModuleDescriptor::Name(parts)) = project.get_module_descriptor(module) {
+            // `from foo import Bar` should still carry over the source module's datatype and
+            // typeclass metadata, even though it doesn't bind the module name itself.
+            self.import_module(parts.clone(), bindings, name_token)?;
+        }
         let entity = Evaluator::new(project, bindings, None).evaluate_name(
             name_token,
             &Stack::new(),
