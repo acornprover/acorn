@@ -115,9 +115,9 @@ fn test_cannot_avoid_inhabitedness_through_resolution_with_concrete_uninhabited_
     }
     "#;
 
-    // The correct result is Exhausted. Current behavior returns Success by deriving
+    // The correct result is shallow exhaustion. Current behavior returns Success by deriving
     // an unsound contradiction via an arbitrary FiniteSet witness.
-    assert_eq!(prove_text(text, "goal"), Outcome::Exhausted);
+    assert_eq!(prove_text(text, "goal"), Outcome::ShallowExhausted);
 }
 
 #[test]

@@ -227,7 +227,8 @@ pub struct Builder<'a> {
     /// Timeout in seconds for proof search. Defaults to 5.0.
     pub timeout_secs: f32,
 
-    /// Maximum number of non-factual activations before returning `Constrained`.
+    /// Maximum number of non-factual activations before returning
+    /// `ShallowExplosion` or `ActivationCap`.
     pub activation_limit: i32,
 }
 
@@ -560,6 +561,14 @@ impl<'a> Builder<'a> {
                 }
                 self.log_verified(goal.first_line, goal.last_line);
             }
+            Outcome::ShallowExhausted => self.log_warning(
+                &goal,
+                &format!("could not be {} (shallow exhaustion)", self.operation_verb),
+            ),
+            Outcome::ShallowExplosion => self.log_warning(
+                &goal,
+                &format!("could not be {} (shallow explosion)", self.operation_verb),
+            ),
             Outcome::Exhausted => self.log_warning(
                 &goal,
                 &format!("could not be {} (exhaustion)", self.operation_verb),
@@ -577,9 +586,9 @@ impl<'a> Builder<'a> {
                 let error = BuildError::goal(&goal, "was interrupted");
                 self.log_build_error(&error);
             }
-            Outcome::Constrained => self.log_warning(
+            Outcome::ActivationCap => self.log_warning(
                 &goal,
-                &format!("could not be {} (constraints)", self.operation_verb),
+                &format!("could not be {} (hit activation cap)", self.operation_verb),
             ),
         }
     }

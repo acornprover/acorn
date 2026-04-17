@@ -763,10 +763,49 @@ impl Prover {
         self.passive_set.push_batch(steps, kernel_context);
     }
 
-    /// The prover will exit with Outcome::Constrained if it hits a constraint:
-    ///   Activating activation_limit nonfactual clauses
-    ///   Going over the time limit, in seconds
-    ///   Activating all shallow steps, if shallow_only is set
+    fn check_shallow_frontier(
+        &mut self,
+        shallow_only: bool,
+        kernel_context: &mut KernelContext,
+    ) -> Option<Outcome> {
+        if !shallow_only || self.passive_set.can_pop_for_verification() {
+            return None;
+        }
+        if let Some(passive_steps) = self.passive_set.get_contradiction() {
+            trace!(
+                target: "acorn::prover::activation",
+                goal = self.goal_name_for_trace(),
+                passive_count = passive_steps.len(),
+                "found passive contradiction at shallow frontier"
+            );
+            self.report_passive_contradiction(passive_steps, kernel_context);
+            let final_step = self.final_step.as_ref().unwrap();
+            if final_step.truthiness == Truthiness::Counterfactual {
+                return Some(Outcome::Success);
+            }
+            if let Some(goal) = &self.goal {
+                if goal.inconsistency_okay {
+                    return Some(Outcome::Success);
+                }
+            }
+            return Some(Outcome::Inconsistent);
+        }
+        trace!(
+            target: "acorn::prover::activation",
+            goal = self.goal_name_for_trace(),
+            active_count = self.active_set.len(),
+            passive_count = self.passive_set.len(),
+            "stopping at shallow frontier"
+        );
+        Some(Outcome::ShallowExhausted)
+    }
+
+    /// Search stops for one of five reasons:
+    ///   Succeeding or finding an inconsistency
+    ///   Exhausting the shallow fragment in test mode
+    ///   Exhausting the full passive set in interactive mode
+    ///   Hitting the activation cap, either shallow or regular
+    ///   Going over the time limit
     pub fn search(&mut self, mode: ProverMode, kernel_context: &KernelContext) -> Outcome {
         let mut search_kernel_context = self
             .kernel_context
@@ -812,34 +851,8 @@ impl Prover {
 
         let start_time = std::time::Instant::now();
         loop {
-            if shallow_only && !self.passive_set.can_pop_for_verification() {
-                if let Some(passive_steps) = self.passive_set.get_contradiction() {
-                    trace!(
-                        target: "acorn::prover::activation",
-                        goal = self.goal_name_for_trace(),
-                        passive_count = passive_steps.len(),
-                        "found passive contradiction at shallow frontier"
-                    );
-                    self.report_passive_contradiction(passive_steps, kernel_context);
-                    let final_step = self.final_step.as_ref().unwrap();
-                    if final_step.truthiness == Truthiness::Counterfactual {
-                        return Outcome::Success;
-                    }
-                    if let Some(goal) = &self.goal {
-                        if goal.inconsistency_okay {
-                            return Outcome::Success;
-                        }
-                    }
-                    return Outcome::Inconsistent;
-                }
-                trace!(
-                    target: "acorn::prover::activation",
-                    goal = self.goal_name_for_trace(),
-                    active_count = self.active_set.len(),
-                    passive_count = self.passive_set.len(),
-                    "stopping at shallow frontier"
-                );
-                return Outcome::Exhausted;
+            if let Some(outcome) = self.check_shallow_frontier(shallow_only, kernel_context) {
+                return outcome;
             }
             if self.activate_next(kernel_context, shallow_only) {
                 // The prover terminated. Determine which outcome that is.
@@ -864,8 +877,17 @@ impl Prover {
                     return Outcome::Interrupted;
                 }
             }
+            if let Some(outcome) = self.check_shallow_frontier(shallow_only, kernel_context) {
+                return outcome;
+            }
+            if self.passive_set.is_empty() {
+                return Outcome::Exhausted;
+            }
             if self.nonfactual_activations >= activation_limit {
-                return Outcome::Constrained;
+                if self.passive_set.can_pop_for_verification() {
+                    return Outcome::ShallowExplosion;
+                }
+                return Outcome::ActivationCap;
             }
             let elapsed = start_time.elapsed().as_secs_f32();
             if elapsed >= seconds {
@@ -1066,9 +1088,60 @@ mod tests {
         );
 
         let bindings = BindingMap::new(ModuleId::default());
-        let formatted = prover.format_active_steps(Outcome::Exhausted, &bindings, &kernel_context);
+        let formatted =
+            prover.format_active_steps(Outcome::ShallowExhausted, &bindings, &kernel_context);
 
         assert!(formatted.contains("Clause 0, shallow, Factual, by assumption:"));
         assert!(!formatted.contains("Clause 0, depth 0, Factual, by assumption:"));
+    }
+
+    #[test]
+    fn test_search_returns_shallow_explosion_when_activation_cap_hits_in_shallow_fragment() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1", "c2"], "Bool");
+
+        let mut step1 = ProofStep::mock("c0 = c1", &kernel_context);
+        step1.truthiness = Truthiness::Counterfactual;
+        let mut step2 = ProofStep::mock("c1 = c2", &kernel_context);
+        step2.truthiness = Truthiness::Counterfactual;
+
+        let mut prover = Prover::new(vec![]);
+        prover.add_steps(vec![step1, step2], &kernel_context);
+
+        let outcome = prover.search_with_context(
+            ProverMode::Interactive {
+                timeout_secs: 1.0,
+                activation_limit: 1,
+            },
+            &mut kernel_context,
+        );
+
+        assert_eq!(outcome, Outcome::ShallowExplosion);
+    }
+
+    #[test]
+    fn test_search_returns_activation_cap_after_leaving_shallow_fragment() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1", "c2"], "Bool");
+
+        let mut step1 = ProofStep::mock("c0 = c1", &kernel_context);
+        step1.truthiness = Truthiness::Counterfactual;
+        step1.shallow_status = ShallowStatus::Deep;
+        let mut step2 = ProofStep::mock("c1 = c2", &kernel_context);
+        step2.truthiness = Truthiness::Counterfactual;
+        step2.shallow_status = ShallowStatus::Deep;
+
+        let mut prover = Prover::new(vec![]);
+        prover.add_steps(vec![step1, step2], &kernel_context);
+
+        let outcome = prover.search_with_context(
+            ProverMode::Interactive {
+                timeout_secs: 1.0,
+                activation_limit: 1,
+            },
+            &mut kernel_context,
+        );
+
+        assert_eq!(outcome, Outcome::ActivationCap);
     }
 }

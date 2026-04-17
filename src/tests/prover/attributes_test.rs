@@ -14,7 +14,7 @@ fn test_infix_addition_goes_left_to_right() {
     theorem antigoal(a: Nat, b: Nat, c: Nat) { Nat.add(a, Nat.add(b, c)) = a + b + c }
     "#;
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
-    assert_eq!(prove_text(text, "antigoal"), Outcome::Exhausted);
+    assert_eq!(prove_text(text, "antigoal"), Outcome::ShallowExhausted);
 }
 
 #[test]

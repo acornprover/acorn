@@ -17,8 +17,11 @@ fn test_no_verify_boolean_soup() {
         "#;
     let outcome = verify(text).expect("verification errored");
     assert!(
-        outcome == Outcome::Exhausted || outcome == Outcome::Timeout,
-        "Expected Exhausted or Timeout, got {}",
+        matches!(
+            outcome,
+            Outcome::ShallowExhausted | Outcome::ShallowExplosion | Outcome::Timeout
+        ),
+        "Expected shallow failure or Timeout, got {}",
         outcome
     );
 }
@@ -302,7 +305,7 @@ fn test_later_import_does_not_help_earlier_goal() {
     processor.set_lowered_goal(normalized_goal);
 
     let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
-    assert_eq!(outcome, Outcome::Exhausted);
+    assert_eq!(outcome, Outcome::ShallowExhausted);
 }
 
 #[test]

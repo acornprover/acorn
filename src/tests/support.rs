@@ -160,7 +160,11 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
             let deep_outcome = if options.deep_followup_on_failure
                 && matches!(
                     shallow_outcome,
-                    Outcome::Exhausted | Outcome::Timeout | Outcome::Constrained
+                    Outcome::ShallowExhausted
+                        | Outcome::ShallowExplosion
+                        | Outcome::Exhausted
+                        | Outcome::Timeout
+                        | Outcome::ActivationCap
                 ) {
                 let deep_outcome = processor.search(
                     ProverMode::Interactive {
@@ -298,9 +302,12 @@ pub fn verify_succeeds_verbose(text: &str) {
 pub fn verify_fails(text: &str) {
     let outcome = verify(text).expect("verification errored");
 
-    if outcome != Outcome::Exhausted {
+    if !matches!(
+        outcome,
+        Outcome::ShallowExhausted | Outcome::ShallowExplosion | Outcome::Timeout
+    ) {
         panic!(
-            "We expected verification to return Exhausted, but we got {}.",
+            "We expected verification to fail shallowly, but we got {}.",
             outcome
         );
     }

@@ -34,22 +34,26 @@ pub enum ProverMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Success,
+    ShallowExhausted,
+    ShallowExplosion,
     Exhausted,
     Inconsistent,
     Interrupted,
     Timeout,
-    Constrained,
+    ActivationCap,
 }
 
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Outcome::Success => write!(f, "Success"),
+            Outcome::ShallowExhausted => write!(f, "ShallowExhausted"),
+            Outcome::ShallowExplosion => write!(f, "ShallowExplosion"),
             Outcome::Exhausted => write!(f, "Exhausted"),
             Outcome::Inconsistent => write!(f, "Inconsistent"),
             Outcome::Interrupted => write!(f, "Interrupted"),
             Outcome::Timeout => write!(f, "Timeout"),
-            Outcome::Constrained => write!(f, "Constrained"),
+            Outcome::ActivationCap => write!(f, "ActivationCap"),
         }
     }
 }

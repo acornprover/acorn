@@ -18,13 +18,13 @@ fn test_backward_specialization_fails() {
             axiom f_one { f(t) }
             theorem goal(x: Thing) { f(x) }
             "#;
-    assert_eq!(prove_thing(text, "goal"), Outcome::Exhausted);
+    assert_eq!(prove_thing(text, "goal"), Outcome::ShallowExhausted);
 }
 
 #[test]
 fn test_axiomatic_values_distinct() {
     let text = "theorem goal { t = t2 }";
-    assert_eq!(prove_thing(text, "goal"), Outcome::Exhausted);
+    assert_eq!(prove_thing(text, "goal"), Outcome::ShallowExhausted);
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn test_prover_avoids_loops() {
             axiom arbitrary(x: Thing) { f(h(x)) or f(x) }
             theorem goal { f(t) }
             "#;
-    assert_eq!(prove_thing(text, "goal"), Outcome::Exhausted);
+    assert_eq!(prove_thing(text, "goal"), Outcome::ShallowExhausted);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn test_synthesis_avoids_loops() {
             axiom foo(x: Thing -> Bool) { x(t) or f(h(t)) }
             theorem goal { f(t2) }
             "#;
-    assert_eq!(prove_thing(text, "goal"), Outcome::Exhausted);
+    assert_eq!(prove_thing(text, "goal"), Outcome::ShallowExhausted);
 }
 
 #[test]
