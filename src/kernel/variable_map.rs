@@ -5,6 +5,7 @@ use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::types::TypeclassId;
 
@@ -60,6 +61,19 @@ pub struct VariableMap {
 }
 
 impl VariableMap {
+    fn split_eq_args(term: TermRef) -> Option<(Term, Term, Term)> {
+        let (head, args) = term.split_application_multi()?;
+        if args.len() != 3 {
+            return None;
+        }
+        match head.as_ref().decompose() {
+            Decomposition::Atom(Atom::Symbol(Symbol::Eq)) => {
+                Some((args[0].clone(), args[1].clone(), args[2].clone()))
+            }
+            _ => None,
+        }
+    }
+
     pub fn new() -> VariableMap {
         VariableMap { map: Vec::new() }
     }
@@ -159,6 +173,62 @@ impl VariableMap {
                 }
                 _ => Some(term.get_type_with_context(context, kernel_context)),
             }
+        }
+
+        if let (
+            Some((general_type, general_left, general_right)),
+            Some((special_type, special_left, special_right)),
+        ) = (Self::split_eq_args(general), Self::split_eq_args(special))
+        {
+            let mut direct = self.clone();
+            if direct.match_terms(
+                general_type.as_ref(),
+                special_type.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) && direct.match_terms(
+                general_left.as_ref(),
+                special_left.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) && direct.match_terms(
+                general_right.as_ref(),
+                special_right.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) {
+                *self = direct;
+                return true;
+            }
+
+            let mut swapped = self.clone();
+            if swapped.match_terms(
+                general_type.as_ref(),
+                special_type.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) && swapped.match_terms(
+                general_left.as_ref(),
+                special_right.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) && swapped.match_terms(
+                general_right.as_ref(),
+                special_left.as_ref(),
+                general_context,
+                special_context,
+                kernel_context,
+            ) {
+                *self = swapped;
+                return true;
+            }
+
+            return false;
         }
 
         // Type checking is only needed when matching a variable to a term.
@@ -746,5 +816,56 @@ mod tests {
             "lambda pattern should not match by binding a free variable to an escaping bound variable"
         );
         assert_eq!(var_map.get_mapping(0), None);
+    }
+
+    #[test]
+    fn test_match_terms_accepts_swapped_nested_eq_sides() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Value");
+        kctx.parse_constant("c0", "Value");
+        kctx.parse_constant("g0", "Value -> Bool");
+        kctx.parse_constant("g1", "Value -> Value");
+        kctx.parse_constant("g2", "(Value, Value) -> Value");
+        kctx.parse_constant("g3", "Value -> Value");
+
+        let general_context = kctx.parse_local(&["Value"]);
+        let special_context = kctx.parse_local(&["Value"]);
+        let value_type = kctx.parse_type("Value");
+        let general = Term::exists(
+            value_type.clone(),
+            Term::and(
+                kctx.parse_term("g0(b0)"),
+                Term::eq(
+                    value_type.clone(),
+                    Term::new_variable(0),
+                    kctx.parse_term("g2(x1, b0)"),
+                ),
+            ),
+        );
+        let special = Term::exists(
+            value_type.clone(),
+            Term::and(
+                kctx.parse_term("g0(b0)"),
+                Term::eq(
+                    value_type,
+                    kctx.parse_term("g2(g3(c0), b0)"),
+                    kctx.parse_term("g1(c0)"),
+                ),
+            ),
+        );
+
+        let mut var_map = VariableMap::new();
+        assert!(
+            var_map.match_terms(
+                general.as_ref(),
+                special.as_ref(),
+                &general_context,
+                &special_context,
+                &kctx,
+            ),
+            "expected specialization to treat nested equality as symmetric"
+        );
+        assert_eq!(var_map.get_mapping(0), Some(&kctx.parse_term("g1(c0)")));
+        assert_eq!(var_map.get_mapping(1), Some(&kctx.parse_term("g3(c0)")));
     }
 }

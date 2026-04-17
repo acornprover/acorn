@@ -32,6 +32,7 @@ impl Scope {
 // We do need a mapping for the output because we may have two complex terms in the output
 // scope that we need to unify, and during this unification we may discover that previously
 // unrelated variables now need to relate to each other.
+#[derive(Clone)]
 pub struct Unifier<'a> {
     maps: Vec<VariableMap>,
 
@@ -71,6 +72,19 @@ fn resolve_type_constraint_kind(
 }
 
 impl<'a> Unifier<'a> {
+    fn split_eq_args(term: TermRef) -> Option<(Term, Term, Term)> {
+        let (head, args) = term.split_application_multi()?;
+        if args.len() != 3 {
+            return None;
+        }
+        match head.as_ref().decompose() {
+            Decomposition::Atom(Atom::Symbol(Symbol::Eq)) => {
+                Some((args[0].clone(), args[1].clone(), args[2].clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Creates a new unifier with the given number of scopes.
     pub fn new(num_scopes: usize, kernel_context: &'a KernelContext) -> Unifier<'a> {
         let mut maps = Vec::with_capacity(num_scopes);
@@ -647,6 +661,30 @@ impl<'a> Unifier<'a> {
         }
         if let Some(i) = term2.atomic_variable() {
             return self.unify_variable(scope2, i, scope1, &term1.to_owned());
+        }
+
+        if let (Some((eq_type1, left1, right1)), Some((eq_type2, left2, right2))) =
+            (Self::split_eq_args(term1), Self::split_eq_args(term2))
+        {
+            let mut direct = self.clone();
+            if direct.unify_internal(scope1, eq_type1.as_ref(), scope2, eq_type2.as_ref())
+                && direct.unify_internal(scope1, left1.as_ref(), scope2, left2.as_ref())
+                && direct.unify_internal(scope1, right1.as_ref(), scope2, right2.as_ref())
+            {
+                *self = direct;
+                return true;
+            }
+
+            let mut swapped = self.clone();
+            if swapped.unify_internal(scope1, eq_type1.as_ref(), scope2, eq_type2.as_ref())
+                && swapped.unify_internal(scope1, left1.as_ref(), scope2, right2.as_ref())
+                && swapped.unify_internal(scope1, right1.as_ref(), scope2, left2.as_ref())
+            {
+                *self = swapped;
+                return true;
+            }
+
+            return false;
         }
 
         match (term1.decompose(), term2.decompose()) {
@@ -2392,6 +2430,60 @@ mod tests {
         assert!(
             !result,
             "Unifying mapped variable with BoundVariable should fail, not panic"
+        );
+    }
+
+    #[test]
+    fn test_unify_exists_terms_with_swapped_nested_eq_sides() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_datatype("Value");
+        ctx.parse_constant("c0", "Value");
+        ctx.parse_constant("g0", "Value -> Bool");
+        ctx.parse_constant("g1", "Value -> Value");
+        ctx.parse_constant("g2", "(Value, Value) -> Value");
+        ctx.parse_constant("g3", "Value -> Value");
+
+        let left_context = ctx.parse_local(&["Value"]);
+        let right_context = ctx.parse_local(&["Value"]);
+        let value_type = ctx.parse_type("Value");
+        let left = Term::exists(
+            value_type.clone(),
+            Term::and(
+                ctx.parse_term("g0(b0)"),
+                Term::eq(
+                    value_type.clone(),
+                    ctx.parse_term("g1(c0)"),
+                    ctx.parse_term("g2(x0, b0)"),
+                ),
+            ),
+        );
+        let right = Term::exists(
+            value_type.clone(),
+            Term::and(
+                ctx.parse_term("g0(b0)"),
+                Term::eq(
+                    value_type,
+                    ctx.parse_term("g2(g3(x0), b0)"),
+                    Term::new_variable(0),
+                ),
+            ),
+        );
+
+        let mut unifier = Unifier::new(3, &ctx);
+        unifier.set_input_context(Scope::LEFT, Box::leak(Box::new(left_context)));
+        unifier.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_context)));
+
+        assert!(
+            unifier.unify(Scope::LEFT, &left, Scope::RIGHT, &right),
+            "expected equality symmetry under exists to allow unification"
+        );
+        assert_eq!(
+            unifier.apply(Scope::LEFT, &Term::new_variable(0)),
+            ctx.parse_term("g3(g1(c0))")
+        );
+        assert_eq!(
+            unifier.apply(Scope::RIGHT, &Term::new_variable(0)),
+            ctx.parse_term("g1(c0)")
         );
     }
 }

@@ -83,6 +83,42 @@ Nevertheless, intuitively it is just one step.
     
 ```
 
+## Reopen Existential With Non Atomic Goal Term
+
+This is a reduced repro of the `rat_base.ac` failure.
+
+The `witness` axiom already has the existential we want. The failing step is
+reopening that existential with the non-atomic term `g(Value.a)` on the left side
+of the equality. If that term is first aliased to a local name, the proof succeeds.
+
+```acorn
+        inductive Value {
+            a
+            b
+        }
+
+        let p: Value -> Bool = axiom
+        let h: (Value, Value) -> Value = axiom
+        let g: Value -> Value = axiom
+
+        axiom witness(m: Value) {
+            exists(q: Value, r: Value) {
+                p(r) and m = h(q, r)
+            }
+        }
+
+        theorem goal {
+            exists(q: Value, r: Value) {
+                p(r) and g(Value.a) = h(q, r)
+            }
+        } by {
+            let (q: Value, r: Value) satisfy {
+                p(r) and g(Value.a) = h(q, r)
+            }
+        }
+        
+```
+
 ## Code Gen Not Losing Conclusion
 
 Reproducing a bug found by Dan.
