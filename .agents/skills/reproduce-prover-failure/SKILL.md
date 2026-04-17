@@ -12,6 +12,9 @@ Use this when:
 This skill is for the `acorn` repo. Use `cargo run`, not the installed `acorn` binary.
 Keep scratch work in `/tmp` or a scratch project. Do **not** edit the bundled library under
 `vscode/extension/acornlib`.
+If your scratch repro uses imports and those imports should resolve against the scratch library
+rather than the default local `acornlib`, run with `--lib /path/to/scratch_project`.
+Do not assume `verify /tmp/.../src/foo.ac` will make imports local by itself.
 
 ## Key Principle
 
@@ -28,8 +31,36 @@ So if an acornlib failure is **not** a shallow explosion, it should reduce to a 
 There are two cases:
 
 1. `ShallowExplosion`
-   This is usually not the kind of thing you can reproduce cleanly in a unit test.
-   Once the evidence points here, stop narrowing and bring it to a human.
+   First determine which kind of shallow explosion it is.
+   Before minimizing, raise the activation cap and inspect the shallow activation trace for a
+   single selected goal, for example:
+
+   ```bash
+   RUST_LOG=acorn::prover::activation=trace \
+   cargo run --profile release -- verify MODULENAME:LINE --read-only --fail-fast --activations 20000 --verbose
+   ```
+
+   `--verbose` requires a single selected line.
+
+   There are two subcases:
+
+   - A single rule or pattern is generating a practically unbounded number of shallow steps.
+     This is the shallow-explosion case that can often be minimized to a clean repro.
+     You can identify it because even after materially raising `--activations`, you still do not
+     reach the end of the shallow frontier.
+     In this case, the reduced repro must also end in `ShallowExplosion`.
+     Do **not** accept `ShallowExhausted`, `Exhausted`, activation-cap failures, or any other
+     non-success outcome as "close enough".
+   - The shallow frontier is just large.
+     In this case, raising `--activations` eventually gets through the shallow frontier or leaves
+     it, and the problem is not a cleanly reproducible unbounded shallow-generation bug.
+     Usually this cannot be reduced to a useful unit test.
+     The goal becomes explaining the shallow search rather than forcing a tiny repro:
+     report how many shallow activations it takes to clear the frontier and what rules or
+     patterns dominate those activations.
+
+   For either subcase, keep minimizing or analyzing until you have tried removing every plausible
+   part of the context and understand which declarations or rules are responsible.
 2. Ordinary prover failure
    Keep narrowing until you have a red repro.
    Do not accept "only fails in full acornlib" unless you have strong evidence that it is really
@@ -61,19 +92,50 @@ Record:
 - the line number if you have one
 - the observed shallow outcome if it is available
 
+For `ShallowExplosion`, also record:
+
+- the activation cap you used
+- whether raising `--activations` still leaves you in `ShallowExplosion`
+- which activated rules or clause patterns dominate the shallow trace
+
 ### 2. Get It Running In A Scratch Repro
 
 If the bug is in acornlib, copy a generous slice of relevant context into `/tmp` or a scratch
 module first.
 If the bug comes from an issue, start from the reported snippet and add only what is missing.
 
+If the scratch repro has imports, make it a real scratch library root with `acorn.toml`, `src/`,
+and `build/`, and verify it with `--lib` pointing at that root, for example:
+
+```bash
+cargo run --profile release -- --lib /tmp/repro verify src/repro.ac --read-only --fail-fast
+```
+
+Without `--lib`, imports may silently resolve against the default local `acornlib`, which does
+not count as a local repro.
+
 The first scratch repro does **not** need to be minimal.
 It only needs to fail in the same way.
+
+For an original `ShallowExplosion`, "the same way" is strict:
+
+- the scratch repro should also end in `ShallowExplosion`
+- if it changes to a different failure mode, treat that as a different bug shape, not progress
+- keep the original shallow-explosion outcome visible as the invariant while reducing
+
+But do this only for the unbounded-shallow-generation subcase.
+If the investigation shows that the original issue is merely a very large but finite shallow
+frontier, do not force a fake minimal repro.
+Instead keep the larger local scratch context and use it to explain the shallow-step breakdown.
 
 ### 3. Narrow Aggressively
 
 Reduce the scratch repro a small step at a time.
 After each reduction, rerun the smallest repro immediately.
+Assume the human wants exhaustive minimization by default.
+Do **not** stop to ask whether to keep pushing.
+Keep going until you have tried removing every plausible declaration, import, proof body,
+definition detail, and module boundary that might still be irrelevant.
 
 Preferred simplifications:
 
@@ -83,6 +145,10 @@ Preferred simplifications:
 - replace supporting theorems that you still use with `axiom`
 - inline only the constants and types needed to keep the goal meaningful
 - remove proof text that is not required for the failure
+- split reductions apart instead of deleting many things at once, so you know exactly which piece
+  preserves the failing outcome
+- when the repro still spans multiple files, try collapsing each imported file independently and
+  also try replacing the whole import with smaller local stand-ins
 
 Do not preserve original structure for its own sake.
 The target is a tiny self-contained repro, not a faithful miniature of acornlib.
@@ -100,6 +166,20 @@ For prover regressions, prefer a positive repro that should pass `verify_succeed
 That is the correct unit-test oracle because it fails when shallow search fails, even if deep
 search could eventually succeed.
 
+For a shallow-explosion investigation, preserve the exact shallow outcome as well as the goal.
+A repro that merely fails differently is not yet reproducing the same issue.
+
+For the large-finite-frontier shallow-explosion subcase, preserve the exact shallow outcome while
+measuring it, but do not insist on turning it into a unit test.
+The correct deliverable there is an explanation of the shallow search:
+
+- how many shallow activations it takes to clear the frontier
+- whether the search then succeeds, exhausts, or leaves the shallow fragment
+- which rules, definitions, or clause families generate most of the shallow work
+
+For non-shallow-explosion failures, a different non-success outcome during narrowing is acceptable
+as a temporary signal that the same underlying prover problem may still be present.
+
 Temporary debugging aids are fine while reducing, but the end state should be a small proof that
 ought to verify.
 
@@ -115,13 +195,27 @@ You have a good repro when:
 
 - the snippet is self-contained
 - the failure still happens
-- there is no obvious unused context left
-- further deletions would change the shape of the bug rather than simplify it
+- you have explicitly tried removing every plausible remaining piece of context
+- every remaining deletion or simplification attempt changes the shape of the bug rather than
+  simplifying it
 
 If the reduced repro still fails shallowly, keep it.
 
+But if the original issue was specifically `ShallowExplosion`, only keep the repro if it is still
+`ShallowExplosion`.
+
+If raising `--activations` shows that the shallow frontier is finite and the issue is really just
+"too many shallow steps", do not keep pushing for a tiny mdtest-style repro.
+Stop when you have:
+
+- a local scratch context that exhibits the large shallow frontier
+- a count or lower bound for how many shallow activations it takes to get through it
+- a concrete breakdown of which rules or patterns account for most of that shallow work
+
 If every reduced repro succeeds and only the large original context fails, treat that as evidence
 of `ShallowExplosion` and bring it to a human instead of forcing a unit test.
+When you stop, report what categories of reductions you tried so the human can see that the
+minimization was exhaustive rather than merely "pretty small".
 
 ## Handoff
 
@@ -130,6 +224,15 @@ Once you have a minimal repro:
 - share the snippet with the human first
 - say whether it looks like an ordinary prover bug or a shallow explosion
 - explain what was replaced with axioms and what was removed
+
+If the result is a large-finite-frontier shallow explosion rather than an unbounded shallow
+generation bug:
+
+- share the local scratch context or target command instead of forcing a tiny snippet
+- report the activation budgets you tried
+- say whether the search eventually reaches `ShallowExhausted`, `ActivationCap`, `Success`, or
+  another outcome once `--activations` is raised
+- summarize which rules or clause families dominate the shallow activations
 
 If the human agrees it is the right repro, turn any single positive `verify_succeeds` case into an
 mdtest under `src/tests/prover/mdtest`.
