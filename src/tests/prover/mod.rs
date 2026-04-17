@@ -3,6 +3,7 @@ mod basics_test;
 mod equality_test;
 mod inhabitedness_test;
 mod language_test;
+mod mdtest;
 mod normalization_test;
 mod proof_generation_test;
 mod search_test;
