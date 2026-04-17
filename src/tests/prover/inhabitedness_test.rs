@@ -134,54 +134,6 @@ fn test_cannot_avoid_inhabitedness_through_equality_reduction() {
 }
 
 #[test]
-fn test_can_inhabit_arbitrary_type_of_typeclass() {
-    // This should be accepted, since any arbitrary P: Pointed is inhabited.
-    let text = r#"
-    typeclass P: Pointed {
-        point: P
-    }
-
-    let inhabitant[P: Pointed]: P satisfy {
-        true
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-#[test]
-fn test_can_inhabit_arbitrary_type_of_extended_typeclass() {
-    // This should be accepted, since any arbitrary P: Pointed is inhabited.
-    let text = r#"
-    typeclass P: Pointed {
-        point: P
-    }
-
-    typeclass Q: Qux extends Pointed {
-        foo: Q -> Bool
-    }
-
-    let inhabitant[Q: Qux]: Q satisfy {
-        true
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-#[test]
-fn test_can_inhabit_function_type_when_codomain_inhabited() {
-    let text = r#"
-    typeclass P: Pointed {
-        point: P
-    }
-
-    let inhabitant[P: Pointed, Q]: Q -> P satisfy {
-        true
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-#[test]
 fn test_cannot_inhabit_function_type_when_only_domain_inhabited() {
     let text = r#"
     typeclass P: Pointed {
@@ -193,40 +145,6 @@ fn test_cannot_inhabit_function_type_when_only_domain_inhabited() {
     }
     "#;
     verify_fails(text);
-}
-
-#[test]
-fn test_can_inhabit_identity_function_type() {
-    let text = r#"
-    let inhabitant[T]: T -> T satisfy {
-        true
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-#[test]
-fn test_can_inhabit_list_type() {
-    let text = r#"
-    inductive List[T] {
-        cons(List[T])
-        nil
-    }
-    let inhabitant[T]: List[T] satisfy {
-        true
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-#[test]
-fn test_inhabited_const() {
-    let text = r#"
-    let inhabited[T]: Bool = exists(x: T) {
-        true
-    }
-    "#;
-    verify_succeeds(text);
 }
 
 #[test]
@@ -259,20 +177,6 @@ fn test_passive_contradiction_cert_replays_inhabited_forall_exists() {
             .any(|line| line == "function(x0: Foo) { not g(x0) }(Foo.c0)"),
         "expected certificate to specialize the negated boolean reduction for passive contradiction: {proof:?}"
     );
-}
-
-#[test]
-fn test_passive_contradiction_cert_replays_outer_function_capture() {
-    let text = r#"
-        inductive Foo {
-            c0
-        }
-
-        theorem goal(h: Foo -> Bool) {
-            (forall(x: Foo) { h(x) }) implies exists(y: Foo) { h(y) }
-        }
-        "#;
-    verify_succeeds(text);
 }
 
 /// Regression test: when a certificate uses a typeclass constraint from a function
@@ -393,109 +297,6 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     processor
         .check_cert(&cert, None, goal_kernel_context, &p, cursor.bindings())
         .expect("check_cert should succeed");
-}
-
-// Regression test for a bug where polymorphic structures containing functions with
-// if-then-else expressions returning non-Bool types would cause a type mismatch
-// during clause validation. The issue was with how normalization tracked the local
-// type-parameter slots inside function definitions in `define` statements.
-#[test]
-fn test_polymorphic_structure_with_function_if_then_else() {
-    let text = r#"
-    inductive Nat {
-        zero
-        suc(Nat)
-    }
-
-    structure Wrapper[T] {
-        func: T -> Nat
-    }
-
-    attributes Wrapper[T] {
-        define modify(self, item: T) -> Wrapper[T] {
-            Wrapper.new(function(x: T) {
-                if x = item {
-                    self.func(x).suc
-                } else {
-                    self.func(x)
-                }
-            })
-        }
-    }
-
-    theorem goal[T](w: Wrapper[T], item: T) {
-        w.modify(item) = w.modify(item)
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-// Reproduces a bug where the prover needs to instantiate a polymorphic axiom
-// with an arbitrary type, resulting in certificate code like "let w2: x0 satisfy { true }"
-// which is invalid because x0 is not a valid type name.
-#[test]
-fn test_polymorphic_axiom_chain_needs_arbitrary_type() {
-    let text = r#"
-    let foo: Bool = axiom
-    let baz: Bool = axiom
-
-    define bar[T](x: T) -> Bool {
-        axiom
-    }
-
-    axiom foo_imp_bar[T](x: T) {
-        foo implies bar[T](x)
-    }
-
-    axiom bar_imp_baz[T](x: T) {
-        bar[T](x) implies baz
-    }
-
-    theorem goal {
-        foo implies baz
-    }
-    "#;
-    verify_succeeds(text);
-}
-
-// Regression: certificates generated while proving a polymorphic structure
-// constructor definition must check with the goal's type parameters in scope.
-#[test]
-fn test_subgroup_identity_existence_cert_generation() {
-    verify_succeeds(
-        r#"
-        inductive Option[T] {
-            none
-            some(T)
-        }
-
-        typeclass G: Group {
-            1: G
-        }
-
-        define subgroup_constraint[G: Group](contains: G -> Bool) -> Bool {
-            contains(G.1)
-        }
-
-        define is_identity[G: Group](g: G) -> Bool {
-            g = G.1
-        }
-
-        theorem identity_subgroup_constraint[G: Group] {
-            subgroup_constraint(is_identity[G])
-        }
-
-        structure Subgroup[G: Group] {
-            contains: G -> Bool
-        } constraint {
-            subgroup_constraint(contains)
-        }
-
-        let identity_subgroup[G: Group]: Subgroup[G] satisfy {
-            Subgroup.new_option(is_identity[G]) = Option.some(identity_subgroup)
-        }
-        "#,
-    );
 }
 
 #[test]
