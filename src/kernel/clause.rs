@@ -37,6 +37,75 @@ pub struct PositiveExistsReduction {
     pub body: Term,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BooleanReductionKind {
+    FalseLiteralElimination,
+    IteSimplifyLeft,
+    IteSimplifyRight,
+    IteSplitLeftThenBranch,
+    IteSplitLeftElseBranch,
+    IteSplitRightThenBranch,
+    IteSplitRightElseBranch,
+    FunctionInequalityToExists,
+    SignedNot,
+    BooleanEqToEquality,
+    PositiveForallOpen,
+    PositiveExistsObviousWitness,
+    PositiveExistsOpen,
+    NegatedForallToExists,
+    NegatedExistsOpen,
+    PositiveAndLeft,
+    PositiveAndRight,
+    NegativeAnd,
+    PositiveOr,
+    NegativeOrLeft,
+    NegativeOrRight,
+    BooleanEqualityLeftOrNotRight,
+    BooleanEqualityNotLeftOrRight,
+    BooleanInequalityNotLeftOrNotRight,
+    BooleanInequalityLeftOrRight,
+}
+
+impl BooleanReductionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BooleanReductionKind::FalseLiteralElimination => "false_literal_elimination",
+            BooleanReductionKind::IteSimplifyLeft => "ite_simplify_left",
+            BooleanReductionKind::IteSimplifyRight => "ite_simplify_right",
+            BooleanReductionKind::IteSplitLeftThenBranch => "ite_split_left_then_branch",
+            BooleanReductionKind::IteSplitLeftElseBranch => "ite_split_left_else_branch",
+            BooleanReductionKind::IteSplitRightThenBranch => "ite_split_right_then_branch",
+            BooleanReductionKind::IteSplitRightElseBranch => "ite_split_right_else_branch",
+            BooleanReductionKind::FunctionInequalityToExists => "function_inequality_to_exists",
+            BooleanReductionKind::SignedNot => "signed_not",
+            BooleanReductionKind::BooleanEqToEquality => "boolean_eq_to_equality",
+            BooleanReductionKind::PositiveForallOpen => "positive_forall_open",
+            BooleanReductionKind::PositiveExistsObviousWitness => "positive_exists_obvious_witness",
+            BooleanReductionKind::PositiveExistsOpen => "positive_exists_open",
+            BooleanReductionKind::NegatedForallToExists => "negated_forall_to_exists",
+            BooleanReductionKind::NegatedExistsOpen => "negated_exists_open",
+            BooleanReductionKind::PositiveAndLeft => "positive_and_left",
+            BooleanReductionKind::PositiveAndRight => "positive_and_right",
+            BooleanReductionKind::NegativeAnd => "negative_and",
+            BooleanReductionKind::PositiveOr => "positive_or",
+            BooleanReductionKind::NegativeOrLeft => "negative_or_left",
+            BooleanReductionKind::NegativeOrRight => "negative_or_right",
+            BooleanReductionKind::BooleanEqualityLeftOrNotRight => {
+                "boolean_equality_left_or_not_right"
+            }
+            BooleanReductionKind::BooleanEqualityNotLeftOrRight => {
+                "boolean_equality_not_left_or_right"
+            }
+            BooleanReductionKind::BooleanInequalityNotLeftOrNotRight => {
+                "boolean_inequality_not_left_or_not_right"
+            }
+            BooleanReductionKind::BooleanInequalityLeftOrRight => {
+                "boolean_inequality_left_or_right"
+            }
+        }
+    }
+}
+
 impl Clause {
     fn normalize_with_var_ids_prefilled(
         literals: Vec<Literal>,
@@ -1094,19 +1163,11 @@ impl Clause {
         .expect("positive exists reduction produces exactly one clause")
     }
 
-    pub fn find_boolean_reductions(
-        &self,
-        kernel_context: &KernelContext,
-    ) -> Vec<NormalizedClauseTrace> {
-        self.find_boolean_reductions_with_options(kernel_context, true)
-    }
-
-    /// Enumerate boolean reductions while letting callers choose whether generic existentials open.
-    pub fn find_boolean_reductions_with_options(
+    fn find_boolean_reductions_with_kinds_with_options(
         &self,
         kernel_context: &KernelContext,
         _allow_positive_exists_witness: bool,
-    ) -> Vec<NormalizedClauseTrace> {
+    ) -> Vec<(BooleanReductionKind, NormalizedClauseTrace)> {
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];
@@ -1128,11 +1189,11 @@ impl Clause {
                 if !literal_is_true {
                     // A false literal in a disjunction can be removed.
                     // If it was the only literal, this yields the empty (impossible) clause.
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        vec![vec![]],
-                        &self.context,
-                    ));
+                    answer.extend(
+                        self.with_replaced_literal_and_context(i, vec![vec![]], &self.context)
+                            .into_iter()
+                            .map(|trace| (BooleanReductionKind::FalseLiteralElimination, trace)),
+                    );
                 }
                 continue;
             }
@@ -1145,21 +1206,29 @@ impl Clause {
             if reduced_left != literal.left {
                 let reduced_lit =
                     Literal::new(literal.positive, reduced_left, literal.right.clone());
-                answer.extend(self.with_replaced_literal_and_context(
-                    i,
-                    vec![vec![reduced_lit]],
-                    &self.context,
-                ));
+                answer.extend(
+                    self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![reduced_lit]],
+                        &self.context,
+                    )
+                    .into_iter()
+                    .map(|trace| (BooleanReductionKind::IteSimplifyLeft, trace)),
+                );
             }
             let reduced_right = Self::simplify_ite_term(&literal.right);
             if reduced_right != literal.right {
                 let reduced_lit =
                     Literal::new(literal.positive, literal.left.clone(), reduced_right);
-                answer.extend(self.with_replaced_literal_and_context(
-                    i,
-                    vec![vec![reduced_lit]],
-                    &self.context,
-                ));
+                answer.extend(
+                    self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![reduced_lit]],
+                        &self.context,
+                    )
+                    .into_iter()
+                    .map(|trace| (BooleanReductionKind::IteSimplifyRight, trace)),
+                );
             }
 
             // Branch reduction for equalities/inequalities with ITE:
@@ -1172,14 +1241,22 @@ impl Clause {
                 let else_lit =
                     Literal::new(literal.positive, args[3].clone(), literal.right.clone());
                 let replacements = vec![
-                    vec![Literal::negative(condition.clone()), then_lit],
-                    vec![Literal::positive(condition), else_lit],
+                    (
+                        BooleanReductionKind::IteSplitLeftThenBranch,
+                        vec![Literal::negative(condition.clone()), then_lit],
+                    ),
+                    (
+                        BooleanReductionKind::IteSplitLeftElseBranch,
+                        vec![Literal::positive(condition), else_lit],
+                    ),
                 ];
-                answer.extend(self.with_replaced_literal_and_context(
-                    i,
-                    replacements,
-                    &self.context,
-                ));
+                for (kind, replacement) in replacements {
+                    answer.extend(
+                        self.with_replaced_literal_and_context(i, vec![replacement], &self.context)
+                            .into_iter()
+                            .map(|trace| (kind, trace)),
+                    );
+                }
             }
             if let Some(args) = Self::split_symbol_application(&literal.right, Symbol::Ite, 4) {
                 let condition = args[1].clone();
@@ -1188,24 +1265,36 @@ impl Clause {
                 let else_lit =
                     Literal::new(literal.positive, literal.left.clone(), args[3].clone());
                 let replacements = vec![
-                    vec![Literal::negative(condition.clone()), then_lit],
-                    vec![Literal::positive(condition), else_lit],
+                    (
+                        BooleanReductionKind::IteSplitRightThenBranch,
+                        vec![Literal::negative(condition.clone()), then_lit],
+                    ),
+                    (
+                        BooleanReductionKind::IteSplitRightElseBranch,
+                        vec![Literal::positive(condition), else_lit],
+                    ),
                 ];
-                answer.extend(self.with_replaced_literal_and_context(
-                    i,
-                    replacements,
-                    &self.context,
-                ));
+                for (kind, replacement) in replacements {
+                    answer.extend(
+                        self.with_replaced_literal_and_context(i, vec![replacement], &self.context)
+                            .into_iter()
+                            .map(|trace| (kind, trace)),
+                    );
+                }
             }
 
             if let Some(reduced) =
                 Self::reduce_function_inequality_to_exists(literal, &self.context, kernel_context)
             {
-                answer.extend(self.with_replaced_literal_and_context(
-                    i,
-                    vec![vec![Literal::positive(reduced)]],
-                    &self.context,
-                ));
+                answer.extend(
+                    self.with_replaced_literal_and_context(
+                        i,
+                        vec![vec![Literal::positive(reduced)]],
+                        &self.context,
+                    )
+                    .into_iter()
+                    .map(|trace| (BooleanReductionKind::FunctionInequalityToExists, trace)),
+                );
             }
 
             if literal
@@ -1225,7 +1314,11 @@ impl Clause {
                         )]],
                         &self.context,
                     );
-                    answer.extend(reduced);
+                    answer.extend(
+                        reduced
+                            .into_iter()
+                            .map(|trace| (BooleanReductionKind::SignedNot, trace)),
+                    );
                     continue;
                 }
 
@@ -1237,11 +1330,15 @@ impl Clause {
                     } else {
                         Literal::not_equals(eq_left, eq_right)
                     };
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        vec![vec![reduced_lit]],
-                        &self.context,
-                    ));
+                    answer.extend(
+                        self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![reduced_lit]],
+                            &self.context,
+                        )
+                        .into_iter()
+                        .map(|trace| (BooleanReductionKind::BooleanEqToEquality, trace)),
+                    );
                     continue;
                 }
 
@@ -1254,38 +1351,56 @@ impl Clause {
                     if let Some((reduced, output_context)) =
                         Self::reduce_positive_forall(&literal.left, &self.context)
                     {
-                        answer.extend(self.with_replaced_literal_and_context(
-                            i,
-                            vec![vec![Literal::positive(reduced)]],
-                            &output_context,
-                        ));
+                        answer.extend(
+                            self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &output_context,
+                            )
+                            .into_iter()
+                            .map(|trace| (BooleanReductionKind::PositiveForallOpen, trace)),
+                        );
                         continue;
                     }
                     if let Some((_witness, reduced)) =
                         Self::reduce_exists_with_obvious_witness(&literal.left)
                     {
-                        answer.extend(self.with_replaced_literal_and_context(
-                            i,
-                            vec![vec![Literal::positive(reduced)]],
-                            &self.context,
-                        ));
+                        answer.extend(
+                            self.with_replaced_literal_and_context(
+                                i,
+                                vec![vec![Literal::positive(reduced)]],
+                                &self.context,
+                            )
+                            .into_iter()
+                            .map(|trace| {
+                                (BooleanReductionKind::PositiveExistsObviousWitness, trace)
+                            }),
+                        );
                         continue;
                     }
                 } else if let Some(reduced) = Self::reduce_negated_forall(&literal.left) {
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        vec![vec![Literal::positive(reduced)]],
-                        &self.context,
-                    ));
+                    answer.extend(
+                        self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![Literal::positive(reduced)]],
+                            &self.context,
+                        )
+                        .into_iter()
+                        .map(|trace| (BooleanReductionKind::NegatedForallToExists, trace)),
+                    );
                     continue;
                 } else if let Some((reduced, output_context)) =
                     Self::reduce_negated_exists(&literal.left, &self.context)
                 {
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        vec![vec![Literal::negative(reduced)]],
-                        &output_context,
-                    ));
+                    answer.extend(
+                        self.with_replaced_literal_and_context(
+                            i,
+                            vec![vec![Literal::negative(reduced)]],
+                            &output_context,
+                        )
+                        .into_iter()
+                        .map(|trace| (BooleanReductionKind::NegatedExistsOpen, trace)),
+                    );
                     continue;
                 }
 
@@ -1294,17 +1409,32 @@ impl Clause {
                     let right = args[1].clone();
                     let replacements = if literal.positive {
                         vec![
-                            vec![Literal::positive(left)],
-                            vec![Literal::positive(right)],
+                            (
+                                BooleanReductionKind::PositiveAndLeft,
+                                vec![Literal::positive(left)],
+                            ),
+                            (
+                                BooleanReductionKind::PositiveAndRight,
+                                vec![Literal::positive(right)],
+                            ),
                         ]
                     } else {
-                        vec![vec![Literal::negative(left), Literal::negative(right)]]
+                        vec![(
+                            BooleanReductionKind::NegativeAnd,
+                            vec![Literal::negative(left), Literal::negative(right)],
+                        )]
                     };
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        replacements,
-                        &self.context,
-                    ));
+                    for (kind, replacement) in replacements {
+                        answer.extend(
+                            self.with_replaced_literal_and_context(
+                                i,
+                                vec![replacement],
+                                &self.context,
+                            )
+                            .into_iter()
+                            .map(|trace| (kind, trace)),
+                        );
+                    }
                     continue;
                 }
 
@@ -1312,18 +1442,33 @@ impl Clause {
                     let left = args[0].clone();
                     let right = args[1].clone();
                     let replacements = if literal.positive {
-                        vec![vec![Literal::positive(left), Literal::positive(right)]]
+                        vec![(
+                            BooleanReductionKind::PositiveOr,
+                            vec![Literal::positive(left), Literal::positive(right)],
+                        )]
                     } else {
                         vec![
-                            vec![Literal::negative(left)],
-                            vec![Literal::negative(right)],
+                            (
+                                BooleanReductionKind::NegativeOrLeft,
+                                vec![Literal::negative(left)],
+                            ),
+                            (
+                                BooleanReductionKind::NegativeOrRight,
+                                vec![Literal::negative(right)],
+                            ),
                         ]
                     };
-                    answer.extend(self.with_replaced_literal_and_context(
-                        i,
-                        replacements,
-                        &self.context,
-                    ));
+                    for (kind, replacement) in replacements {
+                        answer.extend(
+                            self.with_replaced_literal_and_context(
+                                i,
+                                vec![replacement],
+                                &self.context,
+                            )
+                            .into_iter()
+                            .map(|trace| (kind, trace)),
+                        );
+                    }
                     continue;
                 }
                 continue;
@@ -1344,18 +1489,59 @@ impl Clause {
             }
             first.extend_from_slice(&self.literals[i + 1..]);
             second.extend_from_slice(&self.literals[i + 1..]);
-            answer.push(Self::normalize_boolean_reduction(
-                first,
-                self.context.clone(),
-                self.context.len(),
+            let first_kind = if literal.positive {
+                BooleanReductionKind::BooleanEqualityLeftOrNotRight
+            } else {
+                BooleanReductionKind::BooleanInequalityNotLeftOrNotRight
+            };
+            let second_kind = if literal.positive {
+                BooleanReductionKind::BooleanEqualityNotLeftOrRight
+            } else {
+                BooleanReductionKind::BooleanInequalityLeftOrRight
+            };
+            answer.push((
+                first_kind,
+                Self::normalize_boolean_reduction(first, self.context.clone(), self.context.len()),
             ));
-            answer.push(Self::normalize_boolean_reduction(
-                second,
-                self.context.clone(),
-                self.context.len(),
+            answer.push((
+                second_kind,
+                Self::normalize_boolean_reduction(second, self.context.clone(), self.context.len()),
             ));
         }
         answer
+    }
+
+    pub fn find_boolean_reductions(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Vec<NormalizedClauseTrace> {
+        self.find_boolean_reductions_with_options(kernel_context, true)
+    }
+
+    /// Enumerate boolean reductions while letting callers choose whether generic existentials open.
+    pub fn find_boolean_reductions_with_options(
+        &self,
+        kernel_context: &KernelContext,
+        allow_positive_exists_witness: bool,
+    ) -> Vec<NormalizedClauseTrace> {
+        self.find_boolean_reductions_with_kinds_with_options(
+            kernel_context,
+            allow_positive_exists_witness,
+        )
+        .into_iter()
+        .map(|(_kind, trace)| trace)
+        .collect()
+    }
+
+    pub fn find_boolean_reduction_kinds_with_options(
+        &self,
+        kernel_context: &KernelContext,
+        allow_positive_exists_witness: bool,
+    ) -> Vec<(BooleanReductionKind, NormalizedClauseTrace)> {
+        self.find_boolean_reductions_with_kinds_with_options(
+            kernel_context,
+            allow_positive_exists_witness,
+        )
     }
 
     /// Generates all clauses that can be derived from this clause using boolean reduction.

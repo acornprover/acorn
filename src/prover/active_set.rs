@@ -7,7 +7,7 @@ use super::rewrite_tree::{Rewrite, RewriteTree};
 use super::synthetic::WitnessRegistry;
 use crate::code_generator::Error;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::clause::Clause;
+use crate::kernel::clause::{BooleanReductionKind, Clause};
 use crate::kernel::clause_set::TermId;
 use crate::kernel::fingerprint::FingerprintUnifier;
 use crate::kernel::inference;
@@ -15,8 +15,10 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::pdt::LiteralSet;
+#[cfg(feature = "lsbr")]
+use crate::kernel::proof_step::ShallowStatus;
 use crate::kernel::proof_step::{
-    PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
+    BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
 };
 use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
@@ -1102,7 +1104,9 @@ impl ActiveSet {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
-        for reduction in clause.find_boolean_reductions_with_options(kernel_context, false) {
+        for (kind, reduction) in
+            clause.find_boolean_reduction_kinds_with_options(kernel_context, false)
+        {
             if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
                 continue;
             }
@@ -1121,7 +1125,10 @@ impl ActiveSet {
             );
             let step = ProofStep::direct(
                 activated_step,
-                Rule::BooleanReduction(SingleSourceInfo { id: activated_id }),
+                Rule::BooleanReduction(BooleanReductionInfo {
+                    id: activated_id,
+                    kind,
+                }),
                 reduction.clause,
                 premise_map,
             );
@@ -1154,12 +1161,27 @@ impl ActiveSet {
                 reduction.pre_norm_context,
                 witness_map,
             );
-            let step = ProofStep::direct(
-                activated_step,
-                Rule::BooleanReduction(SingleSourceInfo { id: activated_id }),
-                reduction.clause,
-                premise_map,
-            );
+            let rule = Rule::BooleanReduction(BooleanReductionInfo {
+                id: activated_id,
+                kind: BooleanReductionKind::PositiveExistsOpen,
+            });
+            #[cfg(feature = "lsbr")]
+            let step = if activated_step.shallow_status == ShallowStatus::Spent {
+                // Experimental: opening a named existential witness from an already-spent
+                // shallow branch no longer stays shallow.
+                ProofStep::direct_with_shallow(
+                    activated_step,
+                    rule,
+                    reduction.clause,
+                    premise_map,
+                    ShallowStatus::Deep,
+                    None,
+                )
+            } else {
+                ProofStep::direct(activated_step, rule, reduction.clause, premise_map)
+            };
+            #[cfg(not(feature = "lsbr"))]
+            let step = ProofStep::direct(activated_step, rule, reduction.clause, premise_map);
             answer.push(step);
         }
 

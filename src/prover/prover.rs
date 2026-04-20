@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::env;
 use std::fmt::Write as _;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
@@ -19,7 +20,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{
-    PremiseMap, ProofStep, ProofStepId, Rule, ShallowStatus, Truthiness,
+    BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, ShallowStatus, Truthiness,
 };
 use crate::kernel::EqualityGraphContradiction;
 use crate::prover::{Outcome, ProverMode};
@@ -69,11 +70,16 @@ pub struct Prover {
 }
 
 impl Prover {
+    fn should_log_boolean_reductions() -> bool {
+        env::var_os("ACORN_LOG_BOOLEAN_REDUCTIONS").is_some()
+    }
+
     fn verbose_depth_label(step: &ProofStep) -> String {
-        if step.is_shallow() {
-            "shallow".to_string()
-        } else {
-            format!("depth {}", step.depth)
+        match step.shallow_status {
+            ShallowStatus::Unspent => "unspent shallow".to_string(),
+            ShallowStatus::Spent => "spent shallow".to_string(),
+            ShallowStatus::Contradiction => "shallow".to_string(),
+            ShallowStatus::Deep => format!("depth {}", step.depth),
         }
     }
 
@@ -82,6 +88,23 @@ impl Prover {
             .as_ref()
             .map(|goal| goal.name.as_str())
             .unwrap_or("<unset>")
+    }
+
+    fn log_boolean_reduction_activation(
+        &self,
+        step: &ProofStep,
+        info: BooleanReductionInfo,
+        source_step: &ProofStep,
+    ) {
+        eprintln!(
+            "BOOLEAN_REDUCTION goal={} kind={} step_status={:?} source_status={:?} source_rule={} truthiness={:?}",
+            self.goal_name_for_trace(),
+            info.kind.as_str(),
+            step.shallow_status,
+            source_step.shallow_status,
+            source_step.rule.name(),
+            step.truthiness,
+        );
     }
 
     fn bindings_with_type_params<'a>(
@@ -273,14 +296,23 @@ impl Prover {
                     effective_kernel_context,
                 )
             };
+            let depth_label = match step.shallow_origin() {
+                Some(origin) => format!("{}, origin {:?}", Self::verbose_depth_label(step), origin),
+                None => Self::verbose_depth_label(step),
+            };
+            let rule_label = match step.underlying_boolean_reduction() {
+                Some(info) => format!(
+                    "{} [{}]",
+                    step.rule.name().to_lowercase(),
+                    info.kind.as_str()
+                ),
+                None => step.rule.name().to_lowercase(),
+            };
 
             writeln!(
                 output,
                 "Clause {}, {}, {:?}, by {}:",
-                id,
-                Self::verbose_depth_label(step),
-                step.truthiness,
-                step.rule.name().to_lowercase()
+                id, depth_label, step.truthiness, rule_label
             )
             .unwrap();
             writeln!(output, "    {}", clause_text).unwrap();
@@ -630,12 +662,20 @@ impl Prover {
             goal = self.goal_name_for_trace(),
             active_id = self.active_set.next_id(),
             shallow = was_shallow,
+            shallow_status = ?step.shallow_status,
             depth = step.depth,
             truthiness = ?step.truthiness,
             rule = step.rule.name(),
             clause = %step.clause,
             "activating clause"
         );
+
+        if Self::should_log_boolean_reductions() {
+            if let Some(info) = step.underlying_boolean_reduction() {
+                let source_step = self.active_set.get_step(info.id);
+                self.log_boolean_reduction_activation(&step, info, source_step);
+            }
+        }
 
         if step.truthiness != Truthiness::Factual {
             self.nonfactual_activations += 1;
@@ -1026,7 +1066,10 @@ mod tests {
         let reduction = opening.reduction;
         let witness_step = ProofStep::direct(
             &source_step,
-            Rule::BooleanReduction(crate::kernel::proof_step::SingleSourceInfo { id: 0 }),
+            Rule::BooleanReduction(crate::kernel::proof_step::BooleanReductionInfo {
+                id: 0,
+                kind: crate::kernel::clause::BooleanReductionKind::PositiveExistsOpen,
+            }),
             reduction.clause,
             PremiseMap::new(
                 vec![crate::kernel::variable_map::VariableMap::new()],
@@ -1091,8 +1134,29 @@ mod tests {
         let formatted =
             prover.format_active_steps(Outcome::ShallowExhausted, &bindings, &kernel_context);
 
-        assert!(formatted.contains("Clause 0, shallow, Factual, by assumption:"));
+        assert!(formatted.contains("Clause 0, unspent shallow, Factual, by assumption:"));
         assert!(!formatted.contains("Clause 0, depth 0, Factual, by assumption:"));
+    }
+
+    #[test]
+    fn test_format_active_steps_labels_spent_shallow_activated_steps() {
+        let mut kernel_context = KernelContext::new();
+        let mut step = ProofStep::mock("true = false", &kernel_context);
+        step.shallow_status = ShallowStatus::Spent;
+
+        let mut prover = Prover::new(vec![]);
+        prover.active_set.activate(
+            step,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let formatted =
+            prover.format_active_steps(Outcome::ShallowExhausted, &bindings, &kernel_context);
+
+        assert!(formatted.contains("Clause 0, spent shallow, Factual, by assumption:"));
     }
 
     #[test]

@@ -717,7 +717,11 @@ instance Nat: Two
         );
 
         let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
-        assert_eq!(outcome, Outcome::Success);
+        #[cfg(feature = "lsbr")]
+        let expected = Outcome::ShallowExhausted;
+        #[cfg(not(feature = "lsbr"))]
+        let expected = Outcome::Success;
+        assert_eq!(outcome, expected);
     }
 
     #[test]

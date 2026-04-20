@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::elaborator::source::{Source, SourceType};
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::clause::Clause;
+use crate::kernel::clause::{BooleanReductionKind, Clause};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
@@ -167,6 +167,15 @@ pub struct SingleSourceInfo {
     pub id: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BooleanReductionInfo {
+    /// The id of the source clause.
+    pub id: usize,
+
+    /// The specific boolean-reduction rule that fired.
+    pub kind: BooleanReductionKind,
+}
+
 /// Information about a simplification step.
 /// The original step is stored inline (not referenced by ID) because it was never activated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,7 +200,7 @@ pub enum Rule {
     EqualityFactoring(SingleSourceInfo),
     EqualityResolution(SingleSourceInfo),
     Injectivity(SingleSourceInfo),
-    BooleanReduction(SingleSourceInfo),
+    BooleanReduction(BooleanReductionInfo),
     Extensionality(SingleSourceInfo),
 
     /// A contradiction found by repeatedly rewriting identical terms.
@@ -291,6 +300,14 @@ impl Rule {
             Rule::Assumption(info) => matches!(info.source.source_type, SourceType::NegatedGoal),
             Rule::Simplification(info) => info.original.rule.is_underlying_negated_goal(),
             _ => false,
+        }
+    }
+
+    pub fn underlying_boolean_reduction(&self) -> Option<BooleanReductionInfo> {
+        match self {
+            Rule::BooleanReduction(info) => Some(*info),
+            Rule::Simplification(info) => info.original.rule.underlying_boolean_reduction(),
+            _ => None,
         }
     }
 }
@@ -761,6 +778,29 @@ impl ProofStep {
         )
     }
 
+    /// Like `direct`, but lets callers override shallow classification.
+    pub fn direct_with_shallow(
+        activated_step: &ProofStep,
+        rule: Rule,
+        clause: Clause,
+        premise_map: PremiseMap,
+        shallow_status: ShallowStatus,
+        shallow_origin: Option<ShallowOrigin>,
+    ) -> ProofStep {
+        let depth = activated_step.depth;
+
+        Self::new_with_normalized_clause(
+            clause,
+            activated_step.truthiness,
+            rule,
+            activated_step.proof_size + 1,
+            depth,
+            shallow_status,
+            shallow_origin,
+            premise_map,
+        )
+    }
+
     /// Construct a ProofStep that is a specialization of a general pattern.
     pub fn specialization(
         pattern_id: usize,
@@ -1072,8 +1112,8 @@ impl ProofStep {
             Rule::EqualityFactoring(info)
             | Rule::EqualityResolution(info)
             | Rule::Injectivity(info)
-            | Rule::BooleanReduction(info)
             | Rule::Extensionality(info) => info.id,
+            Rule::BooleanReduction(info) => info.id,
             Rule::Simplification(info) => info.original.shallow_opening_root(active_id_hint),
             Rule::Resolution(_)
             | Rule::Rewrite(_)
@@ -1230,6 +1270,14 @@ impl ProofStep {
 
     pub fn is_shallow(&self) -> bool {
         self.shallow_status.is_shallow()
+    }
+
+    pub fn shallow_origin(&self) -> Option<ShallowOrigin> {
+        self.shallow_origin
+    }
+
+    pub fn underlying_boolean_reduction(&self) -> Option<BooleanReductionInfo> {
+        self.rule.underlying_boolean_reduction()
     }
 
     pub fn automatic_reject(&self) -> bool {

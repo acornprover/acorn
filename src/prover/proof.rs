@@ -637,12 +637,13 @@ pub fn reconstruct_step<R: ProofResolver>(
 mod tests {
     use crate::certificate::Certificate;
     use crate::elaborator::binding_map::BindingMap;
-    use crate::kernel::clause::Clause;
+    use crate::kernel::clause::{BooleanReductionKind, Clause};
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
-    use crate::kernel::proof_step::SingleSourceInfo;
-    use crate::kernel::proof_step::{PremiseMap, ProofStep, Rule, Truthiness};
+    use crate::kernel::proof_step::{
+        BooleanReductionInfo, PremiseMap, ProofStep, Rule, Truthiness,
+    };
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::apply_to_term;
     use crate::kernel::variable_map::VariableMap;
@@ -910,7 +911,10 @@ mod tests {
             .expect("expected conjunction to boolean-reduce");
         let final_step = ProofStep::direct(
             &simplified_step,
-            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 1,
+                kind: BooleanReductionKind::PositiveAndLeft,
+            }),
             reduced_clause.clone(),
             PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
         );
@@ -982,7 +986,10 @@ mod tests {
         let reduction = opening.reduction;
         let original_step = ProofStep::direct(
             &source_step,
-            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 1,
+                kind: BooleanReductionKind::PositiveExistsOpen,
+            }),
             reduction.clause,
             PremiseMap::new(
                 vec![VariableMap::new()],
@@ -1086,7 +1093,10 @@ mod tests {
         let reduction = opening.reduction;
         let original_step = ProofStep::direct(
             &source_step,
-            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 1,
+                kind: BooleanReductionKind::PositiveExistsOpen,
+            }),
             reduction.clause,
             PremiseMap::new(
                 vec![VariableMap::new()],
@@ -1399,7 +1409,10 @@ mod tests {
         let source_step = ProofStep::mock_from_clause(source_clause);
         let original_step = ProofStep::direct(
             &source_step,
-            Rule::BooleanReduction(SingleSourceInfo { id: 1 }),
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 1,
+                kind: BooleanReductionKind::BooleanInequalityLeftOrRight,
+            }),
             reduced_clause,
             PremiseMap::new(
                 vec![VariableMap::new()],
