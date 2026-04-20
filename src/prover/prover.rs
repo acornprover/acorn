@@ -316,6 +316,24 @@ impl Prover {
             )
             .unwrap();
             writeln!(output, "    {}", clause_text).unwrap();
+            for (desc, dep_id) in self.descriptive_dependencies(step) {
+                let dep_clause = self.get_clause(dep_id);
+                let dep_text = if dep_clause.is_impossible() {
+                    "contradiction".to_string()
+                } else {
+                    self.clause_text(dep_clause, cert_bindings.as_ref(), effective_kernel_context)
+                };
+                match dep_id.active_id() {
+                    Some(dep_active_id) => {
+                        writeln!(output, "    using clause {} as {}:", dep_active_id, desc)
+                            .unwrap();
+                    }
+                    None => {
+                        writeln!(output, "    using {}:", desc).unwrap();
+                    }
+                }
+                writeln!(output, "        {}", dep_text).unwrap();
+            }
             writeln!(output).unwrap();
         }
 
@@ -329,6 +347,24 @@ impl Prover {
             )
             .unwrap();
             writeln!(output, "    contradiction").unwrap();
+            for (desc, dep_id) in self.descriptive_dependencies(final_step) {
+                let dep_clause = self.get_clause(dep_id);
+                let dep_text = if dep_clause.is_impossible() {
+                    "contradiction".to_string()
+                } else {
+                    self.clause_text(dep_clause, cert_bindings.as_ref(), effective_kernel_context)
+                };
+                match dep_id.active_id() {
+                    Some(dep_active_id) => {
+                        writeln!(output, "    using clause {} as {}:", dep_active_id, desc)
+                            .unwrap();
+                    }
+                    None => {
+                        writeln!(output, "    using {}:", desc).unwrap();
+                    }
+                }
+                writeln!(output, "        {}", dep_text).unwrap();
+            }
 
             if matches!(final_step.rule, Rule::PassiveContradiction(_)) {
                 writeln!(output).unwrap();
@@ -1157,6 +1193,43 @@ mod tests {
             prover.format_active_steps(Outcome::ShallowExhausted, &bindings, &kernel_context);
 
         assert!(formatted.contains("Clause 0, spent shallow, Factual, by assumption:"));
+    }
+
+    #[test]
+    fn test_format_active_steps_shows_resolution_dependencies() {
+        let mut kernel_context = KernelContext::new();
+        let long = ProofStep::mock("false = false or true = false", &kernel_context);
+        let short = ProofStep::mock("false != false", &kernel_context);
+        let clause = kernel_context.parse_clause("true = false", &[]);
+        let resolution = ProofStep::resolution(0, &long, 1, &short, clause, PremiseMap::empty());
+
+        let mut prover = Prover::new(vec![]);
+        prover.active_set.activate(
+            long,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+        prover.active_set.activate(
+            short,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+        prover.active_set.activate(
+            resolution,
+            &mut kernel_context,
+            &mut prover.witness_registry,
+            ModuleId::default(),
+        );
+
+        let bindings = BindingMap::new(ModuleId::default());
+        let formatted = prover.format_active_steps(Outcome::Success, &bindings, &kernel_context);
+
+        assert!(formatted.contains("Clause 2"));
+        assert!(formatted.contains("by resolution:"));
+        assert!(formatted.contains("using clause 0 as long resolver:\n        "));
+        assert!(formatted.contains("using clause 1 as short resolver:\n        "));
     }
 
     #[test]

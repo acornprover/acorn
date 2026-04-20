@@ -1104,6 +1104,30 @@ impl ActiveSet {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
+        #[cfg(feature = "lsbr")]
+        let make_boolean_reduction_step =
+            |rule: Rule, clause: Clause, premise_map: PremiseMap| -> ProofStep {
+                if activated_step.shallow_status == ShallowStatus::Spent {
+                    // Experimental: once a shallow branch is already spent, boolean-reduction
+                    // followups leave the shallow fragment instead of staying shallow.
+                    ProofStep::direct_with_shallow(
+                        activated_step,
+                        rule,
+                        clause,
+                        premise_map,
+                        ShallowStatus::Deep,
+                        None,
+                    )
+                } else {
+                    ProofStep::direct(activated_step, rule, clause, premise_map)
+                }
+            };
+        #[cfg(not(feature = "lsbr"))]
+        let make_boolean_reduction_step =
+            |rule: Rule, clause: Clause, premise_map: PremiseMap| -> ProofStep {
+                ProofStep::direct(activated_step, rule, clause, premise_map)
+            };
+
         for (kind, reduction) in
             clause.find_boolean_reduction_kinds_with_options(kernel_context, false)
         {
@@ -1123,8 +1147,7 @@ impl ActiveSet {
                 reduction.pre_norm_context,
                 witness_map,
             );
-            let step = ProofStep::direct(
-                activated_step,
+            let step = make_boolean_reduction_step(
                 Rule::BooleanReduction(BooleanReductionInfo {
                     id: activated_id,
                     kind,
@@ -1165,23 +1188,7 @@ impl ActiveSet {
                 id: activated_id,
                 kind: BooleanReductionKind::PositiveExistsOpen,
             });
-            #[cfg(feature = "lsbr")]
-            let step = if activated_step.shallow_status == ShallowStatus::Spent {
-                // Experimental: opening a named existential witness from an already-spent
-                // shallow branch no longer stays shallow.
-                ProofStep::direct_with_shallow(
-                    activated_step,
-                    rule,
-                    reduction.clause,
-                    premise_map,
-                    ShallowStatus::Deep,
-                    None,
-                )
-            } else {
-                ProofStep::direct(activated_step, rule, reduction.clause, premise_map)
-            };
-            #[cfg(not(feature = "lsbr"))]
-            let step = ProofStep::direct(activated_step, rule, reduction.clause, premise_map);
+            let step = make_boolean_reduction_step(rule, reduction.clause, premise_map);
             answer.push(step);
         }
 
