@@ -15,8 +15,6 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::pdt::LiteralSet;
-#[cfg(feature = "lsbr")]
-use crate::kernel::proof_step::ShallowStatus;
 use crate::kernel::proof_step::{
     BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
 };
@@ -474,16 +472,11 @@ impl ActiveSet {
         // "left" and "right" are a bit overloaded here.
         let short_a = &short_clause.literals[short_index].left;
         let short_b = &short_clause.literals[short_index].right;
+        let resolved_long_literal = &long_clause.literals[long_index];
         let (long_a, long_b) = if flipped {
-            (
-                &long_clause.literals[long_index].right,
-                &long_clause.literals[long_index].left,
-            )
+            (&resolved_long_literal.right, &resolved_long_literal.left)
         } else {
-            (
-                &long_clause.literals[long_index].left,
-                &long_clause.literals[long_index].right,
-            )
+            (&resolved_long_literal.left, &resolved_long_literal.right)
         };
         if !unifier.unify(Scope::LEFT, short_a, Scope::RIGHT, long_a) {
             return None;
@@ -593,11 +586,15 @@ impl ActiveSet {
             return None;
         }
 
+        let resolved_long_literal_is_variable_pair =
+            resolved_long_literal.left.is_variable() && resolved_long_literal.right.is_variable();
+
         let step = ProofStep::resolution(
             long_id,
             long_step,
             short_id,
             short_step,
+            resolved_long_literal_is_variable_pair,
             clause,
             premise_map,
         );
@@ -1104,25 +1101,6 @@ impl ActiveSet {
         let clause = &activated_step.clause;
         let mut answer = vec![];
 
-        #[cfg(feature = "lsbr")]
-        let make_boolean_reduction_step =
-            |rule: Rule, clause: Clause, premise_map: PremiseMap| -> ProofStep {
-                if activated_step.shallow_status == ShallowStatus::Spent {
-                    // Experimental: once a shallow branch is already spent, boolean-reduction
-                    // followups leave the shallow fragment instead of staying shallow.
-                    ProofStep::direct_with_shallow(
-                        activated_step,
-                        rule,
-                        clause,
-                        premise_map,
-                        ShallowStatus::Deep,
-                        None,
-                    )
-                } else {
-                    ProofStep::direct(activated_step, rule, clause, premise_map)
-                }
-            };
-        #[cfg(not(feature = "lsbr"))]
         let make_boolean_reduction_step =
             |rule: Rule, clause: Clause, premise_map: PremiseMap| -> ProofStep {
                 ProofStep::direct(activated_step, rule, clause, premise_map)

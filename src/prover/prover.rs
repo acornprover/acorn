@@ -1201,7 +1201,8 @@ mod tests {
         let long = ProofStep::mock("false = false or true = false", &kernel_context);
         let short = ProofStep::mock("false != false", &kernel_context);
         let clause = kernel_context.parse_clause("true = false", &[]);
-        let resolution = ProofStep::resolution(0, &long, 1, &short, clause, PremiseMap::empty());
+        let resolution =
+            ProofStep::resolution(0, &long, 1, &short, false, clause, PremiseMap::empty());
 
         let mut prover = Prover::new(vec![]);
         prover.active_set.activate(

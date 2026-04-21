@@ -3,16 +3,6 @@ use crate::tests::support::*;
 
 // General prover coverage for language features.
 
-#[cfg(feature = "lsbr")]
-fn induction_expected_outcome() -> Outcome {
-    Outcome::ShallowExhausted
-}
-
-#[cfg(not(feature = "lsbr"))]
-fn induction_expected_outcome() -> Outcome {
-    Outcome::Success
-}
-
 #[test]
 fn test_structure_new_equation() {
     let text = r#"
@@ -103,7 +93,7 @@ fn test_prover_gets_structural_induction() {
         f(n)
     }
     "#;
-    assert_eq!(prove_text(text, "goal"), induction_expected_outcome());
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]
@@ -135,7 +125,7 @@ fn test_prover_typical_induction_pattern() {
         }
     }
     "#;
-    assert_eq!(prove_text(text, "goal"), induction_expected_outcome());
+    assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
 #[test]

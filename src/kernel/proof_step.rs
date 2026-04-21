@@ -831,6 +831,7 @@ impl ProofStep {
         long_step: &ProofStep,
         short_id: usize,
         short_step: &ProofStep,
+        resolved_long_literal_is_variable_pair: bool,
         clause: Clause,
         premise_map: PremiseMap,
     ) -> ProofStep {
@@ -853,8 +854,14 @@ impl ProofStep {
             // statement that we have already fetched.
             long_step.depth
         };
-        let (shallow_status, shallow_origin) =
-            Self::resolution_shallow_data(long_id, long_step, short_id, short_step, &clause);
+        let (shallow_status, shallow_origin) = Self::resolution_shallow_data(
+            long_id,
+            long_step,
+            short_id,
+            short_step,
+            resolved_long_literal_is_variable_pair,
+            &clause,
+        );
 
         Self::new_with_normalized_clause(
             clause,
@@ -1127,9 +1134,14 @@ impl ProofStep {
         long_step: &ProofStep,
         short_id: usize,
         short_step: &ProofStep,
+        resolved_long_literal_is_variable_pair: bool,
         clause: &Clause,
     ) -> (ShallowStatus, Option<ShallowOrigin>) {
         use ShallowStatus::{Deep, Spent, Unspent};
+
+        if resolved_long_literal_is_variable_pair && long_step.clause.literals.len() > 2 {
+            return (Deep, None);
+        }
 
         match (long_step.shallow_status, short_step.shallow_status) {
             (Unspent, Unspent) => {
@@ -1419,5 +1431,36 @@ mod tests {
         assert_eq!(var_map.get_mapping(0), Some(&Term::bool_type()));
         assert_eq!(var_map.get_mapping(1), Some(&Term::new_true()));
         assert!(context.is_empty());
+    }
+
+    #[test]
+    fn test_resolution_through_variable_pair_literal_in_long_clause_is_deep_under_ase() {
+        let kernel = KernelContext::new();
+        let long = ProofStep::mock_with_types(
+            "x0 != x1 or x1 = x2 or x2 = x3",
+            &["Bool", "Bool", "Bool", "Bool"],
+            &kernel,
+        );
+        let mut short = ProofStep::mock_with_types("x0 = x1", &["Bool", "Bool"], &kernel);
+        short.truthiness = Truthiness::Counterfactual;
+        let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
+
+        let step = ProofStep::resolution(0, &long, 1, &short, true, clause, PremiseMap::empty());
+
+        assert_eq!(step.shallow_status, ShallowStatus::Deep);
+    }
+
+    #[test]
+    fn test_resolution_through_positive_variable_pair_equality_stays_shallow_under_ase() {
+        let kernel = KernelContext::new();
+        let long =
+            ProofStep::mock_with_types("x0 = x1 or x1 = x2", &["Bool", "Bool", "Bool"], &kernel);
+        let mut short = ProofStep::mock_with_types("x0 != x1", &["Bool", "Bool"], &kernel);
+        short.truthiness = Truthiness::Counterfactual;
+        let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
+
+        let step = ProofStep::resolution(0, &long, 1, &short, false, clause, PremiseMap::empty());
+
+        assert_eq!(step.shallow_status, ShallowStatus::Spent);
     }
 }
