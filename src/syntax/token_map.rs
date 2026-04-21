@@ -120,6 +120,10 @@ impl TokenMap {
 
         None
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&TokenKey, &TokenInfo)> {
+        self.map.iter()
+    }
 }
 
 impl Default for TokenMap {

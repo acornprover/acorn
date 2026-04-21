@@ -12,6 +12,7 @@ pub mod elaborator;
 pub mod exporter;
 pub mod interfaces;
 pub mod kernel;
+pub mod lint;
 pub mod manifest;
 pub mod module;
 pub mod ort_utils;

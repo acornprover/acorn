@@ -4,6 +4,7 @@
 use acorn::cleaner::{ModuleCleaner, ProjectCleaner};
 use acorn::doc_generator::DocGenerator;
 use acorn::interfaces::GoalInfo;
+use acorn::lint::lint_project_targets;
 use acorn::module::ModuleDescriptor;
 use acorn::project::{Project, ProjectConfig, SelectionInfo};
 use acorn::server::{run_server, ServerArgs};
@@ -512,6 +513,13 @@ enum Command {
 
     /// List all module names in the library
     List,
+
+    /// Report lint warnings such as unused imports
+    Lint {
+        /// Target module or file to lint. If not provided, lints all files in the library.
+        #[clap(value_name = "TARGET")]
+        target: Option<String>,
+    },
 
     /// Export all definitions, theorems, and types to JSONL
     Export {
@@ -1170,6 +1178,73 @@ async fn main() {
 
             for module_name in module_names {
                 println!("{}", module_name);
+            }
+        }
+
+        Some(Command::Lint { target }) => {
+            let mut project = Project::new_local(
+                &current_dir,
+                ProjectConfig {
+                    use_filesystem: true,
+                    read_cache: false,
+                    write_cache: false,
+                },
+            )
+            .unwrap_or_else(|e| {
+                println!("Error loading project: {}", e);
+                std::process::exit(1);
+            });
+
+            match target {
+                Some(target) if target == "-" => {
+                    println!("Error: lint does not support reading from stdin");
+                    std::process::exit(1);
+                }
+                Some(target) if target.ends_with(".ac") => {
+                    let path = resolve_target_path(&current_dir, &target);
+                    if let Err(e) = project.add_target_by_path(&path) {
+                        println!("Error loading module: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Some(target) => {
+                    if let Err(e) = project.add_target_by_name(&target) {
+                        println!("Error loading module '{}': {}", target, e);
+                        std::process::exit(1);
+                    }
+                }
+                None => project.add_src_targets(),
+            }
+
+            let errors = project.errors();
+            if !errors.is_empty() {
+                for (module_id, error) in errors {
+                    let module_name = project
+                        .get_module_name_by_id(module_id)
+                        .or_else(|| {
+                            project
+                                .get_module_descriptor(module_id)
+                                .map(|descriptor| descriptor.to_string())
+                        })
+                        .unwrap_or_else(|| module_id.to_string());
+                    println!("Error loading {}: {}", module_name, error);
+                }
+                std::process::exit(1);
+            }
+
+            match lint_project_targets(&project) {
+                Ok(warnings) => {
+                    for warning in &warnings {
+                        println!("{}", warning);
+                    }
+                    if !warnings.is_empty() {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
 
