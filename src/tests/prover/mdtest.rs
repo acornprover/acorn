@@ -133,6 +133,15 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     "non-string panic payload".to_string()
 }
 
+fn case_supported_in_current_features(_case: &MdCase) -> bool {
+    #[cfg(feature = "ncn")]
+    if _case.id == "language/constraints.md :: Constraints / Constrained Member Equation" {
+        return false;
+    }
+
+    true
+}
+
 #[test]
 fn mdtests() {
     let root = mdtest_root();
@@ -158,6 +167,10 @@ fn mdtests() {
         });
 
         for case in cases {
+            if !case_supported_in_current_features(&case) {
+                continue;
+            }
+
             if filter
                 .as_ref()
                 .is_some_and(|filter| !case.id.contains(filter))

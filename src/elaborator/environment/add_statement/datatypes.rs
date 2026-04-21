@@ -132,24 +132,28 @@ impl Environment {
             member_fns.push(potential);
         }
 
-        let new_fn_type = AcornType::functional(field_types.clone(), struct_type.clone());
-        let constructor_info = ConstructorInfo {
-            datatype: datatype.clone(),
-            index: 0,
-            total: 1,
+        let bind_new = unbound_constraint.is_none() || !cfg!(feature = "ncn");
+        let new_fn = if bind_new {
+            let new_fn_type = AcornType::functional(field_types.clone(), struct_type.clone());
+            let constructor_info = ConstructorInfo {
+                datatype: datatype.clone(),
+                index: 0,
+                total: 1,
+            };
+            let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
+            Some(self.bindings.add_datatype_attribute(
+                &datatype,
+                "new",
+                type_params.clone(),
+                new_fn_type.genericize(&type_params),
+                None,
+                Some(constructor_info),
+                vec![],
+                def_str,
+            ))
+        } else {
+            None
         };
-        let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
-        let new_fn = self.bindings.add_datatype_attribute(
-            &datatype,
-            "new",
-            type_params.clone(),
-            new_fn_type.genericize(&type_params),
-            None,
-            Some(constructor_info),
-            vec![],
-            def_str,
-        );
-
         let object_var = AcornValue::Variable(0, struct_type.clone());
         let mut member_args = vec![];
         for (i, member_fn) in member_fns.iter().enumerate() {
@@ -229,38 +233,43 @@ impl Environment {
             self.add_node(Node::structural(project, self, prop));
         }
 
-        let recreated = self.bindings.apply_potential(
-            new_fn.clone(),
-            member_args.clone(),
-            None,
-            &ss.name_token,
-        )?;
-        let new_eq = AcornValue::Binary(
-            BinaryOp::Equals,
-            Box::new(recreated),
-            Box::new(object_var.clone()),
-        );
-        let new_claim = AcornValue::ForAll(vec![struct_type.clone()], Box::new(new_eq))
-            .genericize(&type_params);
-        let source = Source::type_definition(
-            self.module_id,
-            range,
-            self.depth,
-            ss.name_token.text().to_string(),
-            "new".to_string(),
-        );
-        let prop = Proposition::new(new_claim, type_params.clone(), source);
-        self.add_node(Node::structural(project, self, prop));
+        if let Some(new_fn) = &new_fn {
+            let recreated = self.bindings.apply_potential(
+                new_fn.clone(),
+                member_args.clone(),
+                None,
+                &ss.name_token,
+            )?;
+            let new_eq = AcornValue::Binary(
+                BinaryOp::Equals,
+                Box::new(recreated),
+                Box::new(object_var.clone()),
+            );
+            let new_claim = AcornValue::ForAll(vec![struct_type.clone()], Box::new(new_eq))
+                .genericize(&type_params);
+            let source = Source::type_definition(
+                self.module_id,
+                range,
+                self.depth,
+                ss.name_token.text().to_string(),
+                "new".to_string(),
+            );
+            let prop = Proposition::new(new_claim, type_params.clone(), source);
+            self.add_node(Node::structural(project, self, prop));
+        }
 
         let var_args = (0..ss.fields.len())
             .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
             .collect::<Vec<_>>();
-        let new_application = self.bindings.apply_potential(
-            new_fn.clone(),
-            var_args.clone(),
-            None,
-            &ss.name_token,
-        )?;
+        let new_application = match &new_fn {
+            Some(new_fn) => Some(self.bindings.apply_potential(
+                new_fn.clone(),
+                var_args.clone(),
+                None,
+                &ss.name_token,
+            )?),
+            None => None,
+        };
         let constraint_for_args = if let Some(constraint_fn) = &constraint_fn {
             Some(self.bindings.apply_potential(
                 constraint_fn.clone(),
@@ -430,41 +439,43 @@ impl Environment {
             }
         }
 
-        for i in 0..ss.fields.len() {
-            let (field_name_token, field_type_expr, _) = &ss.fields[i];
-            let member_fn = &member_fns[i];
-            let applied = self.bindings.apply_potential(
-                member_fn.clone(),
-                vec![new_application.clone()],
-                None,
-                field_name_token,
-            )?;
-            let member_eq = AcornValue::Binary(
-                BinaryOp::Equals,
-                Box::new(applied),
-                Box::new(AcornValue::Variable(i as AtomId, field_types[i].clone())),
-            );
-            let unbound_member_claim = if let Some(constraint) = &unbound_constraint {
-                AcornValue::implies(constraint.clone(), member_eq)
-            } else {
-                member_eq
-            };
-            let member_claim =
-                AcornValue::ForAll(field_types.clone(), Box::new(unbound_member_claim))
-                    .genericize(&type_params);
-            let range = Range {
-                start: field_name_token.start_pos(),
-                end: field_type_expr.last_token().end_pos(),
-            };
-            let source = Source::type_definition(
-                self.module_id,
-                range,
-                self.depth,
-                ss.name_token.text().to_string(),
-                field_name_token.text().to_string(),
-            );
-            let prop = Proposition::new(member_claim, type_params.clone(), source);
-            self.add_node(Node::structural(project, self, prop));
+        if let Some(new_application) = new_application {
+            for i in 0..ss.fields.len() {
+                let (field_name_token, field_type_expr, _) = &ss.fields[i];
+                let member_fn = &member_fns[i];
+                let applied = self.bindings.apply_potential(
+                    member_fn.clone(),
+                    vec![new_application.clone()],
+                    None,
+                    field_name_token,
+                )?;
+                let member_eq = AcornValue::Binary(
+                    BinaryOp::Equals,
+                    Box::new(applied),
+                    Box::new(AcornValue::Variable(i as AtomId, field_types[i].clone())),
+                );
+                let unbound_member_claim = if let Some(constraint) = &unbound_constraint {
+                    AcornValue::implies(constraint.clone(), member_eq)
+                } else {
+                    member_eq
+                };
+                let member_claim =
+                    AcornValue::ForAll(field_types.clone(), Box::new(unbound_member_claim))
+                        .genericize(&type_params);
+                let range = Range {
+                    start: field_name_token.start_pos(),
+                    end: field_type_expr.last_token().end_pos(),
+                };
+                let source = Source::type_definition(
+                    self.module_id,
+                    range,
+                    self.depth,
+                    ss.name_token.text().to_string(),
+                    field_name_token.text().to_string(),
+                );
+                let prop = Proposition::new(member_claim, type_params.clone(), source);
+                self.add_node(Node::structural(project, self, prop));
+            }
         }
 
         for type_param in &ss.type_params {

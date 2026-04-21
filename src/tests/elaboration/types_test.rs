@@ -497,6 +497,44 @@ fn test_structure_new_option_syntax() {
     );
 }
 
+#[cfg(not(feature = "ncn"))]
+#[test]
+fn test_constrained_structure_new_syntax() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        structure Thing {
+            foo: Bool
+        } constraint {
+            foo
+        }
+
+        let value: Thing = Thing.new(true)
+        "#,
+    );
+}
+
+#[cfg(feature = "ncn")]
+#[test]
+fn test_constrained_structure_new_syntax_rejected() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        structure Thing {
+            foo: Bool
+        } constraint {
+            foo
+        }
+        "#,
+    );
+    let error = env.bad("let value: Thing = Thing.new(true)");
+    assert!(
+        error.contains("attribute Thing.new not found"),
+        "unexpected error: {}",
+        error
+    );
+}
+
 #[test]
 fn test_typechecking_try_option() {
     let mut env = Environment::test();

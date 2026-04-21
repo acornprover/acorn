@@ -245,6 +245,7 @@ fn test_prove_impossible_constraint() {
     verify_fails(text);
 }
 
+#[cfg(not(feature = "ncn"))]
 #[test]
 fn test_prove_member_equation_requires_constraint() {
     // This shouldn't work, because maybe Bar.new(f) doesn't meet the constraint.
