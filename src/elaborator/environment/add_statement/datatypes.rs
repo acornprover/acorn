@@ -339,6 +339,24 @@ impl Environment {
                     vec![],
                     def_str,
                 );
+                if cfg!(feature = "ncn") {
+                    let alias =
+                        ConstantName::datatype_attr(self.module_id, datatype.clone(), "new");
+                    let canonical =
+                        ConstantName::datatype_attr(self.module_id, datatype.clone(), "new_option");
+                    let definition_string = Some(format!(
+                        "{}.new: {}",
+                        ss.name_token.text(),
+                        new_option_fn_type
+                    ));
+                    self.bindings.add_constant_alias(
+                        alias,
+                        canonical,
+                        new_option_fn.clone(),
+                        vec![],
+                        definition_string,
+                    );
+                }
 
                 let new_option_application = self.bindings.apply_potential(
                     new_option_fn.clone(),

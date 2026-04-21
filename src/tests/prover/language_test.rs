@@ -287,6 +287,28 @@ fn test_new_option_can_use_late_constraint_witness() {
     verify_succeeds(text);
 }
 
+#[cfg(feature = "ncn")]
+#[test]
+fn test_new_is_alias_for_new_option() {
+    let text = r#"
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
+    structure Foo {
+        value: Bool
+    } constraint {
+        value
+    }
+
+    theorem goal(b: Bool) {
+        Foo.new(b) = Foo.new_option(b)
+    }
+    "#;
+    verify_succeeds(text);
+}
+
 #[cfg(not(feature = "ncn"))]
 #[test]
 fn test_prove_member_equation_requires_constraint() {

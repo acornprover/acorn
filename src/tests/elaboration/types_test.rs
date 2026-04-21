@@ -544,22 +544,24 @@ fn test_constrained_structure_new_syntax() {
 
 #[cfg(feature = "ncn")]
 #[test]
-fn test_constrained_structure_new_syntax_rejected() {
+fn test_constrained_structure_new_syntax_is_new_option_alias() {
     let mut env = Environment::test();
     env.add(
         r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
         structure Thing {
             foo: Bool
         } constraint {
             foo
         }
+
+        let value: Option[Thing] = Thing.new(true)
+        let value2: Option[Thing] = Thing.new_option(true)
         "#,
-    );
-    let error = env.bad("let value: Thing = Thing.new(true)");
-    assert!(
-        error.contains("attribute Thing.new not found"),
-        "unexpected error: {}",
-        error
     );
 }
 
