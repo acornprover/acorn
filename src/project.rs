@@ -1203,14 +1203,15 @@ impl Project {
     /// Get a display-friendly path string for a module descriptor.
     /// Returns the path relative to the src dir, suitable for error messages.
     pub fn display_path(&self, descriptor: &ModuleDescriptor) -> String {
+        let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/");
         match self.path_from_descriptor(descriptor) {
             Ok(full_path) => {
                 // Try to make it relative to the src dir
                 match full_path.strip_prefix(&self.src_dir) {
-                    Ok(relative_path) => relative_path.to_string_lossy().to_string(),
+                    Ok(relative_path) => normalize(relative_path),
                     Err(_) => {
                         // If it's not under src dir, just use the full path
-                        full_path.to_string_lossy().to_string()
+                        normalize(&full_path)
                     }
                 }
             }
