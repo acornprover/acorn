@@ -224,6 +224,9 @@ pub struct Builder<'a> {
     /// The verb to use in failure messages (e.g., "verified", "checked", "reproved").
     pub operation_verb: &'static str,
 
+    /// Restrict proof search to the shallow fragment.
+    pub shallow_search: bool,
+
     /// Timeout in seconds for proof search. Defaults to 5.0.
     pub timeout_secs: f32,
 
@@ -447,6 +450,7 @@ impl<'a> Builder<'a> {
             cancellation_token,
             cert_override: None,
             operation_verb: "verified",
+            shallow_search: false,
             timeout_secs: 5.0,
             activation_limit: 2000,
         }
@@ -942,13 +946,18 @@ impl<'a> Builder<'a> {
         processor.set_lowered_goal(normalized_goal);
 
         let start = std::time::Instant::now();
-        let outcome = processor.search(
+        let mode = if self.shallow_search {
+            ProverMode::Shallow {
+                timeout_secs: self.timeout_secs,
+                activation_limit: self.activation_limit,
+            }
+        } else {
             ProverMode::Interactive {
                 timeout_secs: self.timeout_secs,
                 activation_limit: self.activation_limit,
-            },
-            goal_kernel_context,
-        );
+            }
+        };
+        let outcome = processor.search(mode, goal_kernel_context);
         if self.verbose {
             processor
                 .prover()

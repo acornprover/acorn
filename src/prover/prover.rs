@@ -878,7 +878,7 @@ impl Prover {
 
     /// Search stops for one of five reasons:
     ///   Succeeding or finding an inconsistency
-    ///   Exhausting the shallow fragment in test mode
+    ///   Exhausting the shallow fragment in shallow-only mode
     ///   Exhausting the full passive set in interactive mode
     ///   Hitting the activation cap, either shallow or regular
     ///   Going over the time limit
@@ -904,6 +904,10 @@ impl Prover {
                 timeout_secs,
                 activation_limit,
             } => (activation_limit, timeout_secs, false),
+            ProverMode::Shallow {
+                timeout_secs,
+                activation_limit,
+            } => (activation_limit, timeout_secs, true),
             ProverMode::Test => (500, 0.3, true),
         };
         // Special test behavior: if we're in test mode and trying to prove "test_hang",
@@ -1281,5 +1285,28 @@ mod tests {
         );
 
         assert_eq!(outcome, Outcome::ActivationCap);
+    }
+
+    #[test]
+    fn test_shallow_mode_stops_before_activating_deep_steps() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_constants(&["c0", "c1"], "Bool");
+
+        let mut step = ProofStep::mock("c0 = c1", &kernel_context);
+        step.truthiness = Truthiness::Counterfactual;
+        step.shallow_status = ShallowStatus::Deep;
+
+        let mut prover = Prover::new(vec![]);
+        prover.add_steps(vec![step], &kernel_context);
+
+        let outcome = prover.search_with_context(
+            ProverMode::Shallow {
+                timeout_secs: 1.0,
+                activation_limit: 1,
+            },
+            &mut kernel_context,
+        );
+
+        assert_eq!(outcome, Outcome::ShallowExhausted);
     }
 }

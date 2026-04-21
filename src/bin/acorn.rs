@@ -349,6 +349,13 @@ enum Command {
         )]
         activations: Option<u32>,
 
+        /// Restrict proof search to the shallow proof fragment
+        #[clap(
+            long,
+            help = "Restrict proof search to the shallow proof fragment used by shallow verifier tests."
+        )]
+        shallow: bool,
+
         /// Print the activated proof steps and final contradiction details for a single selected goal
         #[clap(
             long,
@@ -443,6 +450,13 @@ enum Command {
             value_name = "COUNT"
         )]
         activations: Option<u32>,
+
+        /// Restrict proof search to the shallow proof fragment
+        #[clap(
+            long,
+            help = "Restrict proof search to the shallow proof fragment used by shallow verifier tests."
+        )]
+        shallow: bool,
 
         /// Save reproved results to the cache
         #[clap(long = "save-results", help = "Save reproved results to the cache.")]
@@ -596,6 +610,7 @@ async fn main() {
             strict,
             timeout,
             activations,
+            shallow,
             verbose,
             print_proof,
         }) => {
@@ -665,6 +680,7 @@ async fn main() {
             verifier.builder.check_mode = false;
             verifier.builder.strict = strict;
             verifier.builder.check_hashes = !ignore_hash && !strict;
+            verifier.builder.shallow_search = shallow;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
                 verifier.builder.timeout_secs = t;
@@ -771,6 +787,7 @@ async fn main() {
             fail_fast,
             timeout,
             activations,
+            shallow,
             save_results,
             reverse,
             verbose,
@@ -838,6 +855,7 @@ async fn main() {
             verifier.goal_index = goal;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
+            verifier.builder.shallow_search = shallow;
             verifier.builder.reverse_targets = reverse;
             verifier.builder.operation_verb = "reproved";
             verifier.exit_on_warning = fail_fast;
@@ -1380,6 +1398,17 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_accepts_shallow_flag() {
+        let args =
+            Args::try_parse_from(["acorn", "verify", "--shallow"]).expect("flag should parse");
+
+        match args.command {
+            Some(Command::Verify { shallow, .. }) => assert!(shallow),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
     fn test_verify_rejects_legacy_flag_aliases() {
         let error = Args::try_parse_from(["acorn", "verify", "--no-cache-skip"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
@@ -1404,6 +1433,16 @@ mod tests {
             Args::try_parse_from(["acorn", "reprove", "--reverse"]).expect("flag should parse");
         match args.command {
             Some(Command::Reprove { reverse, .. }) => assert!(reverse),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_reprove_accepts_shallow_flag() {
+        let args =
+            Args::try_parse_from(["acorn", "reprove", "--shallow"]).expect("flag should parse");
+        match args.command {
+            Some(Command::Reprove { shallow, .. }) => assert!(shallow),
             _ => panic!("unexpected command"),
         }
     }

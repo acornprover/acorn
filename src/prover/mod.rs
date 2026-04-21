@@ -26,6 +26,13 @@ pub enum ProverMode {
         activation_limit: i32,
     },
 
+    /// A shallow-only search with configurable limits.
+    /// Stops as soon as the prover reaches the shallow frontier.
+    Shallow {
+        timeout_secs: f32,
+        activation_limit: i32,
+    },
+
     /// A fast search that only uses shallow steps, for testing.
     Test,
 }
