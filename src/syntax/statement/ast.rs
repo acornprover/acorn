@@ -156,7 +156,8 @@ pub struct StructureStatement {
     pub constraint: Option<Expression>,
 
     /// The body is a proof that some value satisfies the constraint.
-    /// We need to prove this because every type must be inhabited.
+    /// In default mode we need this because every type must be inhabited.
+    /// In `ncn` mode constrained types may be empty, so the body is ignored.
     /// If there's no constraint, there cannot be a body.
     pub body: Option<Body>,
 }

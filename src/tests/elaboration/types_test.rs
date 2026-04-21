@@ -449,13 +449,21 @@ fn test_structure_with_good_constraint() {
         }
         "#,
     );
-    for (i, line_type) in env.line_types.iter().enumerate() {
-        println!("{}: {:?}", i, line_type);
-    }
+
+    #[cfg(not(feature = "ncn"))]
     assert!(matches!(env.get_line_type(6), Some(LineType::Node(_))));
+
+    #[cfg(not(feature = "ncn"))]
     assert!(matches!(env.get_line_type(7), Some(LineType::Node(_))));
+
+    #[cfg(feature = "ncn")]
+    assert!(matches!(env.get_line_type(6), Some(LineType::Other)));
+
+    #[cfg(feature = "ncn")]
+    assert!(matches!(env.get_line_type(7), Some(LineType::Other)));
 }
 
+#[cfg(not(feature = "ncn"))]
 #[test]
 fn test_structure_with_constraint_and_by_block() {
     let mut env = Environment::test();
@@ -473,6 +481,26 @@ fn test_structure_with_constraint_and_by_block() {
         "#,
     );
     assert_eq!(env.iter_goals().count(), 2);
+}
+
+#[cfg(feature = "ncn")]
+#[test]
+fn test_structure_with_constraint_and_by_block_is_ignored() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        structure Thing {
+            foo: Bool
+            baz: Bool
+            bar: Bool
+        } constraint {
+            foo or baz or bar
+        } by {
+            true or true or true
+        }
+        "#,
+    );
+    assert_eq!(env.iter_goals().count(), 0);
 }
 
 #[test]

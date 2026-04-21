@@ -233,6 +233,7 @@ fn test_nested_if_else() {
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
+#[cfg(not(feature = "ncn"))]
 #[test]
 fn test_prove_impossible_constraint() {
     let text = r#"
@@ -243,6 +244,47 @@ fn test_prove_impossible_constraint() {
     }
     "#;
     verify_fails(text);
+}
+
+#[cfg(feature = "ncn")]
+#[test]
+fn test_prove_impossible_constraint_is_allowed() {
+    let text = r#"
+    structure Foo {
+        first: Bool
+    } constraint {
+        first and not first
+    }
+    "#;
+    verify_succeeds(text);
+}
+
+#[cfg(feature = "ncn")]
+#[test]
+fn test_new_option_can_use_late_constraint_witness() {
+    let text = r#"
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
+    type Nat: axiom
+    let zero: Nat = axiom
+    let foo: Nat -> Bool = axiom
+
+    structure FooNat {
+        n: Nat
+    } constraint {
+        foo(n)
+    }
+
+    axiom foo_zero {
+        foo(zero)
+    }
+
+    let Option.some(bar) = FooNat.new_option(zero)
+    "#;
+    verify_succeeds(text);
 }
 
 #[cfg(not(feature = "ncn"))]

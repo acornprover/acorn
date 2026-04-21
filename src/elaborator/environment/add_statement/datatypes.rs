@@ -67,21 +67,33 @@ impl Environment {
                 constraint,
                 Some(&AcornType::Bool),
             )?;
-            let inhabited = AcornValue::Exists(field_types.clone(), Box::new(unbound.clone()));
-            let block_params = BlockParams::TypeRequirement(vec![inhabited], constraint.range());
+            if cfg!(feature = "ncn") {
+                // In ncn mode constrained structures are allowed to be empty, so any
+                // optional proof body is parsed for source compatibility but does not
+                // elaborate into an inhabitedness block.
+                self.add_line_types(
+                    LineType::Other,
+                    ss.first_right_brace.line_number + 1,
+                    statement.last_line(),
+                );
+            } else {
+                let inhabited = AcornValue::Exists(field_types.clone(), Box::new(unbound.clone()));
+                let block_params =
+                    BlockParams::TypeRequirement(vec![inhabited], constraint.range());
 
-            let block = Block::new(
-                project,
-                &self,
-                vec![],
-                vec![],
-                block_params,
-                &statement.first_token,
-                &statement.last_token,
-                ss.body.as_ref(),
-            )?;
-            let index = self.add_node(Node::block(project, self, block, None));
-            self.add_node_lines(index, &statement.range());
+                let block = Block::new(
+                    project,
+                    &self,
+                    vec![],
+                    vec![],
+                    block_params,
+                    &statement.first_token,
+                    &statement.last_token,
+                    ss.body.as_ref(),
+                )?;
+                let index = self.add_node(Node::block(project, self, block, None));
+                self.add_node_lines(index, &statement.range());
+            }
             Some(unbound)
         } else {
             None
