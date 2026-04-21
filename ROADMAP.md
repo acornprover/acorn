@@ -2,11 +2,21 @@
 
 ## Philosophy on planning itself
 
-There are two big categories of things we need to do. First, we need to make the AI better, and second, the language needs to support all of the mathematics that people want to write. The AI part of things is tough to plan in too much detail, because it's all experimental. We need to try little things and see what works.
+There are three big goals here. In this order:
 
-Language features are more straightforward to plan. So that's what this roadmap focuses on. And there is one feature that is more requested than anything else: dependent types.
+1. Acornlib needs to contain all known mathematics.
 
-A lot of the groundwork has been laid, like options and uninhabited types. We still have some stuff to do.
+2. The Acorn language needs to be able to express every concept in mathematics.
+
+3. The AI needs to be good enough to maintain acornlib on its own.
+
+As we run into mathematics that the Acorn language can't handle, we learn what we need to add to the language.
+
+As we add to acornlib, we use AI as much as possible, and learn what situations it can't handle.
+
+Right now, the main blocker is dependent types.
+
+The kernel is now built on dependent types, but they need to be exposed more thoroughly in the surface language.
 
 ### Make constrained types use options instead of forcing inhabitedness
 

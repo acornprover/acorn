@@ -1,6 +1,6 @@
 ---
 name: reproduce-prover-failure
-description: "Use when a theorem or goal ought to prove but the prover fails in acornlib or an issue repro. Classify whether the failure is a shallow explosion or a unit-test-reproducible prover bug, then narrow it to a minimal self-contained repro and, once approved, turn a single positive `verify_succeeds` case into an mdtest."
+description: "Use when a theorem or goal ought to prove but the prover fails in acornlib or an issue repro. Classify whether the failure is a shallow explosion or an interactive timeout/activation-cap case that should reproduce as `--shallow` exhaustion, then narrow it to a local repro and, once approved, turn a single positive `verify_succeeds` case into an mdtest."
 ---
 
 Use this when:
@@ -24,7 +24,15 @@ If shallow search fails, the helper may print a deep follow-up proof, but the te
 Whether a proof is shallow is deterministic and does not change just because a lot of unrelated
 context exists around it.
 
-So if an acornlib failure is **not** a shallow explosion, it should reduce to a red unit test.
+There are two reproducible shapes to aim for:
+
+1. `ShallowExplosion`
+   This can sometimes be reduced to a clean test repro, but not always. If the shallow frontier is
+   merely very large, the right deliverable may be analysis rather than an mdtest.
+2. Interactive `Timeout` or `ActivationCap` that should succeed shallowly
+   Treat this as a shallow-exhaustion repro problem. Rerun with `--shallow` and preserve
+   `ShallowExhausted` as the oracle while reducing. This should be reproducible in a separate local
+   file and then in mdtests, because mdtests can reproduce shallow exhaustion.
 
 ## Classification
 
@@ -61,10 +69,22 @@ There are two cases:
 
    For either subcase, keep minimizing or analyzing until you have tried removing every plausible
    part of the context and understand which declarations or rules are responsible.
-2. Ordinary prover failure
-   Keep narrowing until you have a red repro.
-   Do not accept "only fails in full acornlib" unless you have strong evidence that it is really
-   a shallow explosion.
+2. Interactive `Timeout` or `ActivationCap`
+   This should be turned into a shallow repro immediately.
+   Rerun the original goal with `--shallow` and preserve `ShallowExhausted` as the intended
+   outcome while reducing, for example:
+
+   ```bash
+   cargo run --profile release -- verify MODULENAME:LINE --ignore-hash --read-only --fail-fast --shallow
+   ```
+
+   If the `--shallow` rerun does **not** give `ShallowExhausted`, stop and reclassify the bug
+   instead of pushing ahead with the wrong oracle.
+
+   A true interactive-timeout-or-activation-cap repro for this skill should always reduce to:
+
+   - a local scratch repro that still gives `ShallowExhausted` under `--shallow`
+   - then a positive mdtest that fails under `verify_succeeds`
 
 ## Workflow
 
@@ -91,6 +111,10 @@ Record:
 - the failing goal or theorem
 - the line number if you have one
 - the observed shallow outcome if it is available
+
+If the original command fails with interactive `Timeout` or `ActivationCap`, rerun the same target
+with `--shallow` before you minimize anything. That `ShallowExhausted` result is the oracle you
+are trying to preserve in the scratch repro and the mdtest.
 
 For `ShallowExplosion`, also record:
 
@@ -127,6 +151,12 @@ But do this only for the unbounded-shallow-generation subcase.
 If the investigation shows that the original issue is merely a very large but finite shallow
 frontier, do not force a fake minimal repro.
 Instead keep the larger local scratch context and use it to explain the shallow-step breakdown.
+
+For an original interactive `Timeout` or `ActivationCap`, "the same way" means:
+
+- the scratch repro should still give `ShallowExhausted` when run with `--shallow`
+- you may use ordinary `verify` while exploring, but `--shallow` is the oracle that matters
+- do not accept a repro that only fails in interactive mode but succeeds with `--shallow`
 
 ### 3. Narrow Aggressively
 
@@ -177,8 +207,9 @@ The correct deliverable there is an explanation of the shallow search:
 - whether the search then succeeds, exhausts, or leaves the shallow fragment
 - which rules, definitions, or clause families generate most of the shallow work
 
-For non-shallow-explosion failures, a different non-success outcome during narrowing is acceptable
-as a temporary signal that the same underlying prover problem may still be present.
+For interactive-`Timeout`/`ActivationCap` repros, do **not** relax the oracle to some other
+non-success outcome. Preserve `ShallowExhausted` under `--shallow`; that is what makes the repro
+suitable for both a standalone file and an mdtest.
 
 Temporary debugging aids are fine while reducing, but the end state should be a small proof that
 ought to verify.
@@ -204,6 +235,9 @@ If the reduced repro still fails shallowly, keep it.
 But if the original issue was specifically `ShallowExplosion`, only keep the repro if it is still
 `ShallowExplosion`.
 
+If the original issue was interactive `Timeout` or `ActivationCap`, only keep the repro if it
+still gives `ShallowExhausted` under `--shallow`.
+
 If raising `--activations` shows that the shallow frontier is finite and the issue is really just
 "too many shallow steps", do not keep pushing for a tiny mdtest-style repro.
 Stop when you have:
@@ -222,7 +256,7 @@ minimization was exhaustive rather than merely "pretty small".
 Once you have a minimal repro:
 
 - share the snippet with the human first
-- say whether it looks like an ordinary prover bug or a shallow explosion
+- say whether it is a `ShallowExplosion` repro or a `--shallow` `ShallowExhausted` repro
 - explain what was replaced with axioms and what was removed
 
 If the result is a large-finite-frontier shallow explosion rather than an unbounded shallow
@@ -263,5 +297,5 @@ Before calling the reproduction done, make sure you can state clearly:
 
 - what the minimal repro is
 - why it still captures the original failure
-- whether it looks like `ShallowExplosion` or a normal prover bug
+- whether it is a `ShallowExplosion` repro or a `--shallow` `ShallowExhausted` repro
 - whether it is ready to land as an mdtest after approval

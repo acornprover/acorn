@@ -105,3 +105,39 @@ post-normalization numbering.
         theorem goal { h(g(t2, t)) = t }
         
 ```
+
+## Boolean Equality From Mutual Implication
+
+This reproduces the current `unique_preserves_contains` shape from `list_base.ac`.
+The prover can separately prove `A implies B` and `B implies A`, but it does not
+close the bare Boolean equality goal `A = B` when `A` and `B` are applied terms.
+
+It would be nice to have this eventually.
+
+```text
+        type Foo: axiom
+
+        let a: Foo -> Bool = axiom
+        let b: Foo -> Bool = axiom
+
+        axiom a_imp_b(x: Foo) {
+            a(x) implies b(x)
+        }
+
+        axiom b_imp_a(x: Foo) {
+            b(x) implies a(x)
+        }
+
+        theorem prove_a_imp_b(x: Foo) {
+            a(x) implies b(x)
+        }
+
+        theorem prove_b_imp_a(x: Foo) {
+            b(x) implies a(x)
+        }
+
+        theorem prove_eq(x: Foo) {
+            a(x) = b(x)
+        }
+
+```
