@@ -41,8 +41,6 @@ assert_fs = "1.1.2"
 
 [features]
 default = []
-# Disable auto-binding `.new` for constrained structures and keep only `.new_option`.
-ncn = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []

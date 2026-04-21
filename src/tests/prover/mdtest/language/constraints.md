@@ -30,6 +30,11 @@ theorem goal(f: Foo) {
 ## Constrained Member Equation
 
 ```acorn
+inductive Option[T] {
+    none
+    some(T)
+}
+
 type Foo: axiom
 let foo: Foo = axiom
 let foof: Foo -> Bool = axiom
@@ -42,8 +47,12 @@ structure Bar {
 } constraint {
     foof(f)
 }
-theorem goal(f: Foo) {
-    foof(f) implies Bar.new(f).f = f
+theorem goal_some_exists(f: Foo) {
+    foof(f) implies exists(b: Bar) { Bar.new(f) = Option.some(b) }
+}
+
+theorem goal_some_value(f: Foo, b: Bar) {
+    Bar.new(f) = Option.some(b) implies b.f = f
 }
 ```
 

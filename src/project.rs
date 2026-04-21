@@ -1378,12 +1378,8 @@ impl Project {
         // (e.g., exists over uninhabited types in test cases).
         let _ = env.run_lowering_pass(self);
 
-        // Salt module hashes with behavior-changing feature flags so cached builds
-        // are not reused across incompatible elaboration modes.
         let mut content_hasher = blake3::Hasher::new();
         content_hasher.update(text.as_bytes());
-        #[cfg(feature = "ncn")]
-        content_hasher.update(b"\0feature:ncn");
         let content_hash = content_hasher.finalize();
         self.modules[module_id.get() as usize].load_ok(env, content_hash);
         Ok(module_id)

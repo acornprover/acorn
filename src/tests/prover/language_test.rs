@@ -233,20 +233,6 @@ fn test_nested_if_else() {
     assert_eq!(prove_text(text, "goal"), Outcome::Success);
 }
 
-#[cfg(not(feature = "ncn"))]
-#[test]
-fn test_prove_impossible_constraint() {
-    let text = r#"
-    structure Foo {
-        first: Bool
-    } constraint {
-        first and not first
-    }
-    "#;
-    verify_fails(text);
-}
-
-#[cfg(feature = "ncn")]
 #[test]
 fn test_prove_impossible_constraint_is_allowed() {
     let text = r#"
@@ -259,7 +245,6 @@ fn test_prove_impossible_constraint_is_allowed() {
     verify_succeeds(text);
 }
 
-#[cfg(feature = "ncn")]
 #[test]
 fn test_new_option_can_use_late_constraint_witness() {
     let text = r#"
@@ -287,7 +272,6 @@ fn test_new_option_can_use_late_constraint_witness() {
     verify_succeeds(text);
 }
 
-#[cfg(feature = "ncn")]
 #[test]
 fn test_new_is_alias_for_new_option() {
     let text = r#"
@@ -309,11 +293,14 @@ fn test_new_is_alias_for_new_option() {
     verify_succeeds(text);
 }
 
-#[cfg(not(feature = "ncn"))]
 #[test]
-fn test_prove_member_equation_requires_constraint() {
-    // This shouldn't work, because maybe Bar.new(f) doesn't meet the constraint.
+fn test_constrained_new_some_projection_requires_option_match() {
     let text = r#"
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
     type Foo: axiom
     let foo: Foo = axiom
     let foof: Foo -> Bool = axiom
@@ -326,9 +313,9 @@ fn test_prove_member_equation_requires_constraint() {
     } constraint {
         foof(f)
     }
-    theorem goal(f: Foo) {
-        Bar.new(f).f = f
+    theorem goal(f: Foo, b: Bar) {
+        Bar.new(f) = Option.some(b) implies b.f = f
     }
     "#;
-    verify_fails(text);
+    verify_succeeds(text);
 }

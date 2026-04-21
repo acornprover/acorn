@@ -134,11 +134,6 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn case_supported_in_current_features(_case: &MdCase) -> bool {
-    #[cfg(feature = "ncn")]
-    if _case.id == "language/constraints.md :: Constraints / Constrained Member Equation" {
-        return false;
-    }
-
     true
 }
 

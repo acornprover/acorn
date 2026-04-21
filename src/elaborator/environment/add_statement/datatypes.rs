@@ -67,33 +67,13 @@ impl Environment {
                 constraint,
                 Some(&AcornType::Bool),
             )?;
-            if cfg!(feature = "ncn") {
-                // In ncn mode constrained structures are allowed to be empty, so any
-                // optional proof body is parsed for source compatibility but does not
-                // elaborate into an inhabitedness block.
-                self.add_line_types(
-                    LineType::Other,
-                    ss.first_right_brace.line_number + 1,
-                    statement.last_line(),
-                );
-            } else {
-                let inhabited = AcornValue::Exists(field_types.clone(), Box::new(unbound.clone()));
-                let block_params =
-                    BlockParams::TypeRequirement(vec![inhabited], constraint.range());
-
-                let block = Block::new(
-                    project,
-                    &self,
-                    vec![],
-                    vec![],
-                    block_params,
-                    &statement.first_token,
-                    &statement.last_token,
-                    ss.body.as_ref(),
-                )?;
-                let index = self.add_node(Node::block(project, self, block, None));
-                self.add_node_lines(index, &statement.range());
-            }
+            // Constrained structures may be empty, so any optional proof body is
+            // parsed for source compatibility but does not elaborate into a block.
+            self.add_line_types(
+                LineType::Other,
+                ss.first_right_brace.line_number + 1,
+                statement.last_line(),
+            );
             Some(unbound)
         } else {
             None
@@ -144,7 +124,7 @@ impl Environment {
             member_fns.push(potential);
         }
 
-        let bind_new = unbound_constraint.is_none() || !cfg!(feature = "ncn");
+        let bind_new = unbound_constraint.is_none();
         let new_fn = if bind_new {
             let new_fn_type = AcornType::functional(field_types.clone(), struct_type.clone());
             let constructor_info = ConstructorInfo {
@@ -339,24 +319,21 @@ impl Environment {
                     vec![],
                     def_str,
                 );
-                if cfg!(feature = "ncn") {
-                    let alias =
-                        ConstantName::datatype_attr(self.module_id, datatype.clone(), "new");
-                    let canonical =
-                        ConstantName::datatype_attr(self.module_id, datatype.clone(), "new_option");
-                    let definition_string = Some(format!(
-                        "{}.new: {}",
-                        ss.name_token.text(),
-                        new_option_fn_type
-                    ));
-                    self.bindings.add_constant_alias(
-                        alias,
-                        canonical,
-                        new_option_fn.clone(),
-                        vec![],
-                        definition_string,
-                    );
-                }
+                let alias = ConstantName::datatype_attr(self.module_id, datatype.clone(), "new");
+                let canonical =
+                    ConstantName::datatype_attr(self.module_id, datatype.clone(), "new_option");
+                let definition_string = Some(format!(
+                    "{}.new: {}",
+                    ss.name_token.text(),
+                    new_option_fn_type
+                ));
+                self.bindings.add_constant_alias(
+                    alias,
+                    canonical,
+                    new_option_fn.clone(),
+                    vec![],
+                    definition_string,
+                );
 
                 let new_option_application = self.bindings.apply_potential(
                     new_option_fn.clone(),

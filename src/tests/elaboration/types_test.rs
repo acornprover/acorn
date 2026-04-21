@@ -450,40 +450,10 @@ fn test_structure_with_good_constraint() {
         "#,
     );
 
-    #[cfg(not(feature = "ncn"))]
-    assert!(matches!(env.get_line_type(6), Some(LineType::Node(_))));
-
-    #[cfg(not(feature = "ncn"))]
-    assert!(matches!(env.get_line_type(7), Some(LineType::Node(_))));
-
-    #[cfg(feature = "ncn")]
     assert!(matches!(env.get_line_type(6), Some(LineType::Other)));
-
-    #[cfg(feature = "ncn")]
     assert!(matches!(env.get_line_type(7), Some(LineType::Other)));
 }
 
-#[cfg(not(feature = "ncn"))]
-#[test]
-fn test_structure_with_constraint_and_by_block() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        structure Thing {
-            foo: Bool
-            baz: Bool
-            bar: Bool
-        } constraint {
-            foo or baz or bar
-        } by {
-            true or true or true
-        }
-        "#,
-    );
-    assert_eq!(env.iter_goals().count(), 2);
-}
-
-#[cfg(feature = "ncn")]
 #[test]
 fn test_structure_with_constraint_and_by_block_is_ignored() {
     let mut env = Environment::test();
@@ -525,24 +495,6 @@ fn test_structure_new_option_syntax() {
     );
 }
 
-#[cfg(not(feature = "ncn"))]
-#[test]
-fn test_constrained_structure_new_syntax() {
-    let mut env = Environment::test();
-    env.add(
-        r#"
-        structure Thing {
-            foo: Bool
-        } constraint {
-            foo
-        }
-
-        let value: Thing = Thing.new(true)
-        "#,
-    );
-}
-
-#[cfg(feature = "ncn")]
 #[test]
 fn test_constrained_structure_new_syntax_is_new_option_alias() {
     let mut env = Environment::test();
