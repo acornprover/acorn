@@ -761,6 +761,7 @@ impl AcornValue {
         match self {
             AcornValue::Lambda(_, _) => true,
             AcornValue::TypeApplication(app) => app.function.is_lambda(),
+            AcornValue::Grouping(value) => value.is_lambda(),
             _ => false,
         }
     }
@@ -2068,6 +2069,21 @@ impl AcornValue {
 mod tests {
     use super::*;
     use crate::module::ModuleId;
+
+    #[test]
+    fn test_is_lambda_treats_grouped_lambda_as_lambda() {
+        let lambda = AcornValue::lambda(vec![AcornType::Bool], AcornValue::Bool(true));
+        let grouped = AcornValue::grouped(lambda.clone());
+        let type_applied = AcornValue::type_apply(
+            grouped,
+            vec!["T".to_string()],
+            vec![None],
+            vec![AcornType::Bool],
+        );
+
+        assert!(lambda.is_lambda());
+        assert!(type_applied.is_lambda());
+    }
 
     #[test]
     fn test_genericize_with_nested_type_params() {
