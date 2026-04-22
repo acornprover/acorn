@@ -692,6 +692,77 @@ fn test_named_function_witness_replays_exact_open_clause() {
 }
 
 #[test]
+fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step() {
+    use crate::code_generator::CodeGenerator;
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let (project, bindings, _) = setup_claim_codec_env(
+        r#"
+        theorem goal {
+            true
+        }
+    "#,
+    );
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let pre_kernel_context = KernelContext::new();
+    let mut post_kernel_context = pre_kernel_context.clone();
+    let exists_reduction = source_clause
+        .positive_exists_reduction(&post_kernel_context)
+        .expect("expected positive exists reduction");
+    let mut witness_registry = WitnessRegistry::new();
+    witness_registry.open_positive_exists(
+        &mut post_kernel_context,
+        bindings.module_id(),
+        &source_clause,
+        &exists_reduction,
+    );
+    let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
+
+    let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
+        vec![CertificateStep::Claim(candidate_claim)],
+        &witness_registry,
+        post_kernel_context,
+        bindings.module_id(),
+    )
+    .expect("named witness emission should succeed");
+
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .count(),
+        1,
+        "expected exactly one witness declaration after compaction"
+    );
+
+    let mut generator = CodeGenerator::new_for_certificate(&bindings);
+    let proof: Vec<_> = emitted
+        .iter()
+        .map(|step| {
+            Certificate::serialize_certificate_step(
+                step,
+                &mut generator,
+                &updated_kernel_context,
+                &bindings,
+            )
+            .expect("certificate step should serialize")
+        })
+        .collect();
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Owned(pre_kernel_context);
+    let reparsed: Vec<_> = proof
+        .iter()
+        .map(|line| {
+            Certificate::parse_code_line(line, &project, &mut bindings_cow, &mut kernel_context_cow)
+                .expect("serialized witness proof should parse")
+        })
+        .collect();
+
+    assert_eq!(reparsed, emitted);
+}
+
+#[test]
 fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
     use crate::prover::synthetic::WitnessRegistry;
 

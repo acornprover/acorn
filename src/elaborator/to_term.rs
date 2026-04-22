@@ -164,6 +164,16 @@ fn try_lower_partial_logical_lambda(
     let new_var_end = first_new_var + arg_types.len() as u16;
 
     match body {
+        AcornValue::Grouping(value) => {
+            return try_lower_partial_logical_lambda(
+                kernel_context,
+                arg_types,
+                value,
+                type_var_map,
+                prefer_instance_aliases,
+                stack,
+            );
+        }
         AcornValue::Not(inner) if arg_types.len() == 1 && is_new_var(inner, 0) => {
             return Ok(Some(logical_head(Symbol::Not)));
         }
@@ -963,6 +973,22 @@ mod tests {
             Term::new_false(),
         ]);
         assert_eq!(term, expected);
+    }
+
+    #[test]
+    fn test_lower_value_to_term_grouped_partial_not_uses_builtin_head() {
+        let mut kernel_context = KernelContext::new();
+        let value = AcornValue::lambda(
+            vec![AcornType::Bool],
+            AcornValue::grouped(AcornValue::Not(Box::new(AcornValue::Variable(
+                0,
+                AcornType::Bool,
+            )))),
+        );
+        let term = lower_value_to_term(&mut kernel_context, &value, NewConstantType::Local, None)
+            .expect("grouped partial not lowering should succeed");
+
+        assert_eq!(term, Term::atom(Atom::Symbol(Symbol::Not)));
     }
 
     #[test]
