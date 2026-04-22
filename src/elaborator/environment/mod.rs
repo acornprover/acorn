@@ -1149,6 +1149,7 @@ pub enum LineType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elaborator::acorn_type::FamilyParamKind;
     use crate::elaborator::acorn_value::AcornValue;
     use crate::elaborator::fact::Fact;
     use crate::elaborator::names::ConstantName;
@@ -1250,5 +1251,43 @@ mod tests {
         assert!(cursor.bindings().has_constant_name("a"));
         assert!(!cursor.bindings().has_constant_name("helper"));
         assert!(env.bindings.has_constant_name("helper"));
+    }
+
+    #[test]
+    fn test_datatype_family_param_kinds_tracked() {
+        let mut env = Environment::test();
+        env.add(
+            r#"
+            type Nat: axiom
+
+            structure Box[T] {
+                value: T
+            }
+            "#,
+        );
+
+        let box_datatype = env
+            .bindings
+            .get_type_for_typename("Box")
+            .unwrap()
+            .as_base_datatype()
+            .expect("Box should resolve to its base datatype")
+            .clone();
+        assert_eq!(
+            env.bindings.get_datatype_family_param_kinds(&box_datatype),
+            Some([FamilyParamKind::Type(None)].as_slice())
+        );
+
+        let nat_datatype = env
+            .bindings
+            .get_type_for_typename("Nat")
+            .unwrap()
+            .as_base_datatype()
+            .expect("Nat should resolve to its base datatype")
+            .clone();
+        assert_eq!(
+            env.bindings.get_datatype_family_param_kinds(&nat_datatype),
+            Some([].as_slice())
+        );
     }
 }

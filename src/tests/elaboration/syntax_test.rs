@@ -199,6 +199,19 @@ fn test_dependent_type_arguments_report_not_supported_yet() {
 }
 
 #[test]
+fn test_generic_lambda_body_can_infer_equality_operator_ref_type() {
+    let mut env = Environment::test();
+    env.add("define singleton_fun[T](a: T, x: T) -> Bool { a = x }");
+    env.add(
+        r#"
+            let b: Bool = function[T] {
+                singleton_fun[T] = (=)
+            }[Bool]
+        "#,
+    );
+}
+
+#[test]
 fn test_else_on_new_line() {
     // This is ugly but it should work.
     let mut env = Environment::test();

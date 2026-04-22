@@ -9,7 +9,8 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
 
 use crate::code_generator::CodeGenerator;
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, PotentialType, TypeParam, Typeclass, UnresolvedType, Variance,
+    AcornType, Datatype, FamilyParamKind, PotentialType, TypeParam, Typeclass, UnresolvedType,
+    Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
@@ -620,6 +621,7 @@ impl BindingMap {
         info.doc_comments = doc_comments;
         info.range = range;
         info.definition_string = definition_string;
+        info.family_param_kinds = vec![];
         let t = AcornType::Data(datatype, vec![]);
         let dummy_token = Token::empty();
         self.insert_type_name(
@@ -661,6 +663,7 @@ impl BindingMap {
         info.doc_comments = doc_comments;
         info.range = range;
         info.definition_string = definition_string;
+        info.family_param_kinds = params.iter().cloned().map(FamilyParamKind::Type).collect();
         let ut = UnresolvedType { datatype, params };
         let potential = PotentialType::Unresolved(ut);
         self.insert_type_name(name.to_string(), potential.clone(), name_token)
@@ -1235,6 +1238,15 @@ impl BindingMap {
             .get(datatype)
             .map(|info| info.arity)
             .unwrap_or(0)
+    }
+
+    pub fn get_datatype_family_param_kinds(
+        &self,
+        datatype: &Datatype,
+    ) -> Option<&[FamilyParamKind]> {
+        self.datatype_defs
+            .get(datatype)
+            .map(|info| info.family_param_kinds.as_slice())
     }
 
     /// Get the doc comment for a typeclass.
@@ -2167,6 +2179,9 @@ struct DatatypeDefinition {
     /// The number of type parameters this datatype takes.
     /// This is used to generate the proper kind (e.g., Type -> Type for List).
     arity: u8,
+
+    /// The declared parameter kinds for this datatype family.
+    family_param_kinds: Vec<FamilyParamKind>,
 }
 
 impl DatatypeDefinition {
@@ -2180,6 +2195,7 @@ impl DatatypeDefinition {
             definition_string: None,
             variances: None,
             arity: 0,
+            family_param_kinds: vec![],
         }
     }
 
@@ -2213,6 +2229,16 @@ impl DatatypeDefinition {
                     )));
                 }
             }
+        }
+        if self.family_param_kinds.is_empty() {
+            self.family_param_kinds = info.family_param_kinds.clone();
+        } else if !info.family_param_kinds.is_empty()
+            && self.family_param_kinds != info.family_param_kinds
+        {
+            return Err(source.error(&format!(
+                "datatype {} is imported with incompatible family parameter kinds",
+                typename
+            )));
         }
         Ok(())
     }

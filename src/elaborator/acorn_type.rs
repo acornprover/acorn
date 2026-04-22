@@ -322,6 +322,64 @@ impl TypeParam {
     }
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct ValueParam {
+    pub name: String,
+    pub value_type: AcornType,
+}
+
+impl fmt::Display for ValueParam {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.name, self.value_type)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum FamilyParam {
+    Type(TypeParam),
+    Value(ValueParam),
+}
+
+impl FamilyParam {
+    pub fn kind(&self) -> FamilyParamKind {
+        match self {
+            FamilyParam::Type(type_param) => FamilyParamKind::Type(type_param.typeclass.clone()),
+            FamilyParam::Value(value_param) => {
+                FamilyParamKind::Value(value_param.value_type.clone())
+            }
+        }
+    }
+
+    pub fn as_type_param(&self) -> Option<&TypeParam> {
+        match self {
+            FamilyParam::Type(type_param) => Some(type_param),
+            FamilyParam::Value(_) => None,
+        }
+    }
+
+    pub fn as_value_param(&self) -> Option<&ValueParam> {
+        match self {
+            FamilyParam::Type(_) => None,
+            FamilyParam::Value(value_param) => Some(value_param),
+        }
+    }
+}
+
+impl fmt::Display for FamilyParam {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FamilyParam::Type(type_param) => write!(f, "{}", type_param),
+            FamilyParam::Value(value_param) => write!(f, "{}", value_param),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum FamilyParamKind {
+    Type(Option<Typeclass>),
+    Value(AcornType),
+}
+
 /// Every AcornValue has an AcornType.
 /// This is the "richer" form of a type. The environment uses these types; the prover uses ids.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]

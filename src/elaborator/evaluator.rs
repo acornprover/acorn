@@ -1,4 +1,6 @@
-use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, TypeParam, Typeclass};
+use crate::elaborator::acorn_type::{
+    AcornType, Datatype, FamilyParam, PotentialType, TypeParam, Typeclass, ValueParam,
+};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::error::{self, ErrorContext};
@@ -31,12 +33,6 @@ struct CurrentInstanceContext {
     typeclass: Typeclass,
     datatype: Datatype,
     current_attr: String,
-}
-
-#[derive(Debug, Clone)]
-enum EvaluatedParamBinder {
-    Type(TypeParam),
-    Value(Token, AcornType),
 }
 
 /// The Evaluator turns expressions into types and values, and other things of that nature.
@@ -1219,6 +1215,31 @@ impl<'a> Evaluator<'a> {
         right: &Expression,
         left_expected: Option<&AcornType>,
     ) -> error::Result<(AcornValue, AcornValue)> {
+        let left_is_operator_ref = Self::operator_ref_token(left).is_some();
+        let right_is_operator_ref = Self::operator_ref_token(right).is_some();
+
+        if left_is_operator_ref {
+            let right_potential = self.evaluate_potential_value(stack, right, None)?;
+            let right_value = self
+                .inference()
+                .maybe_resolve_value(right_potential, None, right)?
+                .as_value(right)?;
+            let left_value =
+                self.evaluate_value_with_stack(stack, left, Some(&right_value.get_type()))?;
+            return Ok((left_value, right_value));
+        }
+
+        if right_is_operator_ref {
+            let left_potential = self.evaluate_potential_value(stack, left, left_expected)?;
+            let left_value = self
+                .inference()
+                .maybe_resolve_value(left_potential, left_expected, left)?
+                .as_value(left)?;
+            let right_value =
+                self.evaluate_value_with_stack(stack, right, Some(&left_value.get_type()))?;
+            return Ok((left_value, right_value));
+        }
+
         let left_potential = self.evaluate_potential_value(stack, left, left_expected)?;
         let right_potential = self.evaluate_potential_value(stack, right, None)?;
         self.inference()
@@ -1774,10 +1795,10 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
-    fn evaluate_param_binders(
+    pub fn evaluate_family_params(
         &mut self,
         exprs: &[TypeParamExpr],
-    ) -> error::Result<Vec<EvaluatedParamBinder>> {
+    ) -> error::Result<Vec<FamilyParam>> {
         let mut answer = vec![];
         for expr in exprs {
             if expr.type_expr.is_some() {
@@ -1793,20 +1814,23 @@ impl<'a> Evaluator<'a> {
                     .is_ok()
                 {
                     let typeclass = self.evaluate_typeclass(annotation)?;
-                    answer.push(EvaluatedParamBinder::Type(TypeParam {
+                    answer.push(FamilyParam::Type(TypeParam {
                         name: expr.name.text().to_string(),
                         typeclass: Some(typeclass),
                     }));
                     continue;
                 }
                 if let Ok(value_type) = self.fork(self.bindings, None).evaluate_type(annotation) {
-                    answer.push(EvaluatedParamBinder::Value(expr.name.clone(), value_type));
+                    answer.push(FamilyParam::Value(ValueParam {
+                        name: expr.name.text().to_string(),
+                        value_type,
+                    }));
                     continue;
                 }
                 return Err(annotation.error("expected a typeclass constraint or a value type"));
             }
 
-            answer.push(EvaluatedParamBinder::Type(TypeParam {
+            answer.push(FamilyParam::Type(TypeParam {
                 name: expr.name.text().to_string(),
                 typeclass: None,
             }));
@@ -1821,10 +1845,10 @@ impl<'a> Evaluator<'a> {
         exprs: &[TypeParamExpr],
     ) -> error::Result<Vec<TypeParam>> {
         let mut answer: Vec<TypeParam> = vec![];
-        let params = self.evaluate_param_binders(exprs)?;
+        let params = self.evaluate_family_params(exprs)?;
         for (expr, param) in exprs.iter().zip(params) {
             match param {
-                EvaluatedParamBinder::Type(type_param) => {
+                FamilyParam::Type(type_param) => {
                     self.bindings
                         .check_typename_available(&type_param.name, &expr.name)?;
                     if answer.iter().any(|tp| tp.name == type_param.name) {
@@ -1832,8 +1856,10 @@ impl<'a> Evaluator<'a> {
                     }
                     answer.push(type_param);
                 }
-                EvaluatedParamBinder::Value(name_token, value_type) => {
-                    return Err(self.unsupported_value_param_error(&name_token, &value_type));
+                FamilyParam::Value(value_param) => {
+                    return Err(
+                        self.unsupported_value_param_error(&expr.name, &value_param.value_type)
+                    );
                 }
             }
         }
@@ -1929,6 +1955,7 @@ impl<'a> Evaluator<'a> {
 #[cfg(test)]
 mod tests {
     use crate::code_generator::CodeGenerator;
+    use crate::elaborator::acorn_type::FamilyParamKind;
     use crate::syntax::expression::Terminator;
     use crate::syntax::token::TokenIter;
 
@@ -1969,6 +1996,12 @@ mod tests {
                 };
             assert!(self.evaluate_potential_type(&expression).is_err());
         }
+
+        fn parse_type_params(input: &str) -> Vec<TypeParamExpr> {
+            let tokens = Token::scan(input);
+            let mut tokens = TokenIter::new(tokens);
+            TypeParamExpr::parse_list(&mut tokens).unwrap()
+        }
     }
 
     #[test]
@@ -1983,6 +2016,39 @@ mod tests {
         e.assert_type_ok("(Bool, Bool) -> Bool");
         e.assert_type_bad("Bool, Bool -> Bool");
         e.assert_type_bad("(Bool, Bool)");
+    }
+
+    #[test]
+    fn test_evaluate_family_params_classifies_type_and_value_params() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        bindings
+            .add_typeclass(
+                "Ring",
+                vec![],
+                vec![],
+                None,
+                None,
+                &project,
+                &Token::empty(),
+            )
+            .unwrap();
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+        let family_params = evaluator
+            .evaluate_family_params(&Evaluator::parse_type_params("[T, n: Bool, R: Ring]"))
+            .unwrap();
+        let kinds: Vec<_> = family_params.iter().map(|param| param.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                FamilyParamKind::Type(None),
+                FamilyParamKind::Value(AcornType::Bool),
+                FamilyParamKind::Type(Some(Typeclass {
+                    module_id: ModuleId(0),
+                    name: "Ring".to_string(),
+                })),
+            ]
+        );
     }
 
     #[test]
