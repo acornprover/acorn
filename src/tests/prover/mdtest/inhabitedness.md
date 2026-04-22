@@ -188,7 +188,7 @@ constructor definition must check with the goal's type parameters in scope.
         }
 
         let identity_subgroup[G: Group]: Subgroup[G] satisfy {
-            Subgroup.new_option(is_identity[G]) = Option.some(identity_subgroup)
+            Subgroup.new(is_identity[G]) = Option.some(identity_subgroup)
         }
         
 ```

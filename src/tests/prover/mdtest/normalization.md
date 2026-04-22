@@ -413,7 +413,7 @@ the current prover search strategy.
         foo(n)
     }
 
-    let Option.some(bar) = FooNat.new_option(zero)
+    let Option.some(bar) = FooNat.new(zero)
     
 ```
 

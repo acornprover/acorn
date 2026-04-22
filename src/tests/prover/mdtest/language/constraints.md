@@ -71,15 +71,15 @@ structure Foo {
 }
 
 theorem goal_some_exists(b: Bool) {
-    b implies exists(f: Foo) { Foo.new_option(b) = Option.some(f) }
+    b implies exists(f: Foo) { Foo.new(b) = Option.some(f) }
 }
 
 theorem goal_some_value(b: Bool, f: Foo) {
-    Foo.new_option(b) = Option.some(f) implies f.value = b
+    Foo.new(b) = Option.some(f) implies f.value = b
 }
 
 theorem goal_none(b: Bool) {
-    not b implies Foo.new_option(b) = Option.none[Foo]
+    not b implies Foo.new(b) = Option.none[Foo]
 }
 ```
 
@@ -122,7 +122,7 @@ structure Rat {
     is_reduced(num, denom)
 }
 
-let Option.some(alt_zero) = Rat.new_option(zero, one)
+let Option.some(alt_zero) = Rat.new(zero, one)
 
 theorem alt_zero_num {
     alt_zero.num = zero
@@ -155,6 +155,6 @@ structure Rat {
 }
 
 theorem goal(r1: Rat) {
-    Rat.new_option(r1.num, r1.denom) = Option.some(r1)
+    Rat.new(r1.num, r1.denom) = Option.some(r1)
 }
 ```

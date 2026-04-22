@@ -277,7 +277,7 @@ impl Environment {
             if let Some(option_type) = self.bindings.get_type_for_typename("Option").cloned() {
                 let option_datatype = option_type.as_base_datatype().cloned().ok_or_else(|| {
                     ss.name_token
-                        .error("Option must be a datatype to auto-generate constrained new_option")
+                        .error("Option must be a datatype to auto-generate constrained new")
                 })?;
                 let option_struct_type =
                     option_type.resolve(vec![struct_type.clone()], &ss.name_token)?;
@@ -302,41 +302,22 @@ impl Environment {
                     .get_constant_value(&DefinedName::Constant(none_name))
                     .map_err(|e| ss.name_token.error(&e))?;
 
-                let new_option_fn_type =
+                let new_fn_type =
                     AcornType::functional(field_types.clone(), option_struct_type.clone());
-                let def_str = format!(
-                    "{}.new_option: {}",
-                    ss.name_token.text(),
-                    new_option_fn_type
-                );
-                let new_option_fn = self.bindings.add_datatype_attribute(
+                let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
+                let new_fn = self.bindings.add_datatype_attribute(
                     &datatype,
-                    "new_option",
+                    "new",
                     type_params.clone(),
-                    new_option_fn_type.genericize(&type_params),
+                    new_fn_type.genericize(&type_params),
                     None,
                     None,
                     vec![],
                     def_str,
                 );
-                let alias = ConstantName::datatype_attr(self.module_id, datatype.clone(), "new");
-                let canonical =
-                    ConstantName::datatype_attr(self.module_id, datatype.clone(), "new_option");
-                let definition_string = Some(format!(
-                    "{}.new: {}",
-                    ss.name_token.text(),
-                    new_option_fn_type
-                ));
-                self.bindings.add_constant_alias(
-                    alias,
-                    canonical,
-                    new_option_fn.clone(),
-                    vec![],
-                    definition_string,
-                );
 
-                let new_option_application = self.bindings.apply_potential(
-                    new_option_fn.clone(),
+                let new_application = self.bindings.apply_potential(
+                    new_fn.clone(),
                     var_args.clone(),
                     Some(&option_struct_type),
                     &ss.name_token,
@@ -357,7 +338,7 @@ impl Environment {
                     &ss.name_token,
                 )?;
                 let witness_match =
-                    AcornValue::equals(new_option_application.clone(), some_witness.clone());
+                    AcornValue::equals(new_application.clone(), some_witness.clone());
                 let exists_some =
                     AcornValue::Exists(vec![struct_type.clone()], Box::new(witness_match.clone()));
                 let some_claim = AcornValue::ForAll(
@@ -370,7 +351,7 @@ impl Environment {
                     range,
                     self.depth,
                     ss.name_token.text().to_string(),
-                    "new_option".to_string(),
+                    "new".to_string(),
                 );
                 let prop = Proposition::new(some_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));
@@ -396,13 +377,13 @@ impl Environment {
                         range,
                         self.depth,
                         ss.name_token.text().to_string(),
-                        "new_option".to_string(),
+                        "new".to_string(),
                     );
                     let prop = Proposition::new(projection_claim, type_params.clone(), source);
                     self.add_node(Node::structural(project, self, prop));
                 }
 
-                let none_eq = AcornValue::equals(new_option_application, none_value);
+                let none_eq = AcornValue::equals(new_application, none_value);
                 let none_claim = AcornValue::ForAll(
                     field_types.clone(),
                     Box::new(AcornValue::implies(constraint.clone().negate(), none_eq)),
@@ -413,13 +394,13 @@ impl Environment {
                     range,
                     self.depth,
                     ss.name_token.text().to_string(),
-                    "new_option".to_string(),
+                    "new".to_string(),
                 );
                 let prop = Proposition::new(none_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));
 
                 let round_trip_application = self.bindings.apply_potential(
-                    new_option_fn.clone(),
+                    new_fn.clone(),
                     member_args.clone(),
                     Some(&option_struct_type),
                     &ss.name_token,
@@ -439,7 +420,7 @@ impl Environment {
                     range,
                     self.depth,
                     ss.name_token.text().to_string(),
-                    "new_option".to_string(),
+                    "new".to_string(),
                 );
                 let prop = Proposition::new(round_trip_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));

@@ -246,7 +246,7 @@ fn test_prove_impossible_constraint_is_allowed() {
 }
 
 #[test]
-fn test_new_option_can_use_late_constraint_witness() {
+fn test_new_can_use_late_constraint_witness() {
     let text = r#"
     inductive Option[T] {
         none
@@ -267,13 +267,13 @@ fn test_new_option_can_use_late_constraint_witness() {
         foo(zero)
     }
 
-    let Option.some(bar) = FooNat.new_option(zero)
+    let Option.some(bar) = FooNat.new(zero)
     "#;
     verify_succeeds(text);
 }
 
 #[test]
-fn test_new_is_alias_for_new_option() {
+fn test_new_for_constrained_structure_returns_option() {
     let text = r#"
     inductive Option[T] {
         none
@@ -286,8 +286,12 @@ fn test_new_is_alias_for_new_option() {
         value
     }
 
-    theorem goal(b: Bool) {
-        Foo.new(b) = Foo.new_option(b)
+    theorem goal_some(b: Bool) {
+        b implies exists(f: Foo) { Foo.new(b) = Option.some(f) }
+    }
+
+    theorem goal_none(b: Bool) {
+        not b implies Foo.new(b) = Option.none[Foo]
     }
     "#;
     verify_succeeds(text);

@@ -474,7 +474,7 @@ fn test_structure_with_constraint_and_by_block_is_ignored() {
 }
 
 #[test]
-fn test_structure_new_option_syntax() {
+fn test_constrained_structure_new_syntax() {
     let mut env = Environment::test();
     env.add(
         r#"
@@ -490,13 +490,13 @@ fn test_structure_new_option_syntax() {
         }
 
         let condition: Bool = Thing.constraint(true)
-        let value: Option[Thing] = Thing.new_option(true)
+        let value: Option[Thing] = Thing.new(true)
         "#,
     );
 }
 
 #[test]
-fn test_constrained_structure_new_syntax_is_new_option_alias() {
+fn test_constrained_structure_legacy_constructor_syntax_is_rejected() {
     let mut env = Environment::test();
     env.add(
         r#"
@@ -510,11 +510,10 @@ fn test_constrained_structure_new_syntax_is_new_option_alias() {
         } constraint {
             foo
         }
-
-        let value: Option[Thing] = Thing.new(true)
-        let value2: Option[Thing] = Thing.new_option(true)
         "#,
     );
+
+    env.bad("let value: Option[Thing] = Thing.new_option(true)");
 }
 
 #[test]

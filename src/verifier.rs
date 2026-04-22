@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -14,6 +15,22 @@ fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     } else {
         path
     }
+}
+
+fn read_stdin_appended_target(project: &Project, path: &std::path::Path) -> Result<String, String> {
+    if std::io::stdin().is_terminal() {
+        return Err("cannot read stdin in an active terminal".to_string());
+    }
+
+    let mut text = project
+        .read_file(&path.to_path_buf())
+        .map_err(|e| e.to_string())?;
+    let _ = std::io::stdin().lock();
+    for line in std::io::stdin().lines() {
+        text.push_str(&line.map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    Ok(text)
 }
 
 /// Output from running the verifier
@@ -92,9 +109,11 @@ impl Verifier {
             if target == "-" {
                 let path = PathBuf::from("<stdin>");
                 project.add_target_by_path(&path)?;
-            } else if target.starts_with("-:") {
-                let path = PathBuf::from(target);
-                project.add_target_by_path(&path)?;
+            } else if let Some(inner_target) = target.strip_prefix("-:") {
+                let path = resolve_target_path(&start_path, inner_target);
+                let text = read_stdin_appended_target(&project, &path)?;
+                project.update_file(path.clone(), &text, 0)?;
+                normalized_target = Some(path.to_string_lossy().into_owned());
             } else if target.ends_with(".ac") {
                 // Looks like a filename
                 let path = resolve_target_path(&start_path, target);
@@ -588,6 +607,79 @@ instance Nat: Two
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.goals_total, 2);
         assert_eq!(output.metrics.goals_success, 1);
+    }
+
+    #[test]
+    fn test_single_line_verification_accepts_relative_stdin_append_file_target() {
+        let (acornlib, src, build) = setup();
+
+        let nested = src.child("nested");
+        nested.create_dir_all().unwrap();
+        nested
+            .child("test.ac")
+            .write_str(
+                r#"
+                theorem first {
+                    true
+                }
+
+                theorem second {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("-:src/nested/test.ac".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(6));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.goals_total, 2);
+        assert_eq!(output.metrics.goals_success, 1);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert!(!build.child("nested").child("test.jsonl").exists());
+    }
+
+    #[test]
+    fn test_verifier_stdin_append_target_uses_resolved_cache_path() {
+        let (acornlib, src, build) = setup();
+
+        let nested = src.child("nested");
+        nested.create_dir_all().unwrap();
+        nested
+            .child("test.ac")
+            .write_str(
+                r#"
+                theorem first {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("-:src/nested/test.ac".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.goals_total, 1);
+        assert_eq!(output.metrics.goals_success, 1);
+        assert!(
+            build.child("nested").child("test.jsonl").exists(),
+            "build/nested/test.jsonl should exist"
+        );
     }
 
     #[cfg(feature = "validate")]

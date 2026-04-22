@@ -1314,7 +1314,7 @@ impl AcornValue {
             AcornValue::Try(x, _) => x.validate_against_stack(stack),
             AcornValue::Constant(ci) => {
                 // Quoted kernel clauses can legitimately contain bare polymorphic constants
-                // like `some = new_option` after extensionality peels all value arguments.
+                // like `some = new` after extensionality peels all value arguments.
                 // Those still carry generic parameter metadata even with no explicit type args.
                 if ci.params.is_empty() && ci.has_generic() && ci.type_param_names.is_empty() {
                     Err(format!("'{}' has generic type but no params", ci))

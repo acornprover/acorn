@@ -330,7 +330,7 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
         }
 
         let identity_subgroup[G: Group]: Subgroup[G] satisfy {
-            Subgroup.new_option(is_identity[G]) = Option.some(identity_subgroup)
+            Subgroup.new(is_identity[G]) = Option.some(identity_subgroup)
         }
     "#;
 
