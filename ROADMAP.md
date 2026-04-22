@@ -18,36 +18,6 @@ Right now, the main blocker is dependent types.
 
 The kernel is now built on dependent types, but they need to be exposed more thoroughly in the surface language.
 
-### Make constrained types use options instead of forcing inhabitedness
-
-When a type is defined like
-
-```
-structure Foo {
-    bar: Bar
-} constraint {
-    qux(bar)
-}
-```
-
-Currently, we require that `qux` is true for some `bar`. This is because the constructor `Foo.new` always returns a `Foo`, and we need some "default". Instead, we should make `Foo.new` return an `Option`.
-
-### Side quest: generic let-satisfy
-
-It would be great to define methods like:
-
-```
-let pick_any[T](list: List[T]) -> item: T satisfy {
-    if list.length > 0 {
-        list.contains(item)
-    }
-} by {
-  // Proof here
-}
-```
-
-However, this code is similar to the constructor of a constrained type, in that it lets you introduce terms of type `T` with no precondition, thus implicitly assuming that the type is inhabited. We should just check that `T` is inhabited here before allowing this syntax.
-
 ### Side quest: generic instances
 
 Relations like:

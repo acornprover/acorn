@@ -779,6 +779,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parsing_dependent_value_param_syntax() {
+        ok(indoc! {"
+        structure Fin[n: Nat] {
+            value: Nat
+        } constraint {
+            value < n
+        }"});
+        ok(indoc! {"
+        structure Vector[T, n: Nat] {
+            data: List[T]
+        }"});
+        ok(indoc! {"
+        theorem goal[T, n: Nat](x: T) {
+            x = x
+        }"});
+        ok(indoc! {"
+        define append[T, m: Nat, n: Nat](a: T, b: T) -> T {
+            a
+        }"});
+    }
+
+    #[test]
     fn test_parsing_parameterized_inductive_statement() {
         ok(indoc! {"
         inductive List[T] {

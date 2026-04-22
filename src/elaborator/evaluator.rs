@@ -33,6 +33,12 @@ struct CurrentInstanceContext {
     current_attr: String,
 }
 
+#[derive(Debug, Clone)]
+enum EvaluatedParamBinder {
+    Type(TypeParam),
+    Value(Token, AcornType),
+}
+
 /// The Evaluator turns expressions into types and values, and other things of that nature.
 pub struct Evaluator<'a> {
     /// The bindings to use for evaluation.
@@ -397,6 +403,22 @@ impl<'a> Evaluator<'a> {
                 let param_exprs = expr.flatten_comma_separated_list();
                 let mut instance_params = vec![];
                 for param_expr in param_exprs {
+                    if self
+                        .fork(self.bindings, None)
+                        .evaluate_type(param_expr)
+                        .is_ok()
+                    {
+                        instance_params.push(self.evaluate_type(param_expr)?);
+                        continue;
+                    }
+                    if let Ok(value) = self
+                        .fork(self.bindings, None)
+                        .evaluate_value(param_expr, None)
+                    {
+                        return Err(
+                            self.unsupported_value_type_arg_error(param_expr, &value.get_type())
+                        );
+                    }
                     instance_params.push(self.evaluate_type(param_expr)?);
                 }
                 let p = self.evaluate_potential_type(left)?;
@@ -1478,20 +1500,12 @@ impl<'a> Evaluator<'a> {
                     let mut new_bindings = self.bindings.clone();
                     let mut type_param_names = vec![];
                     let mut type_param_constraints = vec![];
-                    for param in type_params {
-                        let type_param = TypeParam {
-                            name: param.name.text().to_string(),
-                            typeclass: if let Some(typeclass) = &param.typeclass {
-                                Some(self.evaluate_typeclass(typeclass)?)
-                            } else {
-                                None
-                            },
-                        };
+                    for type_param in self.evaluate_type_params(type_params)? {
                         type_param_names.push(type_param.name.clone());
                         type_param_constraints.push(type_param.typeclass.clone());
                         let potential =
                             PotentialType::Resolved(AcornType::Arbitrary(type_param.clone()));
-                        new_bindings.add_type_alias(param.name.text(), potential, &param.name)?;
+                        new_bindings.add_type_alias(&type_param.name, potential, token)?;
                     }
 
                     // Create a new evaluator with the modified bindings
@@ -1737,6 +1751,69 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn unsupported_value_param_error(
+        &self,
+        name_token: &Token,
+        value_type: &AcornType,
+    ) -> error::Error {
+        name_token.error(&format!(
+            "dependent value parameters like '{}: {}' are not supported here yet",
+            name_token.text(),
+            value_type
+        ))
+    }
+
+    fn unsupported_value_type_arg_error(
+        &self,
+        expression: &Expression,
+        value_type: &AcornType,
+    ) -> error::Error {
+        expression.error(&format!(
+            "dependent type arguments like '{}: {}' are not supported here yet",
+            expression, value_type
+        ))
+    }
+
+    fn evaluate_param_binders(
+        &mut self,
+        exprs: &[TypeParamExpr],
+    ) -> error::Result<Vec<EvaluatedParamBinder>> {
+        let mut answer = vec![];
+        for expr in exprs {
+            if expr.type_expr.is_some() {
+                return Err(expr.name.error(
+                    "parameter binders must be simple identifiers, not complex type expressions",
+                ));
+            }
+
+            if let Some(annotation) = expr.typeclass.as_ref() {
+                if self
+                    .fork(self.bindings, None)
+                    .evaluate_typeclass(annotation)
+                    .is_ok()
+                {
+                    let typeclass = self.evaluate_typeclass(annotation)?;
+                    answer.push(EvaluatedParamBinder::Type(TypeParam {
+                        name: expr.name.text().to_string(),
+                        typeclass: Some(typeclass),
+                    }));
+                    continue;
+                }
+                if let Ok(value_type) = self.fork(self.bindings, None).evaluate_type(annotation) {
+                    answer.push(EvaluatedParamBinder::Value(expr.name.clone(), value_type));
+                    continue;
+                }
+                return Err(annotation.error("expected a typeclass constraint or a value type"));
+            }
+
+            answer.push(EvaluatedParamBinder::Type(TypeParam {
+                name: expr.name.text().to_string(),
+                typeclass: None,
+            }));
+        }
+        Ok(answer)
+    }
+
     /// Evaluates a list of type parameter expressions.
     /// This does not bind them into the environment.
     pub fn evaluate_type_params(
@@ -1744,27 +1821,21 @@ impl<'a> Evaluator<'a> {
         exprs: &[TypeParamExpr],
     ) -> error::Result<Vec<TypeParam>> {
         let mut answer: Vec<TypeParam> = vec![];
-        for expr in exprs {
-            // Reject complex type expressions in type parameter context
-            if expr.type_expr.is_some() {
-                return Err(expr.name.error(
-                    "type parameters must be simple identifiers, not complex type expressions",
-                ));
+        let params = self.evaluate_param_binders(exprs)?;
+        for (expr, param) in exprs.iter().zip(params) {
+            match param {
+                EvaluatedParamBinder::Type(type_param) => {
+                    self.bindings
+                        .check_typename_available(&type_param.name, &expr.name)?;
+                    if answer.iter().any(|tp| tp.name == type_param.name) {
+                        return Err(expr.name.error("duplicate type parameter"));
+                    }
+                    answer.push(type_param);
+                }
+                EvaluatedParamBinder::Value(name_token, value_type) => {
+                    return Err(self.unsupported_value_param_error(&name_token, &value_type));
+                }
             }
-
-            let name = expr.name.text().to_string();
-            self.bindings.check_typename_available(&name, &expr.name)?;
-            if answer.iter().any(|tp| tp.name == name) {
-                return Err(expr.name.error("duplicate type parameter"));
-            }
-            let typeclass = match expr.typeclass.as_ref() {
-                Some(e) => Some(self.evaluate_typeclass(e)?),
-                None => None,
-            };
-            answer.push(TypeParam {
-                name: expr.name.text().to_string(),
-                typeclass,
-            });
         }
         Ok(answer)
     }
@@ -1787,8 +1858,22 @@ impl<'a> Evaluator<'a> {
 
         for expr in exprs {
             if expr.typeclass.is_some() {
-                // If there's a typeclass constraint (e.g., K: Eq), it must be generic
-                generic_count += 1;
+                let annotation = expr.typeclass.as_ref().unwrap();
+                if self
+                    .fork(self.bindings, None)
+                    .evaluate_typeclass(annotation)
+                    .is_ok()
+                {
+                    generic_count += 1;
+                } else if let Ok(value_type) =
+                    self.fork(self.bindings, None).evaluate_type(annotation)
+                {
+                    return Err(self.unsupported_value_param_error(&expr.name, &value_type));
+                } else {
+                    return Err(
+                        annotation.error("expected a typeclass constraint or a concrete type")
+                    );
+                }
             } else if expr.type_expr.is_some() {
                 // Complex type expression like List[Color] - definitely concrete
                 concrete_count += 1;

@@ -164,6 +164,41 @@ fn test_axiomatic_types_must_be_capitalized() {
 }
 
 #[test]
+fn test_dependent_value_params_report_not_supported_yet() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    let structure_error = env.bad(
+        r#"
+            structure Fin[n: Nat] {
+                value: Nat
+            } constraint {
+                value < n
+            }
+        "#,
+    );
+    assert!(structure_error.contains("dependent value parameters"));
+
+    let theorem_error = env.bad("theorem goal[T, n: Nat] { true }");
+    assert!(theorem_error.contains("dependent value parameters"));
+}
+
+#[test]
+fn test_dependent_type_arguments_report_not_supported_yet() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("let k: Nat = axiom");
+    env.add(
+        r#"
+            structure Box[T] {
+                value: T
+            }
+        "#,
+    );
+    let error = env.bad("let x: Box[k] = axiom");
+    assert!(error.contains("dependent type arguments"));
+}
+
+#[test]
 fn test_else_on_new_line() {
     // This is ugly but it should work.
     let mut env = Environment::test();
