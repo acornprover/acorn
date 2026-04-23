@@ -167,6 +167,7 @@ fn test_axiomatic_types_must_be_capitalized() {
 fn test_dependent_value_params_report_not_supported_yet() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
+    env.add("type Indexed[n: Nat]: axiom");
     let structure_error = env.bad(
         r#"
             structure Fin[n: Nat] {
@@ -187,6 +188,7 @@ fn test_dependent_type_arguments_report_not_supported_yet() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
     env.add("let k: Nat = axiom");
+    env.add("type Fin[n: Nat]: axiom");
     env.add(
         r#"
             structure Box[T] {
@@ -196,6 +198,38 @@ fn test_dependent_type_arguments_report_not_supported_yet() {
     );
     let error = env.bad("let x: Box[k] = axiom");
     assert!(error.contains("dependent type arguments"));
+
+    let fin_error = env.bad("let y: Fin[k] = axiom");
+    assert!(fin_error.contains("dependent type arguments"));
+}
+
+#[test]
+fn test_generic_axiomatic_type_family_can_be_used() {
+    let mut env = Environment::test();
+    env.add("type Box[T]: axiom");
+    env.add("let x: Box[Bool] = axiom");
+}
+
+#[test]
+fn test_parameterized_type_aliases_can_be_used() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            structure Pair[T, U] {
+                first: T
+                second: U
+            }
+        "#,
+    );
+    env.add("type Diagonal[T]: Pair[T, T]");
+    env.add("let x: Diagonal[Bool] = Pair.new(true, false)");
+}
+
+#[test]
+fn test_parameterized_function_type_aliases_can_be_used() {
+    let mut env = Environment::test();
+    env.add("type Pred[T]: T -> Bool");
+    env.add("let p: Pred[Bool] = function(x: Bool) { x }");
 }
 
 #[test]

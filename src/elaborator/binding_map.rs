@@ -642,8 +642,25 @@ impl BindingMap {
         range: Option<Range>,
         definition_string: Option<String>,
     ) -> PotentialType {
+        self.add_potential_type_with_family_params(
+            name_token,
+            params.into_iter().map(FamilyParamKind::Type).collect(),
+            doc_comments,
+            range,
+            definition_string,
+        )
+    }
+
+    pub fn add_potential_type_with_family_params(
+        &mut self,
+        name_token: &Token,
+        family_param_kinds: Vec<FamilyParamKind>,
+        doc_comments: Vec<String>,
+        range: Option<Range>,
+        definition_string: Option<String>,
+    ) -> PotentialType {
         let name = name_token.text();
-        if params.is_empty() {
+        if family_param_kinds.is_empty() {
             return PotentialType::Resolved(self.add_data_type(
                 name,
                 doc_comments,
@@ -663,8 +680,16 @@ impl BindingMap {
         info.doc_comments = doc_comments;
         info.range = range;
         info.definition_string = definition_string;
-        info.family_param_kinds = params.iter().cloned().map(FamilyParamKind::Type).collect();
-        let ut = UnresolvedType { datatype, params };
+        info.family_param_kinds = family_param_kinds.clone();
+        info.arity = family_param_kinds
+            .iter()
+            .filter(|kind| matches!(kind, FamilyParamKind::Type(_)))
+            .count() as u8;
+        let ut = UnresolvedType::canonical_template_for_datatype(
+            name.to_string(),
+            datatype,
+            family_param_kinds,
+        );
         let potential = PotentialType::Unresolved(ut);
         self.insert_type_name(name.to_string(), potential.clone(), name_token)
             .expect("typename should not already be bound");
@@ -704,7 +729,11 @@ impl BindingMap {
         // Local type aliases should also be preferred to the canonical name for
         // unresolved generic types.
         if let PotentialType::Unresolved(u) = &potential {
-            self.add_datatype_alias(&u.datatype, alias);
+            if u.is_identity_alias() {
+                if let Some(datatype) = u.base_datatype() {
+                    self.add_datatype_alias(datatype, alias);
+                }
+            }
         }
 
         self.insert_type_name(alias.to_string(), potential, source)
@@ -1292,7 +1321,7 @@ impl BindingMap {
         match self.typename_to_type.remove(name) {
             Some(p) => match &p {
                 PotentialType::Unresolved(ut) => {
-                    panic!("removing type {} which is unresolved", ut.datatype.name);
+                    panic!("removing type {} which is unresolved", ut.name);
                 }
                 PotentialType::Resolved(t) => {
                     match &t {

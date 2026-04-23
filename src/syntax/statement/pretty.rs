@@ -142,11 +142,15 @@ impl Statement {
 
             StatementInfo::Claim(ps) => ps.claim.pretty_ref(allocator, false),
 
-            StatementInfo::Type(ts) => allocator
-                .text("type ")
-                .append(allocator.text(ts.name_token.text()))
-                .append(allocator.text(": "))
-                .append(ts.type_expr.pretty_ref(allocator, false)),
+            StatementInfo::Type(ts) => write_type_params_pretty(
+                allocator,
+                allocator
+                    .text("type ")
+                    .append(allocator.text(ts.name_token.text())),
+                &ts.type_params,
+            )
+            .append(allocator.text(": "))
+            .append(ts.type_expr.pretty_ref(allocator, false)),
 
             StatementInfo::ForAll(fas) => {
                 let mut doc = allocator.text("forall");

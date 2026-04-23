@@ -1149,7 +1149,7 @@ pub enum LineType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elaborator::acorn_type::FamilyParamKind;
+    use crate::elaborator::acorn_type::{AcornType, FamilyParamKind};
     use crate::elaborator::acorn_value::AcornValue;
     use crate::elaborator::fact::Fact;
     use crate::elaborator::names::ConstantName;
@@ -1259,6 +1259,7 @@ mod tests {
         env.add(
             r#"
             type Nat: axiom
+            type Fin[n: Nat]: axiom
 
             structure Box[T] {
                 value: T
@@ -1288,6 +1289,24 @@ mod tests {
         assert_eq!(
             env.bindings.get_datatype_family_param_kinds(&nat_datatype),
             Some([].as_slice())
+        );
+
+        let fin_datatype = env
+            .bindings
+            .get_type_for_typename("Fin")
+            .unwrap()
+            .as_base_datatype()
+            .expect("Fin should resolve to its base datatype")
+            .clone();
+        assert_eq!(
+            env.bindings.get_datatype_family_param_kinds(&fin_datatype),
+            Some(
+                [FamilyParamKind::Value(AcornType::Data(
+                    nat_datatype.clone(),
+                    vec![]
+                ))]
+                .as_slice()
+            )
         );
     }
 }

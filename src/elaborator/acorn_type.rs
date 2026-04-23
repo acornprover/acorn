@@ -57,24 +57,92 @@ impl Typeclass {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UnresolvedType {
-    /// The underlying generic datatype.
-    pub datatype: Datatype,
+    /// The user-facing name for this generic type.
+    pub name: String,
 
-    /// The parameters we need to instantiate this type, along with their typeclass if any.
-    pub params: Vec<Option<Typeclass>>,
+    /// The parameters we need to instantiate this type.
+    pub params: Vec<FamilyParamKind>,
+
+    /// The instantiated type template after applying those parameters.
+    /// This is stored using canonical arbitrary type names T0, T1, ...
+    pub template: AcornType,
 }
 
 impl UnresolvedType {
+    pub fn canonical_type_args_for(params: &[FamilyParamKind]) -> Vec<AcornType> {
+        let mut args = vec![];
+        let mut next_index = 0;
+        for param in params {
+            if let FamilyParamKind::Type(typeclass) = param {
+                args.push(AcornType::Arbitrary(TypeParam {
+                    name: format!("T{}", next_index),
+                    typeclass: typeclass.clone(),
+                }));
+                next_index += 1;
+            }
+        }
+        args
+    }
+
+    pub fn canonical_template_for_datatype(
+        name: String,
+        datatype: Datatype,
+        params: Vec<FamilyParamKind>,
+    ) -> UnresolvedType {
+        let args = Self::canonical_type_args_for(&params);
+        UnresolvedType {
+            name,
+            params,
+            template: AcornType::Data(datatype, args),
+        }
+    }
+
+    pub fn base_datatype(&self) -> Option<&Datatype> {
+        match &self.template {
+            AcornType::Data(datatype, _) => Some(datatype),
+            _ => None,
+        }
+    }
+
+    fn instantiate_template(&self, params: &[AcornType]) -> AcornType {
+        let replacements: Vec<_> = params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| (format!("T{}", i), param.clone()))
+            .collect();
+        self.template.instantiate(&replacements)
+    }
+
+    pub fn has_value_params(&self) -> bool {
+        self.params
+            .iter()
+            .any(|param| matches!(param, FamilyParamKind::Value(_)))
+    }
+
+    pub fn type_param_constraints(&self) -> Option<Vec<Option<Typeclass>>> {
+        let mut constraints = vec![];
+        for param in &self.params {
+            match param {
+                FamilyParamKind::Type(typeclass) => constraints.push(typeclass.clone()),
+                FamilyParamKind::Value(_) => return None,
+            }
+        }
+        Some(constraints)
+    }
+
+    pub fn is_identity_alias(&self) -> bool {
+        !self.has_value_params()
+            && self.base_datatype().is_some()
+            && self.template
+                == AcornType::Data(
+                    self.base_datatype().unwrap().clone(),
+                    Self::canonical_type_args_for(&self.params),
+                )
+    }
+
     /// Just sticks fake names in there to print.
     pub fn to_display_type(&self) -> AcornType {
-        let mut params = vec![];
-        for (i, param) in self.params.iter().enumerate() {
-            params.push(AcornType::Variable(TypeParam {
-                name: format!("T{}", i),
-                typeclass: param.clone(),
-            }));
-        }
-        AcornType::Data(self.datatype.clone(), params)
+        self.template.arbitrary_to_variable()
     }
 }
 
@@ -97,15 +165,21 @@ impl PotentialType {
         source: &dyn ErrorContext,
     ) -> Result<AcornType> {
         if let PotentialType::Unresolved(ut) = &self {
+            let Some(type_params) = ut.type_param_constraints() else {
+                return Err(source.error(&format!(
+                    "type {} has dependent value parameters and cannot be resolved here",
+                    ut.name
+                )));
+            };
             if ut.params.len() != params.len() {
                 return Err(source.error(&format!(
                     "type {} expects {} parameters, but got {}",
-                    ut.datatype.name,
+                    ut.name,
                     ut.params.len(),
                     params.len()
                 )));
             }
-            for (i, (typeclass, param_type)) in ut.params.iter().zip(params.iter()).enumerate() {
+            for (i, (typeclass, param_type)) in type_params.iter().zip(params.iter()).enumerate() {
                 match param_type {
                     AcornType::Arbitrary(param) => {
                         if typeclass != &param.typeclass {
@@ -136,10 +210,16 @@ impl PotentialType {
         source: &dyn ErrorContext,
     ) -> Result<AcornType> {
         if let PotentialType::Unresolved(ut) = &self {
+            if ut.has_value_params() {
+                return Err(source.error(&format!(
+                    "type {} has dependent value parameters and cannot be resolved here",
+                    ut.name
+                )));
+            }
             if ut.params.len() != params.len() {
                 return Err(source.error(&format!(
                     "type {} expects {} parameters, but got {}",
-                    ut.datatype.name,
+                    ut.name,
                     ut.params.len(),
                     params.len()
                 )));
@@ -175,16 +255,22 @@ impl PotentialType {
                 }
             }
             PotentialType::Unresolved(ut) => {
+                if ut.has_value_params() {
+                    return Err(source.error(&format!(
+                        "type {} has dependent value parameters and cannot be resolved here",
+                        ut.name
+                    )));
+                }
                 if params.len() != ut.params.len() {
                     Err(source.error(&format!(
                         "type {} expects {} parameters, but got {}",
-                        ut.datatype.name,
+                        ut.name,
                         ut.params.len(),
                         params.len()
                     )))
                 } else {
-                    // TODO: check that params obeys ut's typeclasses
-                    Ok(AcornType::Data(ut.datatype, params))
+                    // TODO: check that params obey the typeclass constraints in ut.params.
+                    Ok(ut.instantiate_template(&params))
                 }
             }
         }
@@ -202,7 +288,7 @@ impl PotentialType {
                     None
                 }
             }
-            PotentialType::Unresolved(ut) => Some(&ut.datatype),
+            PotentialType::Unresolved(ut) => ut.base_datatype(),
             _ => None,
         }
     }
@@ -341,6 +427,13 @@ pub enum FamilyParam {
 }
 
 impl FamilyParam {
+    pub fn name(&self) -> &str {
+        match self {
+            FamilyParam::Type(type_param) => &type_param.name,
+            FamilyParam::Value(value_param) => &value_param.name,
+        }
+    }
+
     pub fn kind(&self) -> FamilyParamKind {
         match self {
             FamilyParam::Type(type_param) => FamilyParamKind::Type(type_param.typeclass.clone()),

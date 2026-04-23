@@ -257,7 +257,9 @@ fn entity_key(entity: &NamedEntity) -> EntityKey {
         NamedEntity::Module(module_id) => EntityKey::Module(*module_id),
         NamedEntity::Typeclass(typeclass) => EntityKey::Typeclass(typeclass.clone()),
         NamedEntity::UnresolvedValue(unresolved) => EntityKey::Constant(unresolved.name.clone()),
-        NamedEntity::UnresolvedType(unresolved) => EntityKey::Datatype(unresolved.datatype.clone()),
+        NamedEntity::UnresolvedType(unresolved) => {
+            EntityKey::acorn_type(&unresolved.to_display_type())
+        }
     }
 }
 

@@ -154,6 +154,9 @@ mod tests {
     #[test]
     fn test_nat_ac_statements() {
         ok("type Nat: axiom");
+        ok("type Box[T]: axiom");
+        ok("type Fin[n: Nat]: axiom");
+        ok("type Vector[T, n: Nat]: axiom");
         ok("let suc: Nat -> Nat = axiom");
         ok(indoc! {"
         axiom suc_injective(x: Nat, y: Nat) {

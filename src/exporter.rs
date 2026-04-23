@@ -7,7 +7,7 @@ use serde::Serialize;
 use tower_lsp::lsp_types::Range;
 
 use crate::code_generator::CodeGenerator;
-use crate::elaborator::acorn_type::PotentialType;
+use crate::elaborator::acorn_type::{FamilyParamKind, PotentialType};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::fact::Fact;
@@ -410,12 +410,10 @@ fn export_module(
                 .params
                 .iter()
                 .enumerate()
-                .map(|(i, tc)| {
-                    if let Some(tc) = tc {
-                        format!("T{}: {}", i, tc.name)
-                    } else {
-                        format!("T{}", i)
-                    }
+                .map(|(i, kind)| match kind {
+                    FamilyParamKind::Type(Some(tc)) => format!("T{}: {}", i, tc.name),
+                    FamilyParamKind::Type(None) => format!("T{}", i),
+                    FamilyParamKind::Value(value_type) => format!("x{}: {}", i, value_type),
                 })
                 .collect(),
             _ => vec![],

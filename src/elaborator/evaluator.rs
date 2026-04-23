@@ -1,5 +1,6 @@
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, FamilyParam, PotentialType, TypeParam, Typeclass, ValueParam,
+    AcornType, Datatype, FamilyParam, FamilyParamKind, PotentialType, TypeParam, Typeclass,
+    ValueParam,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
@@ -342,7 +343,7 @@ impl<'a> Evaluator<'a> {
         match potential {
             PotentialType::Resolved(t) => Ok(t),
             PotentialType::Unresolved(ut) => {
-                Err(expression.error(&format!("type {} is unresolved", ut.datatype.name)))
+                Err(expression.error(&format!("type {} is unresolved", ut.name)))
             }
         }
     }
@@ -397,6 +398,51 @@ impl<'a> Evaluator<'a> {
                     return Err(opening.error("expected '[' or 'or' for type params"));
                 }
                 let param_exprs = expr.flatten_comma_separated_list();
+                let p = self.evaluate_potential_type(left)?;
+                if let PotentialType::Unresolved(ut) = &p {
+                    if ut.params.len() != param_exprs.len() {
+                        return Err(expression.error(&format!(
+                            "type {} expects {} parameters, but got {}",
+                            ut.name,
+                            ut.params.len(),
+                            param_exprs.len()
+                        )));
+                    }
+                    let mut instance_params = vec![];
+                    for (param_expr, param_kind) in param_exprs.iter().zip(&ut.params) {
+                        match param_kind {
+                            FamilyParamKind::Type(_) => {
+                                if self
+                                    .fork(self.bindings, None)
+                                    .evaluate_type(param_expr)
+                                    .is_ok()
+                                {
+                                    instance_params.push(self.evaluate_type(param_expr)?);
+                                    continue;
+                                }
+                                if let Ok(value) = self
+                                    .fork(self.bindings, None)
+                                    .evaluate_value(param_expr, None)
+                                {
+                                    return Err(self.unsupported_value_type_arg_error(
+                                        param_expr,
+                                        &value.get_type(),
+                                    ));
+                                }
+                                instance_params.push(self.evaluate_type(param_expr)?);
+                            }
+                            FamilyParamKind::Value(value_type) => {
+                                let value = self.evaluate_value(param_expr, Some(value_type))?;
+                                return Err(self.unsupported_value_type_arg_error(
+                                    param_expr,
+                                    &value.get_type(),
+                                ));
+                            }
+                        }
+                    }
+                    let t = p.resolve(instance_params, expression)?;
+                    return Ok(PotentialType::Resolved(t));
+                }
                 let mut instance_params = vec![];
                 for param_expr in param_exprs {
                     if self
@@ -417,7 +463,6 @@ impl<'a> Evaluator<'a> {
                     }
                     instance_params.push(self.evaluate_type(param_expr)?);
                 }
-                let p = self.evaluate_potential_type(left)?;
                 let t = p.resolve(instance_params, expression)?;
                 Ok(PotentialType::Resolved(t))
             }
@@ -920,7 +965,10 @@ impl<'a> Evaluator<'a> {
                 return Err(name_token.error("cannot access members of unresolved types"));
             }
             Some(NamedEntity::UnresolvedType(ut)) => {
-                match self.evaluate_datatype_attr(&ut.datatype, name, name_token)? {
+                let Some(datatype) = ut.base_datatype() else {
+                    return Err(name_token.error("this type cannot have attributes"));
+                };
+                match self.evaluate_datatype_attr(datatype, name, name_token)? {
                     PotentialValue::Resolved(value) => NamedEntity::Value(value),
                     PotentialValue::Unresolved(u) => NamedEntity::UnresolvedValue(u),
                 }
@@ -1799,7 +1847,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         exprs: &[TypeParamExpr],
     ) -> error::Result<Vec<FamilyParam>> {
-        let mut answer = vec![];
+        let mut answer: Vec<FamilyParam> = vec![];
         for expr in exprs {
             if expr.type_expr.is_some() {
                 return Err(expr.name.error(
@@ -1814,26 +1862,47 @@ impl<'a> Evaluator<'a> {
                     .is_ok()
                 {
                     let typeclass = self.evaluate_typeclass(annotation)?;
-                    answer.push(FamilyParam::Type(TypeParam {
+                    let param = FamilyParam::Type(TypeParam {
                         name: expr.name.text().to_string(),
                         typeclass: Some(typeclass),
-                    }));
+                    });
+                    if answer
+                        .iter()
+                        .any(|existing| existing.name() == param.name())
+                    {
+                        return Err(expr.name.error("duplicate parameter"));
+                    }
+                    answer.push(param);
                     continue;
                 }
                 if let Ok(value_type) = self.fork(self.bindings, None).evaluate_type(annotation) {
-                    answer.push(FamilyParam::Value(ValueParam {
+                    let param = FamilyParam::Value(ValueParam {
                         name: expr.name.text().to_string(),
                         value_type,
-                    }));
+                    });
+                    if answer
+                        .iter()
+                        .any(|existing| existing.name() == param.name())
+                    {
+                        return Err(expr.name.error("duplicate parameter"));
+                    }
+                    answer.push(param);
                     continue;
                 }
                 return Err(annotation.error("expected a typeclass constraint or a value type"));
             }
 
-            answer.push(FamilyParam::Type(TypeParam {
+            let param = FamilyParam::Type(TypeParam {
                 name: expr.name.text().to_string(),
                 typeclass: None,
-            }));
+            });
+            if answer
+                .iter()
+                .any(|existing| existing.name() == param.name())
+            {
+                return Err(expr.name.error("duplicate parameter"));
+            }
+            answer.push(param);
         }
         Ok(answer)
     }

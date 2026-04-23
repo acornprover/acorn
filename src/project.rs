@@ -778,9 +778,9 @@ impl Project {
                     None
                 }
             }
-            NamedEntity::UnresolvedType(unresolved_type) => {
-                self.get_datatype_definition_string(&unresolved_type.datatype)
-            }
+            NamedEntity::UnresolvedType(unresolved_type) => unresolved_type
+                .base_datatype()
+                .and_then(|datatype| self.get_datatype_definition_string(datatype)),
             NamedEntity::Typeclass(typeclass) => self.get_typeclass_definition_string(typeclass),
             NamedEntity::Module(_) => None,
         };
@@ -813,9 +813,9 @@ impl Project {
                     None
                 }
             }
-            NamedEntity::UnresolvedType(unresolved_type) => {
-                self.get_datatype_doc_comments(&unresolved_type.datatype)
-            }
+            NamedEntity::UnresolvedType(unresolved_type) => unresolved_type
+                .base_datatype()
+                .and_then(|datatype| self.get_datatype_doc_comments(datatype)),
 
             NamedEntity::Typeclass(typeclass) => self.get_typeclass_doc_comments(typeclass),
 
@@ -900,7 +900,7 @@ impl Project {
                 }
             }
             NamedEntity::UnresolvedType(unresolved_type) => {
-                let datatype = &unresolved_type.datatype;
+                let datatype = unresolved_type.base_datatype()?;
                 let module_id = datatype.module_id;
                 let module_env = if module_id == env.module_id {
                     env

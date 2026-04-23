@@ -75,6 +75,7 @@ pub struct ClaimStatement {
 /// Type statements declare a name as an alias to a type expression.
 pub struct TypeStatement {
     pub name_token: Token,
+    pub type_params: Vec<TypeParamExpr>,
     pub type_expr: Expression,
 }
 

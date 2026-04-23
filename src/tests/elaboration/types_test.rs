@@ -368,6 +368,30 @@ fn test_aliasing_a_generic_type() {
 }
 
 #[test]
+fn test_parameterized_type_alias() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            structure Pair[T, U] {
+                first: T
+                second: U
+            }
+            "#,
+    );
+    env.add(
+        r#"
+            type Diagonal[T]: Pair[T, T]
+
+            let pair: Diagonal[Bool] = Pair.new(true, false)
+
+            theorem goal(x: Diagonal[Bool]) {
+                x.first = x.second or x.first = not x.second
+            }
+            "#,
+    );
+}
+
+#[test]
 fn test_nested_functional_values() {
     let mut env = Environment::test();
     env.add(
