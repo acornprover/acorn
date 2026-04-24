@@ -18,13 +18,7 @@ Right now, the main blocker is dependent types.
 
 The kernel is now built on dependent types, but they need to be exposed more thoroughly in the surface language.
 
-### Side quest: generic instances
 
-Relations like:
-
-```
-instance NonZero[F: Field]: Group
-```
 
 We are not monomorphizing any more, which makes this more plausible.
 
@@ -45,6 +39,14 @@ Vector[Real, k]
 What else?
 
 ## Open Questions
+
+### Generic instance relationships
+
+Relations like:
+
+```
+instance Zmod[k]: AdditiveGroup
+```
 
 ### Question mark syntax.
 
