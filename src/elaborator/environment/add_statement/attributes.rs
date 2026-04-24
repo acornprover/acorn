@@ -34,12 +34,110 @@ impl Environment {
             .evaluate_attributes_type_args(&ats.type_params)?;
 
         match type_args {
-            AttributesTypeArgs::Generic(type_params) => {
-                let mut params = vec![];
-                for param in &type_params {
-                    params.push(self.bindings.add_arbitrary_type(param.clone()));
+            AttributesTypeArgs::Generic(family_params) => {
+                let expected_param_kinds = match &potential {
+                    crate::elaborator::acorn_type::PotentialType::Resolved(_) => vec![],
+                    crate::elaborator::acorn_type::PotentialType::Unresolved(unresolved) => {
+                        unresolved.params.clone()
+                    }
+                };
+                if family_params.len() != expected_param_kinds.len() {
+                    return Err(ats.name_token.error(&format!(
+                        "type {} expects {} parameters, but got {}",
+                        ats.name_token.text(),
+                        expected_param_kinds.len(),
+                        family_params.len()
+                    )));
                 }
-                let instance_type = potential.resolve_with_arbitrary(params, &ats.name_token)?;
+
+                for ((expr, family_param), expected_kind) in ats
+                    .type_params
+                    .iter()
+                    .zip(&family_params)
+                    .zip(&expected_param_kinds)
+                {
+                    match (family_param, expected_kind) {
+                        (
+                            crate::elaborator::acorn_type::FamilyParam::Type(_),
+                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                        ) => {}
+                        (
+                            crate::elaborator::acorn_type::FamilyParam::Value(value_param),
+                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                        ) => {
+                            if value_param.value_type != *expected_type {
+                                return Err(expr.name.error(&format!(
+                                    "expected a value parameter of type {}, but found {}",
+                                    expected_type, value_param.value_type
+                                )));
+                            }
+                        }
+                        (
+                            crate::elaborator::acorn_type::FamilyParam::Type(_),
+                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                        ) => {
+                            return Err(expr.name.error(&format!(
+                                "expected a dependent value parameter like '{}: {}'",
+                                expr.name.text(),
+                                expected_type
+                            )));
+                        }
+                        (
+                            crate::elaborator::acorn_type::FamilyParam::Value(_),
+                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                        ) => {
+                            return Err(expr
+                                .name
+                                .error("expected a type parameter here, not a value parameter"));
+                        }
+                    }
+                }
+                for (expr, family_param) in ats.type_params.iter().zip(&family_params) {
+                    if let Some(type_param) = family_param.as_type_param() {
+                        self.bindings
+                            .check_typename_available(&type_param.name, &expr.name)?;
+                    }
+                }
+
+                let family_scope = DatatypeFamilyScope {
+                    type_params: family_params
+                        .iter()
+                        .filter_map(|param| param.as_type_param().cloned())
+                        .collect(),
+                    value_params: family_params
+                        .iter()
+                        .filter_map(|param| param.as_value_param().cloned())
+                        .collect(),
+                };
+                let mut arbitrary_type_args = vec![];
+                for param in &family_scope.type_params {
+                    arbitrary_type_args.push(self.bindings.add_arbitrary_type(param.clone()));
+                }
+                let mut next_type_arg = 0usize;
+                let mut next_value_arg = 0usize;
+                let family_args = family_params
+                    .iter()
+                    .map(|param| match param {
+                        crate::elaborator::acorn_type::FamilyParam::Type(_) => {
+                            let arg = crate::elaborator::acorn_type::DependentTypeArg::Type(
+                                arbitrary_type_args[next_type_arg].clone(),
+                            );
+                            next_type_arg += 1;
+                            arg
+                        }
+                        crate::elaborator::acorn_type::FamilyParam::Value(value_param) => {
+                            let arg = crate::elaborator::acorn_type::DependentTypeArg::Value(
+                                AcornValue::Variable(
+                                    next_value_arg as AtomId,
+                                    value_param.value_type.clone(),
+                                ),
+                            );
+                            next_value_arg += 1;
+                            arg
+                        }
+                    })
+                    .collect();
+                let instance_type = potential.resolve_args(family_args, &ats.name_token)?;
                 let datatype = self
                     .check_can_add_attributes(&ats.name_token, &instance_type)?
                     .clone();
@@ -57,7 +155,7 @@ impl Environment {
                                 ),
                                 ls,
                                 ls.name_token.range(),
-                                Some(&type_params),
+                                Some(&family_scope),
                             )?;
                         }
                         StatementInfo::VariableSatisfy(vss) => {
@@ -66,7 +164,7 @@ impl Environment {
                                 project,
                                 substatement,
                                 vss,
-                                Some(&type_params),
+                                Some(&family_scope),
                                 move |name| {
                                     DefinedName::datatype_attr_defined(
                                         defining_module,
@@ -86,7 +184,7 @@ impl Environment {
                                     &datatype,
                                     fss.name_token.text(),
                                 ),
-                                Some(&type_params),
+                                Some(&family_scope),
                             )?;
                         }
                         StatementInfo::Define(ds) => {
@@ -99,7 +197,7 @@ impl Environment {
                                     ds.name_token.text(),
                                 ),
                                 Some(&instance_type),
-                                Some(&type_params),
+                                Some(&family_scope),
                                 ds,
                                 ds.name_token.range(),
                             )?;
@@ -113,8 +211,8 @@ impl Environment {
                         }
                     }
                 }
-                for type_param in &ats.type_params {
-                    self.bindings.remove_type(type_param.name.text());
+                for type_param in &family_scope.type_params {
+                    self.bindings.remove_type(&type_param.name);
                 }
                 Ok(())
             }
@@ -230,7 +328,10 @@ impl Environment {
             typeclass: Some(typeclass.clone()),
         };
         let instance_type = self.bindings.add_arbitrary_type(type_param.clone());
-        let type_params = vec![type_param];
+        let family_scope = DatatypeFamilyScope {
+            type_params: vec![type_param],
+            value_params: vec![],
+        };
 
         for substatement in &ats.body.statements {
             match &substatement.statement {
@@ -245,7 +346,7 @@ impl Environment {
                         ),
                         ls,
                         ls.name_token.range(),
-                        Some(&type_params),
+                        Some(&family_scope),
                     )?;
                 }
                 StatementInfo::VariableSatisfy(vss) => {
@@ -254,7 +355,7 @@ impl Environment {
                         project,
                         substatement,
                         vss,
-                        Some(&type_params),
+                        Some(&family_scope),
                         move |name| {
                             DefinedName::typeclass_attr_defined(defining_module, &typeclass, name)
                         },
@@ -270,7 +371,7 @@ impl Environment {
                             &typeclass,
                             fss.name_token.text(),
                         ),
-                        Some(&type_params),
+                        Some(&family_scope),
                     )?;
                 }
                 StatementInfo::Define(ds) => {
@@ -283,7 +384,7 @@ impl Environment {
                             ds.name_token.text(),
                         ),
                         Some(&instance_type),
-                        Some(&type_params),
+                        Some(&family_scope),
                         ds,
                         ds.name_token.range(),
                     )?;

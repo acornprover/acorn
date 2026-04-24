@@ -1,9 +1,41 @@
 use super::*;
 
+fn bind_datatype_value_params(stack: &mut Stack, datatype_params: Option<&DatatypeFamilyScope>) {
+    if let Some(datatype_params) = datatype_params {
+        datatype_params.bind_value_stack(stack);
+    }
+}
+
+fn datatype_value_param_types(datatype_params: Option<&DatatypeFamilyScope>) -> Vec<AcornType> {
+    datatype_params
+        .map(|datatype_params| datatype_params.value_param_types())
+        .unwrap_or_default()
+}
+
+fn datatype_value_block_args(
+    datatype_params: Option<&DatatypeFamilyScope>,
+) -> Vec<(String, AcornType)> {
+    datatype_params
+        .map(|datatype_params| datatype_params.value_block_args())
+        .unwrap_or_default()
+}
+
+fn quantify_over_datatype_value_params(
+    datatype_params: Option<&DatatypeFamilyScope>,
+    value: AcornValue,
+) -> AcornValue {
+    let value_param_types = datatype_value_param_types(datatype_params);
+    if value_param_types.is_empty() {
+        value
+    } else {
+        AcornValue::ForAll(value_param_types, Box::new(value))
+    }
+}
+
 impl Environment {
     /// Adds a "let" statement to the environment.
     /// This can also be in a class, typeclass, or instance block.
-    /// If this is in an attributes block, the datatype parameters are provided.
+    /// If this is in an attributes block, the datatype family parameters are provided.
     pub(super) fn add_let_statement(
         &mut self,
         project: &Project,
@@ -11,7 +43,7 @@ impl Environment {
         defined_name: DefinedName,
         ls: &LetStatement,
         range: Range,
-        datatype_params: Option<&Vec<TypeParam>>,
+        datatype_params: Option<&DatatypeFamilyScope>,
     ) -> error::Result<()> {
         ls.name_token.check_not_reserved()?;
 
@@ -35,9 +67,14 @@ impl Environment {
             self.bindings.add_arbitrary_type(param.clone());
         }
 
+        let datatype_value_param_types = datatype_value_param_types(datatype_params);
         let (acorn_type, value) = match &ls.type_expr {
             Some(type_expr) => {
-                let acorn_type = self.evaluator(project).evaluate_type(type_expr)?;
+                let mut stack = Stack::new();
+                bind_datatype_value_params(&mut stack, datatype_params);
+                let acorn_type = self
+                    .evaluator(project)
+                    .evaluate_type_with_stack(&mut stack, type_expr)?;
                 if ls.name_token.token_type == TokenType::Numeral {
                     match &defined_name {
                         DefinedName::Constant(constant_name) => {
@@ -56,25 +93,30 @@ impl Environment {
                                 module_id: datatype_module_id,
                                 name: datatype_name,
                             };
-                            if acorn_type != AcornType::Data(datatype, vec![]) {
-                                return Err(type_expr.error(
-                                    "numeric datatype variables must be the datatype type",
-                                ));
-                            }
+                            acorn_type
+                                .check_instance(&datatype, type_expr)
+                                .map_err(|_| {
+                                    type_expr.error(
+                                        "numeric datatype variables must be the datatype type",
+                                    )
+                                })?;
                         }
                         DefinedName::Instance(instance_name) => {
-                            if acorn_type != AcornType::Data(instance_name.datatype.clone(), vec![])
-                            {
-                                return Err(type_expr.error(
-                                    "numeric instance variables must be the instance datatype type",
-                                ));
-                            }
+                            acorn_type
+                                .check_instance(&instance_name.datatype, type_expr)
+                                .map_err(|_| {
+                                    type_expr.error(
+                                        "numeric instance variables must be the instance datatype type",
+                                    )
+                                })?;
                         }
                     }
                 }
                 let value = if ls.value.is_axiom() {
                     None
                 } else {
+                    let mut stack = Stack::new();
+                    bind_datatype_value_params(&mut stack, datatype_params);
                     let v = if let Some(instance_name) = defined_name.as_instance() {
                         Evaluator::new_for_instance_member(
                             project,
@@ -82,10 +124,17 @@ impl Environment {
                             Some(&mut self.token_map),
                             instance_name,
                         )
-                        .evaluate_value(&ls.value, Some(&acorn_type))?
+                        .evaluate_value_with_stack(
+                            &mut stack,
+                            &ls.value,
+                            Some(&acorn_type),
+                        )?
                     } else {
-                        self.evaluator(project)
-                            .evaluate_value(&ls.value, Some(&acorn_type))?
+                        self.evaluator(project).evaluate_value_with_stack(
+                            &mut stack,
+                            &ls.value,
+                            Some(&acorn_type),
+                        )?
                     };
                     Some(v)
                 };
@@ -98,6 +147,8 @@ impl Environment {
                         .first_token()
                         .error("axiom constants require explicit type annotation"));
                 }
+                let mut stack = Stack::new();
+                bind_datatype_value_params(&mut stack, datatype_params);
                 let value = if let Some(instance_name) = defined_name.as_instance() {
                     Evaluator::new_for_instance_member(
                         project,
@@ -105,9 +156,10 @@ impl Environment {
                         Some(&mut self.token_map),
                         instance_name,
                     )
-                    .evaluate_value(&ls.value, None)?
+                    .evaluate_value_with_stack(&mut stack, &ls.value, None)?
                 } else {
-                    self.evaluator(project).evaluate_value(&ls.value, None)?
+                    self.evaluator(project)
+                        .evaluate_value_with_stack(&mut stack, &ls.value, None)?
                 };
                 let acorn_type = value.get_type();
                 (acorn_type, Some(value))
@@ -125,7 +177,7 @@ impl Environment {
                         .name_token
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
-                p.clone()
+                p.type_params.clone()
             }
             None => local_type_params,
         };
@@ -133,27 +185,30 @@ impl Environment {
         let value = value.map(|v| v.genericize(&type_params));
         let def_str = statement.to_string();
 
-        if let Some(value) = &value {
-            if let Some(simple_name) = value.as_simple_constant() {
-                match &defined_name {
-                    DefinedName::Constant(constant_name) => {
-                        let doc_comments = self.take_doc_comments();
-                        self.bindings.add_constant_alias(
-                            constant_name.clone(),
-                            simple_name.clone(),
-                            PotentialValue::Resolved(value.clone()),
-                            doc_comments,
-                            Some(def_str),
-                        );
-                        return Ok(());
+        if datatype_value_param_types.is_empty() {
+            if let Some(value) = &value {
+                if let Some(simple_name) = value.as_simple_constant() {
+                    match &defined_name {
+                        DefinedName::Constant(constant_name) => {
+                            let doc_comments = self.take_doc_comments();
+                            self.bindings.add_constant_alias(
+                                constant_name.clone(),
+                                simple_name.clone(),
+                                PotentialValue::Resolved(value.clone()),
+                                doc_comments,
+                                Some(def_str),
+                            );
+                            return Ok(());
+                        }
+                        DefinedName::Instance(_) => {}
                     }
-                    DefinedName::Instance(_) => {}
                 }
             }
         }
         self.define_constant(
             defined_name,
             type_params,
+            datatype_value_param_types,
             acorn_type,
             value,
             range,
@@ -168,7 +223,7 @@ impl Environment {
         statement: &Statement,
         defined_name: DefinedName,
         self_type: Option<&AcornType>,
-        datatype_params: Option<&Vec<TypeParam>>,
+        datatype_params: Option<&DatatypeFamilyScope>,
         ds: &DefineStatement,
         range: Range,
     ) -> error::Result<()> {
@@ -195,10 +250,12 @@ impl Environment {
                 self_type,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
-                datatype_params,
+                datatype_params.map(|params| params.type_params_slice()),
+                datatype_params.map(|params| params.value_params_slice()),
                 project,
                 Some(&mut self.token_map),
             )?;
+        let datatype_value_param_types = datatype_value_param_types(datatype_params);
 
         if let Some(datatype_type) = self_type {
             if &arg_types[0] != datatype_type {
@@ -221,15 +278,15 @@ impl Environment {
             let mut fn_value = AcornValue::lambda(arg_types, v);
 
             let params = if let Some(datatype_params) = datatype_params {
-                fn_value = fn_value.genericize(datatype_params);
+                fn_value = fn_value.genericize(&datatype_params.type_params);
 
                 if !fn_param_names.is_empty() {
                     fn_value = fn_value.genericize(&fn_param_names);
-                    let mut combined_params = datatype_params.clone();
+                    let mut combined_params = datatype_params.type_params.clone();
                     combined_params.extend(fn_param_names);
                     combined_params
                 } else {
-                    datatype_params.clone()
+                    datatype_params.type_params.clone()
                 }
             } else {
                 fn_param_names
@@ -238,6 +295,7 @@ impl Environment {
             self.define_constant(
                 defined_name,
                 params,
+                datatype_value_param_types,
                 fn_value.get_type(),
                 Some(fn_value),
                 range,
@@ -249,11 +307,11 @@ impl Environment {
         let new_axiom_type = AcornType::functional(arg_types, value_type);
         let params = if let Some(datatype_params) = datatype_params {
             if !fn_param_names.is_empty() {
-                let mut combined_params = datatype_params.clone();
+                let mut combined_params = datatype_params.type_params.clone();
                 combined_params.extend(fn_param_names);
                 combined_params
             } else {
-                datatype_params.clone()
+                datatype_params.type_params.clone()
             }
         } else {
             fn_param_names
@@ -261,6 +319,7 @@ impl Environment {
         self.define_constant(
             defined_name,
             params,
+            datatype_value_param_types,
             new_axiom_type,
             None,
             range,
@@ -290,6 +349,7 @@ impl Environment {
             &ts.args,
             None,
             &ts.claim,
+            None,
             None,
             None,
             None,
@@ -423,7 +483,7 @@ impl Environment {
         project: &mut Project,
         statement: &Statement,
         vss: &VariableSatisfyStatement,
-        datatype_params: Option<&Vec<TypeParam>>,
+        datatype_params: Option<&DatatypeFamilyScope>,
         mut defined_name_for: F,
     ) -> error::Result<()>
     where
@@ -442,13 +502,21 @@ impl Environment {
             self.bindings.add_arbitrary_type(param.clone());
         }
 
+        let family_value_param_count = datatype_params
+            .map(|params| params.value_params.len() as AtomId)
+            .unwrap_or(0);
+        let family_value_param_types = datatype_value_param_types(datatype_params);
         for declaration in &vss.declarations {
             if let Declaration::Typed(_, type_expr) = declaration {
-                self.evaluator(project).evaluate_type(type_expr)?;
+                let mut stack = Stack::new();
+                bind_datatype_value_params(&mut stack, datatype_params);
+                self.evaluator(project)
+                    .evaluate_type_with_stack(&mut stack, type_expr)?;
             }
         }
 
         let mut stack = Stack::new();
+        bind_datatype_value_params(&mut stack, datatype_params);
         let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
         let (quant_names, quant_types) =
             no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
@@ -466,15 +534,16 @@ impl Environment {
                         .token()
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
-                p.clone()
+                p.type_params.clone()
             }
             None => local_type_params.clone(),
         };
+        let block_args = datatype_value_block_args(datatype_params);
         let block = Block::new(
             project,
             &self,
             vec![],
-            vec![],
+            block_args,
             BlockParams::VariableSatisfy(general_claim, vss.condition.range()),
             &statement.first_token,
             &statement.last_token,
@@ -501,7 +570,7 @@ impl Environment {
             self.bindings.add_defined_name(
                 &defined_name,
                 definition_type_params.clone(),
-                vec![],
+                family_value_param_types.clone(),
                 generic_type.clone(),
                 None,
                 None,
@@ -532,8 +601,14 @@ impl Environment {
         }
 
         let num_vars = quant_names.len() as AtomId;
-        let specific_claim_value = general_claim_value.bind_values(0, num_vars, &constant_values);
-        let external_claim = specific_claim_value.genericize(&definition_type_params);
+        let specific_claim_value = general_claim_value.bind_values(
+            family_value_param_count,
+            family_value_param_count + num_vars,
+            &constant_values,
+        );
+        let external_claim =
+            quantify_over_datatype_value_params(datatype_params, specific_claim_value)
+                .genericize(&definition_type_params);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let specific_prop = Proposition::new(external_claim, definition_type_params, source);
         let index = self.add_node(Node::block(project, self, block, Some(specific_prop)));
@@ -562,7 +637,7 @@ impl Environment {
         statement: &Statement,
         fss: &FunctionSatisfyStatement,
         defined_name: DefinedName,
-        datatype_params: Option<&Vec<TypeParam>>,
+        datatype_params: Option<&DatatypeFamilyScope>,
     ) -> error::Result<()> {
         fss.name_token.check_not_reserved()?;
         if self.bindings.constant_name_in_use(&defined_name) {
@@ -593,10 +668,15 @@ impl Environment {
                 None,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
-                datatype_params,
+                datatype_params.map(|params| params.type_params_slice()),
+                datatype_params.map(|params| params.value_params_slice()),
                 project,
                 Some(&mut self.token_map),
             )?;
+        let family_value_param_count = datatype_params
+            .map(|params| params.value_params.len() as AtomId)
+            .unwrap_or(0);
+        let family_value_param_types = datatype_value_param_types(datatype_params);
 
         let unbound_condition = condition.ok_or_else(|| statement.error("missing condition"))?;
         if unbound_condition.get_type() != AcornType::Bool {
@@ -605,12 +685,9 @@ impl Environment {
 
         let _return_name = arg_names.pop().unwrap();
         let return_type = arg_types.pop().unwrap();
-        let block_args: Vec<_> = arg_names
-            .iter()
-            .cloned()
-            .zip(arg_types.iter().cloned())
-            .collect();
-        let num_args = block_args.len() as AtomId;
+        let mut block_args = datatype_value_block_args(datatype_params);
+        block_args.extend(arg_names.iter().cloned().zip(arg_types.iter().cloned()));
+        let return_index = family_value_param_count + arg_types.len() as AtomId;
 
         let block = Block::new(
             project,
@@ -628,14 +705,16 @@ impl Environment {
         )?;
 
         let function_type = AcornType::functional(arg_types.clone(), return_type);
-        let mut all_type_params = datatype_params.cloned().unwrap_or_default();
+        let mut all_type_params = datatype_params
+            .map(|params| params.type_params.clone())
+            .unwrap_or_default();
         all_type_params.extend(fn_type_params);
         let generic_function_type = function_type.clone().genericize(&all_type_params);
         let doc_comments = self.take_doc_comments();
         self.bindings.add_defined_name(
             &defined_name,
             all_type_params.clone(),
-            vec![],
+            family_value_param_types.clone(),
             generic_function_type.clone(),
             None,
             None,
@@ -664,14 +743,19 @@ impl Environment {
             arg_types
                 .iter()
                 .enumerate()
-                .map(|(i, t)| AcornValue::Variable(i as AtomId, t.clone()))
+                .map(|(i, t)| {
+                    AcornValue::Variable(family_value_param_count + i as AtomId, t.clone())
+                })
                 .collect(),
         );
-        let return_bound = unbound_condition.bind_values(num_args, num_args, &[function_term]);
+        let return_bound =
+            unbound_condition.bind_values(return_index, return_index, &[function_term]);
         let arg_count = arg_types.len();
         let arb_condition = AcornValue::ForAll(arg_types, Box::new(return_bound));
 
-        let external_condition = arb_condition.genericize(&all_type_params);
+        let external_condition =
+            quantify_over_datatype_value_params(datatype_params, arb_condition)
+                .genericize(&all_type_params);
         let generic_constant = function_constant.genericize(&all_type_params);
 
         let source = Source::constant_definition(

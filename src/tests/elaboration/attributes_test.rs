@@ -430,6 +430,66 @@ fn test_generic_attribute_with_let_satisfy() {
 }
 
 #[test]
+fn test_dependent_family_attributes() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+            let k: Nat = axiom
+
+            structure Zmod[k: Nat] {
+                value: Nat
+            }
+
+            attributes Zmod[k: Nat] {
+                let zero: Zmod[k] = axiom
+
+                define add(self, other: Zmod[k]) -> Zmod[k] {
+                    self
+                }
+
+                let witness: Zmod[k] satisfy {
+                    witness = Zmod[k].zero
+                }
+
+                let pick(other: Zmod[k]) -> result: Zmod[k] satisfy {
+                    result = Zmod[k].zero
+                } by {
+                    Zmod[k].zero = Zmod[k].zero
+                }
+            }
+
+            let z: Zmod[k] = Zmod[k].zero
+            let sum: Zmod[k] = z.add(z)
+            let chosen: Zmod[k] = Zmod[k].pick(z)
+            let sum2: Zmod[k] = Zmod[k].add(z, Zmod[k].witness)
+            let raw: Nat = sum.value
+        "#,
+    );
+}
+
+#[test]
+fn test_dependent_family_attributes_require_value_binder() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+
+            structure Zmod[k: Nat] {
+                value: Nat
+            }
+        "#,
+    );
+    env.bad(
+        r#"
+            attributes Zmod[k] {
+                let zero: Zmod[k] = axiom
+            }
+        "#,
+    );
+}
+
+#[test]
 fn test_specific_attribute_with_let_satisfy() {
     let mut env = Environment::test();
     env.add(

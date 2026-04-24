@@ -18,12 +18,13 @@ use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
 
-/// Represents the type arguments in an attributes statement.
-/// Either generic type parameters (e.g., K, T) or concrete types (e.g., Color, Nat).
+/// Represents the arguments in an attributes statement.
+/// Either generic datatype-family parameters (e.g., `K`, `n: Nat`) or concrete
+/// type arguments (e.g., `Color`, `List[Nat]`).
 #[derive(Debug, Clone)]
 pub enum AttributesTypeArgs {
-    /// Generic type parameters like `attributes Set[K]`
-    Generic(Vec<TypeParam>),
+    /// Generic parameters like `attributes Set[K]` or `attributes Zmod[k: Nat]`
+    Generic(Vec<FamilyParam>),
     /// Concrete types like `attributes Set[Color]`
     Concrete(Vec<AcornType>),
 }
@@ -2088,8 +2089,8 @@ impl<'a> Evaluator<'a> {
         Ok(answer)
     }
 
-    /// Evaluates type arguments for attributes statements.
-    /// Returns either a list of type parameters (for generic attributes) or
+    /// Evaluates arguments for attributes statements.
+    /// Returns either a list of generic family parameters (for generic attributes) or
     /// a list of concrete types (for specific attributes).
     /// Validates that it's all-or-nothing (no mixing generic and concrete).
     pub fn evaluate_attributes_type_args(
@@ -2113,14 +2114,14 @@ impl<'a> Evaluator<'a> {
                     .is_ok()
                 {
                     generic_count += 1;
-                } else if let Ok(value_type) =
-                    self.fork(self.bindings, None).evaluate_type(annotation)
+                } else if self
+                    .fork(self.bindings, None)
+                    .evaluate_type(annotation)
+                    .is_ok()
                 {
-                    return Err(self.unsupported_value_param_error(&expr.name, &value_type));
+                    generic_count += 1;
                 } else {
-                    return Err(
-                        annotation.error("expected a typeclass constraint or a concrete type")
-                    );
+                    return Err(annotation.error("expected a typeclass constraint or a value type"));
                 }
             } else if expr.type_expr.is_some() {
                 // Complex type expression like List[Color] - definitely concrete
@@ -2167,9 +2168,9 @@ impl<'a> Evaluator<'a> {
             }
             Ok(AttributesTypeArgs::Concrete(types))
         } else {
-            // All are generic - use the existing evaluate_type_params
-            let type_params = self.evaluate_type_params(exprs)?;
-            Ok(AttributesTypeArgs::Generic(type_params))
+            // All are generic - allow either type or value binders.
+            let family_params = self.evaluate_family_params(exprs)?;
+            Ok(AttributesTypeArgs::Generic(family_params))
         }
     }
 }

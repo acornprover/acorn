@@ -132,6 +132,7 @@ impl Environment {
                         None,
                         None,
                         None,
+                        None,
                         project,
                         Some(&mut self.token_map),
                     )?;
@@ -357,6 +358,7 @@ impl Environment {
         for (name, tc_type, dt_value, tc_resolved) in defaults_to_add {
             self.define_constant(
                 name.clone(),
+                vec![],
                 vec![],
                 tc_type,
                 Some(dt_value),

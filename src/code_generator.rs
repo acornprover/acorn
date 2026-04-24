@@ -2,7 +2,9 @@ use std::fmt;
 
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
-use crate::elaborator::acorn_type::{AcornType, Datatype, PotentialType, Typeclass};
+use crate::elaborator::acorn_type::{
+    AcornType, Datatype, DependentTypeArg, PotentialType, Typeclass,
+};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, ConstantInstance};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
@@ -437,7 +439,10 @@ impl CodeGenerator<'_> {
 
                 self.parametrize_expr(base_expr, params)
             }
-            AcornType::Family(datatype, _) => Err(Error::unnamed_type(datatype)),
+            AcornType::Family(datatype, args) => {
+                let base_expr = self.datatype_to_expr(datatype)?;
+                self.parametrize_family_expr(base_expr, args)
+            }
             AcornType::Variable(param) | AcornType::Arbitrary(param) => {
                 Ok(Expression::generate_identifier(&param.name))
             }
@@ -505,6 +510,42 @@ impl CodeGenerator<'_> {
         let params_expr = Expression::generate_params(param_exprs);
         let applied = Expression::Concatenation(Box::new(base_expr), Box::new(params_expr));
         Ok(applied)
+    }
+
+    fn dependent_type_arg_to_expr(&self, arg: &DependentTypeArg) -> Result<Expression> {
+        match arg {
+            DependentTypeArg::Type(acorn_type) => self.type_to_expr(acorn_type),
+            DependentTypeArg::Value(value) => {
+                let mut generator = CodeGenerator {
+                    bindings: self.bindings,
+                    allow_out_of_scope_typeclass_calls: self.allow_out_of_scope_typeclass_calls,
+                    explicit_numerals: self.explicit_numerals,
+                    next_x: self.next_x,
+                    next_k: self.next_k,
+                    var_names: self.var_names.clone(),
+                };
+                generator.value_to_expr(value, false)
+            }
+        }
+    }
+
+    fn parametrize_family_expr(
+        &self,
+        base_expr: Expression,
+        params: &[DependentTypeArg],
+    ) -> Result<Expression> {
+        if params.is_empty() {
+            return Ok(base_expr);
+        }
+        let mut param_exprs = vec![];
+        for param in params {
+            param_exprs.push(self.dependent_type_arg_to_expr(param)?);
+        }
+        let params_expr = Expression::generate_params(param_exprs);
+        Ok(Expression::Concatenation(
+            Box::new(base_expr),
+            Box::new(params_expr),
+        ))
     }
 
     /// If this value cannot be expressed in a single chunk of code, returns an error.

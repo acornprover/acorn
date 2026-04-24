@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::Range;
 
-use crate::elaborator::acorn_type::{AcornType, Datatype, TypeParam, Typeclass, Variance};
+use crate::elaborator::acorn_type::{
+    AcornType, Datatype, TypeParam, Typeclass, ValueParam, Variance,
+};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::ConstructorInfo;
 use crate::elaborator::block::{Block, BlockParams};
@@ -30,6 +32,51 @@ use crate::syntax::statement::{
 use crate::syntax::token::{Token, TokenIter, TokenType};
 
 use super::{Environment, LineType};
+
+/// The hidden family binders that come from the surrounding datatype/typeclass header while we
+/// elaborate an attribute or member body.
+///
+/// Example: inside `attributes Zmod[k: Nat] { ... }`, the body is not itself parameterized, but
+/// every defined constant implicitly depends on the outer `k`. This helper keeps those ambient
+/// binders together so downstream code can:
+/// - genericize over the type parameters
+/// - keep the value parameters as hidden leading constant binders
+/// - reintroduce the value params into local stacks/proof blocks when elaborating bodies
+#[derive(Clone, Debug, Default)]
+struct DatatypeFamilyScope {
+    type_params: Vec<TypeParam>,
+    value_params: Vec<ValueParam>,
+}
+
+impl DatatypeFamilyScope {
+    fn type_params_slice(&self) -> &[TypeParam] {
+        &self.type_params
+    }
+
+    fn value_params_slice(&self) -> &[ValueParam] {
+        &self.value_params
+    }
+
+    fn value_param_types(&self) -> Vec<AcornType> {
+        self.value_params
+            .iter()
+            .map(|param| param.value_type.clone())
+            .collect()
+    }
+
+    fn value_block_args(&self) -> Vec<(String, AcornType)> {
+        self.value_params
+            .iter()
+            .map(|param| (param.name.clone(), param.value_type.clone()))
+            .collect()
+    }
+
+    fn bind_value_stack(&self, stack: &mut Stack) {
+        for param in &self.value_params {
+            stack.insert(param.name.clone(), param.value_type.clone());
+        }
+    }
+}
 
 mod attributes;
 mod blocks;

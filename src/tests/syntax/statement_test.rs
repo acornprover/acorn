@@ -719,6 +719,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parsing_attributes_statement_with_value_params() {
+        ok(indoc! {"
+        attributes Zmod[k: Nat] {
+            let zero: Zmod[k] = axiom
+        }"});
+    }
+
+    #[test]
     fn test_parsing_attribute_with_extra_type_param() {
         ok(indoc! {"
         attributes List[T] {

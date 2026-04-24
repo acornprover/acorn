@@ -1831,7 +1831,8 @@ impl BindingMap {
     /// instance member inside an `instance` block. In that temporary scope, explicit
     /// `Typeclass.attr[Datatype]` references for the same in-progress instance are redirected to
     /// the instance implementation slot instead of the public typeclass constant.
-    /// datatype_params: if this is a method on a parameterized datatype, these are the datatype's params.
+    /// datatype_type_params/datatype_value_params: if this is a method on a parameterized datatype,
+    /// these are the datatype family's hidden type/value parameters.
     ///
     /// This function mutates the binding map but sets it back to its original state when finished.
     ///
@@ -1859,7 +1860,8 @@ impl BindingMap {
         class_type: Option<&AcornType>,
         function_name: Option<&ConstantName>,
         current_instance: Option<&InstanceName>,
-        datatype_params: Option<&Vec<TypeParam>>,
+        datatype_type_params: Option<&[TypeParam]>,
+        datatype_value_params: Option<&[crate::elaborator::acorn_type::ValueParam]>,
         project: &Project,
         mut token_map: Option<&mut TokenMap>,
     ) -> error::Result<(
@@ -1884,6 +1886,11 @@ impl BindingMap {
             self.add_arbitrary_type(param.clone());
         }
         let mut stack = Stack::new();
+        if let Some(value_params) = datatype_value_params {
+            for value_param in value_params {
+                stack.insert(value_param.name.clone(), value_param.value_type.clone());
+            }
+        }
         let mut evaluator = match current_instance {
             Some(instance_name) => Evaluator::new_for_instance_member(
                 project,
@@ -1897,7 +1904,7 @@ impl BindingMap {
 
         // Figure out types.
         let internal_value_type = match value_type_expr {
-            Some(e) => evaluator.evaluate_type(e)?,
+            Some(e) => evaluator.evaluate_type_with_stack(&mut stack, e)?,
             None => AcornType::Bool,
         };
 
@@ -1907,8 +1914,13 @@ impl BindingMap {
             // The function is bound to its name locally, to handle recursive definitions.
             // Internally to the definition, this function is not polymorphic, but it may have
             // type parameters from both the datatype (if it's a method) and the function itself.
-            let mut all_params = datatype_params.cloned().unwrap_or_default();
+            let mut all_params = datatype_type_params.unwrap_or_default().to_vec();
             all_params.extend(type_params.clone());
+            let datatype_value_param_types = datatype_value_params
+                .unwrap_or_default()
+                .iter()
+                .map(|value_param| value_param.value_type.clone())
+                .collect();
 
             // If we have params, genericize the type so it uses type variables instead of arbitrary types
             if !all_params.is_empty() {
@@ -1918,7 +1930,7 @@ impl BindingMap {
             self.add_constant_name(
                 function_name,
                 all_params,
-                vec![],
+                datatype_value_param_types,
                 fn_type,
                 None,
                 None,
@@ -1987,7 +1999,7 @@ impl BindingMap {
                     // For methods on parameterized datatypes, we need to include both
                     // the datatype params and the function's own params.
                     let mut all_params_for_genericize =
-                        datatype_params.cloned().unwrap_or_default();
+                        datatype_type_params.unwrap_or_default().to_vec();
                     all_params_for_genericize.extend(type_params.clone());
                     let generic_params: Vec<_> = all_params_for_genericize
                         .iter()

@@ -229,7 +229,10 @@ impl Block {
                 Some(prop)
             }
             BlockParams::VariableSatisfy(ref unbound_goal, range) => {
-                let bound_goal = unbound_goal.clone().to_arbitrary();
+                let bound_goal = unbound_goal
+                    .clone()
+                    .bind_values(0, 0, &internal_args)
+                    .to_arbitrary();
                 let source = Source::block_goal(env.module_id, range, subenv.depth);
                 let prop = Proposition::new(bound_goal, vec![], source);
                 Some(prop)

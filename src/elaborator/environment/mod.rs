@@ -356,6 +356,7 @@ impl Environment {
         &mut self,
         name: DefinedName,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         range: Range,
@@ -365,7 +366,7 @@ impl Environment {
         self.bindings.add_defined_name(
             &name,
             params,
-            vec![],
+            value_param_types,
             constant_type,
             definition,
             None,
@@ -404,7 +405,7 @@ impl Environment {
         datatype_type: &'a AcornType,
     ) -> error::Result<&'a Datatype> {
         match &datatype_type {
-            AcornType::Data(datatype, _) => {
+            AcornType::Data(datatype, _) | AcornType::Family(datatype, _) => {
                 if &datatype.name != &name_token.text() {
                     Err(name_token.error("you cannot add attributes to aliases"))
                 } else {
