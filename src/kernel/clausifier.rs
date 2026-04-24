@@ -2042,12 +2042,14 @@ mod tests {
             nat_type.clone(),
             nat_type.clone(),
             vec![],
+            vec![],
         );
         let succ = AcornValue::constant(
             succ_name,
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
             vec![],
         );
         let from_nat = AcornValue::constant(
@@ -2056,12 +2058,14 @@ mod tests {
             AcornType::functional(vec![nat_type.clone()], int_type.clone()),
             AcornType::functional(vec![nat_type.clone()], int_type.clone()),
             vec![],
+            vec![],
         );
         let neg_suc = AcornValue::constant(
             neg_suc_name,
             vec![],
             AcornType::functional(vec![nat_type.clone()], int_type.clone()),
             AcornType::functional(vec![nat_type.clone()], int_type.clone()),
+            vec![],
             vec![],
         );
 

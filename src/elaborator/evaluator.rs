@@ -330,6 +330,151 @@ impl<'a> Evaluator<'a> {
             .resolve_unresolved_with_type_params(unresolved, type_params, source)
     }
 
+    fn split_datatype_args(
+        datatype_args: &[DependentTypeArg],
+    ) -> (Vec<AcornType>, Vec<AcornValue>) {
+        let mut type_args = vec![];
+        let mut value_args = vec![];
+        for arg in datatype_args {
+            match arg {
+                DependentTypeArg::Type(acorn_type) => type_args.push(acorn_type.clone()),
+                DependentTypeArg::Value(value) => value_args.push(value.clone()),
+            }
+        }
+        (type_args, value_args)
+    }
+
+    fn datatype_args_for_type(
+        base_type: &AcornType,
+    ) -> Option<(Datatype, Vec<AcornType>, Vec<DependentTypeArg>)> {
+        match base_type {
+            AcornType::Data(datatype, type_args) => Some((
+                datatype.clone(),
+                type_args.clone(),
+                type_args
+                    .iter()
+                    .cloned()
+                    .map(DependentTypeArg::Type)
+                    .collect(),
+            )),
+            AcornType::Family(datatype, args) => Some((
+                datatype.clone(),
+                args.iter()
+                    .filter_map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => Some(acorn_type.clone()),
+                        DependentTypeArg::Value(_) => None,
+                    })
+                    .collect(),
+                args.clone(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn specialize_potential_with_datatype_args(
+        &self,
+        potential: PotentialValue,
+        datatype_args: &[DependentTypeArg],
+        source: &dyn ErrorContext,
+    ) -> error::Result<PotentialValue> {
+        let (type_args, value_args) = Self::split_datatype_args(datatype_args);
+        if type_args.is_empty() && value_args.is_empty() {
+            return Ok(potential);
+        }
+
+        match potential {
+            PotentialValue::Unresolved(unresolved) => Ok(PotentialValue::Resolved(
+                self.resolve_unresolved_with_type_params(unresolved, type_args, source)?
+                    .bind_value_params(&value_args, source)?,
+            )),
+            PotentialValue::Resolved(value) => Ok(PotentialValue::Resolved(
+                value.bind_value_params(&value_args, source)?,
+            )),
+        }
+    }
+
+    fn bind_potential_value_args(
+        &self,
+        potential: PotentialValue,
+        value_args: &[AcornValue],
+        source: &dyn ErrorContext,
+    ) -> error::Result<PotentialValue> {
+        if value_args.is_empty() {
+            return Ok(potential);
+        }
+
+        match potential {
+            PotentialValue::Unresolved(unresolved) => {
+                if unresolved.value_param_types.len() != value_args.len() {
+                    return Err(source.error(&format!(
+                        "expected {} family value arguments, but got {}",
+                        unresolved.value_param_types.len(),
+                        value_args.len()
+                    )));
+                }
+
+                if unresolved.params.is_empty() {
+                    let bound_value = unresolved
+                        .resolve(source, vec![])?
+                        .bind_value_params(value_args, source)?;
+                    Ok(PotentialValue::Resolved(bound_value))
+                } else {
+                    Ok(PotentialValue::Unresolved(UnresolvedConstant {
+                        name: unresolved.name,
+                        params: unresolved.params,
+                        generic_type: unresolved.generic_type.bind_value_params(value_args),
+                        value_param_types: vec![],
+                        args: unresolved.args,
+                    }))
+                }
+            }
+            PotentialValue::Resolved(value) => Ok(PotentialValue::Resolved(
+                value.bind_value_params(value_args, source)?,
+            )),
+        }
+    }
+
+    fn evaluate_datatype_attr_for_type(
+        &self,
+        base_type: &AcornType,
+        attr_name: &str,
+        source: &dyn ErrorContext,
+    ) -> error::Result<PotentialValue> {
+        let Some((datatype, type_args, datatype_args)) = Self::datatype_args_for_type(base_type)
+        else {
+            return Err(source.error("not an attributable datatype"));
+        };
+
+        let (module_id, const_name) = match self
+            .bindings
+            .resolve_datatype_attr_with_params(&datatype, &type_args, attr_name)
+        {
+            Ok((module_id, const_name)) => (module_id, const_name),
+            Err(err) => return Err(source.error(&err)),
+        };
+
+        let bindings = self.get_bindings(module_id);
+        let defined_name = DefinedName::Constant(const_name);
+        let value = bindings
+            .get_constant_value(&defined_name)
+            .map_err(|e| source.error(&e))?;
+        if !defined_name.is_typeclass_attr() {
+            return self.specialize_potential_with_datatype_args(value, &datatype_args, source);
+        }
+
+        match value {
+            PotentialValue::Unresolved(unresolved) => {
+                let resolved = self.resolve_unresolved_with_type_params(
+                    unresolved,
+                    vec![base_type.clone()],
+                    source,
+                )?;
+                Ok(PotentialValue::Resolved(resolved))
+            }
+            potential => Ok(potential),
+        }
+    }
+
     /// Tracks token information for the given entity.
     fn track_token(&mut self, token: &Token, entity: &NamedEntity) {
         if let Some(token_map) = self.token_map.as_mut() {
@@ -767,35 +912,11 @@ impl<'a> Evaluator<'a> {
         attr_name: &str,
         source: &dyn ErrorContext,
     ) -> error::Result<PotentialValue> {
-        let (module_id, const_name) = match self.bindings.resolve_datatype_attr(datatype, attr_name)
-        {
-            Ok((module_id, const_name)) => (module_id, const_name),
-            Err(err) => return Err(source.error(&err)),
-        };
-
-        // Get the bindings from the module where this attribute was actually defined
-        let bindings = self.get_bindings(module_id);
-        let defined_name = DefinedName::Constant(const_name);
-        let value = bindings
-            .get_constant_value(&defined_name)
-            .map_err(|e| source.error(&e))?;
-        if !defined_name.is_typeclass_attr() {
-            return Ok(value);
-        };
-
-        // If this is a typeclass attribute, instantiate it with the datatype.
-        match value {
-            PotentialValue::Unresolved(unresolved) => {
-                let instance_type = AcornType::Data(datatype.clone(), vec![]);
-                let resolved = self.resolve_unresolved_with_type_params(
-                    unresolved,
-                    vec![instance_type],
-                    source,
-                )?;
-                Ok(PotentialValue::Resolved(resolved))
-            }
-            potential => Ok(potential),
-        }
+        self.evaluate_datatype_attr_for_type(
+            &AcornType::Data(datatype.clone(), vec![]),
+            attr_name,
+            source,
+        )
     }
 
     /// Evalutes a name scoped by a typeclass name, like Group.foo
@@ -843,38 +964,37 @@ impl<'a> Evaluator<'a> {
         let base_type = receiver.get_type();
 
         let function = match &base_type {
-            AcornType::Data(datatype, type_params) => {
-                // Try to resolve with specific type parameters first, then fall back to generic
-                let (module_id, const_name) = match self.bindings.resolve_datatype_attr_with_params(
-                    datatype,
-                    type_params,
-                    attr_name,
-                ) {
+            AcornType::Data(_, _) | AcornType::Family(_, _) => {
+                let Some((datatype, type_args, datatype_args)) =
+                    Self::datatype_args_for_type(&base_type)
+                else {
+                    unreachable!("data and family types should be attributable");
+                };
+                let (module_id, const_name) = match self
+                    .bindings
+                    .resolve_datatype_attr_with_params(&datatype, &type_args, attr_name)
+                {
                     Ok((module_id, const_name)) => (module_id, const_name),
                     Err(err) => return Err(source.error(&err)),
                 };
 
-                // Get the bindings from the module where this attribute was actually defined
                 let bindings = self.get_bindings(module_id);
                 let defined_name = DefinedName::Constant(const_name);
                 let value = bindings
                     .get_constant_value(&defined_name)
                     .map_err(|e| source.error(&e))?;
                 if !defined_name.is_typeclass_attr() {
-                    value
+                    let (_type_args, value_args) = Self::split_datatype_args(&datatype_args);
+                    self.bind_potential_value_args(value, &value_args, source)?
+                } else if let PotentialValue::Unresolved(unresolved) = value {
+                    let resolved = self.resolve_unresolved_with_type_params(
+                        unresolved,
+                        vec![base_type.clone()],
+                        source,
+                    )?;
+                    PotentialValue::Resolved(resolved)
                 } else {
-                    // If this is a typeclass attribute, instantiate it with the datatype.
-                    if let PotentialValue::Unresolved(unresolved) = value {
-                        let instance_type = AcornType::Data(datatype.clone(), vec![]);
-                        let resolved = self.resolve_unresolved_with_type_params(
-                            unresolved,
-                            vec![instance_type],
-                            source,
-                        )?;
-                        PotentialValue::Resolved(resolved)
-                    } else {
-                        value
-                    }
+                    value
                 }
             }
             AcornType::Arbitrary(param) | AcornType::Variable(param) => {
@@ -925,35 +1045,35 @@ impl<'a> Evaluator<'a> {
             }
             Some(NamedEntity::Type(t)) => {
                 match &t {
-                    AcornType::Data(datatype, params) => {
+                    AcornType::Data(_, _) | AcornType::Family(_, _) => {
                         if name_token.token_type == TokenType::Numeral {
+                            let datatype = t.get_datatype(name_token)?;
                             let value = self.evaluate_number_with_datatype(
                                 name_token,
-                                &datatype,
+                                datatype,
                                 name_token.text(),
                             )?;
                             NamedEntity::Value(value)
                         } else {
-                            match self.evaluate_datatype_attr(datatype, name, name_token)? {
-                                PotentialValue::Resolved(value) => {
-                                    if !params.is_empty() {
-                                        return Err(
-                                            name_token.error("unexpected double type resolution")
-                                        );
-                                    }
-                                    NamedEntity::Value(value)
-                                }
+                            match self.evaluate_datatype_attr_for_type(&t, name, name_token)? {
+                                PotentialValue::Resolved(value) => NamedEntity::Value(value),
                                 PotentialValue::Unresolved(u) => {
-                                    if params.is_empty() {
+                                    let Some((_datatype, _type_args, datatype_args)) =
+                                        Self::datatype_args_for_type(&t)
+                                    else {
+                                        unreachable!("type namespace should be attributable here");
+                                    };
+                                    if datatype_args.is_empty() {
                                         // Leave it unresolved
                                         NamedEntity::UnresolvedValue(u)
                                     } else {
-                                        // Resolve it with the params from the type name
-                                        let value = self.resolve_unresolved_with_type_params(
-                                            u,
-                                            params.clone(),
-                                            name_token,
-                                        )?;
+                                        let value = self
+                                            .specialize_potential_with_datatype_args(
+                                                PotentialValue::Unresolved(u),
+                                                &datatype_args,
+                                                name_token,
+                                            )?
+                                            .force_value();
                                         NamedEntity::Value(value)
                                     }
                                 }
@@ -1176,7 +1296,7 @@ impl<'a> Evaluator<'a> {
         }
 
         if expression.is_type() {
-            let acorn_type = self.evaluate_type(expression)?;
+            let acorn_type = self.evaluate_type_with_stack(stack, expression)?;
             return Ok(NamedEntity::Type(acorn_type));
         }
 
@@ -2194,6 +2314,7 @@ mod tests {
                     typeclass: Some(typeclass),
                 }),
             ),
+            value_param_types: vec![],
             args: vec![],
         };
 

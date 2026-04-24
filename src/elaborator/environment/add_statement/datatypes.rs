@@ -1,4 +1,5 @@
 use super::*;
+use crate::elaborator::acorn_type::{DependentTypeArg, FamilyParam};
 
 impl Environment {
     pub(super) fn add_structure_statement(
@@ -15,19 +16,73 @@ impl Environment {
         self.bindings
             .check_typename_available(ss.name_token.text(), statement)?;
 
-        let mut arbitrary_params = vec![];
-        let type_params = self
+        let family_params = self
             .evaluator(project)
-            .evaluate_type_params(&ss.type_params)?;
+            .evaluate_family_params(&ss.type_params)?;
+        let type_params: Vec<_> = family_params
+            .iter()
+            .filter_map(|param| param.as_type_param().cloned())
+            .collect();
+        let value_params: Vec<_> = family_params
+            .iter()
+            .filter_map(|param| param.as_value_param().cloned())
+            .collect();
+        let value_param_types: Vec<_> = value_params
+            .iter()
+            .map(|param| param.value_type.clone())
+            .collect();
+        let value_param_count = value_params.len() as AtomId;
+
+        for (expr, family_param) in ss.type_params.iter().zip(&family_params) {
+            if let Some(type_param) = family_param.as_type_param() {
+                self.bindings
+                    .check_typename_available(&type_param.name, &expr.name)?;
+            }
+        }
+
+        let mut arbitrary_params = vec![];
         for type_param in &type_params {
             arbitrary_params.push(self.bindings.add_arbitrary_type(type_param.clone()));
+        }
+        let datatype_value_args: Vec<_> = value_params
+            .iter()
+            .enumerate()
+            .map(|(i, value_param)| {
+                AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+            })
+            .collect();
+        let mut next_type_arg = 0usize;
+        let mut next_value_arg = 0usize;
+        let family_args: Vec<_> = family_params
+            .iter()
+            .map(|param| match param {
+                FamilyParam::Type(_) => {
+                    let arg = DependentTypeArg::Type(arbitrary_params[next_type_arg].clone());
+                    next_type_arg += 1;
+                    arg
+                }
+                FamilyParam::Value(value_param) => {
+                    let arg = DependentTypeArg::Value(AcornValue::Variable(
+                        next_value_arg as AtomId,
+                        value_param.value_type.clone(),
+                    ));
+                    next_value_arg += 1;
+                    arg
+                }
+            })
+            .collect();
+        let mut family_stack = Stack::new();
+        for value_param in &value_params {
+            family_stack.insert(value_param.name.clone(), value_param.value_type.clone());
         }
 
         let mut member_fn_names = vec![];
         let mut field_types = vec![];
         let mut field_doc_comments = vec![];
         for (field_name_token, field_type_expr, doc_comments) in &ss.fields {
-            let field_type = self.evaluator(project).evaluate_type(field_type_expr)?;
+            let field_type = self
+                .evaluator(project)
+                .evaluate_type_with_stack(&mut family_stack, field_type_expr)?;
             field_types.push(field_type.clone());
             if TokenType::is_magic_method_name(&field_name_token.text())
                 && field_name_token.text() != "contains"
@@ -59,6 +114,9 @@ impl Environment {
 
         let unbound_constraint = if let Some(constraint) = &ss.constraint {
             let mut stack = Stack::new();
+            for value_param in &value_params {
+                stack.insert(value_param.name.clone(), value_param.value_type.clone());
+            }
             for ((name_token, _, _), t) in ss.fields.iter().zip(&field_types) {
                 stack.insert(name_token.to_string(), t.clone());
             }
@@ -83,25 +141,42 @@ impl Environment {
             module_id: self.module_id,
             name: ss.name_token.text().to_string(),
         };
-        let typeclasses = type_params.iter().map(|tp| tp.typeclass.clone()).collect();
         let doc_comments = self.take_doc_comments();
         let definition_string = Some(statement.to_string());
-        let potential_type = self.bindings.add_potential_type(
+        let potential_type = self.bindings.add_potential_type_with_family_params(
             &ss.name_token,
-            typeclasses,
+            family_params.iter().map(|param| param.kind()).collect(),
             doc_comments,
             Some(ss.name_token.range()),
             definition_string,
         );
         self.bindings.set_datatype_variances(&datatype, variances);
-        self.bindings
-            .set_datatype_arity(&datatype, type_params.len() as u8);
-        let struct_type = potential_type.resolve(arbitrary_params, &ss.name_token)?;
+        let struct_type = potential_type.resolve_args(family_args, &ss.name_token)?;
+        let quantify_over_value_params = |value: AcornValue| -> AcornValue {
+            if value_param_types.is_empty() {
+                value
+            } else {
+                AcornValue::ForAll(value_param_types.clone(), Box::new(value))
+            }
+        };
+        let specialize_attr = |potential: &PotentialValue,
+                               source: &dyn ErrorContext|
+         -> error::Result<PotentialValue> {
+            Ok(PotentialValue::Resolved(
+                potential.resolve_constant_with_datatype_args(
+                    &arbitrary_params,
+                    &datatype_value_args,
+                    source,
+                )?,
+            ))
+        };
         let mut member_fns = vec![];
-        for ((member_fn_name, field_type), doc_comments) in member_fn_names
-            .into_iter()
-            .zip(&field_types)
-            .zip(&field_doc_comments)
+        for (((member_fn_name, field_type), doc_comments), (field_name_token, _, _)) in
+            member_fn_names
+                .into_iter()
+                .zip(&field_types)
+                .zip(&field_doc_comments)
+                .zip(&ss.fields)
         {
             let member_fn_type =
                 AcornType::functional(vec![struct_type.clone()], field_type.clone());
@@ -115,13 +190,14 @@ impl Environment {
                 &datatype,
                 member_fn_name,
                 type_params.clone(),
+                value_param_types.clone(),
                 member_fn_type.genericize(&type_params),
                 None,
                 None,
                 doc_comments.clone(),
                 def_str,
             );
-            member_fns.push(potential);
+            member_fns.push(specialize_attr(&potential, field_name_token)?);
         }
 
         let bind_new = unbound_constraint.is_none();
@@ -137,16 +213,19 @@ impl Environment {
                 &datatype,
                 "new",
                 type_params.clone(),
+                value_param_types.clone(),
                 new_fn_type.genericize(&type_params),
                 None,
                 Some(constructor_info),
                 vec![],
                 def_str,
             ))
+            .map(|potential| specialize_attr(&potential, &ss.name_token))
+            .transpose()?
         } else {
             None
         };
-        let object_var = AcornValue::Variable(0, struct_type.clone());
+        let object_var = AcornValue::Variable(value_param_count, struct_type.clone());
         let mut member_args = vec![];
         for (i, member_fn) in member_fns.iter().enumerate() {
             let member_arg = self.bindings.apply_potential(
@@ -173,15 +252,19 @@ impl Environment {
                 &datatype,
                 "constraint",
                 type_params.clone(),
+                value_param_types.clone(),
                 constraint_fn_type.genericize(&type_params),
                 None,
                 None,
                 vec![],
                 def_str,
             );
+            let constraint_fn = specialize_attr(&constraint_fn, &ss.name_token)?;
 
             let constraint_args = (0..ss.fields.len())
-                .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
+                .map(|i| {
+                    AcornValue::Variable(value_param_count + i as AtomId, field_types[i].clone())
+                })
                 .collect::<Vec<_>>();
             let constraint_application = self.bindings.apply_potential(
                 constraint_fn.clone(),
@@ -191,9 +274,11 @@ impl Environment {
             )?;
             let constraint_eq =
                 AcornValue::equals(constraint_application, unbound_constraint.clone());
-            let constraint_eq_claim =
-                AcornValue::ForAll(field_types.clone(), Box::new(constraint_eq))
-                    .genericize(&type_params);
+            let constraint_eq_claim = quantify_over_value_params(AcornValue::ForAll(
+                field_types.clone(),
+                Box::new(constraint_eq),
+            ))
+            .genericize(&type_params);
             let source = Source::type_definition(
                 self.module_id,
                 range,
@@ -209,11 +294,16 @@ impl Environment {
         };
 
         if let Some(unbound_constraint) = &unbound_constraint {
-            let c = unbound_constraint.clone().insert_stack(0, 1);
-            let partially_bound = c.bind_values(1, 1, &member_args);
-            let constraint_claim =
-                AcornValue::ForAll(vec![struct_type.clone()], Box::new(partially_bound))
-                    .genericize(&type_params);
+            let c = unbound_constraint
+                .clone()
+                .insert_stack(value_param_count, 1);
+            let partially_bound =
+                c.bind_values(value_param_count + 1, value_param_count + 1, &member_args);
+            let constraint_claim = quantify_over_value_params(AcornValue::ForAll(
+                vec![struct_type.clone()],
+                Box::new(partially_bound),
+            ))
+            .genericize(&type_params);
             let source = Source::type_definition(
                 self.module_id,
                 range,
@@ -237,8 +327,11 @@ impl Environment {
                 Box::new(recreated),
                 Box::new(object_var.clone()),
             );
-            let new_claim = AcornValue::ForAll(vec![struct_type.clone()], Box::new(new_eq))
-                .genericize(&type_params);
+            let new_claim = quantify_over_value_params(AcornValue::ForAll(
+                vec![struct_type.clone()],
+                Box::new(new_eq),
+            ))
+            .genericize(&type_params);
             let source = Source::type_definition(
                 self.module_id,
                 range,
@@ -251,7 +344,7 @@ impl Environment {
         }
 
         let var_args = (0..ss.fields.len())
-            .map(|i| AcornValue::Variable(i as AtomId, field_types[i].clone()))
+            .map(|i| AcornValue::Variable(value_param_count + i as AtomId, field_types[i].clone()))
             .collect::<Vec<_>>();
         let new_application = match &new_fn {
             Some(new_fn) => Some(self.bindings.apply_potential(
@@ -309,12 +402,14 @@ impl Environment {
                     &datatype,
                     "new",
                     type_params.clone(),
+                    value_param_types.clone(),
                     new_fn_type.genericize(&type_params),
                     None,
                     None,
                     vec![],
                     def_str,
                 );
+                let new_fn = specialize_attr(&new_fn, &ss.name_token)?;
 
                 let new_application = self.bindings.apply_potential(
                     new_fn.clone(),
@@ -329,8 +424,10 @@ impl Environment {
                     &ss.name_token,
                 )?;
 
-                let witness =
-                    AcornValue::Variable(field_types.len() as AtomId, struct_type.clone());
+                let witness = AcornValue::Variable(
+                    value_param_count + field_types.len() as AtomId,
+                    struct_type.clone(),
+                );
                 let some_witness = self.bindings.apply_potential(
                     option_some.clone(),
                     vec![witness.clone()],
@@ -341,10 +438,10 @@ impl Environment {
                     AcornValue::equals(new_application.clone(), some_witness.clone());
                 let exists_some =
                     AcornValue::Exists(vec![struct_type.clone()], Box::new(witness_match.clone()));
-                let some_claim = AcornValue::ForAll(
+                let some_claim = quantify_over_value_params(AcornValue::ForAll(
                     field_types.clone(),
                     Box::new(AcornValue::implies(constraint.clone(), exists_some)),
-                )
+                ))
                 .genericize(&type_params);
                 let source = Source::type_definition(
                     self.module_id,
@@ -365,12 +462,15 @@ impl Environment {
                     )?;
                     let field_eq = AcornValue::equals(
                         witness_member,
-                        AcornValue::Variable(i as AtomId, field_types[i].clone()),
+                        AcornValue::Variable(
+                            value_param_count + i as AtomId,
+                            field_types[i].clone(),
+                        ),
                     );
-                    let projection_claim = AcornValue::ForAll(
+                    let projection_claim = quantify_over_value_params(AcornValue::ForAll(
                         [field_types.clone(), vec![struct_type.clone()]].concat(),
                         Box::new(AcornValue::implies(witness_match.clone(), field_eq)),
-                    )
+                    ))
                     .genericize(&type_params);
                     let source = Source::type_definition(
                         self.module_id,
@@ -384,10 +484,10 @@ impl Environment {
                 }
 
                 let none_eq = AcornValue::equals(new_application, none_value);
-                let none_claim = AcornValue::ForAll(
+                let none_claim = quantify_over_value_params(AcornValue::ForAll(
                     field_types.clone(),
                     Box::new(AcornValue::implies(constraint.clone().negate(), none_eq)),
-                )
+                ))
                 .genericize(&type_params);
                 let source = Source::type_definition(
                     self.module_id,
@@ -412,9 +512,11 @@ impl Environment {
                     &ss.name_token,
                 )?;
                 let round_trip_eq = AcornValue::equals(round_trip_application, some_object);
-                let round_trip_claim =
-                    AcornValue::ForAll(vec![struct_type.clone()], Box::new(round_trip_eq))
-                        .genericize(&type_params);
+                let round_trip_claim = quantify_over_value_params(AcornValue::ForAll(
+                    vec![struct_type.clone()],
+                    Box::new(round_trip_eq),
+                ))
+                .genericize(&type_params);
                 let source = Source::type_definition(
                     self.module_id,
                     range,
@@ -440,16 +542,21 @@ impl Environment {
                 let member_eq = AcornValue::Binary(
                     BinaryOp::Equals,
                     Box::new(applied),
-                    Box::new(AcornValue::Variable(i as AtomId, field_types[i].clone())),
+                    Box::new(AcornValue::Variable(
+                        value_param_count + i as AtomId,
+                        field_types[i].clone(),
+                    )),
                 );
                 let unbound_member_claim = if let Some(constraint) = &unbound_constraint {
                     AcornValue::implies(constraint.clone(), member_eq)
                 } else {
                     member_eq
                 };
-                let member_claim =
-                    AcornValue::ForAll(field_types.clone(), Box::new(unbound_member_claim))
-                        .genericize(&type_params);
+                let member_claim = quantify_over_value_params(AcornValue::ForAll(
+                    field_types.clone(),
+                    Box::new(unbound_member_claim),
+                ))
+                .genericize(&type_params);
                 let range = Range {
                     start: field_name_token.start_pos(),
                     end: field_type_expr.last_token().end_pos(),
@@ -466,8 +573,8 @@ impl Environment {
             }
         }
 
-        for type_param in &ss.type_params {
-            self.bindings.remove_type(type_param.name.text());
+        for type_param in &type_params {
+            self.bindings.remove_type(&type_param.name);
         }
         Ok(())
     }
@@ -595,6 +702,7 @@ impl Environment {
                 &datatype,
                 constructor_name,
                 type_params.clone(),
+                vec![],
                 gen_constructor_type,
                 None,
                 Some(constructor_info),
@@ -637,6 +745,7 @@ impl Environment {
             &datatype,
             "match",
             match_type_params,
+            vec![],
             gen_match_type,
             None,
             None,
@@ -807,6 +916,7 @@ impl Environment {
             &datatype,
             "induction",
             type_params.clone(),
+            vec![],
             gen_lambda_claim.get_type(),
             Some(gen_lambda_claim),
             None,

@@ -97,6 +97,16 @@ impl PotentialValue {
             }
         }
     }
+
+    pub fn resolve_constant_with_datatype_args(
+        &self,
+        type_params: &[AcornType],
+        value_params: &[AcornValue],
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        self.resolve_constant(type_params, source)?
+            .bind_value_params(value_params, source)
+    }
 }
 
 impl fmt::Display for PotentialValue {

@@ -109,6 +109,7 @@ impl WitnessRegistry {
                 name.clone(),
                 generic_type,
                 type_params.into_iter().map(|param| param.name).collect(),
+                vec![],
             );
         }
 

@@ -78,6 +78,8 @@ pub struct PolymorphicInfo {
     pub generic_type: AcornType,
     /// The ordered names of type parameters.
     pub type_param_names: Vec<String>,
+    /// Ordered dependent value parameters for this constant, after type genericization.
+    pub value_param_types: Vec<AcornType>,
 }
 
 /// Metadata for a datatype match eliminator (`Type.match`).
@@ -303,12 +305,14 @@ impl SymbolTable {
         name: ConstantName,
         generic_type: AcornType,
         type_param_names: Vec<String>,
+        value_param_types: Vec<AcornType>,
     ) {
         self.polymorphic_info.insert(
             name,
             PolymorphicInfo {
                 generic_type,
                 type_param_names,
+                value_param_types,
             },
         );
     }
@@ -599,12 +603,18 @@ impl SymbolTable {
                         .collect();
                     let generic_type_with_variables =
                         c.generic_type.genericize(&params_for_genericize);
+                    let value_param_types = c
+                        .value_param_types
+                        .iter()
+                        .map(|ty| ty.genericize(&params_for_genericize))
+                        .collect();
 
                     self.polymorphic_info.insert(
                         c.name.clone(),
                         PolymorphicInfo {
                             generic_type: generic_type_with_variables,
                             type_param_names,
+                            value_param_types,
                         },
                     );
                 }
@@ -744,6 +754,7 @@ impl SymbolTable {
                                         .iter()
                                         .map(|param| param.name.clone())
                                         .collect(),
+                                    value_param_types: vec![],
                                 },
                             );
                             symbol

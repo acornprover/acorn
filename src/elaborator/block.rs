@@ -149,6 +149,7 @@ impl Block {
             let potential = subenv.bindings.add_unqualified_constant(
                 arg_name,
                 vec![],
+                vec![],
                 specific_arg_type,
                 None,
                 None,
@@ -240,6 +241,7 @@ impl Block {
                     let def_str = format!("{}: {}", arg_name, arg_type);
                     let potential = subenv.bindings.add_unqualified_constant(
                         arg_name,
+                        vec![],
                         vec![],
                         arg_type.clone(),
                         None,

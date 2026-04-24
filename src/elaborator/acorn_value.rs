@@ -20,8 +20,9 @@ pub struct FunctionApplication {
 impl FunctionApplication {
     /// Gets the type of this function application result
     pub fn get_type(&self) -> AcornType {
-        match self.function.get_type() {
-            AcornType::Function(ftype) => ftype.applied_type(self.args.len()),
+        let (base, all_args) = self.flattened_head_and_args();
+        match Self::resolved_function_type_for_flattened_application(base, &all_args) {
+            AcornType::Function(ftype) => ftype.applied_type(all_args.len()),
             _ => panic!("FunctionApplication's function is not a function type"),
         }
     }
@@ -40,16 +41,17 @@ impl FunctionApplication {
 
     /// Typechecks this function application
     fn typecheck(&self) -> Result<(), String> {
-        let function_type = self.function.get_type();
+        let (base, all_args) = self.flattened_head_and_args();
+        let function_type = Self::resolved_function_type_for_flattened_application(base, &all_args);
         if let AcornType::Function(ftype) = function_type {
-            if ftype.arg_types.len() < self.args.len() {
+            if ftype.arg_types.len() < all_args.len() {
                 return Err(format!(
                     "Function application has {} arguments, but expected {}",
-                    self.args.len(),
+                    all_args.len(),
                     ftype.arg_types.len()
                 ));
             }
-            for (i, (arg, arg_type)) in self.args.iter().zip(ftype.arg_types.iter()).enumerate() {
+            for (i, (arg, arg_type)) in all_args.iter().zip(ftype.arg_types.iter()).enumerate() {
                 if !arg.is_type(arg_type) {
                     return Err(format!(
                         "Argument {} has type {}, but expected {}",
@@ -65,6 +67,45 @@ impl FunctionApplication {
                 "Function application has function of type {}",
                 function_type
             ))
+        }
+    }
+
+    fn flattened_head_and_args(&self) -> (&AcornValue, Vec<AcornValue>) {
+        fn collect<'a>(
+            function: &'a AcornValue,
+            args: &[AcornValue],
+            output: &mut Vec<AcornValue>,
+        ) -> &'a AcornValue {
+            match function {
+                AcornValue::Application(app) => {
+                    let head = collect(&app.function, &app.args, output);
+                    output.extend(args.iter().cloned());
+                    head
+                }
+                _ => {
+                    output.extend(args.iter().cloned());
+                    function
+                }
+            }
+        }
+
+        let mut args = Vec::new();
+        let base = collect(&self.function, &self.args, &mut args);
+        (base, args)
+    }
+
+    fn resolved_function_type_for_flattened_application(
+        base: &AcornValue,
+        all_args: &[AcornValue],
+    ) -> AcornType {
+        match base {
+            AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
+                let num_bound_value_args = constant.value_param_types.len().min(all_args.len());
+                constant
+                    .instance_type
+                    .bind_value_params(&all_args[..num_bound_value_args])
+            }
+            _ => base.get_type(),
         }
     }
 }
@@ -139,8 +180,8 @@ impl fmt::Display for BinaryOp {
 /// An instance of a constant. Could be generic or not.
 ///
 /// Identity is determined by `name` and `params` only. The other fields (`instance_type`,
-/// `generic_type`, `type_param_names`) are derived from these and are not included in
-/// Hash/Eq/Ord comparisons.
+/// `generic_type`, `type_param_names`, `value_param_types`) are derived from these and are not
+/// included in Hash/Eq/Ord comparisons.
 #[derive(Clone, Debug)]
 pub struct ConstantInstance {
     /// The name of this constant
@@ -162,6 +203,10 @@ pub struct ConstantInstance {
     /// Used to map Variable names to bound variable indices for polymorphic type conversion.
     /// Empty for non-generic constants.
     pub type_param_names: Vec<String>,
+
+    /// Ordered dependent value parameters for this constant, if any.
+    /// These behave like hidden leading binders in the constant's type.
+    pub value_param_types: Vec<AcornType>,
 }
 
 // Identity is based only on name and params
@@ -208,7 +253,7 @@ impl fmt::Display for ConstantInstance {
 
 impl ConstantInstance {
     /// Make another constant with the same name as this one.
-    /// Preserves generic_type and type_param_names from self.
+    /// Preserves generic_type, type_param_names, and value_param_types from self.
     fn same_name(&self, params: Vec<AcornType>, instance_type: AcornType) -> ConstantInstance {
         ConstantInstance {
             name: self.name.clone(),
@@ -216,18 +261,51 @@ impl ConstantInstance {
             instance_type,
             generic_type: self.generic_type.clone(),
             type_param_names: self.type_param_names.clone(),
+            value_param_types: self.value_param_types.clone(),
         }
     }
 
     pub fn instantiate(&self, params: &[(String, AcornType)]) -> ConstantInstance {
-        self.same_name(
+        let mut answer = self.same_name(
             self.params.iter().map(|t| t.instantiate(params)).collect(),
             self.instance_type.instantiate(params),
-        )
+        );
+        answer.value_param_types = self
+            .value_param_types
+            .iter()
+            .map(|t| t.instantiate(params))
+            .collect();
+        answer
+    }
+
+    pub fn bind_value_params(
+        &self,
+        values: &[AcornValue],
+        source: &dyn ErrorContext,
+    ) -> error::Result<ConstantInstance> {
+        if values.len() != self.value_param_types.len() {
+            return Err(source.error(&format!(
+                "constant {} expects {} family value arguments, but got {}",
+                self.name,
+                self.value_param_types.len(),
+                values.len()
+            )));
+        }
+
+        Ok(ConstantInstance {
+            name: self.name.clone(),
+            params: self.params.clone(),
+            instance_type: self.instance_type.bind_value_params(values),
+            generic_type: self.generic_type.bind_value_params(values),
+            type_param_names: self.type_param_names.clone(),
+            value_param_types: vec![],
+        })
     }
 
     pub fn has_generic(&self) -> bool {
-        self.params.iter().any(|t| t.has_generic()) || self.instance_type.has_generic()
+        self.params.iter().any(|t| t.has_generic())
+            || self.instance_type.has_generic()
+            || self.value_param_types.iter().any(|t| t.has_generic())
     }
 
     /// Change the arbitrary types in this list of parameters to generic ones.
@@ -277,18 +355,31 @@ impl ConstantInstance {
             // Just genericize what we started with, same as usual
             self.params.iter().map(|t| t.genericize(params)).collect()
         };
-        self.same_name(new_params, instance_type)
+        let mut answer = self.same_name(new_params, instance_type);
+        answer.value_param_types = self
+            .value_param_types
+            .iter()
+            .map(|t| t.genericize(params))
+            .collect();
+        answer
     }
 
     pub fn has_arbitrary(&self) -> bool {
         self.params.iter().any(|t| t.has_arbitrary())
+            || self.value_param_types.iter().any(|t| t.has_arbitrary())
     }
 
     pub fn to_arbitrary(&self) -> ConstantInstance {
-        self.same_name(
+        let mut answer = self.same_name(
             self.params.iter().map(|t| t.to_arbitrary()).collect(),
             self.instance_type.to_arbitrary(),
-        )
+        );
+        answer.value_param_types = self
+            .value_param_types
+            .iter()
+            .map(|t| t.to_arbitrary())
+            .collect();
+        answer
     }
 
     /// If this value is a typeclass attribute with the specific typeclass and class, convert
@@ -733,6 +824,7 @@ impl AcornValue {
             instance_type.clone(),
             instance_type,
             vec![],
+            vec![],
         )
     }
 
@@ -745,6 +837,7 @@ impl AcornValue {
         instance_type: AcornType,
         generic_type: AcornType,
         type_param_names: Vec<String>,
+        value_param_types: Vec<AcornType>,
     ) -> AcornValue {
         let ci = ConstantInstance {
             name,
@@ -752,8 +845,29 @@ impl AcornValue {
             instance_type,
             generic_type,
             type_param_names,
+            value_param_types,
         };
         AcornValue::Constant(ci)
+    }
+
+    pub fn bind_value_params(
+        self,
+        values: &[AcornValue],
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        match self {
+            AcornValue::Constant(constant) => Ok(AcornValue::Constant(
+                constant.bind_value_params(values, source)?,
+            )),
+            other => {
+                if values.is_empty() {
+                    Ok(other)
+                } else {
+                    Err(source
+                        .error("only constants can be specialized with family value arguments"))
+                }
+            }
+        }
     }
 
     /// Checks if this value is a lambda function
@@ -1316,7 +1430,11 @@ impl AcornValue {
                 // Quoted kernel clauses can legitimately contain bare polymorphic constants
                 // like `some = new` after extensionality peels all value arguments.
                 // Those still carry generic parameter metadata even with no explicit type args.
-                if ci.params.is_empty() && ci.has_generic() && ci.type_param_names.is_empty() {
+                if ci.params.is_empty()
+                    && ci.has_generic()
+                    && ci.type_param_names.is_empty()
+                    && ci.value_param_types.is_empty()
+                {
                     Err(format!("'{}' has generic type but no params", ci))
                 } else {
                     Ok(())
@@ -1626,6 +1744,9 @@ impl AcornValue {
                 for param in &c.params {
                     f(param);
                 }
+                for value_param_type in &c.value_param_types {
+                    f(value_param_type);
+                }
             }
             AcornValue::Bool(_) => {}
         }
@@ -1842,6 +1963,11 @@ impl AcornValue {
                 instance_type: c.instance_type.arbitrary_to_variable(),
                 generic_type: c.generic_type.arbitrary_to_variable(),
                 type_param_names: c.type_param_names.clone(),
+                value_param_types: c
+                    .value_param_types
+                    .iter()
+                    .map(|t| t.arbitrary_to_variable())
+                    .collect(),
             }),
             AcornValue::Bool(_) => self.clone(),
         }
@@ -1935,8 +2061,15 @@ impl AcornValue {
                 instance_type: c
                     .instance_type
                     .abstract_over_datatype(datatype, param.clone()),
-                generic_type: c.generic_type.abstract_over_datatype(datatype, param),
+                generic_type: c
+                    .generic_type
+                    .abstract_over_datatype(datatype, param.clone()),
                 type_param_names: c.type_param_names.clone(),
+                value_param_types: c
+                    .value_param_types
+                    .iter()
+                    .map(|t| t.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
             }),
             AcornValue::Bool(_) => self.clone(),
         }
@@ -2222,7 +2355,15 @@ impl AcornValue {
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
         // Typecheck the arguments
-        let function_type = self.get_type();
+        let function_type = match &self {
+            AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
+                let num_bound_value_args = constant.value_param_types.len().min(args.len());
+                constant
+                    .instance_type
+                    .bind_value_params(&args[..num_bound_value_args])
+            }
+            _ => self.get_type(),
+        };
         let function_type = match function_type {
             AcornType::Function(f) => f,
             _ => {
@@ -2423,6 +2564,7 @@ mod tests {
             ),
             generic_type,
             type_param_names: vec!["T".to_string(), "U".to_string()],
+            value_param_types: vec![],
         };
 
         // Genericize with [T, U]

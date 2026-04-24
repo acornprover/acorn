@@ -942,6 +942,7 @@ mod tests {
             instance_type.clone(),
             generic_type,
             vec!["T".to_string()],
+            vec![],
         );
         kernel_context.symbol_table.add_from(
             &constant,
@@ -1135,12 +1136,14 @@ mod tests {
             nat_type.clone(),
             nat_type.clone(),
             vec![],
+            vec![],
         );
         let succ = AcornValue::constant(
             succ_name.clone(),
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
             vec![],
         );
 
@@ -1246,12 +1249,14 @@ mod tests {
             nat_type.clone(),
             nat_type.clone(),
             vec![],
+            vec![],
         );
         let succ = AcornValue::constant(
             succ_name.clone(),
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
             vec![],
         );
 
@@ -1342,7 +1347,14 @@ mod tests {
                 ),
             ),
         );
-        let zero = AcornValue::constant(zero_name, vec![], nat_type.clone(), nat_type, vec![]);
+        let zero = AcornValue::constant(
+            zero_name,
+            vec![],
+            nat_type.clone(),
+            nat_type,
+            vec![],
+            vec![],
+        );
         let bad_match = AcornValue::Match(
             Box::new(zero.clone()),
             vec![
@@ -1414,7 +1426,14 @@ mod tests {
                 ),
             ),
         );
-        let zero = AcornValue::constant(zero_name, vec![], nat_type.clone(), nat_type, vec![]);
+        let zero = AcornValue::constant(
+            zero_name,
+            vec![],
+            nat_type.clone(),
+            nat_type,
+            vec![],
+            vec![],
+        );
         let bad_match = AcornValue::Match(
             Box::new(zero.clone()),
             vec![MatchCase {
@@ -1455,6 +1474,7 @@ mod tests {
             &nat_datatype,
             "zero",
             vec![],
+            vec![],
             nat_type.clone(),
             None,
             Some(ConstructorInfo {
@@ -1468,6 +1488,7 @@ mod tests {
         bindings.add_datatype_attribute(
             &nat_datatype,
             "succ",
+            vec![],
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             None,
@@ -1606,7 +1627,14 @@ mod tests {
         let bool_ty = AcornType::Bool;
         let f_name = ConstantName::unqualified(ModuleId(0), "f");
         let f_type = AcornType::functional(vec![bool_ty.clone()], bool_ty.clone());
-        let f = AcornValue::constant(f_name, vec![], f_type.clone(), f_type.clone(), vec![]);
+        let f = AcornValue::constant(
+            f_name,
+            vec![],
+            f_type.clone(),
+            f_type.clone(),
+            vec![],
+            vec![],
+        );
 
         let t_param = TypeParam {
             name: "T".to_string(),
@@ -1623,6 +1651,7 @@ mod tests {
             id_generic_type.clone(),
             id_generic_type,
             vec!["T".to_string()],
+            vec![],
         );
 
         #[allow(unused_mut)]
@@ -1731,12 +1760,14 @@ mod tests {
             nat_type.clone(),
             nat_type.clone(),
             vec![],
+            vec![],
         );
         let succ = AcornValue::constant(
             succ_name.clone(),
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
             vec![],
         );
         let match_value = AcornValue::Match(
@@ -1817,6 +1848,7 @@ mod tests {
             nat_type.clone(),
             nat_type.clone(),
             vec![],
+            vec![],
         );
         let succ = AcornValue::constant(
             succ_name.clone(),
@@ -1824,12 +1856,14 @@ mod tests {
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             vec![],
+            vec![],
         );
         let id = AcornValue::constant(
             id_name.clone(),
             vec![],
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
             AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            vec![],
             vec![],
         );
         let match_value = AcornValue::Match(

@@ -894,6 +894,7 @@ impl BindingMap {
         &mut self,
         defined_name: &DefinedName,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         constructor: Option<ConstructorInfo>,
@@ -905,6 +906,7 @@ impl BindingMap {
             DefinedName::Constant(constant_name) => self.add_constant_name(
                 constant_name,
                 params,
+                value_param_types,
                 constant_type,
                 definition,
                 constructor,
@@ -943,6 +945,7 @@ impl BindingMap {
         datatype: &Datatype,
         attr: &str,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         constructor: Option<ConstructorInfo>,
@@ -953,6 +956,7 @@ impl BindingMap {
         self.add_constant_name(
             &constant_name,
             params,
+            value_param_types,
             constant_type,
             definition,
             constructor,
@@ -967,6 +971,7 @@ impl BindingMap {
         typeclass: &Typeclass,
         attr: &str,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         constructor: Option<ConstructorInfo>,
@@ -977,6 +982,7 @@ impl BindingMap {
         self.add_constant_name(
             &constant_name,
             params,
+            value_param_types,
             constant_type,
             definition,
             constructor,
@@ -1010,6 +1016,7 @@ impl BindingMap {
         &mut self,
         name: &str,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         constructor: Option<ConstructorInfo>,
@@ -1021,6 +1028,7 @@ impl BindingMap {
         self.add_constant_name(
             &constant_name,
             params,
+            value_param_types,
             constant_type,
             definition,
             constructor,
@@ -1039,6 +1047,7 @@ impl BindingMap {
         &mut self,
         constant_name: &ConstantName,
         params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
         constant_type: AcornType,
         definition: Option<AcornValue>,
         constructor: Option<ConstructorInfo>,
@@ -1058,7 +1067,7 @@ impl BindingMap {
             }
         }
 
-        let value = if params.is_empty() {
+        let value = if params.is_empty() && value_param_types.is_empty() {
             if constant_type.has_generic() {
                 panic!("there should not be generic types in non-parameterized constant types");
             }
@@ -1069,6 +1078,7 @@ impl BindingMap {
                 constant_type.clone(),
                 constant_type,
                 vec![],
+                value_param_types,
             ))
         } else {
             // For parameterized constants, the type should only contain arbitrary types
@@ -1080,6 +1090,7 @@ impl BindingMap {
                 name: constant_name.clone(),
                 params,
                 generic_type: constant_type,
+                value_param_types,
                 args: vec![],
             })
         };
@@ -1907,6 +1918,7 @@ impl BindingMap {
             self.add_constant_name(
                 function_name,
                 all_params,
+                vec![],
                 fn_type,
                 None,
                 None,

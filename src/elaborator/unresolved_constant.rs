@@ -20,6 +20,10 @@ pub struct UnresolvedConstant {
     /// The generic type uses the params.
     pub generic_type: AcornType,
 
+    /// Ordered dependent value parameters for this constant, if any.
+    /// These behave like hidden leading binders in the constant's type.
+    pub value_param_types: Vec<AcornType>,
+
     /// Arguments that have been partially applied to this constant.
     /// When this is resolved, these arguments will be applied to the resolved value.
     pub args: Vec<AcornValue>,
@@ -71,14 +75,26 @@ impl UnresolvedConstant {
         name: ConstantName,
         params: Vec<AcornType>,
     ) -> error::Result<AcornValue> {
+        let named_params = self.named_params(source, &params)?;
         let resolved_type = self.resolved_type(source, &params)?;
 
         // Convert generic_type from Arbitrary to Variable types
         let generic_type = self.generic_type.genericize(&self.params);
         let type_param_names: Vec<String> = self.params.iter().map(|p| p.name.clone()).collect();
+        let value_param_types = self
+            .value_param_types
+            .iter()
+            .map(|value_type| value_type.instantiate(&named_params))
+            .collect();
 
-        let mut value =
-            AcornValue::constant(name, params, resolved_type, generic_type, type_param_names);
+        let mut value = AcornValue::constant(
+            name,
+            params,
+            resolved_type,
+            generic_type,
+            type_param_names,
+            value_param_types,
+        );
 
         // Apply any stored arguments
         if !self.args.is_empty() {
@@ -99,6 +115,11 @@ impl UnresolvedConstant {
         // Convert generic_type from Arbitrary to Variable types
         let generic_type = self.generic_type.genericize(&self.params);
         let type_param_names: Vec<String> = self.params.iter().map(|p| p.name.clone()).collect();
+        let value_param_types = self
+            .value_param_types
+            .into_iter()
+            .map(|value_type| value_type.genericize(&self.params))
+            .collect();
 
         // For generic value, instance_type equals generic_type since params are Variables
         let mut value = AcornValue::constant(
@@ -107,6 +128,7 @@ impl UnresolvedConstant {
             generic_type.clone(),
             generic_type,
             type_param_names,
+            value_param_types,
         );
 
         // Apply any stored arguments

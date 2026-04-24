@@ -350,6 +350,7 @@ impl Environment {
             self.bindings.add_unqualified_constant(
                 name_token.text(),
                 type_params.clone(),
+                vec![],
                 theorem_type.clone(),
                 Some(lambda_claim.clone()),
                 None,
@@ -500,6 +501,7 @@ impl Environment {
             self.bindings.add_defined_name(
                 &defined_name,
                 definition_type_params.clone(),
+                vec![],
                 generic_type.clone(),
                 None,
                 None,
@@ -523,6 +525,7 @@ impl Environment {
                 type_args,
                 quant_type.clone(),
                 generic_type,
+                vec![],
                 vec![],
             );
             constant_values.push(constant_value);
@@ -632,6 +635,7 @@ impl Environment {
         self.bindings.add_defined_name(
             &defined_name,
             all_type_params.clone(),
+            vec![],
             generic_function_type.clone(),
             None,
             None,
@@ -652,6 +656,7 @@ impl Environment {
             type_args,
             function_type.clone(),
             generic_function_type,
+            vec![],
             vec![],
         );
         let function_term = AcornValue::apply(
@@ -837,6 +842,7 @@ impl Environment {
             self.bindings.add_unqualified_constant(
                 arg_name,
                 vec![],
+                vec![],
                 arg_type.clone(),
                 None,
                 None,
@@ -852,7 +858,14 @@ impl Environment {
             .zip(&arg_types)
             .map(|(token, arg_type)| {
                 let name = ConstantName::unqualified(self.module_id, token.text());
-                AcornValue::constant(name, vec![], arg_type.clone(), arg_type.clone(), vec![])
+                AcornValue::constant(
+                    name,
+                    vec![],
+                    arg_type.clone(),
+                    arg_type.clone(),
+                    vec![],
+                    vec![],
+                )
             })
             .collect();
 

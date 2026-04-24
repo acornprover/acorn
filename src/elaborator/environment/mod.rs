@@ -365,6 +365,7 @@ impl Environment {
         self.bindings.add_defined_name(
             &name,
             params,
+            vec![],
             constant_type,
             definition,
             None,

@@ -913,6 +913,7 @@ fn add_named_polymorphic_global_constant(
             .iter()
             .map(|name| name.to_string())
             .collect(),
+        vec![],
     );
 }
 

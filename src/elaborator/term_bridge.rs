@@ -95,9 +95,17 @@ impl<'a> TermBridge<'a> {
                         poly_info.generic_type.clone(),
                         poly_info.generic_type.clone(),
                         poly_info.type_param_names.clone(),
+                        poly_info.value_param_types.clone(),
                     )
                 } else {
-                    AcornValue::constant(name, vec![], acorn_type.clone(), acorn_type, vec![])
+                    AcornValue::constant(
+                        name,
+                        vec![],
+                        acorn_type.clone(),
+                        acorn_type,
+                        vec![],
+                        vec![],
+                    )
                 }
             }
             Atom::Symbol(Symbol::ScopedConstant(i)) => {
@@ -115,9 +123,17 @@ impl<'a> TermBridge<'a> {
                         poly_info.generic_type.clone(),
                         poly_info.generic_type.clone(),
                         poly_info.type_param_names.clone(),
+                        poly_info.value_param_types.clone(),
                     )
                 } else {
-                    AcornValue::constant(name, vec![], acorn_type.clone(), acorn_type, vec![])
+                    AcornValue::constant(
+                        name,
+                        vec![],
+                        acorn_type.clone(),
+                        acorn_type,
+                        vec![],
+                        vec![],
+                    )
                 }
             }
             Atom::FreeVariable(i) => {
@@ -128,6 +144,7 @@ impl<'a> TermBridge<'a> {
                             vec![],
                             acorn_type.clone(),
                             acorn_type,
+                            vec![],
                             vec![],
                         );
                     }
@@ -185,6 +202,11 @@ impl<'a> TermBridge<'a> {
             instance_type,
             generic_type: constant.generic_type.clone(),
             type_param_names: constant.type_param_names.clone(),
+            value_param_types: constant
+                .value_param_types
+                .iter()
+                .map(|ty| ty.instantiate(&named_params))
+                .collect(),
         })
     }
 
@@ -238,6 +260,7 @@ impl<'a> TermBridge<'a> {
                 instance_type,
                 poly.generic_type.clone(),
                 poly.type_param_names.clone(),
+                poly.value_param_types.clone(),
             ));
         }
 
@@ -254,6 +277,7 @@ impl<'a> TermBridge<'a> {
             vec![],
             acorn_type.clone(),
             acorn_type,
+            vec![],
             vec![],
         ))
     }

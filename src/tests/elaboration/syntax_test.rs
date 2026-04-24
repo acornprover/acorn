@@ -164,21 +164,35 @@ fn test_axiomatic_types_must_be_capitalized() {
 }
 
 #[test]
-fn test_dependent_value_params_report_not_supported_yet() {
+fn test_dependent_structures_can_be_used() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
-    env.add("type Indexed[n: Nat]: axiom");
-    let structure_error = env.bad(
+    env.add(
         r#"
             structure Fin[n: Nat] {
                 value: Nat
             } constraint {
-                value < n
+                value = value
             }
         "#,
     );
-    assert!(structure_error.contains("dependent value parameters"));
+    env.add("theorem fin_member(n: Nat, x: Fin[n]) { x.value = x.value }");
 
+    env.add(
+        r#"
+            structure Zmod[k: Nat] {
+                value: Nat
+            }
+        "#,
+    );
+    env.add("theorem zmod_round_trip(k: Nat, x: Nat) { Zmod[k].new(x).value = x }");
+}
+
+#[test]
+fn test_dependent_theorem_params_report_not_supported_yet() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("type Indexed[n: Nat]: axiom");
     let theorem_error = env.bad("theorem goal[T, n: Nat] { true }");
     assert!(theorem_error.contains("dependent value parameters"));
 }

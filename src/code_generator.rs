@@ -63,6 +63,7 @@ impl CodeGenerator<'_> {
             c.instance_type.clone(),
             c.generic_type.clone(),
             c.type_param_names.clone(),
+            c.value_param_types.clone(),
         ))
     }
 

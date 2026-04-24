@@ -743,6 +743,7 @@ impl Certificate {
         bindings.add_defined_name(
             &defined_name,
             type_params.to_vec(),
+            vec![],
             constant_type.clone(),
             None,
             None,
@@ -783,6 +784,7 @@ impl Certificate {
                 constant_name.clone(),
                 constant_type.clone(),
                 type_params.iter().map(|param| param.name.clone()).collect(),
+                vec![],
             );
         }
         Ok(constant_name)
@@ -935,6 +937,7 @@ impl Certificate {
             function_type.clone(),
             function_type,
             type_params.iter().map(|param| param.name.clone()).collect(),
+            vec![],
         );
         let function_term = AcornValue::apply(
             function_constant,
@@ -1769,6 +1772,7 @@ impl<'a> WitnessEmitter<'a> {
                         constant.instance_type.clone(),
                         constant.generic_type.clone(),
                         constant.type_param_names.clone(),
+                        constant.value_param_types.clone(),
                     )
                 })
             });
