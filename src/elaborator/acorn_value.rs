@@ -9,7 +9,7 @@ use crate::module::ModuleId;
 use crate::syntax::token::TokenType;
 
 /// Represents a function application with a function and its arguments.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct FunctionApplication {
     /// The function being applied
     pub function: Box<AcornValue>,
@@ -71,7 +71,7 @@ impl FunctionApplication {
 
 /// Represents explicit type application syntax on a value.
 /// This preserves source-level type arguments for roundtripping.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct TypeApplication {
     /// The value being type-applied.
     pub function: Box<AcornValue>,
@@ -105,7 +105,7 @@ impl TypeApplication {
 }
 
 /// Represents binary operators used in Acorn
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum BinaryOp {
     Implies,
     Equals,
@@ -325,7 +325,7 @@ impl ConstantInstance {
 
 /// Two AcornValue compare to equal if they are structurally identical.
 /// Comparison doesn't do any evaluations.
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct MatchCase {
     /// Types introduced by this match branch (new pattern-bound variables).
     pub new_vars: Vec<AcornType>,
@@ -343,7 +343,7 @@ pub struct MatchCase {
 
 /// Two AcornValue compare to equal if they are structurally identical.
 /// Comparison doesn't do any evaluations.
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum AcornValue {
     /// A variable that is bound to a value on the stack.
     /// Represented by (stack level, type).
@@ -1767,6 +1767,272 @@ impl AcornValue {
             }
             AcornValue::Constant(c) => AcornValue::Constant(c.genericize(params)),
             AcornValue::Bool(_) => self.clone(),
+        }
+    }
+
+    pub fn arbitrary_to_variable(&self) -> AcornValue {
+        match self {
+            AcornValue::Variable(i, var_type) => {
+                AcornValue::Variable(*i, var_type.arbitrary_to_variable())
+            }
+            AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
+                function: Box::new(app.function.arbitrary_to_variable()),
+                args: app.args.iter().map(|x| x.arbitrary_to_variable()).collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.arbitrary_to_variable()),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app
+                    .type_args
+                    .iter()
+                    .map(|x| x.arbitrary_to_variable())
+                    .collect(),
+            }),
+            AcornValue::Lambda(args, value) => AcornValue::Lambda(
+                args.iter().map(|x| x.arbitrary_to_variable()).collect(),
+                Box::new(value.arbitrary_to_variable()),
+            ),
+            AcornValue::ForAll(args, value) => AcornValue::ForAll(
+                args.iter().map(|x| x.arbitrary_to_variable()).collect(),
+                Box::new(value.arbitrary_to_variable()),
+            ),
+            AcornValue::Exists(args, value) => AcornValue::Exists(
+                args.iter().map(|x| x.arbitrary_to_variable()).collect(),
+                Box::new(value.arbitrary_to_variable()),
+            ),
+            AcornValue::Grouping(value) => {
+                AcornValue::Grouping(Box::new(value.arbitrary_to_variable()))
+            }
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                *op,
+                Box::new(left.arbitrary_to_variable()),
+                Box::new(right.arbitrary_to_variable()),
+            ),
+            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(cond.arbitrary_to_variable()),
+                Box::new(if_value.arbitrary_to_variable()),
+                Box::new(else_value.arbitrary_to_variable()),
+            ),
+            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                Box::new(scrutinee.arbitrary_to_variable()),
+                cases
+                    .iter()
+                    .map(|case| MatchCase {
+                        new_vars: case
+                            .new_vars
+                            .iter()
+                            .map(|t| t.arbitrary_to_variable())
+                            .collect(),
+                        pattern: case.pattern.arbitrary_to_variable(),
+                        result: case.result.arbitrary_to_variable(),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    })
+                    .collect(),
+            ),
+            AcornValue::Not(x) => AcornValue::Not(Box::new(x.arbitrary_to_variable())),
+            AcornValue::Try(x, t) => AcornValue::Try(
+                Box::new(x.arbitrary_to_variable()),
+                t.arbitrary_to_variable(),
+            ),
+            AcornValue::Constant(c) => AcornValue::Constant(ConstantInstance {
+                name: c.name.clone(),
+                params: c.params.iter().map(|t| t.arbitrary_to_variable()).collect(),
+                instance_type: c.instance_type.arbitrary_to_variable(),
+                generic_type: c.generic_type.arbitrary_to_variable(),
+                type_param_names: c.type_param_names.clone(),
+            }),
+            AcornValue::Bool(_) => self.clone(),
+        }
+    }
+
+    pub fn abstract_over_datatype(&self, datatype: &Datatype, param: TypeParam) -> AcornValue {
+        match self {
+            AcornValue::Variable(i, var_type) => {
+                AcornValue::Variable(*i, var_type.abstract_over_datatype(datatype, param))
+            }
+            AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
+                function: Box::new(app.function.abstract_over_datatype(datatype, param.clone())),
+                args: app
+                    .args
+                    .iter()
+                    .map(|x| x.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.abstract_over_datatype(datatype, param.clone())),
+                type_param_names: app.type_param_names.clone(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app
+                    .type_args
+                    .iter()
+                    .map(|x| x.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+            }),
+            AcornValue::Lambda(args, value) => AcornValue::Lambda(
+                args.iter()
+                    .map(|x| x.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+                Box::new(value.abstract_over_datatype(datatype, param.clone())),
+            ),
+            AcornValue::ForAll(args, value) => AcornValue::ForAll(
+                args.iter()
+                    .map(|x| x.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+                Box::new(value.abstract_over_datatype(datatype, param.clone())),
+            ),
+            AcornValue::Exists(args, value) => AcornValue::Exists(
+                args.iter()
+                    .map(|x| x.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+                Box::new(value.abstract_over_datatype(datatype, param.clone())),
+            ),
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(
+                value.abstract_over_datatype(datatype, param.clone()),
+            )),
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                *op,
+                Box::new(left.abstract_over_datatype(datatype, param.clone())),
+                Box::new(right.abstract_over_datatype(datatype, param.clone())),
+            ),
+            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(cond.abstract_over_datatype(datatype, param.clone())),
+                Box::new(if_value.abstract_over_datatype(datatype, param.clone())),
+                Box::new(else_value.abstract_over_datatype(datatype, param.clone())),
+            ),
+            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                Box::new(scrutinee.abstract_over_datatype(datatype, param.clone())),
+                cases
+                    .iter()
+                    .map(|case| MatchCase {
+                        new_vars: case
+                            .new_vars
+                            .iter()
+                            .map(|t| t.abstract_over_datatype(datatype, param.clone()))
+                            .collect(),
+                        pattern: case.pattern.abstract_over_datatype(datatype, param.clone()),
+                        result: case.result.abstract_over_datatype(datatype, param.clone()),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    })
+                    .collect(),
+            ),
+            AcornValue::Not(x) => {
+                AcornValue::Not(Box::new(x.abstract_over_datatype(datatype, param.clone())))
+            }
+            AcornValue::Try(x, t) => AcornValue::Try(
+                Box::new(x.abstract_over_datatype(datatype, param.clone())),
+                t.abstract_over_datatype(datatype, param.clone()),
+            ),
+            AcornValue::Constant(c) => AcornValue::Constant(ConstantInstance {
+                name: c.name.clone(),
+                params: c
+                    .params
+                    .iter()
+                    .map(|t| t.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+                instance_type: c
+                    .instance_type
+                    .abstract_over_datatype(datatype, param.clone()),
+                generic_type: c.generic_type.abstract_over_datatype(datatype, param),
+                type_param_names: c.type_param_names.clone(),
+            }),
+            AcornValue::Bool(_) => self.clone(),
+        }
+    }
+
+    pub fn has_arbitrary_type_param(&self, param: &TypeParam) -> bool {
+        match self {
+            AcornValue::Variable(_, var_type) => var_type.has_arbitrary_type_param(param),
+            AcornValue::Application(app) => {
+                app.function.has_arbitrary_type_param(param)
+                    || app.args.iter().any(|x| x.has_arbitrary_type_param(param))
+            }
+            AcornValue::TypeApplication(app) => {
+                app.function.has_arbitrary_type_param(param)
+                    || app
+                        .type_args
+                        .iter()
+                        .any(|x| x.has_arbitrary_type_param(param))
+            }
+            AcornValue::Lambda(args, value)
+            | AcornValue::ForAll(args, value)
+            | AcornValue::Exists(args, value) => {
+                args.iter().any(|x| x.has_arbitrary_type_param(param))
+                    || value.has_arbitrary_type_param(param)
+            }
+            AcornValue::Grouping(value) => value.has_arbitrary_type_param(param),
+            AcornValue::Binary(_, left, right) => {
+                left.has_arbitrary_type_param(param) || right.has_arbitrary_type_param(param)
+            }
+            AcornValue::IfThenElse(cond, if_value, else_value) => {
+                cond.has_arbitrary_type_param(param)
+                    || if_value.has_arbitrary_type_param(param)
+                    || else_value.has_arbitrary_type_param(param)
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                scrutinee.has_arbitrary_type_param(param)
+                    || cases.iter().any(|case| {
+                        case.new_vars
+                            .iter()
+                            .any(|t| t.has_arbitrary_type_param(param))
+                            || case.pattern.has_arbitrary_type_param(param)
+                            || case.result.has_arbitrary_type_param(param)
+                    })
+            }
+            AcornValue::Not(x) => x.has_arbitrary_type_param(param),
+            AcornValue::Try(x, t) => {
+                x.has_arbitrary_type_param(param) || t.has_arbitrary_type_param(param)
+            }
+            AcornValue::Constant(c) => {
+                c.instance_type.has_arbitrary_type_param(param)
+                    || c.params.iter().any(|t| t.has_arbitrary_type_param(param))
+            }
+            AcornValue::Bool(_) => false,
+        }
+    }
+
+    pub fn contains_type_var(&self, param: &TypeParam) -> bool {
+        match self {
+            AcornValue::Variable(_, var_type) => var_type.contains_type_var(param),
+            AcornValue::Application(app) => {
+                app.function.contains_type_var(param)
+                    || app.args.iter().any(|x| x.contains_type_var(param))
+            }
+            AcornValue::TypeApplication(app) => {
+                app.function.contains_type_var(param)
+                    || app.type_args.iter().any(|x| x.contains_type_var(param))
+            }
+            AcornValue::Lambda(args, value)
+            | AcornValue::ForAll(args, value)
+            | AcornValue::Exists(args, value) => {
+                args.iter().any(|x| x.contains_type_var(param)) || value.contains_type_var(param)
+            }
+            AcornValue::Grouping(value) => value.contains_type_var(param),
+            AcornValue::Binary(_, left, right) => {
+                left.contains_type_var(param) || right.contains_type_var(param)
+            }
+            AcornValue::IfThenElse(cond, if_value, else_value) => {
+                cond.contains_type_var(param)
+                    || if_value.contains_type_var(param)
+                    || else_value.contains_type_var(param)
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                scrutinee.contains_type_var(param)
+                    || cases.iter().any(|case| {
+                        case.new_vars.iter().any(|t| t.contains_type_var(param))
+                            || case.pattern.contains_type_var(param)
+                            || case.result.contains_type_var(param)
+                    })
+            }
+            AcornValue::Not(x) => x.contains_type_var(param),
+            AcornValue::Try(x, t) => x.contains_type_var(param) || t.contains_type_var(param),
+            AcornValue::Constant(c) => {
+                c.instance_type.contains_type_var(param)
+                    || c.params.iter().any(|t| t.contains_type_var(param))
+            }
+            AcornValue::Bool(_) => false,
         }
     }
 

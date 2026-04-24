@@ -4,7 +4,9 @@ use std::collections::HashSet as StdHashSet;
 use im::HashMap as ImHashMap;
 use im::Vector as ImVector;
 
-use crate::elaborator::acorn_type::{AcornType, Datatype, FunctionType, TypeParam, Typeclass};
+use crate::elaborator::acorn_type::{
+    AcornType, Datatype, DependentTypeArg, FunctionType, TypeParam, Typeclass,
+};
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
@@ -20,10 +22,9 @@ pub struct TypeStore {
     /// Uses im::Vector for O(1) clones.
     ground_id_to_type: ImVector<ImVector<AcornType>>,
 
-    /// ground_id_to_arity[module_id][local_id] is the number of type parameters for that type.
-    /// For proper types like Bool, arity is 0.
-    /// For type constructors like List, arity is 1.
-    ground_id_to_arity: ImVector<ImVector<u8>>,
+    /// ground_id_to_param_kinds[module_id][local_id] is the ordered list of parameter kinds
+    /// for that type constructor. Proper types have an empty list.
+    ground_id_to_param_kinds: ImVector<ImVector<Vec<Term>>>,
 
     /// Maps Datatype (bare data type with no params) to its GroundTypeId.
     datatype_to_ground_id: ImHashMap<Datatype, GroundTypeId>,
@@ -52,7 +53,7 @@ impl TypeStore {
         // No pre-registration needed.
         TypeStore {
             ground_id_to_type: ImVector::new(),
-            ground_id_to_arity: ImVector::new(),
+            ground_id_to_param_kinds: ImVector::new(),
             datatype_to_ground_id: ImHashMap::new(),
             arbitrary_to_ground_id: ImHashMap::new(),
             typeclass_to_id: ImHashMap::new(),
@@ -68,8 +69,8 @@ impl TypeStore {
         while self.ground_id_to_type.len() <= idx {
             self.ground_id_to_type.push_back(ImVector::new());
         }
-        while self.ground_id_to_arity.len() <= idx {
-            self.ground_id_to_arity.push_back(ImVector::new());
+        while self.ground_id_to_param_kinds.len() <= idx {
+            self.ground_id_to_param_kinds.push_back(ImVector::new());
         }
     }
 
@@ -93,6 +94,41 @@ impl TypeStore {
         self.add_type_internal(acorn_type);
     }
 
+    fn param_kind_for_type_arg(&mut self, acorn_type: &AcornType) -> Term {
+        match acorn_type.as_typeclass_representative() {
+            Some(typeclass) => {
+                let typeclass_id = self.add_typeclass(typeclass);
+                Term::typeclass(typeclass_id)
+            }
+            None => Term::type_sort(),
+        }
+    }
+
+    fn param_kind_for_arg(&mut self, arg: &DependentTypeArg) -> Term {
+        match arg {
+            DependentTypeArg::Type(acorn_type) => self.param_kind_for_type_arg(acorn_type),
+            DependentTypeArg::Value(value) => {
+                self.add_type_internal(&value.get_type());
+                self.to_type_term(&value.get_type())
+            }
+        }
+    }
+
+    fn update_datatype_param_kinds(&mut self, datatype: &Datatype, param_kinds: Vec<Term>) {
+        if let Some(ground_id) = self.datatype_to_ground_id.get(datatype) {
+            let module_id = ground_id.module_id();
+            let local_idx = ground_id.local_id() as usize;
+            let mod_idx = module_id.get() as usize;
+            if let Some(kinds) = self.ground_id_to_param_kinds.get_mut(mod_idx) {
+                if local_idx < kinds.len()
+                    && (kinds[local_idx].is_empty() || kinds[local_idx].len() < param_kinds.len())
+                {
+                    kinds[local_idx] = param_kinds;
+                }
+            }
+        }
+    }
+
     /// Internal implementation that registers ground types.
     /// Only user-defined ground types (bare Data types, Arbitrary) get GroundTypeIds.
     /// Bool and TypeSort are Symbol variants, not GroundTypeIds.
@@ -112,7 +148,7 @@ impl TypeStore {
                 self.ensure_ground_module(module_id);
                 let idx = module_id.get() as usize;
                 self.ground_id_to_type[idx].push_back(acorn_type.clone());
-                self.ground_id_to_arity[idx].push_back(0); // Default arity 0, will be updated by set_datatype_arity
+                self.ground_id_to_param_kinds[idx].push_back(vec![]);
                 self.datatype_to_ground_id
                     .insert(datatype.clone(), ground_id);
             }
@@ -121,22 +157,30 @@ impl TypeStore {
             AcornType::Data(datatype, params) => {
                 let bare_constructor = AcornType::Data(datatype.clone(), vec![]);
                 self.add_type_internal(&bare_constructor);
-                // Update arity if we see a parameterized version
-                // This handles cases where we first see List (arity 0) then List[Int] (arity 1)
-                let arity = params.len() as u8;
-                if let Some(ground_id) = self.datatype_to_ground_id.get(datatype) {
-                    let module_id = ground_id.module_id();
-                    let local_idx = ground_id.local_id() as usize;
-                    let mod_idx = module_id.get() as usize;
-                    if let Some(arities) = self.ground_id_to_arity.get_mut(mod_idx) {
-                        if local_idx < arities.len() && arities[local_idx] < arity {
-                            arities[local_idx] = arity;
-                        }
-                    }
-                }
                 for param in params {
                     self.add_type_internal(param);
                 }
+                let param_kinds: Vec<Term> = params
+                    .iter()
+                    .map(|param| self.param_kind_for_type_arg(param))
+                    .collect();
+                self.update_datatype_param_kinds(datatype, param_kinds);
+            }
+
+            AcornType::Family(datatype, args) => {
+                let bare_constructor = AcornType::Data(datatype.clone(), vec![]);
+                self.add_type_internal(&bare_constructor);
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => self.add_type_internal(acorn_type),
+                        DependentTypeArg::Value(value) => self.add_type_internal(&value.get_type()),
+                    }
+                }
+                let param_kinds: Vec<Term> = args
+                    .iter()
+                    .map(|arg| self.param_kind_for_arg(arg))
+                    .collect();
+                self.update_datatype_param_kinds(datatype, param_kinds);
             }
 
             // Function type: recursively process component types (no GroundTypeId needed)
@@ -158,7 +202,7 @@ impl TypeStore {
                 self.ensure_ground_module(module_id);
                 let idx = module_id.get() as usize;
                 self.ground_id_to_type[idx].push_back(acorn_type.clone());
-                self.ground_id_to_arity[idx].push_back(0); // Arbitrary types have arity 0
+                self.ground_id_to_param_kinds[idx].push_back(vec![]);
                 self.arbitrary_to_ground_id
                     .insert(type_param.clone(), ground_id);
             }
@@ -190,28 +234,19 @@ impl TypeStore {
         self.datatype_to_ground_id.get(datatype).copied()
     }
 
-    /// Set the arity (number of type parameters) for a datatype.
-    /// This should be called after the datatype is registered and its arity is known.
+    /// Set the number of type-level parameters for a datatype.
+    /// This is a compatibility helper for older call sites that only know an arity count.
     pub fn set_datatype_arity(&mut self, datatype: &Datatype, arity: u8) {
-        if let Some(ground_id) = self.datatype_to_ground_id.get(datatype) {
-            let module_id = ground_id.module_id();
-            let local_idx = ground_id.local_id() as usize;
-            let mod_idx = module_id.get() as usize;
-            if let Some(arities) = self.ground_id_to_arity.get_mut(mod_idx) {
-                if local_idx < arities.len() {
-                    arities[local_idx] = arity;
-                }
-            }
-        }
+        self.update_datatype_param_kinds(datatype, (0..arity).map(|_| Term::type_sort()).collect());
     }
 
-    /// Get the arity (number of type parameters) for a ground type.
+    /// Get the number of parameters for a ground type.
     pub fn get_arity(&self, ground_id: GroundTypeId) -> u8 {
         let mod_idx = ground_id.module_id().get() as usize;
-        self.ground_id_to_arity
+        self.ground_id_to_param_kinds
             .get(mod_idx)
             .and_then(|v| v.get(ground_id.local_id() as usize))
-            .copied()
+            .map(|kinds| kinds.len() as u8)
             .unwrap_or(0)
     }
 
@@ -232,8 +267,18 @@ impl TypeStore {
     /// Proper types like Bool have kind Type.
     /// Type constructors like List (arity 1) have kind Type -> Type.
     pub fn get_type_kind(&self, ground_id: GroundTypeId) -> Term {
-        let arity = self.get_arity(ground_id);
-        self.kind_for_arity(arity)
+        let mod_idx = ground_id.module_id().get() as usize;
+        let param_kinds = self
+            .ground_id_to_param_kinds
+            .get(mod_idx)
+            .and_then(|v| v.get(ground_id.local_id() as usize))
+            .cloned()
+            .unwrap_or_default();
+        let mut result = Term::type_sort();
+        for param_kind in param_kinds.into_iter().rev() {
+            result = Term::pi(param_kind, result);
+        }
+        result
     }
 
     /// Look up a GroundTypeId by datatype name string.
@@ -296,6 +341,13 @@ impl TypeStore {
                     .collect();
 
                 Term::type_application(head, args)
+            }
+
+            AcornType::Family(datatype, _) => {
+                panic!(
+                    "dependent family type {} cannot be lowered through TypeStore directly",
+                    datatype.name
+                );
             }
 
             AcornType::Function(ft) => {
@@ -398,6 +450,13 @@ impl TypeStore {
                     .collect();
 
                 Term::type_application(head, args)
+            }
+
+            AcornType::Family(datatype, _) => {
+                panic!(
+                    "dependent family type {} cannot be lowered through TypeStore directly",
+                    datatype.name
+                );
             }
 
             AcornType::Function(ft) => {
@@ -1270,7 +1329,10 @@ impl TypeStore {
     pub fn merge(&mut self, other: &TypeStore) {
         // Merge ground types and arities
         merge_nested_vecs(&mut self.ground_id_to_type, &other.ground_id_to_type);
-        merge_nested_vecs(&mut self.ground_id_to_arity, &other.ground_id_to_arity);
+        merge_nested_vecs(
+            &mut self.ground_id_to_param_kinds,
+            &other.ground_id_to_param_kinds,
+        );
 
         // Merge hash maps
         for (k, v) in other.datatype_to_ground_id.iter() {

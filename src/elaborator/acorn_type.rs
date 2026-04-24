@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt};
 
+use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::error::{self, ErrorContext, Result};
 use crate::module::ModuleId;
 
@@ -55,6 +56,21 @@ impl Typeclass {
     }
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum DependentTypeArg {
+    Type(AcornType),
+    Value(AcornValue),
+}
+
+impl fmt::Display for DependentTypeArg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DependentTypeArg::Type(acorn_type) => write!(f, "{}", acorn_type),
+            DependentTypeArg::Value(value) => write!(f, "{}", value),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UnresolvedType {
     /// The user-facing name for this generic type.
@@ -84,33 +100,67 @@ impl UnresolvedType {
         args
     }
 
+    pub fn canonical_args_for(params: &[FamilyParamKind]) -> Vec<DependentTypeArg> {
+        let mut args = vec![];
+        let mut next_type_index = 0;
+        let mut next_value_index = 0;
+        for param in params {
+            match param {
+                FamilyParamKind::Type(typeclass) => {
+                    args.push(DependentTypeArg::Type(AcornType::Arbitrary(TypeParam {
+                        name: format!("T{}", next_type_index),
+                        typeclass: typeclass.clone(),
+                    })));
+                    next_type_index += 1;
+                }
+                FamilyParamKind::Value(value_type) => {
+                    args.push(DependentTypeArg::Value(AcornValue::Variable(
+                        next_value_index,
+                        value_type.clone(),
+                    )));
+                    next_value_index += 1;
+                }
+            }
+        }
+        args
+    }
+
     pub fn canonical_template_for_datatype(
         name: String,
         datatype: Datatype,
         params: Vec<FamilyParamKind>,
     ) -> UnresolvedType {
-        let args = Self::canonical_type_args_for(&params);
+        let args = Self::canonical_args_for(&params);
         UnresolvedType {
             name,
             params,
-            template: AcornType::Data(datatype, args),
+            template: AcornType::new_datatype_application(datatype, args),
         }
     }
 
     pub fn base_datatype(&self) -> Option<&Datatype> {
         match &self.template {
-            AcornType::Data(datatype, _) => Some(datatype),
+            AcornType::Data(datatype, _) | AcornType::Family(datatype, _) => Some(datatype),
             _ => None,
         }
     }
 
-    fn instantiate_template(&self, params: &[AcornType]) -> AcornType {
-        let replacements: Vec<_> = params
-            .iter()
-            .enumerate()
-            .map(|(i, param)| (format!("T{}", i), param.clone()))
-            .collect();
-        self.template.instantiate(&replacements)
+    fn instantiate_template(&self, params: &[DependentTypeArg]) -> AcornType {
+        let mut type_replacements = vec![];
+        let mut value_replacements = vec![];
+        let mut next_type_index = 0;
+        for arg in params {
+            match arg {
+                DependentTypeArg::Type(param) => {
+                    type_replacements.push((format!("T{}", next_type_index), param.clone()));
+                    next_type_index += 1;
+                }
+                DependentTypeArg::Value(value) => value_replacements.push(value.clone()),
+            }
+        }
+        self.template
+            .instantiate(&type_replacements)
+            .bind_value_params(&value_replacements)
     }
 
     pub fn has_value_params(&self) -> bool {
@@ -134,9 +184,9 @@ impl UnresolvedType {
         !self.has_value_params()
             && self.base_datatype().is_some()
             && self.template
-                == AcornType::Data(
+                == AcornType::new_datatype_application(
                     self.base_datatype().unwrap().clone(),
-                    Self::canonical_type_args_for(&self.params),
+                    Self::canonical_args_for(&self.params),
                 )
     }
 
@@ -157,6 +207,35 @@ pub enum PotentialType {
 }
 
 impl PotentialType {
+    pub fn resolve_args(
+        self,
+        params: Vec<DependentTypeArg>,
+        source: &dyn ErrorContext,
+    ) -> Result<AcornType> {
+        match self {
+            PotentialType::Resolved(t) => {
+                if !params.is_empty() {
+                    Err(source.error("resolved type cannot take parameters"))
+                } else {
+                    Ok(t)
+                }
+            }
+            PotentialType::Unresolved(ut) => {
+                if params.len() != ut.params.len() {
+                    Err(source.error(&format!(
+                        "type {} expects {} parameters, but got {}",
+                        ut.name,
+                        ut.params.len(),
+                        params.len()
+                    )))
+                } else {
+                    // TODO: check that params obey the constraints in ut.params.
+                    Ok(ut.instantiate_template(&params))
+                }
+            }
+        }
+    }
+
     /// Resolves the type given the parameters.
     /// Every replacement must be a type variable being replaced with an arbitrary type.
     pub fn invertible_resolve(
@@ -196,7 +275,10 @@ impl PotentialType {
                 }
             }
         }
-        self.resolve(params, source)
+        self.resolve_args(
+            params.into_iter().map(DependentTypeArg::Type).collect(),
+            source,
+        )
     }
 
     /// Resolves the type given parameters with arbitrary types.
@@ -240,40 +322,27 @@ impl PotentialType {
                 }
             }
         }
-        self.resolve(params, source)
+        self.resolve_args(
+            params.into_iter().map(DependentTypeArg::Type).collect(),
+            source,
+        )
     }
 
     /// Resolves the type given the parameters.
     /// Reports an error if the parameters don't match what we expected.
     pub fn resolve(self, params: Vec<AcornType>, source: &dyn ErrorContext) -> Result<AcornType> {
-        match self {
-            PotentialType::Resolved(t) => {
-                if !params.is_empty() {
-                    Err(source.error("resolved type cannot take parameters"))
-                } else {
-                    Ok(t)
-                }
-            }
-            PotentialType::Unresolved(ut) => {
-                if ut.has_value_params() {
-                    return Err(source.error(&format!(
-                        "type {} has dependent value parameters and cannot be resolved here",
-                        ut.name
-                    )));
-                }
-                if params.len() != ut.params.len() {
-                    Err(source.error(&format!(
-                        "type {} expects {} parameters, but got {}",
-                        ut.name,
-                        ut.params.len(),
-                        params.len()
-                    )))
-                } else {
-                    // TODO: check that params obey the typeclass constraints in ut.params.
-                    Ok(ut.instantiate_template(&params))
-                }
+        if let PotentialType::Unresolved(ut) = &self {
+            if ut.has_value_params() {
+                return Err(source.error(&format!(
+                    "type {} has dependent value parameters and cannot be resolved here",
+                    ut.name
+                )));
             }
         }
+        self.resolve_args(
+            params.into_iter().map(DependentTypeArg::Type).collect(),
+            source,
+        )
     }
 
     /// If this potential type represents a base datatype, ie with no type parameters,
@@ -484,6 +553,11 @@ pub enum AcornType {
     /// They have a datatype, and may have type parameters.
     Data(Datatype, Vec<AcornType>),
 
+    /// Datatype families with at least one value-level argument.
+    /// The arguments remain in declaration order, so mixed families like `Vector[T, n]`
+    /// can preserve which positions are types and which are values.
+    Family(Datatype, Vec<DependentTypeArg>),
+
     /// Function types are defined by their inputs and output.
     Function(FunctionType),
 
@@ -525,6 +599,35 @@ pub enum AcornType {
 }
 
 impl AcornType {
+    pub fn new_datatype_application(datatype: Datatype, args: Vec<DependentTypeArg>) -> AcornType {
+        if args
+            .iter()
+            .all(|arg| matches!(arg, DependentTypeArg::Type(_)))
+        {
+            return AcornType::Data(
+                datatype,
+                args.into_iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => acorn_type,
+                        DependentTypeArg::Value(_) => unreachable!(),
+                    })
+                    .collect(),
+            );
+        }
+        AcornType::Family(datatype, args)
+    }
+
+    fn dependent_args_to_str(args: &[DependentTypeArg]) -> String {
+        let mut result = String::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                result.push_str(", ");
+            }
+            result.push_str(&arg.to_string());
+        }
+        result
+    }
+
     /// Collects all type variables used in this type into the provided HashMap.
     /// The HashMap keys are the variable names.
     /// Returns an error if a type variable name is used with different typeclasses.
@@ -558,6 +661,18 @@ impl AcornType {
                     param.find_type_vars(vars, source)?;
                 }
             }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            acorn_type.find_type_vars(vars, source)?
+                        }
+                        DependentTypeArg::Value(value) => {
+                            value.get_type().find_type_vars(vars, source)?
+                        }
+                    }
+                }
+            }
             // Built-in scalar types and Arbitrary types don't contain type variables
             _ => {}
         }
@@ -576,7 +691,7 @@ impl AcornType {
 
     pub fn check_instance(&self, datatype: &Datatype, source: &dyn ErrorContext) -> Result<()> {
         match self {
-            AcornType::Data(c, _) => {
+            AcornType::Data(c, _) | AcornType::Family(c, _) => {
                 if c != datatype {
                     return Err(source.error(&format!(
                         "expected type {} to be an instance of {}",
@@ -608,6 +723,10 @@ impl AcornType {
         match self {
             AcornType::Variable(param) => param.name == name,
             AcornType::Data(_, types) => types.iter().any(|t| t.has_type_variable(name)),
+            AcornType::Family(_, args) => args.iter().any(|arg| match arg {
+                DependentTypeArg::Type(acorn_type) => acorn_type.has_type_variable(name),
+                DependentTypeArg::Value(value) => value.has_generic(),
+            }),
             AcornType::Function(function_type) => {
                 for arg_type in &function_type.arg_types {
                     if arg_type.has_type_variable(name) {
@@ -690,6 +809,50 @@ impl AcornType {
                 datatype.clone(),
                 types.iter().map(|t| t.instantiate(params)).collect(),
             ),
+            AcornType::Family(datatype, args) => AcornType::Family(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.instantiate(params))
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.instantiate(params))
+                        }
+                    })
+                    .collect(),
+            ),
+            _ => self.clone(),
+        }
+    }
+
+    pub fn bind_value_params(&self, values: &[AcornValue]) -> AcornType {
+        match self {
+            AcornType::Family(datatype, args) => AcornType::new_datatype_application(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.bind_value_params(values))
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.clone().bind_values(0, 0, values))
+                        }
+                    })
+                    .collect(),
+            ),
+            AcornType::Function(function_type) => AcornType::functional(
+                function_type
+                    .arg_types
+                    .iter()
+                    .map(|t| t.bind_value_params(values))
+                    .collect(),
+                function_type.return_type.bind_value_params(values),
+            ),
+            AcornType::Data(datatype, types) => AcornType::Data(
+                datatype.clone(),
+                types.iter().map(|t| t.bind_value_params(values)).collect(),
+            ),
             _ => self.clone(),
         }
     }
@@ -717,6 +880,19 @@ impl AcornType {
                 datatype.clone(),
                 types.iter().map(|t| t.genericize(params)).collect(),
             ),
+            AcornType::Family(datatype, args) => AcornType::Family(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.genericize(params))
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.genericize(params))
+                        }
+                    })
+                    .collect(),
+            ),
             _ => self.clone(),
         }
     }
@@ -730,6 +906,10 @@ impl AcornType {
             | AcornType::TypeclassConstraint(_) => false,
             AcornType::Variable(..) => true,
             AcornType::Data(_, types) => types.iter().any(|t| t.has_generic()),
+            AcornType::Family(_, args) => args.iter().any(|arg| match arg {
+                DependentTypeArg::Type(acorn_type) => acorn_type.has_generic(),
+                DependentTypeArg::Value(value) => value.has_generic(),
+            }),
             AcornType::Function(ftype) => {
                 for arg_type in &ftype.arg_types {
                     if arg_type.has_generic() {
@@ -753,6 +933,19 @@ impl AcornType {
                 datatype.clone(),
                 params.iter().map(|t| t.to_arbitrary()).collect(),
             ),
+            AcornType::Family(datatype, args) => AcornType::Family(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.to_arbitrary())
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.to_arbitrary())
+                        }
+                    })
+                    .collect(),
+            ),
             _ => self.clone(),
         }
     }
@@ -763,6 +956,10 @@ impl AcornType {
             AcornType::Arbitrary(..) => true,
             AcornType::Function(ftype) => ftype.has_arbitrary(),
             AcornType::Data(_, params) => params.iter().any(|t| t.has_arbitrary()),
+            AcornType::Family(_, args) => args.iter().any(|arg| match arg {
+                DependentTypeArg::Type(acorn_type) => acorn_type.has_arbitrary(),
+                DependentTypeArg::Value(value) => value.has_arbitrary(),
+            }),
             _ => false,
         }
     }
@@ -786,6 +983,18 @@ impl AcornType {
                     t.collect_arbitrary_params(params);
                 }
             }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            acorn_type.collect_arbitrary_params(params)
+                        }
+                        DependentTypeArg::Value(value) => {
+                            value.get_type().collect_arbitrary_params(params)
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -806,6 +1015,19 @@ impl AcornType {
                 dt.clone(),
                 params.iter().map(|t| t.arbitrary_to_variable()).collect(),
             ),
+            AcornType::Family(dt, args) => AcornType::Family(
+                dt.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.arbitrary_to_variable())
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.arbitrary_to_variable())
+                        }
+                    })
+                    .collect(),
+            ),
             _ => self.clone(),
         }
     }
@@ -822,6 +1044,19 @@ impl AcornType {
                 params
                     .iter()
                     .map(|t| t.abstract_over_datatype(datatype, param.clone()))
+                    .collect(),
+            ),
+            AcornType::Family(dt, args) => AcornType::Family(
+                dt.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
+                            acorn_type.abstract_over_datatype(datatype, param.clone()),
+                        ),
+                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
+                            value.abstract_over_datatype(datatype, param.clone()),
+                        ),
+                    })
                     .collect(),
             ),
             AcornType::Function(ftype) => AcornType::functional(
@@ -848,6 +1083,10 @@ impl AcornType {
                     || ftype.return_type.has_arbitrary_type_param(param)
             }
             AcornType::Data(_, params) => params.iter().any(|t| t.has_arbitrary_type_param(param)),
+            AcornType::Family(_, args) => args.iter().any(|arg| match arg {
+                DependentTypeArg::Type(acorn_type) => acorn_type.has_arbitrary_type_param(param),
+                DependentTypeArg::Value(value) => value.has_arbitrary_type_param(param),
+            }),
             _ => false,
         }
     }
@@ -858,6 +1097,10 @@ impl AcornType {
         match self {
             AcornType::Variable(p) | AcornType::Arbitrary(p) => p == param,
             AcornType::Data(_, type_args) => type_args.iter().any(|t| t.contains_type_var(param)),
+            AcornType::Family(_, args) => args.iter().any(|arg| match arg {
+                DependentTypeArg::Type(acorn_type) => acorn_type.contains_type_var(param),
+                DependentTypeArg::Value(value) => value.contains_type_var(param),
+            }),
             AcornType::Function(ftype) => {
                 ftype.arg_types.iter().any(|t| t.contains_type_var(param))
                     || ftype.return_type.contains_type_var(param)
@@ -935,6 +1178,19 @@ impl AcornType {
                 }
                 combined
             }
+            AcornType::Family(_, args) => {
+                let mut combined = Variance::None;
+                for arg in args {
+                    if let DependentTypeArg::Type(acorn_type) = arg {
+                        combined = combined.merge(acorn_type.compute_variance_with_lookup(
+                            param,
+                            positive,
+                            variance_lookup,
+                        ));
+                    }
+                }
+                combined
+            }
             AcornType::Function(ftype) => {
                 // Function arguments are in NEGATIVE position, return is in POSITIVE position
                 let mut combined = Variance::None;
@@ -983,7 +1239,7 @@ impl AcornType {
     /// Extracts the datatype from this type, or errors if it is not a data type.
     pub fn get_datatype(&self, source: &dyn ErrorContext) -> error::Result<&Datatype> {
         match self {
-            AcornType::Data(datatype, _) => Ok(datatype),
+            AcornType::Data(datatype, _) | AcornType::Family(datatype, _) => Ok(datatype),
             _ => Err(source.error("not an attributable datatype")),
         }
     }
@@ -997,6 +1253,13 @@ impl fmt::Display for AcornType {
                 write!(f, "{}", datatype.name)?;
                 if !params.is_empty() {
                     write!(f, "[{}]", AcornType::types_to_str(params))?;
+                }
+                Ok(())
+            }
+            AcornType::Family(datatype, args) => {
+                write!(f, "{}", datatype.name)?;
+                if !args.is_empty() {
+                    write!(f, "[{}]", AcornType::dependent_args_to_str(args))?;
                 }
                 Ok(())
             }

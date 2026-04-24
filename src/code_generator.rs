@@ -436,6 +436,7 @@ impl CodeGenerator<'_> {
 
                 self.parametrize_expr(base_expr, params)
             }
+            AcornType::Family(datatype, _) => Err(Error::unnamed_type(datatype)),
             AcornType::Variable(param) | AcornType::Arbitrary(param) => {
                 Ok(Expression::generate_identifier(&param.name))
             }

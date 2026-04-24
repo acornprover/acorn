@@ -184,7 +184,7 @@ fn test_dependent_value_params_report_not_supported_yet() {
 }
 
 #[test]
-fn test_dependent_type_arguments_report_not_supported_yet() {
+fn test_dependent_type_arguments_can_be_used() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
     env.add("let k: Nat = axiom");
@@ -199,8 +199,8 @@ fn test_dependent_type_arguments_report_not_supported_yet() {
     let error = env.bad("let x: Box[k] = axiom");
     assert!(error.contains("dependent type arguments"));
 
-    let fin_error = env.bad("let y: Fin[k] = axiom");
-    assert!(fin_error.contains("dependent type arguments"));
+    env.add("let y: Fin[k] = axiom");
+    env.add("theorem goal(n: Nat, x: Fin[n]) { x = x }");
 }
 
 #[test]

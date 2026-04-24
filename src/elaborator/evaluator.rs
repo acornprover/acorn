@@ -1,6 +1,6 @@
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, FamilyParam, FamilyParamKind, PotentialType, TypeParam, Typeclass,
-    ValueParam,
+    AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, PotentialType, TypeParam,
+    Typeclass, ValueParam,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
@@ -339,7 +339,15 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluates an expression that represents a type.
     pub fn evaluate_type(&mut self, expression: &Expression) -> error::Result<AcornType> {
-        let potential = self.evaluate_potential_type(expression)?;
+        self.evaluate_type_with_stack(&mut Stack::new(), expression)
+    }
+
+    pub fn evaluate_type_with_stack(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+    ) -> error::Result<AcornType> {
+        let potential = self.evaluate_potential_type_with_stack(stack, expression)?;
         match potential {
             PotentialType::Resolved(t) => Ok(t),
             PotentialType::Unresolved(ut) => {
@@ -351,6 +359,14 @@ impl<'a> Evaluator<'a> {
     /// Evaluates an expression that either represents a type, or represents a type that still needs params.
     pub fn evaluate_potential_type(
         &mut self,
+        expression: &Expression,
+    ) -> error::Result<PotentialType> {
+        self.evaluate_potential_type_with_stack(&mut Stack::new(), expression)
+    }
+
+    fn evaluate_potential_type_with_stack(
+        &mut self,
+        stack: &mut Stack,
         expression: &Expression,
     ) -> error::Result<PotentialType> {
         match expression {
@@ -374,16 +390,16 @@ impl<'a> Evaluator<'a> {
                     let arg_exprs = left.flatten_list(true)?;
                     let mut arg_types = vec![];
                     for arg_expr in arg_exprs {
-                        arg_types.push(self.evaluate_type(arg_expr)?);
+                        arg_types.push(self.evaluate_type_with_stack(stack, arg_expr)?);
                     }
-                    let return_type = self.evaluate_type(right)?;
+                    let return_type = self.evaluate_type_with_stack(stack, right)?;
                     Ok(PotentialType::Resolved(AcornType::functional(
                         arg_types,
                         return_type,
                     )))
                 }
                 TokenType::Dot => {
-                    let entity = self.evaluate_entity(&mut Stack::new(), expression)?;
+                    let entity = self.evaluate_entity(stack, expression)?;
                     Ok(entity.expect_potential_type(token)?)
                 }
                 _ => Err(token.error("unexpected binary operator in type expression")),
@@ -398,7 +414,7 @@ impl<'a> Evaluator<'a> {
                     return Err(opening.error("expected '[' or 'or' for type params"));
                 }
                 let param_exprs = expr.flatten_comma_separated_list();
-                let p = self.evaluate_potential_type(left)?;
+                let p = self.evaluate_potential_type_with_stack(stack, left)?;
                 if let PotentialType::Unresolved(ut) = &p {
                     if ut.params.len() != param_exprs.len() {
                         return Err(expression.error(&format!(
@@ -414,59 +430,68 @@ impl<'a> Evaluator<'a> {
                             FamilyParamKind::Type(_) => {
                                 if self
                                     .fork(self.bindings, None)
-                                    .evaluate_type(param_expr)
+                                    .evaluate_type_with_stack(stack, param_expr)
                                     .is_ok()
                                 {
-                                    instance_params.push(self.evaluate_type(param_expr)?);
+                                    instance_params.push(DependentTypeArg::Type(
+                                        self.evaluate_type_with_stack(stack, param_expr)?,
+                                    ));
                                     continue;
                                 }
                                 if let Ok(value) = self
                                     .fork(self.bindings, None)
-                                    .evaluate_value(param_expr, None)
+                                    .evaluate_value_with_stack(stack, param_expr, None)
                                 {
                                     return Err(self.unsupported_value_type_arg_error(
                                         param_expr,
                                         &value.get_type(),
                                     ));
                                 }
-                                instance_params.push(self.evaluate_type(param_expr)?);
+                                instance_params.push(DependentTypeArg::Type(
+                                    self.evaluate_type_with_stack(stack, param_expr)?,
+                                ));
                             }
                             FamilyParamKind::Value(value_type) => {
-                                let value = self.evaluate_value(param_expr, Some(value_type))?;
-                                return Err(self.unsupported_value_type_arg_error(
+                                let value = self.evaluate_value_with_stack(
+                                    stack,
                                     param_expr,
-                                    &value.get_type(),
-                                ));
+                                    Some(value_type),
+                                )?;
+                                instance_params.push(DependentTypeArg::Value(value));
                             }
                         }
                     }
-                    let t = p.resolve(instance_params, expression)?;
+                    let t = p.resolve_args(instance_params, expression)?;
                     return Ok(PotentialType::Resolved(t));
                 }
                 let mut instance_params = vec![];
                 for param_expr in param_exprs {
                     if self
                         .fork(self.bindings, None)
-                        .evaluate_type(param_expr)
+                        .evaluate_type_with_stack(stack, param_expr)
                         .is_ok()
                     {
-                        instance_params.push(self.evaluate_type(param_expr)?);
+                        instance_params.push(DependentTypeArg::Type(
+                            self.evaluate_type_with_stack(stack, param_expr)?,
+                        ));
                         continue;
                     }
                     if let Ok(value) = self
                         .fork(self.bindings, None)
-                        .evaluate_value(param_expr, None)
+                        .evaluate_value_with_stack(stack, param_expr, None)
                     {
                         return Err(
                             self.unsupported_value_type_arg_error(param_expr, &value.get_type())
                         );
                     }
-                    instance_params.push(self.evaluate_type(param_expr)?);
+                    instance_params.push(DependentTypeArg::Type(
+                        self.evaluate_type_with_stack(stack, param_expr)?,
+                    ));
                 }
-                let t = p.resolve(instance_params, expression)?;
+                let t = p.resolve_args(instance_params, expression)?;
                 Ok(PotentialType::Resolved(t))
             }
-            Expression::Grouping(_, e, _) => self.evaluate_potential_type(e),
+            Expression::Grouping(_, e, _) => self.evaluate_potential_type_with_stack(stack, e),
             Expression::Binder(token, _, _, _)
             | Expression::GenericBinder(token, _, _, _, _)
             | Expression::IfThenElse(token, _, _, _, _) => {
@@ -505,7 +530,7 @@ impl<'a> Evaluator<'a> {
     ) -> error::Result<(String, AcornType)> {
         match declaration {
             Declaration::Typed(name_token, type_expr) => {
-                let acorn_type = self.evaluate_type(&type_expr)?;
+                let acorn_type = self.evaluate_type_with_stack(&mut Stack::new(), &type_expr)?;
                 return Ok((name_token.to_string(), acorn_type));
             }
             Declaration::SelfToken(name_token) => {
@@ -557,8 +582,10 @@ impl<'a> Evaluator<'a> {
             if datatype_type.is_some() && i == 0 {
                 match declaration {
                     Declaration::SelfToken(_) => {
+                        let self_type = datatype_type.unwrap().clone();
                         names.push("self".to_string());
-                        types.push(datatype_type.unwrap().clone());
+                        types.push(self_type.clone());
+                        stack.insert("self".to_string(), self_type);
                         continue;
                     }
                     _ => {
@@ -568,7 +595,15 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            let (name, acorn_type) = self.evaluate_declaration(declaration)?;
+            let (name, acorn_type) = match declaration {
+                Declaration::Typed(name_token, type_expr) => (
+                    name_token.to_string(),
+                    self.evaluate_type_with_stack(stack, type_expr)?,
+                ),
+                Declaration::SelfToken(name_token) => {
+                    return Err(name_token.error("cannot use 'self' as an argument here"));
+                }
+            };
             if !allow_shadowing {
                 self.bindings
                     .check_unqualified_name_available(&name, declaration.token())?;
@@ -583,11 +618,9 @@ impl<'a> Evaluator<'a> {
                     .token()
                     .error("cannot declare a name twice in one argument list"));
             }
-            names.push(name);
-            types.push(acorn_type);
-        }
-        for (name, acorn_type) in names.iter().zip(types.iter()) {
-            stack.insert(name.to_string(), acorn_type.clone());
+            names.push(name.clone());
+            types.push(acorn_type.clone());
+            stack.insert(name, acorn_type);
         }
         Ok((names, types))
     }

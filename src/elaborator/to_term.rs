@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_type::{AcornType, DependentTypeArg, TypeParam};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::names::ConstantName;
 use crate::kernel::atom::Atom;
@@ -52,11 +52,49 @@ pub fn lower_type_to_term(
     acorn_type: &AcornType,
     type_var_map: Option<&TypeVarMap>,
 ) -> Term {
+    lower_type_to_term_with_stack(kernel_context, acorn_type, type_var_map, &[])
+}
+
+fn lower_type_to_term_with_stack(
+    kernel_context: &mut KernelContext,
+    acorn_type: &AcornType,
+    type_var_map: Option<&TypeVarMap>,
+    stack: &[Term],
+) -> Term {
     register_typeclasses(kernel_context, acorn_type);
     kernel_context.type_store.add_type(acorn_type);
-    kernel_context
-        .type_store
-        .to_type_term_with_vars(acorn_type, type_var_map)
+    match acorn_type {
+        AcornType::Family(datatype, args) => {
+            let ground_id = kernel_context
+                .type_store
+                .get_datatype_id(datatype)
+                .unwrap_or_else(|| panic!("Data type {} not registered", datatype.name));
+            let arg_terms: Vec<Term> = args
+                .iter()
+                .map(|arg| match arg {
+                    DependentTypeArg::Type(acorn_type) => lower_type_to_term_with_stack(
+                        kernel_context,
+                        acorn_type,
+                        type_var_map,
+                        stack,
+                    ),
+                    DependentTypeArg::Value(value) => lower_value_to_term_existing_with_stack(
+                        kernel_context,
+                        value,
+                        type_var_map,
+                        stack,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("failed to lower dependent type argument {}: {}", value, err)
+                    }),
+                })
+                .collect();
+            Term::type_application(Term::ground_type(ground_id), arg_terms)
+        }
+        _ => kernel_context
+            .type_store
+            .to_type_term_with_vars(acorn_type, type_var_map),
+    }
 }
 
 fn register_typeclasses(kernel_context: &mut KernelContext, acorn_type: &AcornType) {
@@ -70,6 +108,18 @@ fn register_typeclasses(kernel_context: &mut KernelContext, acorn_type: &AcornTy
         AcornType::Data(_, params) => {
             for param in params {
                 register_typeclasses(kernel_context, param);
+            }
+        }
+        AcornType::Family(_, args) => {
+            for arg in args {
+                match arg {
+                    DependentTypeArg::Type(acorn_type) => {
+                        register_typeclasses(kernel_context, acorn_type)
+                    }
+                    DependentTypeArg::Value(value) => value.for_each_type(&mut |acorn_type| {
+                        register_typeclasses(kernel_context, acorn_type)
+                    }),
+                }
             }
         }
         AcornType::Variable(type_param) | AcornType::Arbitrary(type_param) => {
@@ -90,6 +140,7 @@ fn lower_value_type_to_term(
     kernel_context: &mut KernelContext,
     value: &AcornValue,
     type_var_map: Option<&TypeVarMap>,
+    stack: &[Term],
 ) -> Result<Term, String> {
     if let AcornValue::Constant(c) = value {
         if c.params.is_empty() && c.has_generic() && !c.type_param_names.is_empty() {
@@ -102,10 +153,11 @@ fn lower_value_type_to_term(
         }
     }
 
-    Ok(lower_type_to_term(
+    Ok(lower_type_to_term_with_stack(
         kernel_context,
         &value.get_type(),
         type_var_map,
+        stack,
     ))
 }
 
@@ -500,12 +552,14 @@ fn lower_value_to_term_with_stack(
                     Ok(logical_head(Symbol::Or).apply(&[not_left, right_term]))
                 }
                 BinaryOp::Equals => {
-                    let eq_type = lower_value_type_to_term(kernel_context, left, type_var_map)?;
+                    let eq_type =
+                        lower_value_type_to_term(kernel_context, left, type_var_map, stack)?;
                     Ok(logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]))
                 }
                 BinaryOp::NotEquals => {
                     // Logically lossless sugar: (a != b) = not (a = b).
-                    let eq_type = lower_value_type_to_term(kernel_context, left, type_var_map)?;
+                    let eq_type =
+                        lower_value_type_to_term(kernel_context, left, type_var_map, stack)?;
                     let eq_term = logical_head(Symbol::Eq).apply(&[eq_type, left_term, right_term]);
                     Ok(logical_head(Symbol::Not).apply(&[eq_term]))
                 }
@@ -557,7 +611,8 @@ fn lower_value_to_term_with_stack(
                 prefer_instance_aliases,
                 stack,
             )?;
-            let value_type = lower_value_type_to_term(kernel_context, then_value, type_var_map)?;
+            let value_type =
+                lower_value_type_to_term(kernel_context, then_value, type_var_map, stack)?;
             Ok(logical_head(Symbol::Ite).apply(&[value_type, cond_term, then_term, else_term]))
         }
 
@@ -588,24 +643,18 @@ fn elaborate_binder_to_term(
     stack: &mut Vec<Term>,
     kind: BinderKind,
 ) -> Result<Term, String> {
-    let binder_type_terms: Vec<Term> = binder_types
-        .iter()
-        .map(|t| lower_type_to_term(kernel_context, t, type_var_map))
-        .collect();
-
-    let num_new = binder_types.len();
     let old_len = stack.len();
+    let mut binder_type_terms = vec![];
 
-    // Existing bound-variable references are one level deeper for each new binder.
-    for existing in stack.iter_mut() {
-        *existing = existing.shift_bound(0, num_new as i16);
-    }
+    for binder_type in binder_types {
+        let binder_type_term =
+            lower_type_to_term_with_stack(kernel_context, binder_type, type_var_map, stack);
+        binder_type_terms.push(binder_type_term);
 
-    // AcornValue variables are levels (outermost = 0). For the newly introduced binders:
-    // first binder in this block becomes the outer one of the block.
-    for j in 0..num_new {
-        let bound = Term::atom(Atom::BoundVariable((num_new - 1 - j) as u16));
-        stack.push(bound);
+        for existing in stack.iter_mut() {
+            *existing = existing.shift_bound(0, 1);
+        }
+        stack.push(Term::atom(Atom::BoundVariable(0)));
     }
 
     let body_term = lower_value_to_term_with_stack(
@@ -618,14 +667,16 @@ fn elaborate_binder_to_term(
 
     stack.truncate(old_len);
     for existing in stack.iter_mut() {
-        *existing = existing.shift_bound(0, -(num_new as i16));
+        *existing = existing.shift_bound(0, -(binder_types.len() as i16));
     }
-
-    let wrapped = match kind {
-        BinderKind::Lambda => Term::lambda_multi(binder_type_terms, body_term),
-        BinderKind::ForAll => Term::forall_multi(binder_type_terms, body_term),
-        BinderKind::Exists => Term::exists_multi(binder_type_terms, body_term),
-    };
+    let wrapped = binder_type_terms
+        .into_iter()
+        .rev()
+        .fold(body_term, |acc, binder_type_term| match kind {
+            BinderKind::Lambda => Term::lambda(binder_type_term, acc),
+            BinderKind::ForAll => Term::forall(binder_type_term, acc),
+            BinderKind::Exists => Term::exists(binder_type_term, acc),
+        });
 
     Ok(wrapped)
 }
@@ -669,12 +720,13 @@ fn lower_match_to_term(
 
     let mut type_arg_terms: Vec<Term> = data_type_args
         .iter()
-        .map(|t| lower_type_to_term(kernel_context, t, type_var_map))
+        .map(|t| lower_type_to_term_with_stack(kernel_context, t, type_var_map, stack))
         .collect();
     type_arg_terms.push(lower_value_type_to_term(
         kernel_context,
         &cases[0].result,
         type_var_map,
+        stack,
     )?);
 
     let scrutinee_term = lower_value_to_term_with_stack(
