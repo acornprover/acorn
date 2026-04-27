@@ -294,6 +294,13 @@ impl SymbolTable {
         self.name_to_symbol.get(name).cloned()
     }
 
+    pub fn get_instance_alias_symbol(
+        &self,
+        constant: &crate::elaborator::acorn_value::ConstantInstance,
+    ) -> Option<Symbol> {
+        self.instance_to_symbol.get(constant).copied()
+    }
+
     /// Get polymorphic info for a constant, if it's polymorphic.
     pub fn get_polymorphic_info(&self, name: &ConstantName) -> Option<&PolymorphicInfo> {
         self.polymorphic_info.get(name)
@@ -320,6 +327,19 @@ impl SymbolTable {
     /// Get match-eliminator metadata for a datatype `match` constant, if known.
     pub fn get_match_eliminator_info(&self, match_symbol: Symbol) -> Option<&MatchEliminatorInfo> {
         self.match_eliminator_info.get(&match_symbol)
+    }
+
+    /// Record constructor-order metadata for a datatype match eliminator symbol.
+    pub fn set_match_eliminator_info(
+        &mut self,
+        match_symbol: Symbol,
+        constructor_symbols: Vec<Symbol>,
+    ) {
+        self.match_eliminator_info
+            .entry(match_symbol)
+            .or_insert(MatchEliminatorInfo {
+                constructor_symbols,
+            });
     }
 
     /// Get the type of a symbol.

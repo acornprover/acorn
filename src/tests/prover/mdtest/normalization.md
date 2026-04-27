@@ -93,7 +93,7 @@ This file tests that normalization works correctly, by proving statements that r
     }
 
     attributes Set[K] {
-        define superset(self, a: Set[K]) -> Set[K] {
+        define superset(self, a: Set[K]) -> Bool {
             forall(x: K) {
                 a.contains(x) implies self.contains(x)
             }

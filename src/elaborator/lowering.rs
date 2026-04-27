@@ -32,6 +32,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::SourceType;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
+use crate::elaborator::to_term::lower_type_to_term;
 use crate::elaborator::to_term::lower_value_to_term;
 #[cfg(test)]
 use crate::elaborator::to_term::lower_value_to_term_existing;
@@ -40,6 +41,7 @@ use crate::elaborator::to_term::lower_value_to_term_existing_preserving_alias_sp
 use crate::elaborator::to_term::lower_value_to_term_existing_with_stack;
 #[cfg(any(test, feature = "validate"))]
 use crate::elaborator::to_term::lower_value_to_term_preserving_alias_spelling;
+use crate::elaborator::to_term::register_value_symbols;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -139,9 +141,7 @@ impl KernelContext {
         acorn_type: &AcornType,
         type_var_map: Option<&HashMap<String, (AtomId, Term)>>,
     ) -> Atom {
-        let type_term = self
-            .type_store
-            .to_type_term_with_vars(acorn_type, type_var_map);
+        let type_term = lower_type_to_term(self, acorn_type, type_var_map);
         Atom::Symbol(
             self.symbol_table
                 .add_constant(cname, NewConstantType::Local, type_term),
@@ -303,7 +303,7 @@ impl KernelContext {
                     type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
                     Term::atom(Atom::FreeVariable(var_id as AtomId))
                 }
-                _ => self.type_store.to_type_term_with_vars(acorn_type, None),
+                _ => lower_type_to_term(self, acorn_type, None),
             };
             var_map.set(var_id as AtomId, type_term);
         }
@@ -314,8 +314,7 @@ impl KernelContext {
             .map(|i| Term::new_variable((value_offset + i) as AtomId))
             .collect();
         for (var_id, arg) in args.iter().enumerate() {
-            self.symbol_table
-                .add_from(arg, NewConstantType::Local, &mut self.type_store);
+            register_value_symbols(self, arg, NewConstantType::Local);
             let term =
                 self.lower_term_existing_with_stack(arg, type_var_map.as_ref(), &initial_stack)?;
             let term = normalize_term(&term);

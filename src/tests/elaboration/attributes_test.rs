@@ -469,6 +469,38 @@ fn test_dependent_family_attributes() {
 }
 
 #[test]
+fn test_dependent_family_attribute_body_can_use_value_param() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+
+            structure Fin[n: Nat] {
+                value: Nat
+            }
+
+            let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+                result = x
+            }
+
+            attributes Fin[n: Nat] {
+                define bound(self) -> Nat {
+                    n
+                }
+
+                define again(self) -> Fin[n] {
+                    choose_self(n, self)
+                }
+            }
+
+            theorem goal(n: Nat, x: Fin[n]) {
+                x.bound = n and x.again = x
+            }
+        "#,
+    );
+}
+
+#[test]
 fn test_dependent_family_attributes_require_value_binder() {
     let mut env = Environment::test();
     env.add(

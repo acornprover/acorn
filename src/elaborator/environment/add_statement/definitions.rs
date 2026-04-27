@@ -41,6 +41,18 @@ fn quantify_over_datatype_value_params(
     }
 }
 
+fn lambda_over_datatype_value_params(
+    datatype_params: Option<&DatatypeFamilyScope>,
+    value: AcornValue,
+) -> AcornValue {
+    let value_param_types = datatype_value_param_types(datatype_params);
+    if value_param_types.is_empty() {
+        value
+    } else {
+        AcornValue::lambda(value_param_types, value)
+    }
+}
+
 fn bind_explicit_value_params(stack: &mut Stack, value_params: &[ValueParam]) {
     for value_param in value_params {
         stack.insert(value_param.name.clone(), value_param.value_type.clone());
@@ -261,6 +273,7 @@ impl Environment {
         } else {
             value.map(|value| AcornValue::lambda(explicit_value_param_types.clone(), value))
         };
+        let value = value.map(|value| lambda_over_datatype_value_params(datatype_params, value));
 
         for param in local_type_params.iter().rev() {
             self.bindings.remove_type(&param.name);
@@ -380,6 +393,7 @@ impl Environment {
         }
 
         if let Some(v) = unbound_value {
+            let fn_type = AcornType::functional(arg_types.clone(), value_type.clone());
             let mut fn_value = AcornValue::lambda(arg_types, v);
 
             let params = if let Some(datatype_params) = datatype_params {
@@ -397,11 +411,12 @@ impl Environment {
                 fn_param_names
             };
 
+            let fn_value = lambda_over_datatype_value_params(datatype_params, fn_value);
             self.define_constant(
                 defined_name,
                 params,
                 datatype_value_param_types,
-                fn_value.get_type(),
+                fn_type,
                 Some(fn_value),
                 range,
                 Some(statement.to_string()),
