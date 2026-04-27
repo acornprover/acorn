@@ -1,4 +1,13 @@
 use super::*;
+use crate::syntax::expression::TypeParamExpr;
+
+#[derive(Default)]
+struct LocalFamilyParams {
+    type_param_exprs: Vec<TypeParamExpr>,
+    type_params: Vec<TypeParam>,
+    value_params: Vec<ValueParam>,
+    value_declarations: Vec<Declaration>,
+}
 
 fn bind_datatype_value_params(stack: &mut Stack, datatype_params: Option<&DatatypeFamilyScope>) {
     if let Some(datatype_params) = datatype_params {
@@ -32,7 +41,69 @@ fn quantify_over_datatype_value_params(
     }
 }
 
+fn bind_explicit_value_params(stack: &mut Stack, value_params: &[ValueParam]) {
+    for value_param in value_params {
+        stack.insert(value_param.name.clone(), value_param.value_type.clone());
+    }
+}
+
+fn explicit_value_param_types(value_params: &[ValueParam]) -> Vec<AcornType> {
+    value_params
+        .iter()
+        .map(|param| param.value_type.clone())
+        .collect()
+}
+
+fn explicit_value_block_args(value_params: &[ValueParam]) -> Vec<(String, AcornType)> {
+    value_params
+        .iter()
+        .map(|param| (param.name.clone(), param.value_type.clone()))
+        .collect()
+}
+
+fn quantify_over_explicit_value_params(
+    value_params: &[ValueParam],
+    value: AcornValue,
+) -> AcornValue {
+    let value_param_types = explicit_value_param_types(value_params);
+    if value_param_types.is_empty() {
+        value
+    } else {
+        AcornValue::ForAll(value_param_types, Box::new(value))
+    }
+}
+
 impl Environment {
+    fn evaluate_local_family_params(
+        &mut self,
+        project: &Project,
+        exprs: &[TypeParamExpr],
+    ) -> error::Result<LocalFamilyParams> {
+        let family_params =
+            Evaluator::new(project, &self.bindings, None).evaluate_family_params(exprs)?;
+        let mut local_family_params = LocalFamilyParams::default();
+        for (expr, family_param) in exprs.iter().cloned().zip(family_params) {
+            match family_param {
+                crate::elaborator::acorn_type::FamilyParam::Type(type_param) => {
+                    self.bindings
+                        .check_typename_available(&type_param.name, &expr.name)?;
+                    local_family_params.type_param_exprs.push(expr);
+                    local_family_params.type_params.push(type_param);
+                }
+                crate::elaborator::acorn_type::FamilyParam::Value(value_param) => {
+                    let annotation = expr.typeclass.clone().expect(
+                        "value family parameters should always carry their type annotation",
+                    );
+                    local_family_params
+                        .value_declarations
+                        .push(Declaration::Typed(expr.name.clone(), annotation));
+                    local_family_params.value_params.push(value_param);
+                }
+            }
+        }
+        Ok(local_family_params)
+    }
+
     /// Adds a "let" statement to the environment.
     /// This can also be in a class, typeclass, or instance block.
     /// If this is in an attributes block, the datatype family parameters are provided.
@@ -60,17 +131,30 @@ impl Environment {
                 .error("parameterized constants may only be defined at the top level"));
         }
 
-        let local_type_params = self
-            .evaluator(project)
-            .evaluate_type_params(&ls.type_params)?;
+        let local_family_params = if datatype_params.is_some() {
+            LocalFamilyParams {
+                type_param_exprs: ls.type_params.clone(),
+                type_params: self
+                    .evaluator(project)
+                    .evaluate_type_params(&ls.type_params)?,
+                value_params: vec![],
+                value_declarations: vec![],
+            }
+        } else {
+            self.evaluate_local_family_params(project, &ls.type_params)?
+        };
+        let local_type_params = local_family_params.type_params.clone();
         for param in &local_type_params {
             self.bindings.add_arbitrary_type(param.clone());
         }
 
         let datatype_value_param_types = datatype_value_param_types(datatype_params);
+        let explicit_value_param_types =
+            explicit_value_param_types(&local_family_params.value_params);
         let (acorn_type, value) = match &ls.type_expr {
             Some(type_expr) => {
                 let mut stack = Stack::new();
+                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                 bind_datatype_value_params(&mut stack, datatype_params);
                 let acorn_type = self
                     .evaluator(project)
@@ -116,6 +200,7 @@ impl Environment {
                     None
                 } else {
                     let mut stack = Stack::new();
+                    bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                     bind_datatype_value_params(&mut stack, datatype_params);
                     let v = if let Some(instance_name) = defined_name.as_instance() {
                         Evaluator::new_for_instance_member(
@@ -148,6 +233,7 @@ impl Environment {
                         .error("axiom constants require explicit type annotation"));
                 }
                 let mut stack = Stack::new();
+                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                 bind_datatype_value_params(&mut stack, datatype_params);
                 let value = if let Some(instance_name) = defined_name.as_instance() {
                     Evaluator::new_for_instance_member(
@@ -164,6 +250,16 @@ impl Environment {
                 let acorn_type = value.get_type();
                 (acorn_type, Some(value))
             }
+        };
+        let acorn_type = if explicit_value_param_types.is_empty() {
+            acorn_type
+        } else {
+            AcornType::functional(explicit_value_param_types.clone(), acorn_type)
+        };
+        let value = if explicit_value_param_types.is_empty() {
+            value
+        } else {
+            value.map(|value| AcornValue::lambda(explicit_value_param_types.clone(), value))
         };
 
         for param in local_type_params.iter().rev() {
@@ -185,7 +281,7 @@ impl Environment {
         let value = value.map(|v| v.genericize(&type_params));
         let def_str = statement.to_string();
 
-        if datatype_value_param_types.is_empty() {
+        if datatype_value_param_types.is_empty() && explicit_value_param_types.is_empty() {
             if let Some(value) = &value {
                 if let Some(simple_name) = value.as_simple_constant() {
                     match &defined_name {
@@ -241,10 +337,19 @@ impl Environment {
         }
 
         let recursion_name = defined_name.recursion_name();
+        let (type_param_exprs, args) = if datatype_params.is_some() {
+            (ds.type_params.clone(), ds.args.clone())
+        } else {
+            let local_family_params =
+                self.evaluate_local_family_params(project, &ds.type_params)?;
+            let mut args = local_family_params.value_declarations;
+            args.extend(ds.args.clone());
+            (local_family_params.type_param_exprs, args)
+        };
         let (fn_param_names, _, arg_types, unbound_value, value_type) =
             self.bindings.evaluate_scoped_value(
-                &ds.type_params,
-                &ds.args,
+                &type_param_exprs,
+                &args,
                 Some(&ds.return_type),
                 &ds.return_value,
                 self_type,
@@ -344,9 +449,12 @@ impl Environment {
                 .check_unqualified_name_available(name_token.text(), &statement.first_token)?;
         }
 
+        let local_family_params = self.evaluate_local_family_params(project, &ts.type_params)?;
+        let mut args = local_family_params.value_declarations;
+        args.extend(ts.args.clone());
         let (type_params, arg_names, arg_types, value, _) = self.bindings.evaluate_scoped_value(
-            &ts.type_params,
-            &ts.args,
+            &local_family_params.type_param_exprs,
+            &args,
             None,
             &ts.claim,
             None,
@@ -495,20 +603,34 @@ impl Environment {
                 .error("parameterized constants may only be defined at the top level"));
         }
 
-        let local_type_params = self
-            .evaluator(project)
-            .evaluate_type_params(&vss.type_params)?;
+        let local_family_params = if datatype_params.is_some() {
+            LocalFamilyParams {
+                type_param_exprs: vss.type_params.clone(),
+                type_params: self
+                    .evaluator(project)
+                    .evaluate_type_params(&vss.type_params)?,
+                value_params: vec![],
+                value_declarations: vec![],
+            }
+        } else {
+            self.evaluate_local_family_params(project, &vss.type_params)?
+        };
+        let local_type_params = local_family_params.type_params.clone();
         for param in &local_type_params {
             self.bindings.add_arbitrary_type(param.clone());
         }
 
         let family_value_param_count = datatype_params
             .map(|params| params.value_params.len() as AtomId)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + local_family_params.value_params.len() as AtomId;
         let family_value_param_types = datatype_value_param_types(datatype_params);
+        let explicit_value_param_types =
+            explicit_value_param_types(&local_family_params.value_params);
         for declaration in &vss.declarations {
             if let Declaration::Typed(_, type_expr) = declaration {
                 let mut stack = Stack::new();
+                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                 bind_datatype_value_params(&mut stack, datatype_params);
                 self.evaluator(project)
                     .evaluate_type_with_stack(&mut stack, type_expr)?;
@@ -516,6 +638,7 @@ impl Environment {
         }
 
         let mut stack = Stack::new();
+        bind_explicit_value_params(&mut stack, &local_family_params.value_params);
         bind_datatype_value_params(&mut stack, datatype_params);
         let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
         let (quant_names, quant_types) =
@@ -538,7 +661,8 @@ impl Environment {
             }
             None => local_type_params.clone(),
         };
-        let block_args = datatype_value_block_args(datatype_params);
+        let mut block_args = explicit_value_block_args(&local_family_params.value_params);
+        block_args.extend(datatype_value_block_args(datatype_params));
         let block = Block::new(
             project,
             &self,
@@ -565,13 +689,21 @@ impl Environment {
                 )));
             }
 
-            let generic_type = quant_type.clone().genericize(&definition_type_params);
-            let def_str = format!("{}: {}", quant_name, generic_type);
+            let generic_value_type = quant_type.clone().genericize(&definition_type_params);
+            let constant_type = if explicit_value_param_types.is_empty() {
+                generic_value_type.clone()
+            } else {
+                AcornType::functional(
+                    explicit_value_param_types.clone(),
+                    generic_value_type.clone(),
+                )
+            };
+            let def_str = format!("{}: {}", quant_name, constant_type);
             self.bindings.add_defined_name(
                 &defined_name,
                 definition_type_params.clone(),
                 family_value_param_types.clone(),
-                generic_type.clone(),
+                constant_type.clone(),
                 None,
                 None,
                 vec![],
@@ -589,14 +721,25 @@ impl Environment {
                 .iter()
                 .map(|p| AcornType::Arbitrary(p.clone()))
                 .collect();
-            let constant_value = AcornValue::constant(
+            let mut constant_value = AcornValue::constant(
                 const_name,
                 type_args,
-                quant_type.clone(),
-                generic_type,
+                constant_type.clone(),
+                constant_type,
                 vec![],
                 vec![],
             );
+            if !explicit_value_param_types.is_empty() {
+                let explicit_value_args = local_family_params
+                    .value_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value_param)| {
+                        AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                    })
+                    .collect();
+                constant_value = AcornValue::apply(constant_value, explicit_value_args);
+            }
             constant_values.push(constant_value);
         }
 
@@ -606,9 +749,11 @@ impl Environment {
             family_value_param_count + num_vars,
             &constant_values,
         );
-        let external_claim =
-            quantify_over_datatype_value_params(datatype_params, specific_claim_value)
-                .genericize(&definition_type_params);
+        let external_claim = quantify_over_explicit_value_params(
+            &local_family_params.value_params,
+            quantify_over_datatype_value_params(datatype_params, specific_claim_value),
+        )
+        .genericize(&definition_type_params);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let specific_prop = Proposition::new(external_claim, definition_type_params, source);
         let index = self.add_node(Node::block(project, self, block, Some(specific_prop)));
@@ -659,10 +804,19 @@ impl Environment {
         }
 
         let recursion_name = defined_name.recursion_name();
+        let (type_param_exprs, declarations) = if datatype_params.is_some() {
+            (fss.type_params.clone(), fss.declarations.clone())
+        } else {
+            let local_family_params =
+                self.evaluate_local_family_params(project, &fss.type_params)?;
+            let mut declarations = local_family_params.value_declarations;
+            declarations.extend(fss.declarations.clone());
+            (local_family_params.type_param_exprs, declarations)
+        };
         let (fn_type_params, mut arg_names, mut arg_types, condition, _) =
             self.bindings.evaluate_scoped_value(
-                &fss.type_params,
-                &fss.declarations,
+                &type_param_exprs,
+                &declarations,
                 None,
                 &fss.condition,
                 None,

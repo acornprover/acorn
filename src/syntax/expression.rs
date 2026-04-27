@@ -21,7 +21,7 @@ enum ExpressionType {
 
 /// An Expression represents the basic structuring of tokens into a syntax tree.
 /// The expression does not typecheck and enforce semantics; it's just parsing into a tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expression {
     /// A singleton expression is one that consists of just a single token.
     /// This includes identifiers, true, false, numeric literals, and "axiom".
@@ -105,7 +105,7 @@ impl ErrorContext for Expression {
 }
 
 // A single variable declaration, like "p: bool".
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Declaration {
     // (name token, type expression)
     Typed(Token, Expression),
@@ -183,7 +183,7 @@ impl Declaration {
 
 // A single type parameter that may or may not have a typeclass, like "G: Group".
 // Can also represent a complex type expression like "List[Color]" for specific attributes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeParamExpr {
     pub name: Token,
 
