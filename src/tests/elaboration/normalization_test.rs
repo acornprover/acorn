@@ -304,6 +304,52 @@ fn test_top_level_dependent_function_satisfy_module_loads() {
 }
 
 #[test]
+fn test_top_level_dependent_function_satisfy_lowering() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        }
+
+        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+            result = x
+        }
+
+        theorem goal(n: Nat, x: Fin[n]) {
+            choose_self(n, x) = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let missing_goals: Vec<_> = env
+        .iter_goals()
+        .filter_map(|cursor| {
+            if cursor.lowered_goal().is_none() {
+                Some(cursor.goal().unwrap().name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        missing_goals.is_empty(),
+        "dependent function satisfy goals should lower: {:?}",
+        missing_goals
+    );
+}
+
+#[test]
 fn test_second_order_binding() {
     let mut env = Environment::test();
     env.add(

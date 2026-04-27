@@ -786,37 +786,52 @@ impl AcornType {
         result
     }
 
-    /// Replaces type variables in the provided list with the corresponding type.
-    /// Note that this does not check if typeclasses match.
-    pub fn instantiate(&self, params: &[(String, AcornType)]) -> AcornType {
+    pub(crate) fn instantiate_with_stack(
+        &self,
+        stack_size: AtomId,
+        params: &[(String, AcornType)],
+    ) -> AcornType {
         match self {
             AcornType::Variable(param) | AcornType::Arbitrary(param) => {
                 for (param_name, param_type) in params {
                     if &param.name == param_name {
-                        return param_type.clone();
+                        return param_type.insert_stack(0, stack_size);
                     }
                 }
                 self.clone()
             }
-            AcornType::Function(function_type) => AcornType::functional(
-                function_type
+            AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
+                let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| t.instantiate(params))
-                    .collect(),
-                function_type.return_type.instantiate(params),
-            ),
+                    .map(|t| {
+                        let instantiated = t.instantiate_with_stack(current_stack_size, params);
+                        current_stack_size += 1;
+                        instantiated
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type
+                        .return_type
+                        .instantiate_with_stack(current_stack_size, params),
+                )
+            }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
-                types.iter().map(|t| t.instantiate(params)).collect(),
+                types
+                    .iter()
+                    .map(|t| t.instantiate_with_stack(stack_size, params))
+                    .collect(),
             ),
             AcornType::Family(datatype, args) => AcornType::Family(
                 datatype.clone(),
                 args.iter()
                     .map(|arg| match arg {
-                        DependentTypeArg::Type(acorn_type) => {
-                            DependentTypeArg::Type(acorn_type.instantiate(params))
-                        }
+                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
+                            acorn_type.instantiate_with_stack(stack_size, params),
+                        ),
                         DependentTypeArg::Value(value) => {
                             DependentTypeArg::Value(value.instantiate(params))
                         }
@@ -827,35 +842,58 @@ impl AcornType {
         }
     }
 
-    pub fn bind_value_params(&self, values: &[AcornValue]) -> AcornType {
+    /// Replaces type variables in the provided list with the corresponding type.
+    /// Note that this does not check if typeclasses match.
+    pub fn instantiate(&self, params: &[(String, AcornType)]) -> AcornType {
+        self.instantiate_with_stack(0, params)
+    }
+
+    fn bind_value_params_with_stack(&self, stack_size: AtomId, values: &[AcornValue]) -> AcornType {
         match self {
             AcornType::Family(datatype, args) => AcornType::new_datatype_application(
                 datatype.clone(),
                 args.iter()
                     .map(|arg| match arg {
-                        DependentTypeArg::Type(acorn_type) => {
-                            DependentTypeArg::Type(acorn_type.bind_value_params(values))
-                        }
-                        DependentTypeArg::Value(value) => {
-                            DependentTypeArg::Value(value.clone().bind_values(0, 0, values))
-                        }
+                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
+                            acorn_type.bind_value_params_with_stack(stack_size, values),
+                        ),
+                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
+                            value.clone().bind_values(0, stack_size, values),
+                        ),
                     })
                     .collect(),
             ),
-            AcornType::Function(function_type) => AcornType::functional(
-                function_type
+            AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
+                let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| t.bind_value_params(values))
-                    .collect(),
-                function_type.return_type.bind_value_params(values),
-            ),
+                    .map(|t| {
+                        let bound = t.bind_value_params_with_stack(current_stack_size, values);
+                        current_stack_size += 1;
+                        bound
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type
+                        .return_type
+                        .bind_value_params_with_stack(current_stack_size, values),
+                )
+            }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
-                types.iter().map(|t| t.bind_value_params(values)).collect(),
+                types
+                    .iter()
+                    .map(|t| t.bind_value_params_with_stack(stack_size, values))
+                    .collect(),
             ),
             _ => self.clone(),
         }
+    }
+
+    pub fn bind_value_params(&self, values: &[AcornValue]) -> AcornType {
+        self.bind_value_params_with_stack(0, values)
     }
 
     pub fn bind_values(
@@ -880,16 +918,26 @@ impl AcornType {
                     })
                     .collect(),
             ),
-            AcornType::Function(function_type) => AcornType::functional(
-                function_type
+            AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
+                let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| t.bind_values(first_binding_index, stack_size, values))
-                    .collect(),
-                function_type
-                    .return_type
-                    .bind_values(first_binding_index, stack_size, values),
-            ),
+                    .map(|t| {
+                        let bound = t.bind_values(first_binding_index, current_stack_size, values);
+                        current_stack_size += 1;
+                        bound
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type.return_type.bind_values(
+                        first_binding_index,
+                        current_stack_size,
+                        values,
+                    ),
+                )
+            }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
                 types
@@ -954,16 +1002,24 @@ impl AcornType {
                     })
                     .collect(),
             ),
-            AcornType::Function(function_type) => AcornType::functional(
-                function_type
+            AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
+                let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| t.replace_constants(stack_size, replacer))
-                    .collect(),
-                function_type
-                    .return_type
-                    .replace_constants(stack_size, replacer),
-            ),
+                    .map(|t| {
+                        let replaced = t.replace_constants(current_stack_size, replacer);
+                        current_stack_size += 1;
+                        replaced
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type
+                        .return_type
+                        .replace_constants(current_stack_size, replacer),
+                )
+            }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
                 types

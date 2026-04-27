@@ -49,26 +49,18 @@ impl<'a> TermBridge<'a> {
                     .type_store
                     .type_term_to_acorn_type_with_var_names(atom_type, name_map)
             } else {
-                self.kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_context(
-                        atom_type,
-                        local_context,
-                        instantiate_type_vars,
-                    )
+                self.quote_type_with_context(
+                    atom_type.clone(),
+                    local_context,
+                    instantiate_type_vars,
+                )
             }
         } else if let Some(name_map) = type_var_id_to_name {
             self.kernel_context
                 .type_store
                 .type_term_to_acorn_type_with_var_names(atom_type, name_map)
         } else {
-            self.kernel_context
-                .type_store
-                .type_term_to_acorn_type_with_context(
-                    atom_type,
-                    local_context,
-                    instantiate_type_vars,
-                )
+            self.quote_type_with_context(atom_type.clone(), local_context, instantiate_type_vars)
         };
         match atom {
             Atom::Symbol(Symbol::True) => AcornValue::Bool(true),
@@ -399,14 +391,11 @@ impl<'a> TermBridge<'a> {
         match term.as_ref().decompose() {
             crate::kernel::term::Decomposition::Lambda(input, body) => {
                 let input_term = input.to_owned();
-                let input_type = self
-                    .kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_context(
-                        &input_term,
-                        local_context,
-                        instantiate_type_vars,
-                    );
+                let input_type = self.quote_type_with_context(
+                    input_term.clone(),
+                    local_context,
+                    instantiate_type_vars,
+                );
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(input_term) as AtomId;
@@ -448,14 +437,11 @@ impl<'a> TermBridge<'a> {
             }
             crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
                 let binder_type_term = binder_type.to_owned();
-                let binder_acorn_type = self
-                    .kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_context(
-                        &binder_type_term,
-                        local_context,
-                        instantiate_type_vars,
-                    );
+                let binder_acorn_type = self.quote_type_with_context(
+                    binder_type_term.clone(),
+                    local_context,
+                    instantiate_type_vars,
+                );
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(binder_type_term) as AtomId;
@@ -497,14 +483,11 @@ impl<'a> TermBridge<'a> {
             }
             crate::kernel::term::Decomposition::Exists(binder_type, body) => {
                 let binder_type_term = binder_type.to_owned();
-                let binder_acorn_type = self
-                    .kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_context(
-                        &binder_type_term,
-                        local_context,
-                        instantiate_type_vars,
-                    );
+                let binder_acorn_type = self.quote_type_with_context(
+                    binder_type_term.clone(),
+                    local_context,
+                    instantiate_type_vars,
+                );
 
                 let mut next_context = local_context.clone();
                 let fresh_var = next_context.push_type(binder_type_term) as AtomId;
@@ -713,22 +696,18 @@ impl<'a> TermBridge<'a> {
                             typeclass,
                         })
                     } else {
-                        self.kernel_context
-                            .type_store
-                            .type_term_to_acorn_type_with_context(
-                                arg,
-                                local_context,
-                                instantiate_type_vars,
-                            )
-                    }
-                } else {
-                    self.kernel_context
-                        .type_store
-                        .type_term_to_acorn_type_with_context(
-                            arg,
+                        self.quote_type_with_context(
+                            arg.to_owned(),
                             local_context,
                             instantiate_type_vars,
                         )
+                    }
+                } else {
+                    self.quote_type_with_context(
+                        arg.to_owned(),
+                        local_context,
+                        instantiate_type_vars,
+                    )
                 };
                 type_args.push(acorn_type);
             } else {
@@ -1047,13 +1026,11 @@ impl<'a> TermBridge<'a> {
                         .type_store
                         .type_term_to_acorn_type_with_var_names(type_term, name_map)
                 } else {
-                    self.kernel_context
-                        .type_store
-                        .type_term_to_acorn_type_with_context(
-                            type_term,
-                            local_context,
-                            instantiate_type_vars,
-                        )
+                    self.quote_type_with_context(
+                        type_term.clone(),
+                        local_context,
+                        instantiate_type_vars,
+                    )
                 }
             })
             .collect();
@@ -1067,6 +1044,56 @@ impl<'a> TermBridge<'a> {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
+        if let Some((head, args)) = type_term.as_ref().split_application_multi() {
+            if let Some(ground_id) = head.as_ref().as_type_atom() {
+                let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
+                if param_kinds.len() == args.len()
+                    && param_kinds
+                        .iter()
+                        .any(|kind| !kind.as_ref().is_type_param_kind())
+                {
+                    let base_type = self
+                        .kernel_context
+                        .type_store
+                        .type_term_to_acorn_type_with_context(
+                            &Term::ground_type(ground_id),
+                            local_context,
+                            instantiate_type_vars,
+                        );
+                    let datatype = match base_type {
+                        AcornType::Data(datatype, params) if params.is_empty() => datatype,
+                        _ => panic!(
+                            "Expected ground data type in dependent type application, got {:?}",
+                            type_term
+                        ),
+                    };
+                    let family_args = args
+                        .iter()
+                        .zip(param_kinds.iter())
+                        .map(|(arg, kind)| {
+                            if kind.as_ref().is_type_param_kind() {
+                                crate::elaborator::acorn_type::DependentTypeArg::Type(
+                                    self.quote_type_with_context(
+                                        arg.to_owned(),
+                                        local_context,
+                                        instantiate_type_vars,
+                                    ),
+                                )
+                            } else {
+                                crate::elaborator::acorn_type::DependentTypeArg::Value(
+                                    self.quote_term_with_context(
+                                        arg,
+                                        local_context,
+                                        instantiate_type_vars,
+                                    ),
+                                )
+                            }
+                        })
+                        .collect();
+                    return AcornType::new_datatype_application(datatype, family_args);
+                }
+            }
+        }
         self.kernel_context
             .type_store
             .type_term_to_acorn_type_with_context(&type_term, local_context, instantiate_type_vars)

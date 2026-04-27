@@ -160,11 +160,19 @@ impl TypeStore {
                 for param in params {
                     self.add_type_internal(param);
                 }
-                let param_kinds: Vec<Term> = params
-                    .iter()
-                    .map(|param| self.param_kind_for_type_arg(param))
-                    .collect();
-                self.update_datatype_param_kinds(datatype, param_kinds);
+                let ground_id = self
+                    .datatype_to_ground_id
+                    .get(datatype)
+                    .copied()
+                    .expect("datatype should be registered");
+                let existing_kinds = self.get_param_kinds(ground_id);
+                if existing_kinds.is_empty() || existing_kinds.len() < params.len() {
+                    let param_kinds: Vec<Term> = params
+                        .iter()
+                        .map(|param| self.param_kind_for_type_arg(param))
+                        .collect();
+                    self.update_datatype_param_kinds(datatype, param_kinds);
+                }
             }
 
             AcornType::Family(datatype, args) => {
@@ -176,11 +184,19 @@ impl TypeStore {
                         DependentTypeArg::Value(value) => self.add_type_internal(&value.get_type()),
                     }
                 }
-                let param_kinds: Vec<Term> = args
-                    .iter()
-                    .map(|arg| self.param_kind_for_arg(arg))
-                    .collect();
-                self.update_datatype_param_kinds(datatype, param_kinds);
+                let ground_id = self
+                    .datatype_to_ground_id
+                    .get(datatype)
+                    .copied()
+                    .expect("datatype should be registered");
+                let existing_kinds = self.get_param_kinds(ground_id);
+                if existing_kinds.is_empty() || existing_kinds.len() < args.len() {
+                    let param_kinds: Vec<Term> = args
+                        .iter()
+                        .map(|arg| self.param_kind_for_arg(arg))
+                        .collect();
+                    self.update_datatype_param_kinds(datatype, param_kinds);
+                }
             }
 
             // Function type: recursively process component types (no GroundTypeId needed)
@@ -248,6 +264,15 @@ impl TypeStore {
             .and_then(|v| v.get(ground_id.local_id() as usize))
             .map(|kinds| kinds.len() as u8)
             .unwrap_or(0)
+    }
+
+    pub fn get_param_kinds(&self, ground_id: GroundTypeId) -> Vec<Term> {
+        let mod_idx = ground_id.module_id().get() as usize;
+        self.ground_id_to_param_kinds
+            .get(mod_idx)
+            .and_then(|v| v.get(ground_id.local_id() as usize))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Generate the kind Term for a type constructor with the given arity.
