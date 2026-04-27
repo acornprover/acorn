@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
@@ -25,7 +25,9 @@ use crate::kernel::checker::StepReason;
 use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
-use crate::syntax::token::Token;
+use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
+use crate::syntax::statement::{Body, Statement, StatementInfo};
+use crate::syntax::token::{Token, TokenIter, TokenType};
 use crate::syntax::token_map::TokenInfo;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -449,56 +451,274 @@ impl Project {
         }
     }
 
-    fn preload_lib_modules_from_text(
-        &mut self,
-        text: &str,
-        skip_descriptor: Option<&ModuleDescriptor>,
-    ) {
-        if !self.config.use_filesystem {
-            return;
-        }
-
-        self.register_all_modules();
-        let lib_regex =
-            Regex::new(r"lib\(([a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*)\)").unwrap();
-        let skip_name = skip_descriptor.and_then(|descriptor| match descriptor {
-            ModuleDescriptor::Name(parts) => Some(parts.join(".")),
-            ModuleDescriptor::Anonymous => None,
-            ModuleDescriptor::File(_) => None,
-        });
-
-        for module_name in lib_regex
-            .captures_iter(text)
-            .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
-        {
-            if skip_name.as_ref().is_some_and(|skip| skip == &module_name) {
-                continue;
+    fn module_name_from_expression(expression: &Expression) -> Option<String> {
+        match expression {
+            Expression::Singleton(token) if token.token_type == TokenType::Identifier => {
+                Some(token.text().to_string())
             }
-            let _ = self.load_module_by_name(&module_name);
+            Expression::Binary(left, token, right) if token.token_type == TokenType::Dot => {
+                let left_name = Self::module_name_from_expression(left)?;
+                let Expression::Singleton(token) = right.as_ref() else {
+                    return None;
+                };
+                if token.token_type != TokenType::Identifier {
+                    return None;
+                }
+                Some(format!("{}.{}", left_name, token.text()))
+            }
+            _ => None,
         }
     }
 
-    pub fn preload_lib_modules_from_cached_certificates(&mut self) {
-        let descriptors: Vec<_> = self
-            .modules
-            .iter()
-            .filter_map(|module| match module.state {
-                LoadState::Ok(_) => Some(module.descriptor.clone()),
-                _ => None,
-            })
-            .collect();
+    fn collect_lib_dependencies_from_type_param(
+        type_param: &TypeParamExpr,
+        output: &mut BTreeSet<String>,
+    ) {
+        if let Some(type_expr) = &type_param.type_expr {
+            Self::collect_lib_dependencies_from_expression(type_expr, output);
+        }
+        if let Some(typeclass) = &type_param.typeclass {
+            Self::collect_lib_dependencies_from_expression(typeclass, output);
+        }
+    }
 
-        for descriptor in descriptors {
-            let Some(cert_store) = self.build_cache.get_certificates(&descriptor).cloned() else {
-                continue;
-            };
-            for cert in cert_store.certs {
-                let Some(proof) = cert.proof else {
-                    continue;
-                };
-                for line in proof {
-                    self.preload_lib_modules_from_text(&line, Some(&descriptor));
+    fn collect_lib_dependencies_from_declaration(
+        declaration: &Declaration,
+        output: &mut BTreeSet<String>,
+    ) {
+        if let Declaration::Typed(_, type_expr) = declaration {
+            Self::collect_lib_dependencies_from_expression(type_expr, output);
+        }
+    }
+
+    fn collect_lib_dependencies_from_expression(
+        expression: &Expression,
+        output: &mut BTreeSet<String>,
+    ) {
+        match expression {
+            Expression::Singleton(_) => {}
+            Expression::Unary(_, subexpression) => {
+                Self::collect_lib_dependencies_from_expression(subexpression, output);
+            }
+            Expression::Binary(left, _, right) => {
+                Self::collect_lib_dependencies_from_expression(left, output);
+                Self::collect_lib_dependencies_from_expression(right, output);
+            }
+            Expression::Concatenation(left, right) => {
+                if let Expression::Singleton(token) = left.as_ref() {
+                    if token.token_type == TokenType::Lib {
+                        if let Expression::Grouping(_, module_expr, _) = right.as_ref() {
+                            if let Some(module_name) =
+                                Self::module_name_from_expression(module_expr)
+                            {
+                                output.insert(module_name);
+                            }
+                        }
+                    }
                 }
+                Self::collect_lib_dependencies_from_expression(left, output);
+                Self::collect_lib_dependencies_from_expression(right, output);
+            }
+            Expression::Grouping(_, inner, _) => {
+                Self::collect_lib_dependencies_from_expression(inner, output);
+            }
+            Expression::Binder(_, declarations, body, _) => {
+                for declaration in declarations {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(body, output);
+            }
+            Expression::GenericBinder(_, type_params, declarations, body, _) => {
+                for type_param in type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for declaration in declarations {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(body, output);
+            }
+            Expression::IfThenElse(_, cond, if_block, else_block, _) => {
+                Self::collect_lib_dependencies_from_expression(cond, output);
+                Self::collect_lib_dependencies_from_expression(if_block, output);
+                if let Some(else_block) = else_block {
+                    Self::collect_lib_dependencies_from_expression(else_block, output);
+                }
+            }
+            Expression::Match(_, scrutinee, cases, _) => {
+                Self::collect_lib_dependencies_from_expression(scrutinee, output);
+                for (pattern, result) in cases {
+                    Self::collect_lib_dependencies_from_expression(pattern, output);
+                    Self::collect_lib_dependencies_from_expression(result, output);
+                }
+            }
+        }
+    }
+
+    fn collect_lib_dependencies_from_body(body: &Body, output: &mut BTreeSet<String>) {
+        for statement in &body.statements {
+            Self::collect_lib_dependencies_from_statement(statement, output);
+        }
+    }
+
+    fn collect_lib_dependencies_from_statement(
+        statement: &Statement,
+        output: &mut BTreeSet<String>,
+    ) {
+        match &statement.statement {
+            StatementInfo::Let(ls) => {
+                for type_param in &ls.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                if let Some(type_expr) = &ls.type_expr {
+                    Self::collect_lib_dependencies_from_expression(type_expr, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&ls.value, output);
+            }
+            StatementInfo::Define(ds) => {
+                for type_param in &ds.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for declaration in &ds.args {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&ds.return_type, output);
+                Self::collect_lib_dependencies_from_expression(&ds.return_value, output);
+            }
+            StatementInfo::Theorem(ts) => {
+                for type_param in &ts.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for declaration in &ts.args {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&ts.claim, output);
+                if let Some(body) = &ts.body {
+                    Self::collect_lib_dependencies_from_body(body, output);
+                }
+            }
+            StatementInfo::Claim(cs) => {
+                Self::collect_lib_dependencies_from_expression(&cs.claim, output);
+            }
+            StatementInfo::Type(ts) => {
+                for type_param in &ts.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&ts.type_expr, output);
+            }
+            StatementInfo::ForAll(fas) => {
+                for declaration in &fas.quantifiers {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_body(&fas.body, output);
+            }
+            StatementInfo::If(is) => {
+                Self::collect_lib_dependencies_from_expression(&is.condition, output);
+                Self::collect_lib_dependencies_from_body(&is.body, output);
+                if let Some(else_body) = &is.else_body {
+                    Self::collect_lib_dependencies_from_body(else_body, output);
+                }
+            }
+            StatementInfo::VariableSatisfy(vss) => {
+                for type_param in &vss.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for declaration in &vss.declarations {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&vss.condition, output);
+            }
+            StatementInfo::FunctionSatisfy(fss) => {
+                for type_param in &fss.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for declaration in &fss.declarations {
+                    Self::collect_lib_dependencies_from_declaration(declaration, output);
+                }
+                Self::collect_lib_dependencies_from_expression(&fss.condition, output);
+                if let Some(body) = &fss.body {
+                    Self::collect_lib_dependencies_from_body(body, output);
+                }
+            }
+            StatementInfo::Structure(ss) => {
+                for type_param in &ss.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for (_, field_type, _) in &ss.fields {
+                    Self::collect_lib_dependencies_from_expression(field_type, output);
+                }
+                if let Some(constraint) = &ss.constraint {
+                    Self::collect_lib_dependencies_from_expression(constraint, output);
+                }
+                if let Some(body) = &ss.body {
+                    Self::collect_lib_dependencies_from_body(body, output);
+                }
+            }
+            StatementInfo::Inductive(is) => {
+                for type_param in &is.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                for (_, constructor, _) in &is.constructors {
+                    if let Some(constructor) = constructor {
+                        Self::collect_lib_dependencies_from_expression(constructor, output);
+                    }
+                }
+            }
+            StatementInfo::Import(_) => {}
+            StatementInfo::Attributes(as_) => {
+                for type_param in &as_.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
+                Self::collect_lib_dependencies_from_body(&as_.body, output);
+            }
+            StatementInfo::Numerals(ns) => {
+                Self::collect_lib_dependencies_from_expression(&ns.type_expr, output);
+            }
+            StatementInfo::Match(ms) => {
+                Self::collect_lib_dependencies_from_expression(&ms.scrutinee, output);
+                for (pattern, body) in &ms.cases {
+                    Self::collect_lib_dependencies_from_expression(pattern, output);
+                    Self::collect_lib_dependencies_from_body(body, output);
+                }
+            }
+            StatementInfo::Typeclass(ts) => {
+                for extend in &ts.extends {
+                    Self::collect_lib_dependencies_from_expression(extend, output);
+                }
+                for (_, constant_type, _) in &ts.constants {
+                    Self::collect_lib_dependencies_from_expression(constant_type, output);
+                }
+                for condition in &ts.conditions {
+                    for declaration in &condition.args {
+                        Self::collect_lib_dependencies_from_declaration(declaration, output);
+                    }
+                    Self::collect_lib_dependencies_from_expression(&condition.claim, output);
+                }
+            }
+            StatementInfo::Instance(is) => {
+                Self::collect_lib_dependencies_from_expression(&is.typeclass, output);
+                if let Some(definitions) = &is.definitions {
+                    Self::collect_lib_dependencies_from_body(definitions, output);
+                }
+                if let Some(body) = &is.body {
+                    Self::collect_lib_dependencies_from_body(body, output);
+                }
+            }
+            StatementInfo::Destructuring(ds) => {
+                Self::collect_lib_dependencies_from_expression(&ds.function, output);
+                Self::collect_lib_dependencies_from_expression(&ds.value, output);
+            }
+            StatementInfo::DocComment(_) => {}
+        }
+    }
+
+    fn parse_module_statements(text: &str, strict: bool) -> error::Result<Vec<Statement>> {
+        let mut tokens = TokenIter::new(Token::scan(text));
+        let mut statements = vec![];
+        loop {
+            match Statement::parse(&mut tokens, false, strict) {
+                Ok((Some(statement), _)) => statements.push(statement),
+                Ok((None, _)) => return Ok(statements),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1404,9 +1624,38 @@ impl Project {
         };
         self.module_map.insert(descriptor.clone(), module_id);
 
-        // `lib(module)` references are global module lookups, not imports. Preload the referenced
-        // modules now so later name resolution can see their bindings during elaboration.
-        self.preload_lib_modules_from_text(&text, Some(descriptor));
+        let statements = match Self::parse_module_statements(&text, strict) {
+            Ok(statements) => statements,
+            Err(error) => {
+                self.modules[module_id.get() as usize].load_error(error);
+                return Ok(module_id);
+            }
+        };
+
+        let current_module_name = match descriptor {
+            ModuleDescriptor::Name(parts) => Some(parts.join(".")),
+            ModuleDescriptor::Anonymous | ModuleDescriptor::File(_) => None,
+        };
+        let mut lib_dependency_names = BTreeSet::new();
+        for statement in &statements {
+            Self::collect_lib_dependencies_from_statement(statement, &mut lib_dependency_names);
+        }
+        let mut lib_dependencies = vec![];
+        for module_name in lib_dependency_names {
+            if current_module_name
+                .as_ref()
+                .is_some_and(|name| name == &module_name)
+            {
+                continue;
+            }
+            if let Ok(dep_id) = self.load_module_by_name(&module_name) {
+                let full_name = module_name
+                    .split('.')
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>();
+                lib_dependencies.push((dep_id, full_name));
+            }
+        }
 
         let mut env = Environment::new(module_id);
         if !is_prelude {
@@ -1420,16 +1669,21 @@ impl Project {
                 }
             }
         }
+        for (dep_id, full_name) in lib_dependencies {
+            env.bindings.add_module_dependency(dep_id, full_name);
+        }
+        env.sync_current_binding_state();
 
-        let tokens = Token::scan(&text);
-        if let Err(e) = env.add_tokens(self, tokens, strict) {
-            if e.circular.is_some() {
-                let err = Err(ImportError::Circular(module_id));
+        for statement in statements {
+            if let Err(e) = env.add_statement(self, &statement) {
+                if e.circular.is_some() {
+                    let err = Err(ImportError::Circular(module_id));
+                    self.modules[module_id.get() as usize].load_error(e);
+                    return err;
+                }
                 self.modules[module_id.get() as usize].load_error(e);
-                return err;
+                return Ok(module_id);
             }
-            self.modules[module_id.get() as usize].load_error(e);
-            return Ok(module_id);
         }
 
         // Normalize all facts after elaboration.

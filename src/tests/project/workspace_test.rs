@@ -332,6 +332,12 @@ fn test_filesystem_project_supports_global_lib_module_lookup() {
 
     let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
     p.expect_ok("main");
+    let main_id = p.get_module_id_by_name("main").unwrap();
+    let util_id = p.get_module_id_by_name("util").unwrap();
+    assert!(
+        p.all_dependencies(main_id).contains(&util_id),
+        "lib(util) should register util as a source dependency",
+    );
     p.add_target_by_name("main").unwrap();
     expect_build_ok(&mut p);
 }

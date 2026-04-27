@@ -1431,6 +1431,15 @@ impl BindingMap {
         Ok(())
     }
 
+    /// Records another module as a dependency without binding a local module name.
+    /// This is used for `lib(module)` references.
+    pub fn add_module_dependency(&mut self, module_id: ModuleId, full_name: Vec<String>) {
+        self.module_info.entry(module_id).or_insert(ModuleInfo {
+            local_name: None,
+            full_name,
+        });
+    }
+
     /// Imports all exportable names from a prelude module.
     /// This is similar to import_module + import_name for all names, but done automatically.
     /// Used to auto-import prelude.ac into every module.
