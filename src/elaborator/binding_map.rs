@@ -1091,6 +1091,7 @@ impl BindingMap {
                 params,
                 generic_type: constant_type,
                 value_param_types,
+                bound_value_args: vec![],
                 args: vec![],
             })
         };

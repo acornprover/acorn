@@ -317,7 +317,11 @@ impl Environment {
         self.define_constant(
             defined_name,
             type_params,
-            datatype_value_param_types,
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types
+            } else {
+                explicit_value_param_types.clone()
+            },
             acorn_type,
             value,
             range,
@@ -350,14 +354,18 @@ impl Environment {
         }
 
         let recursion_name = defined_name.recursion_name();
-        let (type_param_exprs, args) = if datatype_params.is_some() {
-            (ds.type_params.clone(), ds.args.clone())
+        let (type_param_exprs, args, explicit_value_param_types) = if datatype_params.is_some() {
+            (ds.type_params.clone(), ds.args.clone(), vec![])
         } else {
             let local_family_params =
                 self.evaluate_local_family_params(project, &ds.type_params)?;
             let mut args = local_family_params.value_declarations;
             args.extend(ds.args.clone());
-            (local_family_params.type_param_exprs, args)
+            (
+                local_family_params.type_param_exprs,
+                args,
+                explicit_value_param_types(&local_family_params.value_params),
+            )
         };
         let (fn_param_names, _, arg_types, unbound_value, value_type) =
             self.bindings.evaluate_scoped_value(
@@ -415,7 +423,11 @@ impl Environment {
             self.define_constant(
                 defined_name,
                 params,
-                datatype_value_param_types,
+                if explicit_value_param_types.is_empty() {
+                    datatype_value_param_types.clone()
+                } else {
+                    explicit_value_param_types.clone()
+                },
                 fn_type,
                 Some(fn_value),
                 range,
@@ -439,7 +451,11 @@ impl Environment {
         self.define_constant(
             defined_name,
             params,
-            datatype_value_param_types,
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types
+            } else {
+                explicit_value_param_types
+            },
             new_axiom_type,
             None,
             range,
@@ -533,7 +549,7 @@ impl Environment {
             self.bindings.add_unqualified_constant(
                 name_token.text(),
                 type_params.clone(),
-                vec![],
+                explicit_value_param_types(&local_family_params.value_params),
                 theorem_type.clone(),
                 Some(lambda_claim.clone()),
                 None,
@@ -717,7 +733,11 @@ impl Environment {
             self.bindings.add_defined_name(
                 &defined_name,
                 definition_type_params.clone(),
-                family_value_param_types.clone(),
+                if explicit_value_param_types.is_empty() {
+                    family_value_param_types.clone()
+                } else {
+                    explicit_value_param_types.clone()
+                },
                 constant_type.clone(),
                 None,
                 None,
@@ -742,7 +762,11 @@ impl Environment {
                 constant_type.clone(),
                 constant_type,
                 vec![],
-                vec![],
+                if explicit_value_param_types.is_empty() {
+                    family_value_param_types.clone()
+                } else {
+                    explicit_value_param_types.clone()
+                },
             );
             if !explicit_value_param_types.is_empty() {
                 let explicit_value_args = local_family_params
@@ -819,15 +843,21 @@ impl Environment {
         }
 
         let recursion_name = defined_name.recursion_name();
-        let (type_param_exprs, declarations) = if datatype_params.is_some() {
-            (fss.type_params.clone(), fss.declarations.clone())
+        let local_family_params = if datatype_params.is_some() {
+            LocalFamilyParams {
+                type_param_exprs: fss.type_params.clone(),
+                type_params: self
+                    .evaluator(project)
+                    .evaluate_type_params(&fss.type_params)?,
+                value_params: vec![],
+                value_declarations: vec![],
+            }
         } else {
-            let local_family_params =
-                self.evaluate_local_family_params(project, &fss.type_params)?;
-            let mut declarations = local_family_params.value_declarations;
-            declarations.extend(fss.declarations.clone());
-            (local_family_params.type_param_exprs, declarations)
+            self.evaluate_local_family_params(project, &fss.type_params)?
         };
+        let mut declarations = local_family_params.value_declarations.clone();
+        declarations.extend(fss.declarations.clone());
+        let type_param_exprs = local_family_params.type_param_exprs.clone();
         let (fn_type_params, mut arg_names, mut arg_types, condition, _) =
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
@@ -846,6 +876,8 @@ impl Environment {
             .map(|params| params.value_params.len() as AtomId)
             .unwrap_or(0);
         let family_value_param_types = datatype_value_param_types(datatype_params);
+        let explicit_value_param_types =
+            explicit_value_param_types(&local_family_params.value_params);
 
         let unbound_condition = condition.ok_or_else(|| statement.error("missing condition"))?;
         if unbound_condition.get_type() != AcornType::Bool {
@@ -883,7 +915,11 @@ impl Environment {
         self.bindings.add_defined_name(
             &defined_name,
             all_type_params.clone(),
-            family_value_param_types.clone(),
+            if explicit_value_param_types.is_empty() {
+                family_value_param_types.clone()
+            } else {
+                explicit_value_param_types.clone()
+            },
             generic_function_type.clone(),
             None,
             None,
@@ -899,14 +935,31 @@ impl Environment {
             .iter()
             .map(|p| AcornType::Arbitrary(p.clone()))
             .collect();
-        let function_constant = AcornValue::constant(
+        let mut function_constant = AcornValue::constant(
             const_name,
             type_args,
             function_type.clone(),
             generic_function_type,
             vec![],
-            vec![],
+            if explicit_value_param_types.is_empty() {
+                family_value_param_types.clone()
+            } else {
+                explicit_value_param_types.clone()
+            },
         );
+        if explicit_value_param_types.is_empty() && !family_value_param_types.is_empty() {
+            let family_value_args = datatype_params
+                .expect("family value params should have a datatype scope")
+                .value_params
+                .iter()
+                .enumerate()
+                .map(|(i, value_param)| {
+                    AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                })
+                .collect::<Vec<_>>();
+            function_constant =
+                function_constant.bind_value_params(&family_value_args, &fss.name_token)?;
+        }
         let function_term = AcornValue::apply(
             function_constant.clone(),
             arg_types

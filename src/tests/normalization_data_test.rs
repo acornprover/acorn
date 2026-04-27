@@ -859,6 +859,94 @@ fn load_target_clause(code: &str) -> (KernelContext, AcornValue) {
     load_target_value(code)
 }
 
+#[test]
+fn test_find_inhabitant_for_option_aliases_uses_polymorphic_none() {
+    use crate::kernel::atom::Atom;
+    use crate::kernel::symbol::Symbol;
+
+    let (_project, bindings, kernel_context) = load_mock_module(
+        r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        let some[T] = Option.some[T]
+        let none[T] = Option.none[T]
+        "#,
+    );
+
+    let option_type = bindings
+        .get_type_for_typename("Option")
+        .expect("Option type should exist");
+    let option_bool_type = option_type
+        .clone()
+        .resolve(
+            vec![crate::elaborator::acorn_type::AcornType::Bool],
+            &crate::syntax::token::Token::empty(),
+        )
+        .expect("Option[Bool] should resolve");
+    let option_option_bool_type = option_type
+        .clone()
+        .resolve(
+            vec![option_bool_type.clone()],
+            &crate::syntax::token::Token::empty(),
+        )
+        .expect("Option[Option[Bool]] should resolve");
+    let option_bool = kernel_context
+        .type_store
+        .get_type_term(&option_bool_type)
+        .expect("Option[Bool] should lower");
+    let option_option_bool = kernel_context
+        .type_store
+        .get_type_term(&option_option_bool_type)
+        .expect("Option[Option[Bool]] should lower");
+    let crate::kernel::atom::Atom::Symbol(Symbol::Type(option_id)) = option_bool.get_head_atom()
+    else {
+        panic!("Option[Bool] should lower to a type application");
+    };
+    let witness = kernel_context
+        .find_inhabitant(&option_option_bool, None)
+        .expect("Option[Option[Bool]] should be inhabited");
+    let provider = kernel_context
+        .symbol_table
+        .get_type_constructor_witness(*option_id)
+        .expect("Option should have a witness provider");
+    let expected = Term::atom(Atom::Symbol(provider)).apply(&[option_bool]);
+    assert_eq!(witness, expected);
+    let provider_type = kernel_context
+        .symbol_table
+        .get_symbol_type(provider, &kernel_context.type_store);
+    assert!(
+        provider_type.as_ref().split_pi().is_some(),
+        "witness provider should remain polymorphic, got {:?}",
+        provider_type
+    );
+    assert!(
+        !matches!(provider, Symbol::ScopedConstant(_)),
+        "witness provider should be a global constant"
+    );
+}
+
+#[test]
+fn test_lower_term_for_nested_option_aliases() {
+    let (_kernel_context, term) = load_target_term(
+        r#"
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        let some[T] = Option.some[T]
+        let none[T] = Option.none[T]
+
+        let target: Option[Option[Bool]] = some[Option[Bool]](none[Bool])
+        "#,
+    );
+
+    term.validate();
+}
+
 fn add_named_global_constant(kernel_context: &mut KernelContext, name: &str, type_str: &str) {
     let constant_name = ConstantName::unqualified(ModuleId(0), name);
     let type_term = kernel_context.parse_type(type_str);

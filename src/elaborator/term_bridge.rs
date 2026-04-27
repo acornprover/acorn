@@ -207,6 +207,11 @@ impl<'a> TermBridge<'a> {
                 .iter()
                 .map(|ty| ty.instantiate(&named_params))
                 .collect(),
+            bound_value_args: constant
+                .bound_value_args
+                .iter()
+                .map(|value| value.instantiate(&named_params))
+                .collect(),
         })
     }
 

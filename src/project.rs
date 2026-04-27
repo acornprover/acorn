@@ -449,6 +449,60 @@ impl Project {
         }
     }
 
+    fn preload_lib_modules_from_text(
+        &mut self,
+        text: &str,
+        skip_descriptor: Option<&ModuleDescriptor>,
+    ) {
+        if !self.config.use_filesystem {
+            return;
+        }
+
+        self.register_all_modules();
+        let lib_regex =
+            Regex::new(r"lib\(([a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*)\)").unwrap();
+        let skip_name = skip_descriptor.and_then(|descriptor| match descriptor {
+            ModuleDescriptor::Name(parts) => Some(parts.join(".")),
+            ModuleDescriptor::Anonymous => None,
+            ModuleDescriptor::File(_) => None,
+        });
+
+        for module_name in lib_regex
+            .captures_iter(text)
+            .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        {
+            if skip_name.as_ref().is_some_and(|skip| skip == &module_name) {
+                continue;
+            }
+            let _ = self.load_module_by_name(&module_name);
+        }
+    }
+
+    pub fn preload_lib_modules_from_cached_certificates(&mut self) {
+        let descriptors: Vec<_> = self
+            .modules
+            .iter()
+            .filter_map(|module| match module.state {
+                LoadState::Ok(_) => Some(module.descriptor.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for descriptor in descriptors {
+            let Some(cert_store) = self.build_cache.get_certificates(&descriptor).cloned() else {
+                continue;
+            };
+            for cert in cert_store.certs {
+                let Some(proof) = cert.proof else {
+                    continue;
+                };
+                for line in proof {
+                    self.preload_lib_modules_from_text(&line, Some(&descriptor));
+                }
+            }
+        }
+    }
+
     // Adds a target for all files in the 'src' directory.
     pub fn add_src_targets(&mut self) {
         if !self.config.use_filesystem {
@@ -1349,6 +1403,10 @@ impl Project {
             id
         };
         self.module_map.insert(descriptor.clone(), module_id);
+
+        // `lib(module)` references are global module lookups, not imports. Preload the referenced
+        // modules now so later name resolution can see their bindings during elaboration.
+        self.preload_lib_modules_from_text(&text, Some(descriptor));
 
         let mut env = Environment::new(module_id);
         if !is_prelude {

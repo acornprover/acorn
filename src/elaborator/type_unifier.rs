@@ -357,6 +357,7 @@ impl<'a> TypeUnifier<'a> {
                 params: unresolved.params,
                 generic_type: unresolved.generic_type,
                 value_param_types: unresolved.value_param_types,
+                bound_value_args: unresolved.bound_value_args,
                 args: vec![], // Don't apply args in resolve(), we'll apply combined_args here
             };
             let instance_fn = unresolved_without_args.resolve(source, all_params)?;
@@ -372,6 +373,7 @@ impl<'a> TypeUnifier<'a> {
                 params: unresolved.params.clone(),
                 generic_type: unresolved.generic_type.clone(),
                 value_param_types: unresolved.value_param_types.clone(),
+                bound_value_args: unresolved.bound_value_args.clone(),
                 args: combined_args,
             };
 

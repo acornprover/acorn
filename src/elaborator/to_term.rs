@@ -166,105 +166,6 @@ pub(crate) fn register_value_symbols(
         }
     }
 
-    fn collect_value_var_types_from_value(
-        value: &AcornValue,
-        vars: &mut std::collections::BTreeMap<AtomId, AcornType>,
-    ) {
-        match value {
-            AcornValue::Variable(i, var_type) => {
-                vars.entry(*i).or_insert_with(|| var_type.clone());
-            }
-            AcornValue::Application(app) => {
-                collect_value_var_types_from_value(&app.function, vars);
-                for arg in &app.args {
-                    collect_value_var_types_from_value(arg, vars);
-                }
-            }
-            AcornValue::TypeApplication(app) => {
-                collect_value_var_types_from_value(&app.function, vars);
-                for arg in &app.type_args {
-                    collect_value_var_types_from_type(arg, vars);
-                }
-            }
-            AcornValue::Lambda(_, value)
-            | AcornValue::ForAll(_, value)
-            | AcornValue::Exists(_, value)
-            | AcornValue::Grouping(value)
-            | AcornValue::Not(value)
-            | AcornValue::Try(value, _) => collect_value_var_types_from_value(value, vars),
-            AcornValue::Binary(_, left, right) => {
-                collect_value_var_types_from_value(left, vars);
-                collect_value_var_types_from_value(right, vars);
-            }
-            AcornValue::IfThenElse(cond, if_value, else_value) => {
-                collect_value_var_types_from_value(cond, vars);
-                collect_value_var_types_from_value(if_value, vars);
-                collect_value_var_types_from_value(else_value, vars);
-            }
-            AcornValue::Match(scrutinee, cases) => {
-                collect_value_var_types_from_value(scrutinee, vars);
-                for case in cases {
-                    collect_value_var_types_from_value(&case.pattern, vars);
-                    collect_value_var_types_from_value(&case.result, vars);
-                }
-            }
-            AcornValue::Constant(_) | AcornValue::Bool(_) => {}
-        }
-    }
-
-    fn collect_value_var_types_from_type(
-        acorn_type: &AcornType,
-        vars: &mut std::collections::BTreeMap<AtomId, AcornType>,
-    ) {
-        match acorn_type {
-            AcornType::Data(_, params) => {
-                for param in params {
-                    collect_value_var_types_from_type(param, vars);
-                }
-            }
-            AcornType::Family(_, args) => {
-                for arg in args {
-                    match arg {
-                        DependentTypeArg::Type(acorn_type) => {
-                            collect_value_var_types_from_type(acorn_type, vars)
-                        }
-                        DependentTypeArg::Value(value) => {
-                            collect_value_var_types_from_value(value, vars)
-                        }
-                    }
-                }
-            }
-            AcornType::Function(ft) => {
-                for arg_type in &ft.arg_types {
-                    collect_value_var_types_from_type(arg_type, vars);
-                }
-                collect_value_var_types_from_type(&ft.return_type, vars);
-            }
-            AcornType::Bool
-            | AcornType::Variable(_)
-            | AcornType::Arbitrary(_)
-            | AcornType::Type0
-            | AcornType::TypeclassConstraint(_) => {}
-        }
-    }
-
-    fn infer_hidden_value_param_types(acorn_type: &AcornType) -> Vec<AcornType> {
-        let mut vars = std::collections::BTreeMap::new();
-        collect_value_var_types_from_type(acorn_type, &mut vars);
-        if vars.is_empty() {
-            return vec![];
-        }
-        let max = *vars.keys().last().unwrap() as usize;
-        let mut inferred = Vec::with_capacity(max + 1);
-        for i in 0..=max {
-            let Some(var_type) = vars.get(&(i as AtomId)) else {
-                return vec![];
-            };
-            inferred.push(var_type.clone());
-        }
-        inferred
-    }
-
     fn replace_type_args_with_params(
         ty: &AcornType,
         concrete_type_args: &[AcornType],
@@ -433,8 +334,70 @@ pub(crate) fn register_value_symbols(
         }
     }
 
+    fn register_type_embedded_value_symbols(
+        kernel_context: &mut KernelContext,
+        acorn_type: &AcornType,
+        ctype: NewConstantType,
+    ) {
+        match acorn_type {
+            AcornType::Function(function_type) => {
+                for arg_type in &function_type.arg_types {
+                    register_type_embedded_value_symbols(kernel_context, arg_type, ctype);
+                }
+                register_type_embedded_value_symbols(
+                    kernel_context,
+                    &function_type.return_type,
+                    ctype,
+                );
+            }
+            AcornType::Data(_, params) => {
+                for param in params {
+                    register_type_embedded_value_symbols(kernel_context, param, ctype);
+                }
+            }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            register_type_embedded_value_symbols(kernel_context, acorn_type, ctype)
+                        }
+                        DependentTypeArg::Value(value) => {
+                            register_value_symbols(kernel_context, value, ctype)
+                        }
+                    }
+                }
+            }
+            AcornType::Bool
+            | AcornType::Variable(_)
+            | AcornType::Arbitrary(_)
+            | AcornType::Type0
+            | AcornType::TypeclassConstraint(_) => {}
+        }
+    }
+
+    fn value_params_are_visible_prefix(
+        name: &ConstantName,
+        generic_type: &AcornType,
+        value_param_types: &[AcornType],
+    ) -> bool {
+        if value_param_types.is_empty() {
+            return false;
+        }
+        if !matches!(name, ConstantName::Unqualified(..)) {
+            return false;
+        }
+        match generic_type {
+            AcornType::Function(function_type) => {
+                function_type.arg_types.len() >= value_param_types.len()
+                    && function_type.arg_types[..value_param_types.len()] == *value_param_types
+            }
+            _ => false,
+        }
+    }
+
     value.for_each_type(&mut |t| {
         kernel_context.type_store.add_type(t);
+        register_type_embedded_value_symbols(kernel_context, t, ctype);
     });
 
     value.for_each_constant(&mut |c| {
@@ -442,21 +405,15 @@ pub(crate) fn register_value_symbols(
             return;
         }
 
-        let inferred_value_param_types = match c.name {
-            crate::elaborator::names::ConstantName::DatatypeAttribute(..)
-            | crate::elaborator::names::ConstantName::SpecificDatatypeAttribute(..) => {
-                infer_hidden_value_param_types(&c.generic_type)
-            }
-            _ => vec![],
-        };
-        let effective_value_param_types = if c.value_param_types.is_empty() {
-            inferred_value_param_types
-        } else {
-            c.value_param_types.clone()
-        };
+        let symbol_value_param_types =
+            if value_params_are_visible_prefix(&c.name, &c.generic_type, &c.value_param_types) {
+                vec![]
+            } else {
+                c.value_param_types.clone()
+            };
         let is_polymorphic = !c.type_param_names.is_empty()
             || !c.params.is_empty()
-            || !effective_value_param_types.is_empty();
+            || !c.value_param_types.is_empty();
 
         let var_type = if !is_polymorphic {
             lower_type_to_term(kernel_context, &c.instance_type, None)
@@ -495,7 +452,7 @@ pub(crate) fn register_value_symbols(
                 })
                 .collect();
 
-            for (i, value_param_type) in effective_value_param_types.iter().enumerate() {
+            for (i, value_param_type) in symbol_value_param_types.iter().enumerate() {
                 let value_param_term = lower_type_to_term_with_stack(
                     kernel_context,
                     value_param_type,
@@ -547,7 +504,8 @@ pub(crate) fn register_value_symbols(
                 })
                 .collect();
             let generic_type_with_variables = c.generic_type.genericize(&params_for_genericize);
-            let value_param_types = effective_value_param_types
+            let value_param_types = c
+                .value_param_types
                 .iter()
                 .map(|ty| ty.genericize(&params_for_genericize))
                 .collect();
@@ -612,7 +570,8 @@ fn lower_value_type_to_term(
     if let AcornValue::Constant(c) = value {
         if c.params.is_empty()
             && c.has_generic()
-            && (!c.type_param_names.is_empty() || !c.value_param_types.is_empty())
+            && (!c.type_param_names.is_empty()
+                || (!c.value_param_types.is_empty() && c.bound_value_args.is_empty()))
         {
             let Some(symbol) = kernel_context.symbol_table.get_symbol(&c.name) else {
                 return Err(format!("constant {} not found in symbol table", c));
@@ -895,16 +854,19 @@ fn lower_value_to_term_with_stack(
         }),
 
         AcornValue::Constant(c) => {
-            if prefer_instance_aliases {
-                if let Some(symbol) = kernel_context.symbol_table.get_instance_alias_symbol(c) {
-                    return Ok(Term::atom(Atom::Symbol(symbol)));
+            let (base_symbol, used_instance_alias) = if prefer_instance_aliases {
+                match kernel_context.symbol_table.get_instance_alias_symbol(c) {
+                    Some(symbol) => (Some(symbol), true),
+                    None => (kernel_context.symbol_table.get_symbol(&c.name), false),
                 }
-            }
-            let Some(base_symbol) = kernel_context.symbol_table.get_symbol(&c.name) else {
+            } else {
+                (kernel_context.symbol_table.get_symbol(&c.name), false)
+            };
+            let Some(base_symbol) = base_symbol else {
                 return Err(format!("constant {} not found in symbol table", c));
             };
-            if c.params.is_empty() {
-                Ok(Term::atom(Atom::Symbol(base_symbol)))
+            let mut term = if used_instance_alias || c.params.is_empty() {
+                Term::atom(Atom::Symbol(base_symbol))
             } else {
                 let type_args: Vec<Term> = c
                     .params
@@ -913,8 +875,27 @@ fn lower_value_to_term_with_stack(
                         lower_type_to_term_with_stack(kernel_context, param, type_var_map, stack)
                     })
                     .collect();
-                Ok(Term::atom(Atom::Symbol(base_symbol)).apply(&type_args))
+                Term::atom(Atom::Symbol(base_symbol)).apply(&type_args)
+            };
+
+            if !c.bound_value_args.is_empty() {
+                let value_args: Result<Vec<_>, _> = c
+                    .bound_value_args
+                    .iter()
+                    .map(|value_arg| {
+                        lower_value_to_term_with_stack(
+                            kernel_context,
+                            value_arg,
+                            type_var_map,
+                            prefer_instance_aliases,
+                            stack,
+                        )
+                    })
+                    .collect();
+                term = term.apply(&value_args?);
             }
+
+            Ok(term)
         }
 
         AcornValue::Application(app) => {

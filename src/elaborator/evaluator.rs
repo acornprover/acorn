@@ -423,8 +423,9 @@ impl<'a> Evaluator<'a> {
                     Ok(PotentialValue::Unresolved(UnresolvedConstant {
                         name: unresolved.name,
                         params: unresolved.params,
-                        generic_type: unresolved.generic_type.bind_value_params(value_args),
-                        value_param_types: vec![],
+                        generic_type: unresolved.generic_type,
+                        value_param_types: unresolved.value_param_types,
+                        bound_value_args: value_args.to_vec(),
                         args: unresolved.args,
                     }))
                 }
@@ -2316,6 +2317,7 @@ mod tests {
                 }),
             ),
             value_param_types: vec![],
+            bound_value_args: vec![],
             args: vec![],
         };
 

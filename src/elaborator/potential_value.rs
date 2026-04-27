@@ -41,7 +41,7 @@ impl PotentialValue {
     /// If this is an unresolved value, it will have a generic type.
     pub fn get_type(&self) -> AcornType {
         match &self {
-            PotentialValue::Unresolved(u) => u.generic_type.clone(),
+            PotentialValue::Unresolved(u) => u.generic_type.bind_value_params(&u.bound_value_args),
             PotentialValue::Resolved(v) => v.get_type(),
         }
     }

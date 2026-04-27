@@ -24,6 +24,9 @@ pub struct UnresolvedConstant {
     /// These behave like hidden leading binders in the constant's type.
     pub value_param_types: Vec<AcornType>,
 
+    /// Bound values for hidden family parameters, if this is already specialized.
+    pub bound_value_args: Vec<AcornValue>,
+
     /// Arguments that have been partially applied to this constant.
     /// When this is resolved, these arguments will be applied to the resolved value.
     pub args: Vec<AcornValue>,
@@ -57,7 +60,10 @@ impl UnresolvedConstant {
         params: &[AcornType],
     ) -> error::Result<AcornType> {
         let named_params = self.named_params(source, params)?;
-        Ok(self.generic_type.instantiate(&named_params))
+        Ok(self
+            .generic_type
+            .instantiate(&named_params)
+            .bind_value_params(&self.bound_value_args))
     }
 
     /// Resolves the constant with the given parameters.
@@ -86,15 +92,21 @@ impl UnresolvedConstant {
             .iter()
             .map(|value_type| value_type.instantiate(&named_params))
             .collect();
+        let bound_value_args = self
+            .bound_value_args
+            .iter()
+            .map(|value| value.instantiate(&named_params))
+            .collect();
 
-        let mut value = AcornValue::constant(
+        let mut value = AcornValue::Constant(crate::elaborator::acorn_value::ConstantInstance {
             name,
             params,
-            resolved_type,
+            instance_type: resolved_type,
             generic_type,
             type_param_names,
             value_param_types,
-        );
+            bound_value_args,
+        });
 
         // Apply any stored arguments
         if !self.args.is_empty() {
@@ -120,16 +132,22 @@ impl UnresolvedConstant {
             .into_iter()
             .map(|value_type| value_type.genericize(&self.params))
             .collect();
+        let bound_value_args: Vec<_> = self
+            .bound_value_args
+            .into_iter()
+            .map(|value| value.genericize(&self.params))
+            .collect();
 
         // For generic value, instance_type equals generic_type since params are Variables
-        let mut value = AcornValue::constant(
-            self.name.clone(),
+        let mut value = AcornValue::Constant(crate::elaborator::acorn_value::ConstantInstance {
+            name: self.name.clone(),
             params,
-            generic_type.clone(),
+            instance_type: generic_type.clone().bind_value_params(&bound_value_args),
             generic_type,
             type_param_names,
             value_param_types,
-        );
+            bound_value_args,
+        });
 
         // Apply any stored arguments
         if !self.args.is_empty() {

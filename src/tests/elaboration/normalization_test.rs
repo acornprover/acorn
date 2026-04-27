@@ -154,6 +154,156 @@ fn test_forall_reflexive_goal_keeps_lowered_goal() {
 }
 
 #[test]
+fn test_constrained_dependent_structure_module_loads() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+        let lt: (Nat, Nat) -> Bool = axiom
+
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        let some[T] = Option.some[T]
+        let none[T] = Option.none[T]
+
+        structure Fin[n: Nat] {
+            value: Nat
+        } constraint {
+            lt(value, n)
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    }
+}
+
+#[test]
+fn test_top_level_dependent_theorem_module_loads() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+        type Indexed[n: Nat]: axiom
+
+        theorem goal[n: Nat](x: Indexed[n]) {
+            x = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    }
+}
+
+#[test]
+fn test_dependent_structure_theorem_module_loads() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        } constraint {
+            value = value
+        }
+
+        theorem value_refl[n: Nat](x: Fin[n]) {
+            x.value = x.value
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    }
+}
+
+#[test]
+fn test_dependent_structure_attributes_module_loads() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        }
+
+        attributes Fin[n: Nat] {
+            define bound(self) -> Nat {
+                n
+            }
+
+            define again(self) -> Fin[n] {
+                self
+            }
+        }
+
+        theorem goal(n: Nat, x: Fin[n]) {
+            x.bound = n and x.again = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    }
+}
+
+#[test]
+fn test_top_level_dependent_function_satisfy_module_loads() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        }
+
+        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+            result = x
+        }
+
+        theorem goal(n: Nat, x: Fin[n]) {
+            choose_self(n, x) = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    }
+}
+
+#[test]
 fn test_second_order_binding() {
     let mut env = Environment::test();
     env.add(

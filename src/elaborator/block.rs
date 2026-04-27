@@ -113,6 +113,31 @@ fn body_contains_explicit_false(body: &Body) -> bool {
 }
 
 impl Block {
+    fn apply_with_dependent_args(
+        value: AcornValue,
+        args: &[AcornValue],
+        expected_type: Option<&AcornType>,
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        let mut function_type = value.get_type();
+        for arg in args {
+            let AcornType::Function(ftype) = function_type else {
+                return Err(source.error("cannot apply a non-function"));
+            };
+            let Some(arg_type) = ftype.arg_types.first() else {
+                return Err(source.error("expected 0 arguments"));
+            };
+            arg.check_type(Some(arg_type), source)?;
+            function_type = ftype
+                .applied_type(1)
+                .bind_values(0, 0, std::slice::from_ref(arg));
+        }
+
+        let applied = AcornValue::apply(value, args.to_vec());
+        applied.check_type(expected_type, source)?;
+        Ok(applied)
+    }
+
     /// Creates a new block, as a direct child of the given environment.
     ///
     /// Note: The range from first_token to last_token may include part of the surrounding
@@ -144,7 +169,10 @@ impl Block {
         // Inside the block, the arguments are constants.
         let mut internal_args = vec![];
         for (arg_name, generic_arg_type) in &args {
-            let specific_arg_type = generic_arg_type.instantiate(&param_pairs);
+            let specific_arg_type =
+                generic_arg_type
+                    .instantiate(&param_pairs)
+                    .bind_values(0, 0, &internal_args);
             let def_str = format!("{}: {}", arg_name, specific_arg_type);
             let potential = subenv.bindings.add_unqualified_constant(
                 arg_name,
@@ -181,8 +209,9 @@ impl Block {
                         .map_err(|e| error::Error::new(first_token, last_token, &e))?;
                     let applied = match theorem_value {
                         PotentialValue::Resolved(value) if internal_args.is_empty() => Some(value),
-                        PotentialValue::Resolved(value) => Some(value.check_apply(
-                            internal_args.clone(),
+                        PotentialValue::Resolved(value) => Some(Self::apply_with_dependent_args(
+                            value,
+                            &internal_args,
                             Some(&AcornType::Bool),
                             first_token,
                         )?),
@@ -223,7 +252,11 @@ impl Block {
                     .clone()
                     .bind_values(0, 0, &internal_args)
                     .to_arbitrary();
-                let bound_goal = AcornValue::exists(vec![return_type.to_arbitrary()], partial_goal);
+                let bound_return_type = return_type
+                    .clone()
+                    .bind_values(0, 0, &internal_args)
+                    .to_arbitrary();
+                let bound_goal = AcornValue::exists(vec![bound_return_type], partial_goal);
                 let source = Source::block_goal(env.module_id, range, subenv.depth);
                 let prop = Proposition::new(bound_goal, vec![], source);
                 Some(prop)

@@ -301,6 +301,42 @@ fn test_building_project() {
 }
 
 #[test]
+fn test_filesystem_project_supports_global_lib_module_lookup() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&build_dir).unwrap();
+    fs::write(temp_dir.path().join("acorn.toml"), "").unwrap();
+
+    fs::write(
+        src_dir.join("util.ac"),
+        indoc! {r#"
+            type Foo: axiom
+            let foo: Foo = axiom
+        "#},
+    )
+    .unwrap();
+    fs::write(
+        src_dir.join("main.ac"),
+        indoc! {r#"
+            theorem goal {
+                lib(util).foo = lib(util).foo
+            }
+        "#},
+    )
+    .unwrap();
+
+    let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
+    p.expect_ok("main");
+    p.add_target_by_name("main").unwrap();
+    expect_build_ok(&mut p);
+}
+
+#[test]
 fn test_target_outside_library() {
     let mut p = Project::new_mock();
     let outside_path = "/outside/foo.ac";

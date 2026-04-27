@@ -126,6 +126,8 @@ impl Verifier {
             project.add_src_targets();
         }
 
+        project.preload_lib_modules_from_cached_certificates();
+
         // Unsafe is to make this self-referential
         let project_box = Box::new(project);
         let project_ptr = Box::into_raw(project_box);
