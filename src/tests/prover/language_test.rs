@@ -323,3 +323,27 @@ fn test_constrained_new_some_projection_requires_option_match() {
     "#;
     verify_succeeds(text);
 }
+
+#[test]
+fn test_dependent_constrained_new_some_projection_requires_option_match() {
+    let text = r#"
+    inductive Option[T] {
+        none
+        some(T)
+    }
+
+    type Nat: axiom
+    let lt: (Nat, Nat) -> Bool = axiom
+
+    structure Fin[n: Nat] {
+        value: Nat
+    } constraint {
+        lt(value, n)
+    }
+
+    theorem goal(n: Nat, x: Nat, y: Fin[n]) {
+        Fin[n].new(x) = Option.some(y) implies y.value = x
+    }
+    "#;
+    verify_succeeds(text);
+}

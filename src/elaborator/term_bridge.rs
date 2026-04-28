@@ -221,6 +221,75 @@ impl<'a> TermBridge<'a> {
         }
     }
 
+    fn is_syntactic_kind_term(term: &Term) -> bool {
+        fn go(term: crate::kernel::term::TermRef<'_>) -> bool {
+            use crate::kernel::term::Decomposition;
+            match term.decompose() {
+                Decomposition::Atom(atom) => matches!(
+                    atom,
+                    Atom::Symbol(Symbol::Type0) | Atom::Symbol(Symbol::Typeclass(_))
+                ),
+                Decomposition::Pi(input, output) => go(input) && go(output),
+                Decomposition::Application(_, _)
+                | Decomposition::Lambda(_, _)
+                | Decomposition::ForAll(_, _)
+                | Decomposition::Exists(_, _) => false,
+            }
+        }
+        go(term.as_ref())
+    }
+
+    fn is_syntactic_type_term(&self, term: &Term, local_context: &LocalContext) -> bool {
+        fn go(
+            bridge: &TermBridge<'_>,
+            term: crate::kernel::term::TermRef<'_>,
+            local_context: &LocalContext,
+        ) -> bool {
+            use crate::kernel::term::Decomposition;
+            match term.decompose() {
+                Decomposition::Atom(atom) => match atom {
+                    Atom::Symbol(Symbol::Type(_))
+                    | Atom::Symbol(Symbol::Bool)
+                    | Atom::Symbol(Symbol::Type0)
+                    | Atom::Symbol(Symbol::Typeclass(_)) => true,
+                    Atom::FreeVariable(i) => local_context
+                        .get_var_type(*i as usize)
+                        .is_some_and(|t| t.as_ref().is_type_param_kind()),
+                    Atom::BoundVariable(_) => true,
+                    _ => false,
+                },
+                Decomposition::Application(_, _) => {
+                    if let Some((head, args)) = term.split_application_multi() {
+                        if let Some(ground_id) = head.as_ref().as_type_atom() {
+                            let param_kinds =
+                                bridge.kernel_context.type_store.get_param_kinds(ground_id);
+                            if param_kinds.len() == args.len() {
+                                return args.iter().zip(param_kinds.iter()).all(|(arg, kind)| {
+                                    if kind.as_ref().is_type_param_kind() {
+                                        go(bridge, arg.as_ref(), local_context)
+                                    } else {
+                                        true
+                                    }
+                                });
+                            }
+                        }
+                    }
+
+                    let Decomposition::Application(func, arg) = term.decompose() else {
+                        unreachable!();
+                    };
+                    go(bridge, func, local_context) && go(bridge, arg, local_context)
+                }
+                Decomposition::Pi(_, _) => true,
+                Decomposition::Lambda(_, _)
+                | Decomposition::ForAll(_, _)
+                | Decomposition::Exists(_, _) => false,
+            }
+        }
+
+        go(self, term.as_ref(), local_context)
+    }
+
     fn instantiate_symbol_for_match(
         &self,
         symbol: Symbol,
@@ -616,51 +685,6 @@ impl<'a> TermBridge<'a> {
         let mut value_args: Vec<AcornValue> = vec![];
         let mut remaining_head_type = head_type.clone();
 
-        fn is_syntactic_type_term(term: &Term, local_context: &LocalContext) -> bool {
-            fn go(term: crate::kernel::term::TermRef<'_>, local_context: &LocalContext) -> bool {
-                use crate::kernel::term::Decomposition;
-                match term.decompose() {
-                    Decomposition::Atom(atom) => match atom {
-                        Atom::Symbol(Symbol::Type(_))
-                        | Atom::Symbol(Symbol::Bool)
-                        | Atom::Symbol(Symbol::Type0)
-                        | Atom::Symbol(Symbol::Typeclass(_)) => true,
-                        Atom::FreeVariable(i) => local_context
-                            .get_var_type(*i as usize)
-                            .is_some_and(|t| t.as_ref().is_type_param_kind()),
-                        Atom::BoundVariable(_) => true,
-                        _ => false,
-                    },
-                    Decomposition::Application(func, arg) => {
-                        go(func, local_context) && go(arg, local_context)
-                    }
-                    Decomposition::Pi(_, _) => true,
-                    Decomposition::Lambda(_, _)
-                    | Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _) => false,
-                }
-            }
-            go(term.as_ref(), local_context)
-        }
-
-        fn is_syntactic_kind_term(term: &Term) -> bool {
-            fn go(term: crate::kernel::term::TermRef<'_>) -> bool {
-                use crate::kernel::term::Decomposition;
-                match term.decompose() {
-                    Decomposition::Atom(atom) => matches!(
-                        atom,
-                        Atom::Symbol(Symbol::Type0) | Atom::Symbol(Symbol::Typeclass(_))
-                    ),
-                    Decomposition::Pi(input, output) => go(input) && go(output),
-                    Decomposition::Application(_, _)
-                    | Decomposition::Lambda(_, _)
-                    | Decomposition::ForAll(_, _)
-                    | Decomposition::Exists(_, _) => false,
-                }
-            }
-            go(term.as_ref())
-        }
-
         // Shifts existing quoted args upward when we need to insert missing lambda binders
         // ahead of them for partially applied logical builtins.
         fn shift_for_inserted_lambda(
@@ -680,8 +704,8 @@ impl<'a> TermBridge<'a> {
                 .map(|(input, _)| input.to_owned());
             let is_type_arg = expected_input_type
                 .as_ref()
-                .is_some_and(is_syntactic_kind_term)
-                && is_syntactic_type_term(arg, local_context);
+                .is_some_and(Self::is_syntactic_kind_term)
+                && self.is_syntactic_type_term(arg, local_context);
 
             if is_type_arg {
                 let typeclass = expected_input_type

@@ -223,6 +223,7 @@ impl ClaimCodec {
         let mut value_arg_codes = vec![];
         let mut value_lambda_arg_types = vec![];
         let mut value_arg_values = vec![];
+        let mut value_decl_names_in_scope = vec![];
         let mut next_value_decl_id = 0;
         let mut value_decl_name_by_var = vec![None; local_context.len()];
 
@@ -333,8 +334,10 @@ impl ClaimCodec {
             value_decl_codes.push(format!(
                 "{}: {}",
                 var_name,
-                generator.type_to_expr(&acorn_type)?
+                generator
+                    .type_to_code_with_initial_vars(&acorn_type, &value_decl_names_in_scope)?
             ));
+            value_decl_names_in_scope.push(var_name.clone());
 
             let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
             let arg_value = if substituted_arg_term.max_variable().is_some() {
@@ -715,14 +718,16 @@ impl ClaimCodec {
         for (arg_name, arg_type) in arg_names.iter().zip(specialized_arg_types.iter()) {
             specialized_stack.insert(arg_name.clone(), arg_type.clone());
         }
-        let args = shape
-            .value_args
-            .iter()
-            .zip(specialized_arg_types.iter())
-            .map(|(expr, arg_type)| {
-                evaluator.evaluate_value_with_stack(&mut specialized_stack, expr, Some(arg_type))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut args = Vec::with_capacity(shape.value_args.len());
+        for (expr, arg_type) in shape.value_args.iter().zip(specialized_arg_types.iter()) {
+            let expected_type = arg_type.bind_values(0, 0, &args);
+            let value = evaluator.evaluate_value_with_stack(
+                &mut specialized_stack,
+                expr,
+                Some(&expected_type),
+            )?;
+            args.push(value);
+        }
         stack.remove_all(&arg_names);
 
         let function_value = ClaimFunctionValue {

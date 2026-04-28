@@ -3,7 +3,7 @@ use std::fmt;
 use tower_lsp::lsp_types::{LanguageString, MarkedString};
 
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, DependentTypeArg, PotentialType, Typeclass,
+    AcornType, Datatype, DependentTypeArg, FamilyParamKind, PotentialType, Typeclass,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, ConstantInstance};
 use crate::elaborator::binding_map::BindingMap;
@@ -418,6 +418,160 @@ impl CodeGenerator<'_> {
         // Reference this type via referencing the imported module
         let module = self.module_to_expr(datatype.module_id)?;
         Ok(module.add_dot_str(&datatype.name))
+    }
+
+    fn datatype_receiver_expr(
+        &self,
+        datatype: &Datatype,
+        type_params: &[AcornType],
+        type_param_names: &[String],
+        bound_value_args: &[AcornValue],
+    ) -> Result<Expression> {
+        let base_expr = self.datatype_to_expr(datatype)?;
+        if bound_value_args.is_empty() && !type_params.is_empty() {
+            return self.parametrize_expr(base_expr, type_params);
+        }
+
+        let Some(param_kinds) = self.bindings.get_datatype_family_param_kinds(datatype) else {
+            return Err(Error::GeneratedBadCode(format!(
+                "missing family parameter kinds for specialized datatype attribute '{}'",
+                datatype.name
+            )));
+        };
+
+        let mut remaining_type_params = type_params.iter();
+        let mut remaining_type_param_names = type_param_names.iter();
+        let mut remaining_value_args = bound_value_args.iter();
+        let mut family_args = vec![];
+        for kind in param_kinds {
+            match kind {
+                FamilyParamKind::Type(_) => {
+                    if let Some(type_param) = remaining_type_params.next() {
+                        family_args.push(DependentTypeArg::Type(type_param.clone()));
+                        continue;
+                    }
+                    let Some(type_param_name) = remaining_type_param_names.next() else {
+                        return Err(Error::GeneratedBadCode(format!(
+                            "missing type argument while rendering specialized datatype attribute '{}'",
+                            datatype.name
+                        )));
+                    };
+                    let FamilyParamKind::Type(typeclass) = kind else {
+                        unreachable!();
+                    };
+                    family_args.push(DependentTypeArg::Type(AcornType::Variable(
+                        crate::elaborator::acorn_type::TypeParam {
+                            name: type_param_name.clone(),
+                            typeclass: typeclass.clone(),
+                        },
+                    )));
+                }
+                FamilyParamKind::Value(_) => {
+                    let Some(value_arg) = remaining_value_args.next() else {
+                        return Err(Error::GeneratedBadCode(format!(
+                            "missing value argument while rendering specialized datatype attribute '{}'",
+                            datatype.name
+                        )));
+                    };
+                    family_args.push(DependentTypeArg::Value(value_arg.clone()));
+                }
+            }
+        }
+
+        if remaining_type_params.next().is_some()
+            || remaining_type_param_names.next().is_some()
+            || remaining_value_args.next().is_some()
+        {
+            return Err(Error::GeneratedBadCode(format!(
+                "extra arguments while rendering specialized datatype attribute '{}'",
+                datatype.name
+            )));
+        }
+
+        self.parametrize_family_expr(base_expr, &family_args)
+    }
+
+    fn datatype_prefers_receiver_specialization(&self, datatype: &Datatype) -> bool {
+        self.bindings
+            .get_datatype_family_param_kinds(datatype)
+            .is_some_and(|param_kinds| {
+                param_kinds
+                    .iter()
+                    .any(|kind| matches!(kind, FamilyParamKind::Value(_)))
+            })
+    }
+
+    fn datatype_attribute_expr_plain(&self, datatype: &Datatype, attr: &str) -> Result<Expression> {
+        let receiver = self.datatype_to_expr(datatype)?;
+        if attr.chars().all(|ch| ch.is_ascii_digit()) {
+            return Ok(Expression::generate_dot(
+                receiver,
+                Expression::Singleton(TokenType::Numeral.new_token(attr)),
+            ));
+        }
+        Ok(receiver.add_dot_str(attr))
+    }
+
+    fn datatype_attribute_expr(
+        &self,
+        ci: &ConstantInstance,
+        datatype: &Datatype,
+        attr: &str,
+    ) -> Result<Expression> {
+        let receiver = self.datatype_receiver_expr(
+            datatype,
+            &ci.params,
+            &ci.type_param_names,
+            &ci.bound_value_args,
+        )?;
+        if attr.chars().all(|ch| ch.is_ascii_digit()) {
+            return Ok(Expression::generate_dot(
+                receiver,
+                Expression::Singleton(TokenType::Numeral.new_token(attr)),
+            ));
+        }
+        Ok(receiver.add_dot_str(attr))
+    }
+
+    fn datatype_attribute_expr_for_family_args(
+        &self,
+        datatype: &Datatype,
+        type_params: &[AcornType],
+        family_value_args: &[AcornValue],
+        attr: &str,
+    ) -> Result<Expression> {
+        let receiver =
+            self.datatype_receiver_expr(datatype, type_params, &[], family_value_args)?;
+        if attr.chars().all(|ch| ch.is_ascii_digit()) {
+            return Ok(Expression::generate_dot(
+                receiver,
+                Expression::Singleton(TokenType::Numeral.new_token(attr)),
+            ));
+        }
+        Ok(receiver.add_dot_str(attr))
+    }
+
+    fn canonical_datatype_attribute_expr(
+        &self,
+        ci: &ConstantInstance,
+        datatype: &Datatype,
+        attr: &str,
+    ) -> Result<Expression> {
+        if self.datatype_prefers_receiver_specialization(datatype) {
+            self.datatype_attribute_expr(ci, datatype, attr)
+        } else {
+            self.datatype_attribute_expr_plain(datatype, attr)
+        }
+    }
+
+    fn constant_uses_receiver_specialization(&self, ci: &ConstantInstance) -> bool {
+        match &ci.name {
+            ConstantName::DatatypeAttribute(_, datatype, _)
+            | ConstantName::SpecificDatatypeAttribute(_, datatype, _, _) => {
+                self.datatype_prefers_receiver_specialization(datatype)
+            }
+            _ => false,
+        }
     }
 
     /// Returns an error if this type can't be encoded as an expression.
@@ -1071,6 +1225,26 @@ impl CodeGenerator<'_> {
         Ok(expr.to_string())
     }
 
+    fn type_to_code_with_initial_vars_internal(
+        &mut self,
+        acorn_type: &AcornType,
+        initial_var_names: &[String],
+    ) -> Result<String> {
+        let initial_len = self.var_names.len();
+        self.var_names.extend(initial_var_names.iter().cloned());
+        let code = self.type_to_code(acorn_type)?;
+        self.var_names.truncate(initial_len);
+        Ok(code)
+    }
+
+    pub(crate) fn type_to_code_with_initial_vars(
+        &mut self,
+        acorn_type: &AcornType,
+        initial_var_names: &[String],
+    ) -> Result<String> {
+        self.type_to_code_with_initial_vars_internal(acorn_type, initial_var_names)
+    }
+
     /// Render the optional `[T, U: Trait]` prefix used by witness declarations.
     fn format_type_params(
         &self,
@@ -1101,25 +1275,26 @@ impl CodeGenerator<'_> {
     ) -> Result<String> {
         let type_params = self.format_type_params(&step.type_params)?;
         if let Some(return_name) = &step.return_name {
-            let args: Result<Vec<String>> = step
-                .arguments
-                .iter()
-                .map(|(name, arg_type)| Ok(format!("{}: {}", name, self.type_to_code(arg_type)?)))
-                .collect();
-            let mut initial_vars: Vec<String> = step
-                .arguments
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            let mut args = vec![];
+            let mut arg_names_in_scope = vec![];
+            for (name, arg_type) in &step.arguments {
+                let arg_type_code =
+                    self.type_to_code_with_initial_vars(arg_type, &arg_names_in_scope)?;
+                args.push(format!("{}: {}", name, arg_type_code));
+                arg_names_in_scope.push(name.clone());
+            }
+            let mut initial_vars = arg_names_in_scope.clone();
             initial_vars.push(return_name.clone());
             let condition = self.value_to_code_with_initial_vars(&step.condition, &initial_vars)?;
+            let return_type =
+                self.type_to_code_with_initial_vars(&step.return_type, &arg_names_in_scope)?;
             return Ok(format!(
                 "let {}{}({}) -> {}: {} satisfy {{ {} }}",
                 step.name,
                 type_params,
-                args?.join(", "),
+                args.join(", "),
                 return_name,
-                self.type_to_code(&step.return_type)?,
+                return_type,
                 condition,
             ));
         }
@@ -1284,12 +1459,10 @@ impl CodeGenerator<'_> {
             return Ok(match &ci.name {
                 ConstantName::Unqualified(_, word) => Expression::generate_identifier(word),
                 ConstantName::DatatypeAttribute(_, datatype, attr) => {
-                    Expression::generate_identifier(&datatype.name).add_dot_str(attr)
+                    return self.canonical_datatype_attribute_expr(ci, datatype, attr);
                 }
                 ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
-                    // Generate the same expression as for generic attributes
-                    // The specific type information is not needed in the generated code
-                    Expression::generate_identifier(&datatype.name).add_dot_str(attr)
+                    return self.canonical_datatype_attribute_expr(ci, datatype, attr);
                 }
                 ConstantName::TypeclassAttribute(_, tc, attr) => {
                     Expression::generate_identifier(&tc.name).add_dot_str(attr)
@@ -1315,8 +1488,16 @@ impl CodeGenerator<'_> {
                 name: rname.to_string(),
             };
             if let Some(alias) = self.bindings.datatype_alias(&datatype) {
-                let lhs = Expression::generate_identifier(alias);
-                return Ok(lhs.add_dot_str(attr));
+                match &ci.name {
+                    ConstantName::DatatypeAttribute(..)
+                    | ConstantName::SpecificDatatypeAttribute(..) => {
+                        return self.canonical_datatype_attribute_expr(ci, &datatype, attr);
+                    }
+                    _ => {
+                        let lhs = Expression::generate_identifier(alias);
+                        return Ok(lhs.add_dot_str(attr));
+                    }
+                }
             }
 
             // Check if this is a typeclass attribute
@@ -1335,10 +1516,10 @@ impl CodeGenerator<'_> {
         match &ci.name {
             ConstantName::Unqualified(_, name) => Ok(module.add_dot_str(name)),
             ConstantName::DatatypeAttribute(_, datatype, attr) => {
-                Ok(module.add_dot_str(&datatype.name).add_dot_str(attr))
+                self.canonical_datatype_attribute_expr(ci, datatype, attr)
             }
             ConstantName::SpecificDatatypeAttribute(_, datatype, _types, attr) => {
-                Ok(module.add_dot_str(&datatype.name).add_dot_str(attr))
+                self.canonical_datatype_attribute_expr(ci, datatype, attr)
             }
             ConstantName::TypeclassAttribute(_, tc, attr) => {
                 Ok(module.add_dot_str(&tc.name).add_dot_str(attr))
@@ -1526,6 +1707,36 @@ impl CodeGenerator<'_> {
                         &AcornValue::apply(public_function, fa.args.clone()),
                         false,
                     );
+                }
+
+                if let AcornValue::Constant(c) = fa.function.as_ref() {
+                    match &c.name {
+                        ConstantName::DatatypeAttribute(_, datatype, attr)
+                        | ConstantName::SpecificDatatypeAttribute(_, datatype, _, attr)
+                            if !c.value_param_types.is_empty()
+                                && fa.args.len() >= c.value_param_types.len() =>
+                        {
+                            let family_value_arg_count = c.value_param_types.len();
+                            let bound = self.datatype_attribute_expr_for_family_args(
+                                datatype,
+                                &c.params,
+                                &fa.args[..family_value_arg_count],
+                                attr,
+                            )?;
+                            let remaining_arg_exprs = fa.args[family_value_arg_count..]
+                                .iter()
+                                .map(|arg| self.value_to_expr(arg, false))
+                                .collect::<Result<Vec<_>>>()?;
+                            if remaining_arg_exprs.is_empty() {
+                                return Ok(bound);
+                            }
+                            return Ok(Expression::Concatenation(
+                                Box::new(bound),
+                                Box::new(Expression::generate_paren_grouping(remaining_arg_exprs)),
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
 
                 let mut arg_exprs = vec![];
@@ -1780,7 +1991,12 @@ impl CodeGenerator<'_> {
                 // type_param_names - it uses types from enclosing scope but isn't polymorphic.
                 let is_polymorphic = !c.type_param_names.is_empty()
                     || matches!(c.name, ConstantName::TypeclassAttribute(..));
-                if !inferrable && !c.params.is_empty() && is_polymorphic {
+                let receiver_already_specialized = self.constant_uses_receiver_specialization(c);
+                if !inferrable
+                    && !c.params.is_empty()
+                    && is_polymorphic
+                    && !receiver_already_specialized
+                {
                     self.parametrize_expr(const_expr, &c.params)
                 } else {
                     // We don't need to parametrize because it can be inferred

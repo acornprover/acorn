@@ -1162,6 +1162,143 @@ fn test_code_generator_omits_type_params_when_arity_changes() {
     );
 }
 
+#[test]
+fn test_code_generator_preserves_attr_specialization_for_type_only_datatypes() {
+    use crate::code_generator::CodeGenerator;
+
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/list.ac",
+        r#"
+        inductive List[T] {
+            nil
+            cons(T, List[T])
+        }
+        "#,
+    );
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        from list import List
+
+        theorem goal[T] {
+            exists(x: List[T]) { x = List.nil[T] }
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let mut norm = KernelContext::new();
+    let clauses = norm.get_all_clauses(&env);
+
+    let mut found_nil_clause = false;
+    for clause in &clauses {
+        let quoted = norm.quote_clause(clause, None, None, false);
+        let denorm_code = format!("{}", quoted);
+        if !denorm_code.contains("nil") {
+            continue;
+        }
+
+        let mut generator = CodeGenerator::new_for_certificate(&env.bindings);
+        let generated_code = generator.value_to_code(&quoted).unwrap();
+        if !generated_code.contains("nil") {
+            continue;
+        }
+
+        found_nil_clause = true;
+        assert!(
+            generated_code.contains("List.nil["),
+            "expected type-only datatype attribute specialization to stay on the attribute\n\
+             denormalized: {}\n\
+             generated: {}",
+            denorm_code,
+            generated_code
+        );
+        break;
+    }
+
+    assert!(
+        found_nil_clause,
+        "Test setup error: no quoted clause mentioning List.nil was found"
+    );
+}
+
+#[test]
+fn test_code_generator_uses_receiver_specialization_for_value_indexed_datatypes() {
+    use crate::code_generator::CodeGenerator;
+
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+        let lt: (Nat, Nat) -> Bool = axiom
+
+        inductive Option[T] {
+            none
+            some(T)
+        }
+
+        structure Fin[n: Nat] {
+            value: Nat
+        } constraint {
+            lt(value, n)
+        }
+
+        theorem goal(n: Nat, x: Nat) {
+            exists(y: Fin[n]) { Fin[n].new(x) = Option.some(y) }
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let mut norm = KernelContext::new();
+    let clauses = norm.get_all_clauses(&env);
+
+    let mut found_new_clause = false;
+    for clause in &clauses {
+        let quoted = norm.quote_clause(clause, None, None, false);
+        let denorm_code = format!("{}", quoted);
+        if !denorm_code.contains("Fin") || !denorm_code.contains("new") {
+            continue;
+        }
+
+        let mut generator = CodeGenerator::new_for_certificate(&env.bindings);
+        let generated_code = generator.value_to_code(&quoted).unwrap();
+        if !generated_code.contains("new") {
+            continue;
+        }
+
+        found_new_clause = true;
+        assert!(
+            generated_code.contains("Fin[") && generated_code.contains("].new("),
+            "expected value-indexed datatype attribute specialization to stay on the receiver\n\
+             denormalized: {}\n\
+             generated: {}",
+            denorm_code,
+            generated_code
+        );
+        break;
+    }
+
+    assert!(
+        found_new_clause,
+        "Test setup error: no quoted clause mentioning Fin.new was found"
+    );
+}
+
 /// Test that type variables in quoted clauses are displayed with proper formatting:
 /// - Type variables should use "T" prefix (T0, T1) instead of "x" prefix
 /// - Type variables should appear in forall with their kind (Type0 or typeclass name)
