@@ -326,14 +326,6 @@ enum Command {
         #[clap(long, help = "Exit immediately on the first verification failure.")]
         fail_fast: bool,
 
-        /// Reject any use of the axiom keyword
-        #[clap(
-            long,
-            default_value = "false",
-            help = "Reject any use of the axiom keyword."
-        )]
-        strict: bool,
-
         /// Timeout in seconds for proof search (default: 5)
         #[clap(
             long,
@@ -623,7 +615,6 @@ async fn main() {
             read_only,
             line_flag,
             fail_fast,
-            strict,
             timeout,
             activations,
             shallow,
@@ -694,8 +685,7 @@ async fn main() {
             verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = false;
-            verifier.builder.strict = strict;
-            verifier.builder.check_hashes = !ignore_hash && !strict;
+            verifier.builder.check_hashes = !ignore_hash;
             verifier.builder.shallow_search = shallow;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -1502,6 +1492,12 @@ mod tests {
             Some(Command::Check { strict, .. }) => assert!(strict),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_verify_rejects_strict_flag() {
+        let error = Args::try_parse_from(["acorn", "verify", "--strict"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
