@@ -1267,6 +1267,38 @@ impl<'a> TermBridge<'a> {
         ) {
             return family_type;
         }
+        if type_term.as_ref().split_pi().is_some() {
+            let mut arg_types = vec![];
+            let mut current_context = local_context.clone();
+            let mut current_term = type_term;
+
+            while let Some((input, output)) = current_term.as_ref().split_pi() {
+                let input_owned = input.to_owned();
+                if !input_owned.as_ref().is_type_param_kind() {
+                    arg_types.push(self.quote_type_with_context(
+                        input_owned.clone(),
+                        &current_context,
+                        instantiate_type_vars,
+                    ));
+                }
+
+                let fresh_var = current_context.push_type(input_owned) as AtomId;
+                current_term = output
+                    .to_owned()
+                    .substitute_bound(0, &Term::new_variable(fresh_var))
+                    .shift_bound(0, -1);
+            }
+
+            let return_type =
+                self.quote_type_with_context(current_term, &current_context, instantiate_type_vars);
+            if arg_types.is_empty() {
+                return return_type;
+            }
+            return AcornType::Function(crate::elaborator::acorn_type::FunctionType {
+                arg_types,
+                return_type: Box::new(return_type),
+            });
+        }
         self.kernel_context
             .type_store
             .type_term_to_acorn_type_with_context(&type_term, local_context, instantiate_type_vars)
