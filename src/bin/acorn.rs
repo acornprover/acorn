@@ -401,6 +401,14 @@ enum Command {
             value_name = "CERT"
         )]
         cert: Option<String>,
+
+        /// Reject any use of the axiom keyword
+        #[clap(
+            long,
+            default_value = "false",
+            help = "Reject any use of the axiom keyword."
+        )]
+        strict: bool,
     },
 
     /// Re-prove goals without using the cache
@@ -715,6 +723,7 @@ async fn main() {
             line_positional,
             line_flag,
             cert,
+            strict,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -758,6 +767,7 @@ async fn main() {
             verifier.builder.print_proof = false;
             verifier.line_selection = line_selection;
             verifier.builder.check_mode = true;
+            verifier.builder.strict = strict;
             verifier.builder.check_hashes = false;
             verifier.builder.operation_verb = "checked";
 
@@ -1479,6 +1489,17 @@ mod tests {
 
         match args.command {
             Some(Command::Verify { shallow, .. }) => assert!(shallow),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_check_accepts_strict_flag() {
+        let args = Args::try_parse_from(["acorn", "check", "--strict"])
+            .expect("check strict flag should parse");
+
+        match args.command {
+            Some(Command::Check { strict, .. }) => assert!(strict),
             _ => panic!("unexpected command"),
         }
     }
