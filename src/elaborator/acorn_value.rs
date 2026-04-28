@@ -21,16 +21,18 @@ impl FunctionApplication {
     /// Gets the type of this function application result
     pub fn get_type(&self) -> AcornType {
         let (base, all_args) = self.flattened_head_and_args();
-        let (function_type, checked_args_start) =
+        let (function_type, checked_args_start, binding_offset) =
             Self::resolved_function_type_for_flattened_application(base, &all_args);
         let mut current_type = function_type;
         for arg in &all_args[checked_args_start..] {
             let AcornType::Function(ftype) = current_type else {
                 panic!("FunctionApplication's function is not a function type");
             };
-            current_type = ftype
-                .applied_type(1)
-                .bind_values(0, 0, std::slice::from_ref(arg));
+            current_type = ftype.applied_type(1).bind_values(
+                binding_offset,
+                binding_offset,
+                std::slice::from_ref(arg),
+            );
         }
         current_type
     }
@@ -68,7 +70,7 @@ impl FunctionApplication {
                 }
             }
         }
-        let (function_type, checked_args_start) =
+        let (function_type, checked_args_start, binding_offset) =
             Self::resolved_function_type_for_flattened_application(base, &all_args);
         let remaining_args = &all_args[checked_args_start..];
         let mut current_type = function_type;
@@ -90,9 +92,11 @@ impl FunctionApplication {
                     arg_type
                 ));
             }
-            current_type = ftype
-                .applied_type(1)
-                .bind_values(0, 0, std::slice::from_ref(arg));
+            current_type = ftype.applied_type(1).bind_values(
+                binding_offset,
+                binding_offset,
+                std::slice::from_ref(arg),
+            );
         }
         Ok(())
     }
@@ -124,11 +128,13 @@ impl FunctionApplication {
     fn resolved_function_type_for_flattened_application(
         base: &AcornValue,
         all_args: &[AcornValue],
-    ) -> (AcornType, usize) {
+    ) -> (AcornType, usize, AtomId) {
         match base {
-            AcornValue::Constant(constant) if !constant.bound_value_args.is_empty() => {
-                (constant.instance_type.clone(), 0)
-            }
+            AcornValue::Constant(constant) if !constant.bound_value_args.is_empty() => (
+                constant.instance_type.clone(),
+                0,
+                constant.bound_value_args.len() as AtomId,
+            ),
             AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
                 let num_specialization_args =
                     constant.pending_value_specialization_arg_count(all_args.len());
@@ -138,21 +144,26 @@ impl FunctionApplication {
                 let mut function_type = constant
                     .instance_type
                     .bind_value_params(&all_args[..num_specialization_args]);
+                let binding_offset = constant.bound_value_args.len() as AtomId;
                 if visible_prefix_count > 0 {
                     for arg in &all_args[..visible_prefix_count] {
                         function_type = match function_type {
                             AcornType::Function(function_type) => function_type
                                 .applied_type(1)
-                                .bind_values(0, 0, std::slice::from_ref(arg)),
+                                .bind_values(
+                                    binding_offset,
+                                    binding_offset,
+                                    std::slice::from_ref(arg),
+                                ),
                             _ => panic!(
                                 "Function application has invalid visible dependent value parameters"
                             ),
                         };
                     }
                 }
-                (function_type, num_specialization_args)
+                (function_type, num_specialization_args, binding_offset)
             }
-            _ => (base.get_type(), 0),
+            _ => (base.get_type(), 0, 0),
         }
     }
 }
@@ -2853,6 +2864,7 @@ impl AcornValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elaborator::acorn_type::DependentTypeArg;
     use crate::module::ModuleId;
 
     #[test]
@@ -2968,5 +2980,102 @@ mod tests {
                 vec![AcornType::Variable(u_param.clone())]
             )
         );
+    }
+
+    #[test]
+    fn test_bind_value_params_keeps_outer_value_args_stable_through_function_type() {
+        let nat_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let fin_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Fin".to_string(),
+        };
+        let nat_type = AcornType::Data(nat_datatype, vec![]);
+        let family_arg = DependentTypeArg::Value(AcornValue::Variable(0, nat_type.clone()));
+        let function_type = AcornType::functional(
+            vec![
+                nat_type.clone(),
+                AcornType::Family(fin_datatype.clone(), vec![family_arg.clone()]),
+            ],
+            AcornType::Family(fin_datatype, vec![family_arg]),
+        );
+
+        let bound = function_type.bind_value_params(&[AcornValue::Variable(0, nat_type.clone())]);
+        let expected = AcornType::functional(
+            vec![
+                nat_type.clone(),
+                AcornType::Family(
+                    Datatype {
+                        module_id: ModuleId(0),
+                        name: "Fin".to_string(),
+                    },
+                    vec![DependentTypeArg::Value(AcornValue::Variable(
+                        0,
+                        nat_type.clone(),
+                    ))],
+                ),
+            ],
+            AcornType::Family(
+                Datatype {
+                    module_id: ModuleId(0),
+                    name: "Fin".to_string(),
+                },
+                vec![DependentTypeArg::Value(AcornValue::Variable(0, nat_type))],
+            ),
+        );
+
+        assert_eq!(bound, expected);
+    }
+
+    #[test]
+    fn test_function_application_type_keeps_hidden_family_args_stable() {
+        struct TestContext;
+        impl crate::elaborator::error::ErrorContext for TestContext {
+            fn error(&self, msg: &str) -> crate::elaborator::error::Error {
+                let token = crate::syntax::token::Token::empty();
+                crate::elaborator::error::Error::new(&token, &token, msg)
+            }
+        }
+
+        let nat_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let option_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Option".to_string(),
+        };
+        let fin_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Fin".to_string(),
+        };
+        let nat_type = AcornType::Data(nat_datatype, vec![]);
+        let fin_of_n = AcornType::Family(
+            fin_datatype,
+            vec![DependentTypeArg::Value(AcornValue::Variable(
+                0,
+                nat_type.clone(),
+            ))],
+        );
+        let option_fin_of_n = AcornType::Data(option_datatype, vec![fin_of_n.clone()]);
+        let new_constant = ConstantInstance {
+            name: ConstantName::unqualified(ModuleId(0), "new"),
+            params: vec![],
+            instance_type: AcornType::functional(vec![nat_type.clone()], option_fin_of_n.clone()),
+            generic_type: AcornType::functional(vec![nat_type.clone()], option_fin_of_n.clone()),
+            type_param_names: vec![],
+            value_param_types: vec![nat_type.clone()],
+            bound_value_args: vec![],
+        }
+        .bind_value_params(&[AcornValue::Variable(0, nat_type.clone())], &TestContext)
+        .expect("specialize constant");
+
+        let applied = AcornValue::apply(
+            AcornValue::Constant(new_constant),
+            vec![AcornValue::Variable(1, nat_type)],
+        );
+        assert_eq!(applied.get_type(), option_fin_of_n);
     }
 }

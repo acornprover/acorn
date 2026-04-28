@@ -122,6 +122,21 @@ impl VariableMap {
         output
     }
 
+    pub(crate) fn build_output_context_from_replacement_context(
+        &self,
+        replacement_context: &LocalContext,
+    ) -> LocalContext {
+        let mut output = LocalContext::empty();
+        for opt_term in &self.map {
+            if let Some(term) = opt_term {
+                for (var_id, var_type) in term.collect_vars(replacement_context) {
+                    output.set_type(var_id as usize, var_type.to_owned());
+                }
+            }
+        }
+        output
+    }
+
     pub fn get_mapping(&self, i: AtomId) -> Option<&Term> {
         let i = i as usize;
         if i >= self.map.len() {
@@ -603,7 +618,8 @@ impl VariableMap {
     ) -> Clause {
         let input_context = clause.get_local_context();
         // Build output context from replacement terms
-        let mut output_context = self.build_output_context(replacement_context);
+        let mut output_context =
+            self.build_output_context_from_replacement_context(replacement_context);
         // Also need to include unmapped variables from the input clause
         // These keep their original types from the input context
         for i in 0..input_context.len() {
@@ -867,5 +883,42 @@ mod tests {
         );
         assert_eq!(var_map.get_mapping(0), Some(&kctx.parse_term("g1(c0)")));
         assert_eq!(var_map.get_mapping(1), Some(&kctx.parse_term("g3(c0)")));
+    }
+
+    #[test]
+    fn test_specialize_clause_with_replacement_context_preserves_replacement_var_types() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_type_constructor("List", 1);
+        let local_context =
+            LocalContext::from_types(vec![Term::type_sort(), kctx.parse_type("List[T0]")]);
+
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::new(
+                true,
+                Term::new_variable(1),
+                Term::new_variable(1),
+            )],
+            &local_context,
+        );
+        let replacement_context = local_context;
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::bool_type());
+        var_map.set(1, Term::new_variable(1));
+
+        let specialized = var_map.specialize_clause_with_replacement_context(
+            &clause,
+            &replacement_context,
+            &kctx,
+        );
+        let specialized_var_type = specialized
+            .get_local_context()
+            .get_var_type(1)
+            .expect("x1 should remain in the output context");
+
+        assert_eq!(
+            specialized_var_type,
+            &kctx.parse_type("List[T0]"),
+            "replacement-context variable types should be copied, not specialized through the generic var_map"
+        );
     }
 }

@@ -2103,4 +2103,51 @@ theorem goal(s: Nat -> Container, h: Bool) {
         assert_eq!(output.status, BuildStatus::Good);
         assert!(output.metrics.goals_success >= 1);
     }
+
+    #[test]
+    fn test_verifier_constrained_dependent_function_satisfy() {
+        let (acornlib, src, _) = setup();
+
+        src.child("main.ac")
+            .write_str(
+                r#"
+                type Nat: axiom
+                let lt: (Nat, Nat) -> Bool = axiom
+
+                structure Fin[n: Nat] {
+                    value: Nat
+                } constraint {
+                    lt(value, n)
+                }
+
+                let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+                    result = x
+                }
+
+                theorem goal(n: Nat, x: Fin[n]) {
+                    choose_self(n, x) = x
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+
+        let result = verifier.run();
+        assert!(
+            result.is_ok(),
+            "Verifier should successfully verify constrained dependent function satisfy: {:?}",
+            result
+        );
+
+        let output = result.unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert!(output.metrics.goals_success >= 1);
+    }
 }

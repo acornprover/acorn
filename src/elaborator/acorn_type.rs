@@ -864,21 +864,16 @@ impl AcornType {
                     .collect(),
             ),
             AcornType::Function(function_type) => {
-                let mut current_stack_size = stack_size;
                 let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| {
-                        let bound = t.bind_value_params_with_stack(current_stack_size, values);
-                        current_stack_size += 1;
-                        bound
-                    })
+                    .map(|t| t.bind_value_params_with_stack(stack_size, values))
                     .collect();
                 AcornType::functional(
                     arg_types,
                     function_type
                         .return_type
-                        .bind_value_params_with_stack(current_stack_size, values),
+                        .bind_value_params_with_stack(stack_size, values),
                 )
             }
             AcornType::Data(datatype, types) => AcornType::Data(

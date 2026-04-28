@@ -533,7 +533,8 @@ impl PremiseMap {
 
                 // Use concrete_context which has types for both conclusion vars
                 // and fresh extended vars (for eliminated pre-norm variables).
-                let output_ctx = result.build_output_context(&concrete_context);
+                let output_ctx =
+                    result.build_output_context_from_replacement_context(&concrete_context);
                 (result, output_ctx)
             })
             .collect()

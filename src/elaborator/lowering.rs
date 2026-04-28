@@ -621,7 +621,7 @@ impl KernelContext {
         let quoted = self.quote_clause(clause, None, None, false);
         quoted
             .validate()
-            .map_err(|e| format!("quoted clause should validate: {:?}", e))?;
+            .map_err(|e| format!("quoted clause should validate: {:?}\nQuoted: {}", e, quoted))?;
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let mut roundtrip_context = self.clone();
         let lowered_again = roundtrip_context.lower_clause_preserving_alias_spelling(
