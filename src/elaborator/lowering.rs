@@ -624,11 +624,62 @@ impl KernelContext {
             .map_err(|e| format!("quoted clause should validate: {:?}\nQuoted: {}", e, quoted))?;
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let mut roundtrip_context = self.clone();
-        let lowered_again = roundtrip_context.lower_clause_preserving_alias_spelling(
-            &quoted,
-            NewConstantType::Local,
-            type_var_map,
-        )?;
+        for atom in clause.iter_atoms() {
+            match atom {
+                Atom::Symbol(crate::kernel::symbol::Symbol::ScopedConstant(atom_id)) => {
+                    if roundtrip_context
+                        .symbol_table
+                        .try_name_for_local_id(*atom_id)
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    roundtrip_context
+                        .symbol_table
+                        .ensure_local_name(
+                            *atom_id,
+                            ConstantName::unqualified(
+                                crate::module::ModuleId(0),
+                                &format!("__scoped{}", atom_id),
+                            ),
+                        )
+                        .map_err(|e| {
+                            format!("failed to name scoped constant c{}: {}", atom_id, e)
+                        })?;
+                }
+                Atom::Symbol(crate::kernel::symbol::Symbol::GlobalConstant(module_id, atom_id)) => {
+                    if roundtrip_context
+                        .symbol_table
+                        .try_name_for_global_id(*module_id, *atom_id)
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    roundtrip_context
+                        .symbol_table
+                        .ensure_global_name(
+                            *module_id,
+                            *atom_id,
+                            ConstantName::unqualified(
+                                *module_id,
+                                &format!("__global{}_{}", module_id.get(), atom_id),
+                            ),
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "failed to name global constant g{}_{}: {}",
+                                module_id.get(),
+                                atom_id,
+                                e
+                            )
+                        })?;
+                }
+                _ => {}
+            }
+        }
+        let lowered_again = roundtrip_context
+            .lower_clause_preserving_alias_spelling(&quoted, NewConstantType::Local, type_var_map)
+            .map_err(|e| format!("{}\nQuoted: {}", e, quoted))?;
         if &lowered_again != clause {
             return Err(format!(
                 "quote/lower clause roundtrip mismatch: original {:?} lowered again to {:?}",

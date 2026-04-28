@@ -138,13 +138,13 @@ impl FunctionApplication {
             AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
                 let num_specialization_args =
                     constant.pending_value_specialization_arg_count(all_args.len());
+                let binding_offset = num_specialization_args as AtomId;
                 let visible_prefix_count = constant
                     .visible_value_param_prefix_count()
                     .min(num_specialization_args);
                 let mut function_type = constant
                     .instance_type
                     .bind_value_params(&all_args[..num_specialization_args]);
-                let binding_offset = constant.bound_value_args.len() as AtomId;
                 if visible_prefix_count > 0 {
                     for arg in &all_args[..visible_prefix_count] {
                         function_type = match function_type {
@@ -1654,7 +1654,8 @@ impl AcornValue {
                 None => Err(format!("variable {} is not in scope", i)),
             },
             AcornValue::Application(app) => {
-                app.typecheck()?;
+                app.typecheck()
+                    .map_err(|err| format!("{} in application {}", err, self))?;
                 app.function.validate_against_stack(stack)?;
                 for arg in &app.args {
                     arg.validate_against_stack(stack)?;
@@ -2729,6 +2730,7 @@ impl AcornValue {
             AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
                 let num_specialization_args =
                     constant.pending_value_specialization_arg_count(args.len());
+                let binding_offset = num_specialization_args as AtomId;
                 for (arg, arg_type) in args[..num_specialization_args]
                     .iter()
                     .zip(constant.value_param_types.iter())
@@ -2744,9 +2746,13 @@ impl AcornValue {
                 if visible_prefix_count > 0 {
                     for arg in &args[..visible_prefix_count] {
                         function_type = match function_type {
-                            AcornType::Function(function_type) => function_type
-                                .applied_type(1)
-                                .bind_values(0, 0, std::slice::from_ref(arg)),
+                            AcornType::Function(function_type) => {
+                                function_type.applied_type(1).bind_values(
+                                    binding_offset,
+                                    binding_offset,
+                                    std::slice::from_ref(arg),
+                                )
+                            }
                             _ => {
                                 return Err(
                                     source.error("cannot apply visible dependent value parameters")

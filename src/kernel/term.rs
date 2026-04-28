@@ -214,6 +214,7 @@ impl<'a> TermRef<'a> {
 
     fn validate_application_argument(
         input_type: TermRef<'_>,
+        arg_type: &Term,
         arg: TermRef<'_>,
         local_context: &LocalContext,
         kernel_context: &KernelContext,
@@ -225,6 +226,21 @@ impl<'a> TermRef<'a> {
                 local_context,
                 kernel_context,
             );
+        }
+        if input_type.is_type0() {
+            if arg_type.as_ref().is_type_param_kind() {
+                return Ok(());
+            }
+            return Err(format!(
+                "Argument {} has type {}, but expected {}",
+                arg, arg_type, input_type
+            ));
+        }
+        if *arg_type != input_type.to_owned() {
+            return Err(format!(
+                "Argument {} has type {}, but expected {}",
+                arg, arg_type, input_type
+            ));
         }
         Ok(())
     }
@@ -754,7 +770,7 @@ impl<'a> TermRef<'a> {
             },
             Decomposition::Application(func, arg) => {
                 let func_type = func.checked_type_with_context(local_context, kernel_context)?;
-                let _arg_type = arg.checked_type_with_context(local_context, kernel_context)?;
+                let arg_type = arg.checked_type_with_context(local_context, kernel_context)?;
                 let Some((input_type, _)) = func_type.as_ref().split_pi() else {
                     return Err(format!(
                         "Function type expected but not found during type application.\n\
@@ -767,6 +783,7 @@ impl<'a> TermRef<'a> {
                 };
                 Self::validate_application_argument(
                     input_type,
+                    &arg_type,
                     arg,
                     local_context,
                     kernel_context,

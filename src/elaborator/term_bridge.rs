@@ -10,6 +10,7 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Term;
+use crate::module::ModuleId;
 
 /// Bridge for quoting kernel terms/clauses back into Acorn surface values/types.
 pub struct TermBridge<'a> {
@@ -19,6 +20,142 @@ pub struct TermBridge<'a> {
 impl<'a> TermBridge<'a> {
     pub fn new(kernel_context: &'a KernelContext) -> Self {
         Self { kernel_context }
+    }
+
+    fn quote_dependent_type_application_with_context(
+        &self,
+        type_term: &Term,
+        local_context: &LocalContext,
+        instantiate_type_vars: bool,
+    ) -> Option<AcornType> {
+        if let Some((head, args)) = type_term.as_ref().split_application_multi() {
+            if let Some(ground_id) = head.as_ref().as_type_atom() {
+                let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
+                if param_kinds.len() == args.len() {
+                    let base_type = self
+                        .kernel_context
+                        .type_store
+                        .type_term_to_acorn_type_with_context(
+                            &Term::ground_type(ground_id),
+                            local_context,
+                            instantiate_type_vars,
+                        );
+                    let datatype = match base_type {
+                        AcornType::Data(datatype, params) if params.is_empty() => datatype,
+                        _ => panic!(
+                            "Expected ground data type in dependent type application, got {:?}",
+                            type_term
+                        ),
+                    };
+                    let family_args = args
+                        .iter()
+                        .zip(param_kinds.iter())
+                        .map(|(arg, kind)| {
+                            if kind.as_ref().is_type_param_kind() {
+                                crate::elaborator::acorn_type::DependentTypeArg::Type(
+                                    self.quote_type_with_context(
+                                        arg.to_owned(),
+                                        local_context,
+                                        instantiate_type_vars,
+                                    ),
+                                )
+                            } else {
+                                crate::elaborator::acorn_type::DependentTypeArg::Value(
+                                    self.quote_term_with_context(
+                                        arg,
+                                        local_context,
+                                        instantiate_type_vars,
+                                    ),
+                                )
+                            }
+                        })
+                        .collect();
+                    return Some(AcornType::new_datatype_application(datatype, family_args));
+                }
+            }
+        }
+        None
+    }
+
+    fn quote_standalone_symbol_type(
+        &self,
+        type_term: &Term,
+        local_context: &LocalContext,
+        instantiate_type_vars: bool,
+    ) -> AcornType {
+        if let Some(family_type) = self.quote_dependent_type_application_with_context(
+            type_term,
+            local_context,
+            instantiate_type_vars,
+        ) {
+            return family_type;
+        }
+
+        if let Some((input, output)) = type_term.as_ref().split_pi() {
+            let input_owned = input.to_owned();
+            if input_owned.as_ref().is_type_param_kind() {
+                return self
+                    .kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_context(
+                        type_term,
+                        local_context,
+                        instantiate_type_vars,
+                    );
+            }
+
+            let mut arg_types = vec![];
+            let mut current_context = local_context.clone();
+            let mut current_input = input_owned;
+            let mut current_output = output.to_owned();
+
+            loop {
+                arg_types.push(self.quote_standalone_symbol_type(
+                    &current_input,
+                    &current_context,
+                    instantiate_type_vars,
+                ));
+
+                let fresh_var = current_context.push_type(current_input.clone()) as AtomId;
+                let opened_output = current_output
+                    .substitute_bound(0, &Term::new_variable(fresh_var))
+                    .shift_bound(0, -1);
+
+                if let Some((next_input, next_output)) = opened_output.as_ref().split_pi() {
+                    let next_input_owned = next_input.to_owned();
+                    if next_input_owned.as_ref().is_type_param_kind() {
+                        let return_type = self
+                            .kernel_context
+                            .type_store
+                            .type_term_to_acorn_type_with_context(
+                                &opened_output,
+                                &current_context,
+                                instantiate_type_vars,
+                            );
+                        return AcornType::Function(crate::elaborator::acorn_type::FunctionType {
+                            arg_types,
+                            return_type: Box::new(return_type),
+                        });
+                    }
+                    current_input = next_input_owned;
+                    current_output = next_output.to_owned();
+                } else {
+                    let return_type = self.quote_standalone_symbol_type(
+                        &opened_output,
+                        &current_context,
+                        instantiate_type_vars,
+                    );
+                    return AcornType::Function(crate::elaborator::acorn_type::FunctionType {
+                        arg_types,
+                        return_type: Box::new(return_type),
+                    });
+                }
+            }
+        }
+
+        self.kernel_context
+            .type_store
+            .type_term_to_acorn_type_with_context(type_term, local_context, instantiate_type_vars)
     }
 
     fn quote_atom(
@@ -76,8 +213,11 @@ impl<'a> TermBridge<'a> {
                 let name = self
                     .kernel_context
                     .symbol_table
-                    .name_for_global_id(*m, *i)
-                    .clone();
+                    .try_name_for_global_id(*m, *i)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ConstantName::unqualified(*m, &format!("__global{}_{}", m.get(), i))
+                    });
                 if let Some(poly_info) =
                     self.kernel_context.symbol_table.get_polymorphic_info(&name)
                 {
@@ -90,11 +230,16 @@ impl<'a> TermBridge<'a> {
                         poly_info.value_param_types.clone(),
                     )
                 } else {
+                    let standalone_type = self.quote_standalone_symbol_type(
+                        atom_type,
+                        &LocalContext::empty(),
+                        instantiate_type_vars,
+                    );
                     AcornValue::constant(
                         name,
                         vec![],
-                        acorn_type.clone(),
-                        acorn_type,
+                        standalone_type.clone(),
+                        standalone_type,
                         vec![],
                         vec![],
                     )
@@ -104,8 +249,11 @@ impl<'a> TermBridge<'a> {
                 let name = self
                     .kernel_context
                     .symbol_table
-                    .name_for_local_id(*i)
-                    .clone();
+                    .try_name_for_local_id(*i)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ConstantName::unqualified(ModuleId(0), &format!("__scoped{}", i))
+                    });
                 if let Some(poly_info) =
                     self.kernel_context.symbol_table.get_polymorphic_info(&name)
                 {
@@ -118,11 +266,16 @@ impl<'a> TermBridge<'a> {
                         poly_info.value_param_types.clone(),
                     )
                 } else {
+                    let standalone_type = self.quote_standalone_symbol_type(
+                        atom_type,
+                        &LocalContext::empty(),
+                        instantiate_type_vars,
+                    );
                     AcornValue::constant(
                         name,
                         vec![],
-                        acorn_type.clone(),
-                        acorn_type,
+                        standalone_type.clone(),
+                        standalone_type,
                         vec![],
                         vec![],
                     )
@@ -299,13 +452,22 @@ impl<'a> TermBridge<'a> {
             Symbol::GlobalConstant(module_id, atom_id) => self
                 .kernel_context
                 .symbol_table
-                .name_for_global_id(module_id, atom_id)
-                .clone(),
+                .try_name_for_global_id(module_id, atom_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    ConstantName::unqualified(
+                        module_id,
+                        &format!("__global{}_{}", module_id.get(), atom_id),
+                    )
+                }),
             Symbol::ScopedConstant(atom_id) => self
                 .kernel_context
                 .symbol_table
-                .name_for_local_id(atom_id)
-                .clone(),
+                .try_name_for_local_id(atom_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    ConstantName::unqualified(ModuleId(0), &format!("__scoped{}", atom_id))
+                }),
             _ => return None,
         };
 
@@ -907,6 +1069,36 @@ impl<'a> TermBridge<'a> {
             other => other,
         };
 
+        if let AcornValue::Constant(constant) = &head {
+            let missing_hidden_value_args = if constant.bound_value_args.is_empty() {
+                constant
+                    .value_param_types
+                    .len()
+                    .saturating_sub(value_args.len())
+            } else {
+                0
+            };
+            if missing_hidden_value_args > 0 {
+                let first_arg_index = Self::visible_stack_size(local_context, var_remapping);
+                let shifted_value_args = shift_for_inserted_lambda(
+                    value_args,
+                    first_arg_index,
+                    missing_hidden_value_args,
+                );
+                let lambda_args: Vec<_> = constant
+                    .value_param_types
+                    .iter()
+                    .take(missing_hidden_value_args)
+                    .cloned()
+                    .collect();
+                let hidden_args = lambda_args.iter().enumerate().map(|(i, arg_type)| {
+                    AcornValue::Variable(first_arg_index + i as AtomId, arg_type.clone())
+                });
+                let all_args = hidden_args.chain(shifted_value_args).collect();
+                return AcornValue::lambda(lambda_args, AcornValue::apply(head, all_args));
+            }
+        }
+
         AcornValue::apply(head, value_args)
     }
 
@@ -1068,55 +1260,12 @@ impl<'a> TermBridge<'a> {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
-        if let Some((head, args)) = type_term.as_ref().split_application_multi() {
-            if let Some(ground_id) = head.as_ref().as_type_atom() {
-                let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
-                if param_kinds.len() == args.len()
-                    && param_kinds
-                        .iter()
-                        .any(|kind| !kind.as_ref().is_type_param_kind())
-                {
-                    let base_type = self
-                        .kernel_context
-                        .type_store
-                        .type_term_to_acorn_type_with_context(
-                            &Term::ground_type(ground_id),
-                            local_context,
-                            instantiate_type_vars,
-                        );
-                    let datatype = match base_type {
-                        AcornType::Data(datatype, params) if params.is_empty() => datatype,
-                        _ => panic!(
-                            "Expected ground data type in dependent type application, got {:?}",
-                            type_term
-                        ),
-                    };
-                    let family_args = args
-                        .iter()
-                        .zip(param_kinds.iter())
-                        .map(|(arg, kind)| {
-                            if kind.as_ref().is_type_param_kind() {
-                                crate::elaborator::acorn_type::DependentTypeArg::Type(
-                                    self.quote_type_with_context(
-                                        arg.to_owned(),
-                                        local_context,
-                                        instantiate_type_vars,
-                                    ),
-                                )
-                            } else {
-                                crate::elaborator::acorn_type::DependentTypeArg::Value(
-                                    self.quote_term_with_context(
-                                        arg,
-                                        local_context,
-                                        instantiate_type_vars,
-                                    ),
-                                )
-                            }
-                        })
-                        .collect();
-                    return AcornType::new_datatype_application(datatype, family_args);
-                }
-            }
+        if let Some(family_type) = self.quote_dependent_type_application_with_context(
+            &type_term,
+            local_context,
+            instantiate_type_vars,
+        ) {
+            return family_type;
         }
         self.kernel_context
             .type_store

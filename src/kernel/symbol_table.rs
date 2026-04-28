@@ -845,9 +845,104 @@ impl SymbolTable {
             .unwrap()
     }
 
+    pub fn try_name_for_global_id(
+        &self,
+        module_id: ModuleId,
+        atom_id: AtomId,
+    ) -> Option<&ConstantName> {
+        self.global_constants
+            .get(module_id.get() as usize)
+            .and_then(|constants| constants.get(atom_id as usize))
+            .and_then(|name| name.as_ref())
+    }
+
+    /// Ensure a global constant has a stable name without changing its global id or type.
+    pub fn ensure_global_name(
+        &mut self,
+        module_id: ModuleId,
+        atom_id: AtomId,
+        name: ConstantName,
+    ) -> Result<(), String> {
+        match self
+            .global_constants
+            .get(module_id.get() as usize)
+            .and_then(|constants| constants.get(atom_id as usize))
+        {
+            Some(Some(existing)) => {
+                if *existing == name {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "global constant {:?}/{} already has name '{}', cannot rename to '{}'",
+                    module_id, atom_id, existing, name
+                ));
+            }
+            Some(None) => {}
+            None => {
+                return Err(format!(
+                    "global constant {:?}/{} is out of range for symbol table",
+                    module_id, atom_id
+                ));
+            }
+        }
+
+        let symbol = Symbol::GlobalConstant(module_id, atom_id);
+        if let Some(existing) = self.name_to_symbol.get(&name) {
+            if *existing != symbol {
+                return Err(format!(
+                    "cannot assign name '{}' to global constant {:?}/{}: name already maps to {:?}",
+                    name, module_id, atom_id, existing
+                ));
+            }
+        }
+
+        self.name_to_symbol.insert(name.clone(), symbol);
+        self.global_constants[module_id.get() as usize][atom_id as usize] = Some(name);
+        Ok(())
+    }
+
     /// Get the name corresponding to a particular local AtomId.
     pub fn name_for_local_id(&self, atom_id: AtomId) -> &ConstantName {
         &self.scoped_constants[atom_id as usize].as_ref().unwrap()
+    }
+
+    pub fn try_name_for_local_id(&self, atom_id: AtomId) -> Option<&ConstantName> {
+        self.scoped_constants
+            .get(atom_id as usize)
+            .and_then(|name| name.as_ref())
+    }
+
+    /// Ensure a scoped constant has a stable name without changing its local id or type.
+    pub fn ensure_local_name(&mut self, atom_id: AtomId, name: ConstantName) -> Result<(), String> {
+        match self.scoped_constants.get(atom_id as usize) {
+            Some(Some(existing)) => {
+                if *existing == name {
+                    return Ok(());
+                }
+                return self.rename_scoped_constant(atom_id, name);
+            }
+            Some(None) => {}
+            None => {
+                return Err(format!(
+                    "scoped constant {} is out of range for symbol table",
+                    atom_id
+                ));
+            }
+        }
+
+        let symbol = Symbol::ScopedConstant(atom_id);
+        if let Some(existing) = self.name_to_symbol.get(&name) {
+            if *existing != symbol {
+                return Err(format!(
+                    "cannot assign name '{}' to scoped constant {}: name already maps to {:?}",
+                    name, atom_id, existing
+                ));
+            }
+        }
+
+        self.name_to_symbol.insert(name.clone(), symbol);
+        self.scoped_constants[atom_id as usize] = Some(name);
+        Ok(())
     }
 
     /// Rename one scoped constant while preserving its local id and type.

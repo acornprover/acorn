@@ -1,5 +1,6 @@
 use super::*;
 use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
+use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::module::ModuleId;
 
@@ -68,6 +69,25 @@ fn test_nested_term_comparison() {
     let term2 = Term::parse("c0(c1(c3))");
 
     let _ = term1.extended_kbo_cmp(&term2);
+}
+
+#[test]
+fn test_checked_type_rejects_wrong_argument_type() {
+    let mut kctx = KernelContext::new();
+    kctx.parse_datatype("Foo");
+    kctx.parse_datatype("Bar");
+    kctx.parse_constant("g0", "Foo -> Bool");
+    kctx.parse_constant("c0", "Bar");
+
+    let term = kctx.parse_term("g0(c0)");
+    let error = term
+        .checked_type_with_context(LocalContext::empty_ref(), &kctx)
+        .expect_err("wrong argument type should be rejected");
+    assert!(
+        error.contains("Argument c0 has type") && error.contains("but expected"),
+        "unexpected error: {}",
+        error
+    );
 }
 
 #[test]

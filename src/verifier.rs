@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io::BufRead;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -17,16 +18,26 @@ fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     }
 }
 
-fn read_stdin_appended_target(project: &Project, path: &std::path::Path) -> Result<String, String> {
+fn read_stdin_appended_target(
+    project: &Project,
+    path: &std::path::Path,
+    stdin_override: Option<&str>,
+) -> Result<String, String> {
+    let mut text = project
+        .read_file(&path.to_path_buf())
+        .map_err(|e| e.to_string())?;
+    if let Some(stdin_override) = stdin_override {
+        text.push_str(stdin_override);
+        return Ok(text);
+    }
+
     if std::io::stdin().is_terminal() {
         return Err("cannot read stdin in an active terminal".to_string());
     }
 
-    let mut text = project
-        .read_file(&path.to_path_buf())
-        .map_err(|e| e.to_string())?;
-    let _ = std::io::stdin().lock();
-    for line in std::io::stdin().lines() {
+    let stdin = std::io::stdin();
+    let locked = stdin.lock();
+    for line in locked.lines() {
         text.push_str(&line.map_err(|e| e.to_string())?);
         text.push('\n');
     }
@@ -101,6 +112,15 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
     ) -> Result<Self, String> {
+        Self::new_inner(start_path, config, target, None)
+    }
+
+    fn new_inner(
+        start_path: PathBuf,
+        config: ProjectConfig,
+        target: Option<String>,
+        stdin_override: Option<&str>,
+    ) -> Result<Self, String> {
         let mut project = Project::new_local(&start_path, config.clone())?;
         let mut normalized_target = target.clone();
 
@@ -111,7 +131,7 @@ impl Verifier {
                 project.add_target_by_path(&path)?;
             } else if let Some(inner_target) = target.strip_prefix("-:") {
                 let path = resolve_target_path(&start_path, inner_target);
-                let text = read_stdin_appended_target(&project, &path)?;
+                let text = read_stdin_appended_target(&project, &path, stdin_override)?;
                 project.update_file(path.clone(), &text, 0)?;
                 normalized_target = Some(path.to_string_lossy().into_owned());
             } else if target.ends_with(".ac") {
@@ -156,6 +176,16 @@ impl Verifier {
             events,
             builder,
         })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        start_path: PathBuf,
+        config: ProjectConfig,
+        target: Option<String>,
+        stdin_override: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::new_inner(start_path, config, target, stdin_override)
     }
 
     /// Returns VerifierOutput on success or clean failure.
@@ -630,10 +660,11 @@ instance Nat: Two
             )
             .unwrap();
 
-        let mut verifier = Verifier::new(
+        let mut verifier = Verifier::new_for_test(
             acornlib.path().to_path_buf(),
             ProjectConfig::default(),
             Some("-:src/nested/test.ac".to_string()),
+            Some(""),
         )
         .unwrap();
         verifier.builder.check_hashes = false;
@@ -664,10 +695,11 @@ instance Nat: Two
             )
             .unwrap();
 
-        let mut verifier = Verifier::new(
+        let mut verifier = Verifier::new_for_test(
             acornlib.path().to_path_buf(),
             ProjectConfig::default(),
             Some("-:src/nested/test.ac".to_string()),
+            Some(""),
         )
         .unwrap();
         verifier.builder.check_hashes = false;

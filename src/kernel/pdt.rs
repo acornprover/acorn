@@ -1842,10 +1842,12 @@ mod tests {
 
         let mut kctx = KernelContext::new();
 
-        // Set up: T0 is a concrete type, g1 is polymorphic
-        kctx.parse_datatype("T0");
+        // Set up: Foo is a concrete type, g1 is polymorphic.
+        // Avoid names like T0 here because the kernel test parser reserves that syntax for
+        // type variables.
+        kctx.parse_datatype("Foo");
         kctx.parse_polymorphic_constant("g1", "T: Type", "(T, T) -> Bool");
-        kctx.parse_constants(&["c1", "c2"], "T0");
+        kctx.parse_constants(&["c1", "c2"], "Foo");
 
         let mut gset = GeneralizationSet::new();
 
@@ -1855,9 +1857,9 @@ mod tests {
         let pattern_clause = kctx.parse_clause("g1(x0, x1, x2)", &["Type", "x0", "x0"]);
         gset.insert(pattern_clause, 42, &kctx);
 
-        // Query: g1(T0, c1, c2) - concrete instantiation
-        // Should match with T->T0, x->c1, y->c2
-        let query_clause = kctx.parse_clause("g1(T0, c1, c2)", &[]);
+        // Query: g1(Foo, c1, c2) - concrete instantiation
+        // Should match with T->Foo, x->c1, y->c2
+        let query_clause = kctx.parse_clause("g1(Foo, c1, c2)", &[]);
         let found = gset.find_generalization(query_clause, &kctx);
 
         assert_eq!(

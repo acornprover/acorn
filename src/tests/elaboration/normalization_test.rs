@@ -349,6 +349,44 @@ fn test_top_level_dependent_function_satisfy_lowering() {
     );
 }
 
+#[cfg(feature = "validate")]
+#[test]
+fn test_validate_roundtrip_top_level_dependent_function_satisfy_clauses() {
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        type Nat: axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        }
+
+        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+            result = x
+        }
+
+        theorem goal(n: Nat, x: Fin[n]) {
+            choose_self(n, x) = x
+        }
+        "#,
+    );
+
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let env = match project.get_module_by_id(module_id) {
+        LoadState::Ok(env) => env,
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let mut norm = KernelContext::new();
+    let clauses = norm.get_all_clauses(&env);
+    for clause in &clauses {
+        norm.validate_clause_roundtrip(clause)
+            .unwrap_or_else(|err| panic!("roundtrip failed for clause {:?}: {}", clause, err));
+    }
+}
+
 #[test]
 fn test_second_order_binding() {
     let mut env = Environment::test();

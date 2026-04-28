@@ -722,12 +722,39 @@ impl Clause {
             return None; // No matching suffix at all
         }
 
-        fn would_leave_unsupported_bare_builtin(term: &Term, remaining_arg_count: usize) -> bool {
-            remaining_arg_count == 0
-                && matches!(
-                    term.get_head_atom(),
-                    Atom::Symbol(Symbol::Eq) | Atom::Symbol(Symbol::Ite)
-                )
+        fn would_leave_unsupported_bare_head(
+            term: &Term,
+            remaining_arg_count: usize,
+            kernel_context: &KernelContext,
+        ) -> bool {
+            if remaining_arg_count != 0 {
+                return false;
+            }
+            if matches!(
+                term.get_head_atom(),
+                Atom::Symbol(Symbol::Eq) | Atom::Symbol(Symbol::Ite)
+            ) {
+                return true;
+            }
+            let Atom::Symbol(symbol) = term.get_head_atom() else {
+                return false;
+            };
+            let name = match symbol {
+                Symbol::GlobalConstant(module_id, atom_id) => kernel_context
+                    .symbol_table
+                    .try_name_for_global_id(*module_id, *atom_id),
+                Symbol::ScopedConstant(atom_id) => {
+                    kernel_context.symbol_table.try_name_for_local_id(*atom_id)
+                }
+                _ => return false,
+            };
+            let Some(name) = name else {
+                return false;
+            };
+            kernel_context
+                .symbol_table
+                .get_polymorphic_info(name)
+                .is_some_and(|info| !info.value_param_types.is_empty())
         }
 
         // Find the longest right-suffix of matching args that are distinct free variables.
@@ -745,18 +772,15 @@ impl Clause {
                     // special builtins like `eq` and `ite` do not support a bare head in the
                     // clause roundtrip codec. Stop right before we would produce that shape.
                     let next_peel_count = peel_count + 1;
-                    if self
-                        .context
-                        .get_var_type(var_id as usize)
-                        .is_some_and(|var_type| var_type.as_ref().is_type_param_kind())
-                        && (would_leave_unsupported_bare_builtin(
-                            longer,
-                            longer_len - next_peel_count,
-                        ) || would_leave_unsupported_bare_builtin(
-                            shorter,
-                            shorter_len - next_peel_count,
-                        ))
-                    {
+                    if would_leave_unsupported_bare_head(
+                        longer,
+                        longer_len - next_peel_count,
+                        kernel_context,
+                    ) || would_leave_unsupported_bare_head(
+                        shorter,
+                        shorter_len - next_peel_count,
+                        kernel_context,
+                    ) {
                         break;
                     }
 

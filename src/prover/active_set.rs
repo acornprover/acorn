@@ -644,26 +644,14 @@ impl ActiveSet {
                     #[cfg(feature = "validate")]
                     for rewrite in &rewrites {
                         if !rewrite.term.has_any_variable() {
-                            // Create a literal representing the rewrite: u_subterm = rewrite.term
-                            let (lit, flipped) = if rewrite.forwards {
-                                Literal::new_with_flip(
-                                    true,
-                                    u_subterm.clone(),
-                                    rewrite.term.clone(),
-                                )
-                            } else {
-                                Literal::new_with_flip(
-                                    true,
-                                    rewrite.term.clone(),
-                                    u_subterm.clone(),
-                                )
-                            };
-
-                            // Get the pattern clause and try to unify
                             let pattern_step = self.get_step(rewrite.pattern_id);
                             let pattern_lit = &pattern_step.clause.literals[0];
+                            let (s, t) = if rewrite.forwards {
+                                (&pattern_lit.left, &pattern_lit.right)
+                            } else {
+                                (&pattern_lit.right, &pattern_lit.left)
+                            };
 
-                            // Use the unifier to check if this specialization is valid
                             let mut unifier = Unifier::new(3, kernel_context);
                             unifier.set_input_context(
                                 Scope::LEFT,
@@ -671,15 +659,7 @@ impl ActiveSet {
                             );
                             unifier.set_input_context(Scope::RIGHT, LocalContext::empty_ref());
 
-                            let unified = unifier.unify_literals(
-                                Scope::LEFT,
-                                pattern_lit,
-                                Scope::RIGHT,
-                                &lit,
-                                flipped,
-                            );
-
-                            if !unified {
+                            if !unifier.unify(Scope::LEFT, s, Scope::RIGHT, &u_subterm) {
                                 panic!(
                                     "Rewrite tree produced invalid rewrite!\n\
                                      Pattern id: {}\n\
@@ -693,6 +673,33 @@ impl ActiveSet {
                                     pattern_step.clause.get_local_context().get_var_types(),
                                     u_subterm,
                                     rewrite.term,
+                                    rewrite.forwards
+                                );
+                            }
+
+                            let specialized = unifier.apply(Scope::LEFT, t);
+                            let specialized_context = unifier.output_context().clone();
+                            if specialized != rewrite.term || specialized_context != rewrite.context
+                            {
+                                panic!(
+                                    "Rewrite tree reconstruction mismatch!\n\
+                                     Pattern id: {}\n\
+                                     Pattern clause: {}\n\
+                                     Pattern context: {:?}\n\
+                                     Subterm: {}\n\
+                                     Expected rewrite term: {}\n\
+                                     Actual rewrite term: {}\n\
+                                     Expected context: {:?}\n\
+                                     Actual context: {:?}\n\
+                                     Forwards: {}",
+                                    rewrite.pattern_id,
+                                    pattern_step.clause,
+                                    pattern_step.clause.get_local_context().get_var_types(),
+                                    u_subterm,
+                                    rewrite.term,
+                                    specialized,
+                                    rewrite.context.get_var_types(),
+                                    specialized_context.get_var_types(),
                                     rewrite.forwards
                                 );
                             }
@@ -2038,9 +2045,9 @@ mod tests {
         // c1: Real
         kctx.parse_constant("c1", "Real");
 
-        // g162: (Real -> Real) -> (Real -> Real) -> Real
-        // (takes two functions and returns a value)
-        kctx.parse_constant("g162", "(Real -> Real) -> (Real -> Real) -> Real");
+        // g162: Real -> Real
+        // (maps the Real returned by g204 into another Real)
+        kctx.parse_constant("g162", "Real -> Real");
 
         // g204: (Real -> Real) -> (Real -> Real) -> Real
         // (similar to g162)

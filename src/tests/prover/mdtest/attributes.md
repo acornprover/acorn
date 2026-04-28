@@ -249,6 +249,34 @@ Just testing that we can define something, then immediately prove the definition
     
 ```
 
+## Dependent Attribute Calling Dependent Function
+
+```acorn
+    type Nat: axiom
+    let lt: (Nat, Nat) -> Bool = axiom
+
+    structure Fin[n: Nat] {
+        value: Nat
+    } constraint {
+        lt(value, n)
+    }
+
+    define fin_self[n: Nat](x: Fin[n]) -> Fin[n] {
+        x
+    }
+
+    attributes Fin[n: Nat] {
+        define again(self) -> Fin[n] {
+            fin_self(n, self)
+        }
+    }
+
+    theorem value_lt_bound[n: Nat](x: Fin[n]) {
+        lt(x.value, n)
+    }
+    
+```
+
 ## Proving With Generic Attribute Match
 
 ```acorn

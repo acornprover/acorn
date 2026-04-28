@@ -292,10 +292,10 @@ fn test_term_graph_checking_reducible_clause() {
 #[test]
 fn test_term_graph_reducing_clauses() {
     let g = TestGraph::with_clauses(&[
-        "not g3(g1) or g3(g0)",
-        "not g3(g0) or g3(g2)",
-        "g3(g1)",
-        "not g3(g2)",
+        "not g3(c1) or g3(c0)",
+        "not g3(c0) or g3(c2)",
+        "g3(c1)",
+        "not g3(c2)",
     ]);
     assert!(g.has_contradiction());
 }

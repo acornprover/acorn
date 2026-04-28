@@ -46,6 +46,30 @@ pub struct Rewrite {
     pub context: LocalContext,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TypeConstraintKind {
+    Type0,
+    Typeclass(crate::kernel::types::TypeclassId),
+    Other,
+}
+
+fn resolve_type_constraint_kind(
+    type_term: TermRef,
+    local_context: &LocalContext,
+) -> TypeConstraintKind {
+    match type_term.decompose() {
+        Decomposition::Atom(KernelAtom::Symbol(Symbol::Type0)) => TypeConstraintKind::Type0,
+        Decomposition::Atom(KernelAtom::Symbol(Symbol::Typeclass(tc_id))) => {
+            TypeConstraintKind::Typeclass(*tc_id)
+        }
+        Decomposition::Atom(KernelAtom::FreeVariable(var_id)) => local_context
+            .get_var_type(*var_id as usize)
+            .map(|var_type| resolve_type_constraint_kind(var_type.as_ref(), local_context))
+            .unwrap_or(TypeConstraintKind::Other),
+        _ => TypeConstraintKind::Other,
+    }
+}
+
 /// Recursively extracts type variable bindings by matching a pattern type against a concrete type.
 ///
 /// For example, if pattern_type is `Pi(x1, x2)` (a function from x1 to x2) and
@@ -244,6 +268,42 @@ fn type_term_satisfies_typeclass_constraint(
     false
 }
 
+fn is_proper_type_expr(
+    type_expr: TermRef,
+    query_context: &LocalContext,
+    kernel_context: &KernelContext,
+) -> bool {
+    match type_expr.decompose() {
+        Decomposition::Atom(KernelAtom::Symbol(Symbol::Bool)) => true,
+        Decomposition::Atom(KernelAtom::Symbol(Symbol::Type(ground_id))) => {
+            kernel_context.type_store.get_arity(*ground_id) == 0
+        }
+        Decomposition::Atom(KernelAtom::FreeVariable(var_id)) => query_context
+            .get_var_type(*var_id as usize)
+            .is_some_and(|var_type| {
+                matches!(
+                    resolve_type_constraint_kind(var_type.as_ref(), query_context),
+                    TypeConstraintKind::Type0 | TypeConstraintKind::Typeclass(_)
+                )
+            }),
+        Decomposition::Application(_, _) => {
+            let Some((head, args)) = type_expr.split_application_multi() else {
+                return false;
+            };
+            let Some(ground_id) = head.as_ref().as_type_atom() else {
+                return false;
+            };
+            if args.len() != kernel_context.type_store.get_arity(ground_id) as usize {
+                return false;
+            }
+            args.iter()
+                .all(|arg| is_proper_type_expr(arg.as_ref(), query_context, kernel_context))
+        }
+        Decomposition::Pi(input, _) => !input.is_type_param_kind(),
+        _ => false,
+    }
+}
+
 fn term_satisfies_typeclass_constraint(
     term: TermRef,
     query_context: &LocalContext,
@@ -327,6 +387,13 @@ fn build_bindings(
         let Some(var_type) = pattern_context.get_var_type(var_id as usize) else {
             continue;
         };
+        if matches!(
+            resolve_type_constraint_kind(var_type.as_ref(), pattern_context),
+            TypeConstraintKind::Type0
+        ) && !is_proper_type_expr(bound_term.as_ref(), query_context, kernel_context)
+        {
+            return None;
+        }
         let Some(tc_id) = resolve_typeclass_constraint(var_type.as_ref(), pattern_context) else {
             continue;
         };
@@ -757,6 +824,33 @@ mod tests {
         assert_eq!(
             rewrites[0].term, expected,
             "Backwards rewrite should infer type variable from matched term's type"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tree_polymorphic_backwards_rejects_higher_kinded_type_binding() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_polymorphic_constant("g0", "T: Type", "T -> T");
+        kctx.parse_constant("c0", "Type -> Bool");
+
+        let mut tree = RewriteTree::new();
+        let pattern_clause = kctx.parse_clause("g0(x0, x1) = x1", &["Type", "x0"]);
+        tree.insert_literal(
+            0,
+            &pattern_clause.literals[0],
+            pattern_clause.get_local_context(),
+        );
+
+        let query_lctx = kctx.parse_local(&[]);
+        let query_term = kctx.parse_term("c0");
+        let rewrites = tree.get_rewrites(&query_term, 0, &query_lctx, &kctx);
+        let backward_rewrites: Vec<_> = rewrites.iter().filter(|r| !r.forwards).collect();
+
+        assert!(
+            backward_rewrites.is_empty(),
+            "Backwards rewrite should reject inferred higher-kinded type bindings like \
+             Type -> Bool. Got {} backward rewrites.",
+            backward_rewrites.len()
         );
     }
 
