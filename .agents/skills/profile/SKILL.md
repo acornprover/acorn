@@ -10,10 +10,61 @@ Use this skill when the user asks to profile the Acorn prover or verifier. The g
 ## Scope
 
 - Run all commands from the `acorn` repo root.
-- Use this skill for profiling and performance-breakdown requests, not for generic benchmarking.
+- Use this skill for profiling, performance-breakdown requests, and performance-sensitive changes
+  that need release-mode timing baselines.
 - If the target is not specified, ask whether to profile `profile_reprove` or `profile_check`.
 - In sandboxed Codex runs, if `perf`, `cargo install samply`, or profile recording is blocked, request escalated permissions instead of working around it.
 - After every successful profiling run, update `PROFILE.md` in the repo root.
+
+## CLI semantics for performance work
+
+- `check` is the thorough correctness check for existing proofs. It verifies cached certificates
+  without relying on prover search. Treat it as the CI/release correctness operation and the main
+  benchmark for certificate-checking scalability.
+- `verify` is the normal incremental Acorn-code workflow. It uses cache/hash skipping when possible
+  and searches for missing proofs when necessary. Use it to measure edit-loop and no-change
+  incremental performance.
+- `reprove` bypasses cached proofs and forces prover search. Use it only for testing prover behavior
+  or measuring prover/search performance.
+
+## Release-mode timing baselines
+
+When evaluating performance-sensitive changes, first build in release mode:
+
+```bash
+cargo build --profile release
+```
+
+Then time the relevant CLI path:
+
+```bash
+time cargo run --profile release -- check
+time cargo run --profile release -- verify
+time cargo run --profile release -- reprove real.double_sum
+```
+
+Interpret these separately:
+
+- `check` measures full existing-proof correctness throughput.
+- `verify` measures incremental loading, manifest/hash skipping, and any necessary missing-proof search.
+- `reprove real.double_sum` measures prover behavior on a representative search workload.
+
+This is especially important after changes to core term or proof-search data structures, such as
+`Term`, `EqualityGraph`, `Pdt`, or `FingerprintX`.
+
+## Scaling notes
+
+When discussing how performance scales as acornlib grows, separate these workloads:
+
+- Existing-proof correctness: `check` should be evaluated as a full-library, certificate-checking
+  workload. Track total certificates, certificates per second, and time spent loading/elaborating
+  versus checking certificates.
+- Incremental development: `verify` should be evaluated for no-change and small-change runs. Track
+  modules skipped by manifest hash, cache loading time, dependency/hash walking cost, and any proof
+  searches triggered by edits.
+- Prover behavior: `reprove` should be evaluated by search success rate, timeout count, average and
+  p95 search time, activation counts, and imported/visible fact counts per goal. A larger library can
+  make individual goals harder if relevance filtering admits too many facts.
 
 ## Guardrail: abort on certificate-check failures
 
@@ -29,8 +80,8 @@ When that happens:
 
 ## Available profiling targets
 
-- `profile_reprove`: reprove `real.double_sum`, a representative prover workload
-- `profile_check`: check-mode workload
+- `profile_reprove`: reprove `real.double_sum`, a representative prover/search workload
+- `profile_check`: check-mode workload for existing cached certificates
 
 ## Recording results in `PROFILE.md`
 

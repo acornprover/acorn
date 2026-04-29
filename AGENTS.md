@@ -1,6 +1,7 @@
 ## Instructions
 
-- When writing Rust code, before telling the user you're finished, you should run the tests, check, and autoformat:
+- When writing Rust code, before telling the user you're finished, you should run the tests,
+  Rust compiler check, and autoformat:
   `cargo test`
   `cargo check`
   `cargo fmt`
@@ -14,6 +15,19 @@
 - If a unit test breaks, but just in the verifier or prover, we should try to add another,
   narrower unit test, that catches the problem in the underlying data structure.
 
+## Acorn CLI Usage
+
+- `cargo run --profile release -- check` is the thorough correctness check for existing proofs.
+  It verifies cached certificates without relying on prover search, and should be run after
+  completing work.
+
+- `cargo run --profile release -- verify [target]` is the normal incremental way to check Acorn
+  code. It uses the cache when possible and searches for missing proofs when necessary.
+
+- `cargo run --profile release -- reprove [target]` bypasses cached proofs and forces prover
+  search. Use it only for testing prover behavior, not for routine correctness checks or cache
+  rewrites.
+
 - If we run into an error during check mode, to debug it, it can help to
   run check just on the module that failed at a higher log level. For example:
   `RUST_LOG=acorn=trace cargo run --profile release -- check list.list_base`
@@ -23,18 +37,6 @@
   `cargo run --profile release -- verify finite_group --ignore-hash`
 
   `reprove` forces the prover to run and should be reserved for testing prover behavior.
-
-- To evaluate performance, we should do a release build:
-
-  `cargo build --profile release`
-
-  and then see how long it takes to run the commands:
-
-  `time cargo run --profile release -- check`
-  `time cargo run --profile release -- reprove real.double_sum`
-
-  This is important to do if we are doing something performance-sensitive, like altering the basic Term
-  structure, or changing how one of the key EqualityGraph / Pdt / FingerprintX data structures work.
 
 - A "full reprove" is slow, but sometimes finds obscure bugs that nothing else finds. We generally
   only want to do this when the user asks for it:
