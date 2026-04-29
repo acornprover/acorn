@@ -248,10 +248,11 @@ fn type_term_satisfies_typeclass_constraint(
     kernel_context: &KernelContext,
     required_tc_id: crate::kernel::types::TypeclassId,
 ) -> bool {
-    if let Some(ground_id) = type_term.as_type_atom() {
-        return kernel_context
-            .type_store
-            .is_instance_of(ground_id, required_tc_id);
+    if kernel_context
+        .type_store
+        .type_term_is_instance_of(type_term, query_context, required_tc_id)
+    {
+        return true;
     }
 
     if let Some(var_id) = type_term.atomic_variable() {
@@ -403,12 +404,11 @@ fn build_bindings(
             Decomposition::Atom(KernelAtom::FreeVariable(_)) => {}
             _ => {
                 // Require a concrete type instance for typeclass constraints
-                if let Some(ground_id) = bound_term.as_ref().as_type_atom() {
-                    if !kernel_context.type_store.is_instance_of(ground_id, tc_id) {
-                        return None;
-                    }
-                } else {
-                    // Non-ground types (e.g., function types) do not satisfy typeclass constraints
+                if !kernel_context.type_store.type_term_is_instance_of(
+                    bound_term.as_ref(),
+                    query_context,
+                    tc_id,
+                ) {
                     return None;
                 }
             }

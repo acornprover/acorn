@@ -985,13 +985,13 @@ fn export_fact(
                 _ => {}
             }
         }
-        Fact::Instance(datatype, typeclass, source) => {
+        Fact::Instance(instance, source) => {
             if source.module_id != module_id {
                 return;
             }
             instances.push(ExportedInstance {
-                type_name: datatype.name.clone(),
-                typeclass: typeclass.name.clone(),
+                type_name: instance.instance_type.to_string(),
+                typeclass: instance.typeclass.name.clone(),
                 line: source.range.start.line + 1,
                 source_block: None,
             });

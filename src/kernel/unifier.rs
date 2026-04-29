@@ -209,11 +209,12 @@ impl<'a> Unifier<'a> {
         ) {
             return false;
         }
-        if let Some(ground_id) = type_expr.as_type_atom() {
-            return self
-                .kernel_context
-                .type_store
-                .is_instance_of(ground_id, required_tc);
+        if self.kernel_context.type_store.type_term_is_instance_of(
+            type_expr,
+            &self.output_context,
+            required_tc,
+        ) {
+            return true;
         }
 
         let Some(out_var_id) = type_expr.atomic_variable() else {

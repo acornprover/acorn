@@ -10,7 +10,7 @@ use crate::elaborator::acorn_type::{
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
-use crate::kernel::term::Term;
+use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::types::{GroundTypeId, TypeclassId};
 use crate::module::ModuleId;
 
@@ -45,6 +45,15 @@ pub struct TypeStore {
 
     /// typeclass_instances[module_id][local_id] is the set of GroundTypeIds that are instances of this typeclass.
     typeclass_instances: ImVector<ImVector<StdHashSet<GroundTypeId>>>,
+
+    /// Parameterized instance schemes for each typeclass.
+    typeclass_instance_schemes: ImVector<ImVector<Vec<TypeclassInstanceScheme>>>,
+}
+
+#[derive(Clone)]
+struct TypeclassInstanceScheme {
+    target: Term,
+    context: LocalContext,
 }
 
 impl TypeStore {
@@ -60,6 +69,7 @@ impl TypeStore {
             id_to_typeclass: ImVector::new(),
             typeclass_extends: ImVector::new(),
             typeclass_instances: ImVector::new(),
+            typeclass_instance_schemes: ImVector::new(),
         }
     }
 
@@ -85,6 +95,9 @@ impl TypeStore {
         }
         while self.typeclass_instances.len() <= idx {
             self.typeclass_instances.push_back(ImVector::new());
+        }
+        while self.typeclass_instance_schemes.len() <= idx {
+            self.typeclass_instance_schemes.push_back(ImVector::new());
         }
     }
 
@@ -1176,6 +1189,7 @@ impl TypeStore {
         self.id_to_typeclass[mod_idx].push_back(typeclass.clone());
         self.typeclass_extends[mod_idx].push_back(StdHashSet::new());
         self.typeclass_instances[mod_idx].push_back(StdHashSet::new());
+        self.typeclass_instance_schemes[mod_idx].push_back(vec![]);
         self.typeclass_to_id.insert(typeclass.clone(), id);
         id
     }
@@ -1266,6 +1280,21 @@ impl TypeStore {
         self.add_instance(ground_id, typeclass_id);
     }
 
+    pub fn add_type_instance_scheme(
+        &mut self,
+        target: Term,
+        context: LocalContext,
+        typeclass_id: TypeclassId,
+    ) {
+        let mod_idx = typeclass_id.module_id().get() as usize;
+        self.ensure_typeclass_module(typeclass_id.module_id());
+        if let Some(schemes) =
+            self.typeclass_instance_schemes[mod_idx].get_mut(typeclass_id.local_id() as usize)
+        {
+            schemes.push(TypeclassInstanceScheme { target, context });
+        }
+    }
+
     /// Check if one typeclass extends another (directly or transitively).
     pub fn typeclass_extends(&self, typeclass_id: TypeclassId, base_id: TypeclassId) -> bool {
         let mod_idx = typeclass_id.module_id().get() as usize;
@@ -1320,6 +1349,108 @@ impl TypeStore {
         }
 
         false
+    }
+
+    pub fn type_term_is_instance_of(
+        &self,
+        type_term: TermRef<'_>,
+        query_context: &LocalContext,
+        typeclass_id: TypeclassId,
+    ) -> bool {
+        if let Some(ground_id) = type_term.as_type_atom() {
+            if self.is_instance_of(ground_id, typeclass_id) {
+                return true;
+            }
+        }
+
+        if let Some(actual_tc_id) = self.type_term_typeclass_constraint(type_term, query_context) {
+            return actual_tc_id == typeclass_id
+                || self.typeclass_extends(actual_tc_id, typeclass_id);
+        }
+
+        let mod_idx = typeclass_id.module_id().get() as usize;
+        let Some(schemes) = self
+            .typeclass_instance_schemes
+            .get(mod_idx)
+            .and_then(|v| v.get(typeclass_id.local_id() as usize))
+        else {
+            return false;
+        };
+
+        schemes.iter().any(|scheme| {
+            let mut bindings = StdHashMap::new();
+            self.match_instance_scheme_term(
+                scheme.target.as_ref(),
+                type_term,
+                &scheme.context,
+                query_context,
+                &mut bindings,
+            )
+        })
+    }
+
+    fn type_term_typeclass_constraint(
+        &self,
+        type_term: TermRef<'_>,
+        query_context: &LocalContext,
+    ) -> Option<TypeclassId> {
+        let var_id = type_term.atomic_variable()?;
+        let var_type = query_context.get_var_type(var_id as usize)?;
+        var_type.as_ref().as_typeclass()
+    }
+
+    fn match_instance_scheme_term(
+        &self,
+        pattern: TermRef<'_>,
+        query: TermRef<'_>,
+        scheme_context: &LocalContext,
+        query_context: &LocalContext,
+        bindings: &mut StdHashMap<AtomId, Term>,
+    ) -> bool {
+        if let Some(pattern_var) = pattern.atomic_variable() {
+            if let Some(bound) = bindings.get(&pattern_var) {
+                return bound.as_ref() == query;
+            }
+            let Some(pattern_var_type) = scheme_context.get_var_type(pattern_var as usize) else {
+                return false;
+            };
+            if !self.scheme_binding_satisfies_type(pattern_var_type.as_ref(), query, query_context)
+            {
+                return false;
+            }
+            bindings.insert(pattern_var, query.to_owned());
+            return true;
+        }
+
+        match (pattern.decompose(), query.decompose()) {
+            (Decomposition::Atom(a), Decomposition::Atom(b)) => a == b,
+            (Decomposition::Application(pf, pa), Decomposition::Application(qf, qa)) => {
+                self.match_instance_scheme_term(pf, qf, scheme_context, query_context, bindings)
+                    && self.match_instance_scheme_term(
+                        pa,
+                        qa,
+                        scheme_context,
+                        query_context,
+                        bindings,
+                    )
+            }
+            _ => pattern == query,
+        }
+    }
+
+    fn scheme_binding_satisfies_type(
+        &self,
+        pattern_var_type: TermRef<'_>,
+        query: TermRef<'_>,
+        query_context: &LocalContext,
+    ) -> bool {
+        if pattern_var_type.is_type0() {
+            return !query.is_type0() && query.as_typeclass().is_none();
+        }
+        if let Some(required_tc) = pattern_var_type.as_typeclass() {
+            return self.type_term_is_instance_of(query, query_context, required_tc);
+        }
+        true
     }
 
     /// Find any ground type that implements the given typeclass.
@@ -1383,6 +1514,15 @@ impl TypeStore {
             &mut self.typeclass_instances,
             &other.typeclass_instances,
             |a, b| a.union(b).cloned().collect(),
+        );
+        merge_nested_vecs_with(
+            &mut self.typeclass_instance_schemes,
+            &other.typeclass_instance_schemes,
+            |a, b| {
+                let mut merged = a.clone();
+                merged.extend(b.iter().cloned());
+                merged
+            },
         );
     }
 }

@@ -35,10 +35,11 @@ fn type_term_satisfies_typeclass_constraint(
     kernel_context: &KernelContext,
     required_tc_id: TypeclassId,
 ) -> bool {
-    if let Some(ground_id) = type_term.as_type_atom() {
-        return kernel_context
-            .type_store
-            .is_instance_of(ground_id, required_tc_id);
+    if kernel_context
+        .type_store
+        .type_term_is_instance_of(type_term, context, required_tc_id)
+    {
+        return true;
     }
 
     let Some(var_id) = type_term.atomic_variable() else {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
+use crate::elaborator::acorn_type::{AcornType, Datatype, TypeParam, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::potential_value::PotentialValue;
@@ -38,6 +38,16 @@ pub enum Error {
 pub trait TypeclassRegistry {
     /// Returns whether the class is an instance of the typeclass.
     fn is_instance_of(&self, class: &Datatype, typeclass: &Typeclass) -> bool;
+
+    /// Returns whether the full type is an instance of the typeclass.
+    fn is_instance_of_type(&self, ty: &AcornType, typeclass: &Typeclass) -> bool {
+        match ty {
+            AcornType::Data(datatype, params) if params.is_empty() => {
+                self.is_instance_of(datatype, typeclass)
+            }
+            _ => false,
+        }
+    }
 
     /// Returns whether typeclass extends base.
     /// In particular, this returns false when typeclass == base.
@@ -103,8 +113,11 @@ impl<'a> TypeUnifier<'a> {
                 }
                 if let Some(generic_typeclass) = param.typeclass.as_ref() {
                     match instance_type {
-                        AcornType::Data(dt, _) => {
-                            if !self.registry.is_instance_of(&dt, generic_typeclass) {
+                        AcornType::Data(dt, _) | AcornType::Family(dt, _) => {
+                            if !self
+                                .registry
+                                .is_instance_of_type(instance_type, generic_typeclass)
+                            {
                                 return Err(Error::Datatype(dt.clone(), generic_typeclass.clone()));
                             }
                         }
@@ -143,8 +156,11 @@ impl<'a> TypeUnifier<'a> {
                 }
                 if let Some(generic_typeclass) = param.typeclass.as_ref() {
                     match instance_type {
-                        AcornType::Data(dt, _) => {
-                            if !self.registry.is_instance_of(&dt, generic_typeclass) {
+                        AcornType::Data(dt, _) | AcornType::Family(dt, _) => {
+                            if !self
+                                .registry
+                                .is_instance_of_type(instance_type, generic_typeclass)
+                            {
                                 return Err(Error::Datatype(dt.clone(), generic_typeclass.clone()));
                             }
                         }
@@ -228,7 +244,82 @@ impl<'a> TypeUnifier<'a> {
                     self.match_instance(g_param, i_param)?;
                 }
             }
+            (AcornType::Family(g_class, g_args), AcornType::Family(i_class, i_args)) => {
+                if g_class != i_class || g_args.len() != i_args.len() {
+                    return Err(Error::Other);
+                }
+                for (g_arg, i_arg) in g_args.iter().zip(i_args) {
+                    self.match_dependent_arg(g_arg, i_arg)?;
+                }
+            }
             _ => return require_eq(generic_type, instance_type),
+        }
+        Ok(())
+    }
+
+    fn match_dependent_arg(
+        &mut self,
+        generic_arg: &crate::elaborator::acorn_type::DependentTypeArg,
+        instance_arg: &crate::elaborator::acorn_type::DependentTypeArg,
+    ) -> Result {
+        match (generic_arg, instance_arg) {
+            (
+                crate::elaborator::acorn_type::DependentTypeArg::Type(generic_type),
+                crate::elaborator::acorn_type::DependentTypeArg::Type(instance_type),
+            ) => self.match_instance(generic_type, instance_type),
+            (
+                crate::elaborator::acorn_type::DependentTypeArg::Value(generic_value),
+                crate::elaborator::acorn_type::DependentTypeArg::Value(instance_value),
+            ) => {
+                if generic_value == instance_value {
+                    return Ok(());
+                }
+                match generic_value {
+                    AcornValue::Variable(_, generic_type) => {
+                        if &instance_value.get_type() == generic_type {
+                            Ok(())
+                        } else {
+                            Err(Error::Other)
+                        }
+                    }
+                    _ => Err(Error::Other),
+                }
+            }
+            _ => Err(Error::Other),
+        }
+    }
+
+    fn satisfies_typeclass_constraint(&self, ty: &AcornType, typeclass: &Typeclass) -> bool {
+        match ty {
+            AcornType::Data(_, _) | AcornType::Family(_, _) => {
+                self.registry.is_instance_of_type(ty, typeclass)
+            }
+            AcornType::Arbitrary(param) | AcornType::Variable(param) => {
+                let Some(actual) = &param.typeclass else {
+                    return false;
+                };
+                actual == typeclass || self.registry.extends(actual, typeclass)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn check_type_param_constraints(
+        &self,
+        params: &[TypeParam],
+        args: &[AcornType],
+        source: &dyn ErrorContext,
+    ) -> error::Result<()> {
+        for (param, arg) in params.iter().zip(args) {
+            let Some(typeclass) = &param.typeclass else {
+                continue;
+            };
+            if !self.satisfies_typeclass_constraint(arg, typeclass) {
+                return Err(source.error(&format!(
+                    "type parameter '{}' expected an instance of '{}', but got '{}'",
+                    param.name, typeclass.name, arg
+                )));
+            }
         }
         Ok(())
     }
@@ -348,6 +439,8 @@ impl<'a> TypeUnifier<'a> {
                 }
             }
         }
+
+        self.check_type_param_constraints(&unresolved.params, &all_params, source)?;
 
         if uninferred_params.is_empty() {
             // All parameters inferred - fully resolve

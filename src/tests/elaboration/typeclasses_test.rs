@@ -1,3 +1,4 @@
+use crate::elaborator::acorn_type::{AcornType, Datatype};
 use crate::elaborator::environment::Environment;
 
 #[test]
@@ -420,6 +421,95 @@ fn test_env_forbid_instance_on_alias() {
             instance Bar: Flagged {
                 let flag: Bool = true
             }
+            "#,
+    );
+}
+
+#[test]
+fn test_env_parameterized_value_instance_scheme() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+
+            structure Zmod[k: Nat] {
+                value: Nat
+            }
+
+            typeclass A: AddGroup {
+                zero: A
+            }
+
+            instance Zmod[k: Nat]: AddGroup {
+                let zero: Zmod[k] = Zmod[k].new(k)
+            }
+
+            define use_add_group[A: AddGroup](x: A) -> A {
+                x
+            }
+
+            let k: Nat = axiom
+            let x: Zmod[k] = axiom
+            let y: Zmod[k] = use_add_group(x)
+            "#,
+    );
+}
+
+#[test]
+fn test_env_parameterized_type_instance_scheme_checks_constraints() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            typeclass F: Field {
+                one: F
+            }
+            typeclass G: Group {
+                id: G
+            }
+
+            type Foo: axiom
+            type Bar: axiom
+            let foo_one: Foo = axiom
+            instance Foo: Field {
+                let one: Foo = foo_one
+            }
+
+            structure NonZero[T] {
+                value: T
+            }
+
+            instance NonZero[F: Field]: Group {
+                let id: NonZero[F] = NonZero[F].new(Field.one[F])
+            }
+
+            define use_group[G: Group](x: G) -> G {
+                x
+            }
+
+            let good: NonZero[Foo] = axiom
+            let good_used: NonZero[Foo] = use_group(good)
+            "#,
+    );
+    let nonzero = Datatype {
+        module_id: env.module_id,
+        name: "NonZero".to_string(),
+    };
+    let bar = Datatype {
+        module_id: env.module_id,
+        name: "Bar".to_string(),
+    };
+    let group = env
+        .bindings
+        .get_typeclass_for_name("Group")
+        .expect("Group typeclass")
+        .clone();
+    assert!(!env.bindings.is_instance_of_type(
+        &AcornType::Data(nonzero, vec![AcornType::Data(bar, vec![])],),
+        &group,
+    ));
+    env.bad(
+        r#"
+            let bad_id: NonZero[Bar] = Group.id[NonZero[Bar]]
             "#,
     );
 }

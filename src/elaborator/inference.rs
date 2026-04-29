@@ -94,6 +94,11 @@ impl<'a> InferenceEngine<'a> {
         type_params: Vec<AcornType>,
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
+        self.bindings.unifier().check_type_param_constraints(
+            &unresolved.params,
+            &type_params,
+            source,
+        )?;
         unresolved.resolve(source, type_params)
     }
 

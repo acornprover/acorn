@@ -846,6 +846,8 @@ mod tests {
     fn test_parsing_instance_statement_no_block_syntax() {
         ok("instance Nat: Trivial");
         ok("instance String: Show");
+        ok("instance Zmod[k: Nat]: AddGroup");
+        ok("instance NonZero[F: Field]: Group");
     }
 
     #[test]

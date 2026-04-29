@@ -938,6 +938,7 @@ fn parse_typeclass_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
 /// Parses an instance statement where the "instance" keyword has already been found.
 fn parse_instance_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statement> {
     let type_name = tokens.expect_type_name()?;
+    let type_params = TypeParamExpr::parse_list(tokens)?;
     tokens.expect_type(TokenType::Colon)?;
 
     let (typeclass, terminator) = Expression::parse_type(
@@ -969,6 +970,7 @@ fn parse_instance_statement(keyword: Token, tokens: &mut TokenIter) -> Result<St
 
     let is = InstanceStatement {
         type_name,
+        type_params,
         typeclass,
         definitions,
         body,

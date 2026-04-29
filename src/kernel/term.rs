@@ -163,13 +163,14 @@ impl<'a> TermRef<'a> {
             ));
         }
 
-        if let Some(ground_id) = arg.as_type_atom() {
-            if kernel_context
-                .type_store
-                .is_instance_of(ground_id, required_tc)
-            {
-                return Ok(());
-            }
+        if kernel_context
+            .type_store
+            .type_term_is_instance_of(arg, local_context, required_tc)
+        {
+            return Ok(());
+        }
+
+        if arg.as_type_atom().is_some() {
             return Err(format!(
                 "type {} is not an instance of {}",
                 arg, required_name

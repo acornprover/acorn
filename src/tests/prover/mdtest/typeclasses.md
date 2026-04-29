@@ -533,8 +533,39 @@ This direction should work - we can use instance relationship in subsequent proo
 
     instance MyType: Bar
 
-    theorem goal {
-        MyType.property
-    }
+theorem goal {
+    MyType.property
+}
     
+```
+
+## Prover Uses Parameterized Instance Scheme
+
+```acorn
+    typeclass F: Field {
+        one: F
+    }
+
+    typeclass G: Group {
+        id: G
+    }
+
+    type Foo: axiom
+    let foo: Foo = axiom
+
+    instance Foo: Field {
+        let one: Foo = foo
+    }
+
+    structure NonZero[T] {
+        value: T
+    }
+
+    instance NonZero[F: Field]: Group {
+        let id: NonZero[F] = NonZero[F].new(Field.one[F])
+    }
+
+    theorem goal {
+        Group.id[NonZero[Foo]] = Group.id[NonZero[Foo]]
+    }
 ```

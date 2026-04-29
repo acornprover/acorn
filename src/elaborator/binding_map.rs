@@ -9,8 +9,8 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
 
 use crate::code_generator::CodeGenerator;
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, FamilyParamKind, PotentialType, TypeParam, Typeclass, UnresolvedType,
-    Variance,
+    AcornType, Datatype, DependentTypeArg, FamilyParamKind, PotentialType, TypeParam, Typeclass,
+    TypeclassInstance, UnresolvedType, Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
@@ -252,12 +252,23 @@ impl BindingMap {
                     .instance_attr_defs
                     .get(instance_name)
                     .ok_or_else(|| format!("instance constant {} not found", name))?;
-                let value = AcornValue::instance_impl_constant(
-                    self.module_id,
-                    instance_name.clone(),
-                    definition.value.get_type(),
-                );
-                Ok(PotentialValue::Resolved(value))
+                if definition.params.is_empty() && definition.value_param_types.is_empty() {
+                    let value = AcornValue::instance_impl_constant(
+                        self.module_id,
+                        instance_name.clone(),
+                        definition.constant_type.clone(),
+                    );
+                    Ok(PotentialValue::Resolved(value))
+                } else {
+                    Ok(PotentialValue::Unresolved(UnresolvedConstant {
+                        name: ConstantName::instance_attr(self.module_id, instance_name.clone()),
+                        params: definition.params.clone(),
+                        generic_type: definition.constant_type.clone(),
+                        value_param_types: definition.value_param_types.clone(),
+                        bound_value_args: vec![],
+                        args: vec![],
+                    }))
+                }
             }
         }
     }
@@ -351,6 +362,29 @@ impl BindingMap {
             .get(datatype)
             .into_iter()
             .flat_map(|info| info.typeclasses.keys())
+    }
+
+    fn get_instance_typeclasses_for_type(&self, ty: &AcornType) -> Vec<Typeclass> {
+        let Ok(datatype) = ty.get_datatype(&Token::empty()) else {
+            return vec![];
+        };
+        let Some(info) = self.datatype_defs.get(datatype) else {
+            return vec![];
+        };
+        let mut typeclasses = vec![];
+        for typeclass in info.typeclasses.keys() {
+            if self.is_instance_of_type(ty, typeclass) && !typeclasses.contains(typeclass) {
+                typeclasses.push(typeclass.clone());
+            }
+        }
+        for instance in &info.typeclass_instances {
+            if self.is_instance_of_type(ty, &instance.typeclass)
+                && !typeclasses.contains(&instance.typeclass)
+            {
+                typeclasses.push(instance.typeclass.clone());
+            }
+        }
+        typeclasses
     }
 
     /// A helper to get the bindings from the project if needed bindings.
@@ -467,6 +501,76 @@ impl BindingMap {
 
         // Fall back to generic attribute resolution
         self.resolve_datatype_attr(datatype, attr_name)
+    }
+
+    pub fn resolve_datatype_attr_for_type(
+        &self,
+        receiver_type: &AcornType,
+        attr_name: &str,
+    ) -> Result<(ModuleId, ConstantName), String> {
+        let datatype = receiver_type
+            .get_datatype(&Token::empty())
+            .map_err(|_| "only data types can have attributes".to_string())?;
+        let type_params = match receiver_type {
+            AcornType::Data(_, params) => params.clone(),
+            AcornType::Family(_, args) => args
+                .iter()
+                .filter_map(|arg| match arg {
+                    DependentTypeArg::Type(acorn_type) => Some(acorn_type.clone()),
+                    DependentTypeArg::Value(_) => None,
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        if !type_params.is_empty() {
+            let specific_name = ConstantName::datatype_specific_attr(
+                self.module_id,
+                datatype.clone(),
+                type_params,
+                attr_name,
+            );
+            if self.constant_defs.contains_key(&specific_name) {
+                return Ok((self.module_id, specific_name));
+            }
+        }
+
+        if let Some(module_id) = self.get_module_for_datatype_attr(datatype, attr_name) {
+            let name = ConstantName::datatype_attr(module_id, datatype.clone(), attr_name);
+            return Ok((module_id, name));
+        }
+
+        let mut base_typeclass: Option<Typeclass> = None;
+        for typeclass in self.get_instance_typeclasses_for_type(receiver_type) {
+            let Some(base_tc) = self.typeclass_attr_lookup(&typeclass, attr_name) else {
+                continue;
+            };
+            if let Some(existing_base) = &base_typeclass {
+                if existing_base != base_tc {
+                    return Err(format!(
+                        "attribute '{}' is ambiguous: defined in multiple typeclasses: {}, {}",
+                        attr_name, existing_base.name, base_tc.name
+                    ));
+                }
+            } else {
+                base_typeclass = Some(base_tc.clone());
+            }
+        }
+
+        match base_typeclass {
+            Some(typeclass) => self
+                .resolve_typeclass_attr(&typeclass, attr_name)
+                .ok_or_else(|| {
+                    format!(
+                        "attribute {}.{} not found via typeclass {}",
+                        datatype.name, attr_name, typeclass.name
+                    )
+                }),
+            None => Err(format!(
+                "attribute {}.{} not found",
+                datatype.name, attr_name
+            )),
+        }
     }
 
     /// Figures out whether a typeclass attribute is defined directly or by inheritance.
@@ -828,6 +932,8 @@ impl BindingMap {
         instance_type: &AcornType,
         typeclass: &Typeclass,
         attr_name: &str,
+        type_params: &[TypeParam],
+        value_args: &[AcornValue],
         project: &Project,
         source: &dyn ErrorContext,
     ) -> error::Result<(AcornValue, AcornValue)> {
@@ -839,6 +945,7 @@ impl BindingMap {
             .map_err(|e| source.error(&e))?;
         let uc = typeclass_attr.to_unresolved(source)?;
         let resolved_attr = uc.resolve(source, vec![instance_type.clone()])?;
+        let resolved_attr = resolved_attr.genericize(type_params);
         let resolved_attr_type = resolved_attr.get_type();
 
         // Get the relevant properties of the instance datatype.
@@ -848,7 +955,13 @@ impl BindingMap {
         let instance_attr = self
             .get_constant_value(&instance_attr_name)
             .map_err(|e| source.error(&e))?;
-        let instance_attr = instance_attr.as_value(source)?;
+        let type_args: Vec<_> = type_params
+            .iter()
+            .map(|param| AcornType::Arbitrary(param.clone()))
+            .collect();
+        let instance_attr =
+            instance_attr.resolve_constant_with_datatype_args(&type_args, value_args, source)?;
+        let instance_attr = instance_attr.genericize(type_params);
         let instance_attr_type = instance_attr.get_type();
         if instance_attr_type != resolved_attr_type {
             return Err(source.error(&format!(
@@ -860,11 +973,56 @@ impl BindingMap {
     }
 
     pub fn add_instance_of(&mut self, datatype: Datatype, typeclass: Typeclass) {
+        let instance = TypeclassInstance {
+            instance_type: AcornType::Data(datatype.clone(), vec![]),
+            datatype: datatype.clone(),
+            type_params: vec![],
+            value_params: vec![],
+            typeclass: typeclass.clone(),
+        };
+        self.add_typeclass_instance(instance);
+    }
+
+    pub fn add_typeclass_instance(&mut self, instance: TypeclassInstance) {
+        if instance.type_params.is_empty() && instance.value_params.is_empty() {
+            self.datatype_defs
+                .entry(instance.datatype.clone())
+                .or_insert_with(DatatypeDefinition::new)
+                .typeclasses
+                .insert(instance.typeclass.clone(), self.module_id);
+        }
         self.datatype_defs
-            .entry(datatype)
+            .entry(instance.datatype.clone())
             .or_insert_with(DatatypeDefinition::new)
-            .typeclasses
-            .insert(typeclass, self.module_id);
+            .typeclass_instances
+            .push(instance);
+    }
+
+    pub fn is_instance_of_type(&self, ty: &AcornType, typeclass: &Typeclass) -> bool {
+        let Ok(datatype) = ty.get_datatype(&Token::empty()) else {
+            return false;
+        };
+        let Some(info) = self.datatype_defs.get(datatype) else {
+            return false;
+        };
+        if matches!(ty, AcornType::Data(_, params) if params.is_empty())
+            && info.typeclasses.contains_key(typeclass)
+        {
+            return true;
+        }
+        for instance in &info.typeclass_instances {
+            if &instance.typeclass != typeclass {
+                continue;
+            }
+            if self
+                .unifier()
+                .match_instance(&instance.instance_type, ty)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// All other modules that we directly depend on, besides this one.
@@ -916,25 +1074,41 @@ impl BindingMap {
             ),
             DefinedName::Instance(instance_name) => {
                 let definition = definition.expect("instance must have a definition");
-                if !params.is_empty() {
-                    panic!("instance may not have parameters");
-                }
                 if constructor.is_some() {
                     panic!("instance may not be a constructor");
+                }
+                if params.is_empty() && definition.has_generic() {
+                    panic!("there should not be generic types in non-parameterized definitions");
+                }
+                if !params.is_empty() && definition.has_arbitrary() {
+                    panic!("there should not be arbitrary types in parameterized definitions");
                 }
                 self.instance_attr_defs.insert(
                     instance_name.clone(),
                     InstanceAttributeDefinition {
-                        value: definition,
+                        value: definition.clone(),
+                        params: params.clone(),
+                        value_param_types: value_param_types.clone(),
+                        constant_type: constant_type.clone(),
                         range,
                     },
                 );
-                let value = AcornValue::instance_impl_constant(
-                    self.module_id,
-                    instance_name.clone(),
-                    constant_type,
-                );
-                PotentialValue::Resolved(value)
+                if params.is_empty() && value_param_types.is_empty() {
+                    PotentialValue::Resolved(AcornValue::instance_impl_constant(
+                        self.module_id,
+                        instance_name.clone(),
+                        constant_type,
+                    ))
+                } else {
+                    PotentialValue::Unresolved(UnresolvedConstant {
+                        name: ConstantName::instance_attr(self.module_id, instance_name.clone()),
+                        params,
+                        generic_type: constant_type,
+                        value_param_types,
+                        bound_value_args: vec![],
+                        args: vec![],
+                    })
+                }
             }
         }
     }
@@ -2222,6 +2396,9 @@ struct DatatypeDefinition {
     /// Maps typeclasses this datatype is an instance of to the module with the instance statement.
     typeclasses: HashMap<Typeclass, ModuleId>,
 
+    /// Parameterized instance schemes for this datatype.
+    typeclass_instances: Vec<TypeclassInstance>,
+
     /// The preferred local name for this datatype.
     alias: Option<String>,
 
@@ -2252,6 +2429,7 @@ impl DatatypeDefinition {
         DatatypeDefinition {
             attributes: BTreeMap::new(),
             typeclasses: HashMap::new(),
+            typeclass_instances: vec![],
             alias: None,
             doc_comments: Vec::new(),
             range: None,
@@ -2291,6 +2469,11 @@ impl DatatypeDefinition {
                         typename, typeclass.name
                     )));
                 }
+            }
+        }
+        for imported_instance in &info.typeclass_instances {
+            if !self.typeclass_instances.contains(imported_instance) {
+                self.typeclass_instances.push(imported_instance.clone());
             }
         }
         if self.family_param_kinds.is_empty() {
@@ -2390,6 +2573,15 @@ struct InstanceAttributeDefinition {
     /// How the attribute is defined.
     value: AcornValue,
 
+    /// Generic type parameters for this implementation.
+    params: Vec<TypeParam>,
+
+    /// Hidden dependent value parameters for this implementation.
+    value_param_types: Vec<AcornType>,
+
+    /// The generic type of this implementation.
+    constant_type: AcornType,
+
     /// The range in the source code where this instance attribute was defined.
     range: Option<Range>,
 }
@@ -2406,9 +2598,11 @@ fn keys_with_prefix<'a, T>(
 
 impl TypeclassRegistry for BindingMap {
     fn is_instance_of(&self, dt: &Datatype, typeclass: &Typeclass) -> bool {
-        self.datatype_defs
-            .get(dt)
-            .map_or(false, |info| info.typeclasses.contains_key(typeclass))
+        self.is_instance_of_type(&AcornType::Data(dt.clone(), vec![]), typeclass)
+    }
+
+    fn is_instance_of_type(&self, ty: &AcornType, typeclass: &Typeclass) -> bool {
+        BindingMap::is_instance_of_type(self, ty, typeclass)
     }
 
     fn extends(&self, typeclass: &Typeclass, base: &Typeclass) -> bool {

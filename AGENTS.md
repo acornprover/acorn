@@ -18,6 +18,12 @@
   run check just on the module that failed at a higher log level. For example:
   `RUST_LOG=acorn=trace cargo run --profile release -- check list.list_base`
 
+- To rewrite certificate caches without testing prover search, use `verify --ignore-hash`, not
+  `reprove`. For example:
+  `cargo run --profile release -- verify finite_group --ignore-hash`
+
+  `reprove` forces the prover to run and should be reserved for testing prover behavior.
+
 - To evaluate performance, we should do a release build:
 
   `cargo build --profile release`

@@ -695,6 +695,9 @@ impl Project {
                 }
             }
             StatementInfo::Instance(is) => {
+                for type_param in &is.type_params {
+                    Self::collect_lib_dependencies_from_type_param(type_param, output);
+                }
                 Self::collect_lib_dependencies_from_expression(&is.typeclass, output);
                 if let Some(definitions) = &is.definitions {
                     Self::collect_lib_dependencies_from_body(definitions, output);

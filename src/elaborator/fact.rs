@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
+use crate::elaborator::acorn_type::{AcornType, Typeclass, TypeclassInstance};
 use crate::elaborator::acorn_value::{AcornValue, ConstantInstance};
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::potential_value::PotentialValue;
@@ -24,8 +24,8 @@ pub enum Fact {
         Source,
     ),
 
-    /// The fact that this class is an instance of this typeclass.
-    Instance(Datatype, Typeclass, Source),
+    /// The fact that this type is an instance of this typeclass.
+    Instance(TypeclassInstance, Source),
 
     /// A defined constant.
     /// The tuple is the name of the constant, the definition, and the source.
@@ -46,8 +46,12 @@ impl fmt::Display for Fact {
                     write!(f, "{} extends {}", tc.name, names.join(", "))
                 }
             }
-            Fact::Instance(class, typeclass, _) => {
-                write!(f, "{} is an instance of {}", class.name, typeclass.name)
+            Fact::Instance(instance, _) => {
+                write!(
+                    f,
+                    "{} is an instance of {}",
+                    instance.instance_type, instance.typeclass.name
+                )
             }
             Fact::Definition(_, _, source) => write!(f, "{}", source.description()),
         }
@@ -63,7 +67,7 @@ impl Fact {
         match self {
             Fact::Proposition(p) => &p.source,
             Fact::Extends(_, _, _, source) => source,
-            Fact::Instance(_, _, source) => source,
+            Fact::Instance(_, source) => source,
             Fact::Definition(_, _, source) => source,
         }
     }

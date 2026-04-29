@@ -33,6 +33,7 @@ use crate::elaborator::source::SourceType;
 use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::build_type_var_map;
 use crate::elaborator::to_term::lower_type_to_term;
+use crate::elaborator::to_term::lower_type_to_term_with_value_stack;
 use crate::elaborator::to_term::lower_value_to_term;
 #[cfg(test)]
 use crate::elaborator::to_term::lower_value_to_term_existing;
@@ -372,10 +373,52 @@ impl KernelContext {
 
         // Register typeclass relationships in TypeStore
         match fact {
-            Fact::Instance(datatype, typeclass, _) => {
-                let acorn_type = AcornType::Data(datatype.clone(), vec![]);
-                let typeclass_id = self.type_store.add_typeclass(typeclass);
-                self.type_store.add_type_instance(&acorn_type, typeclass_id);
+            Fact::Instance(instance, _) => {
+                let typeclass_id = self.type_store.add_typeclass(&instance.typeclass);
+                if instance.type_params.is_empty() && instance.value_params.is_empty() {
+                    self.type_store
+                        .add_type_instance(&instance.instance_type, typeclass_id);
+                } else {
+                    let type_var_map = build_type_var_map(self, &instance.type_params);
+                    let mut context_types = vec![];
+                    for type_param in &instance.type_params {
+                        let kind = if let Some(typeclass) = &type_param.typeclass {
+                            let tc_id = self.type_store.add_typeclass(typeclass);
+                            Term::typeclass(tc_id)
+                        } else {
+                            Term::type_sort()
+                        };
+                        context_types.push(kind);
+                    }
+                    let value_stack: Vec<_> = instance
+                        .value_params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            Term::atom(Atom::FreeVariable(
+                                (instance.type_params.len() + i) as AtomId,
+                            ))
+                        })
+                        .collect();
+                    for value_param in &instance.value_params {
+                        context_types.push(lower_type_to_term(
+                            self,
+                            &value_param.value_type,
+                            Some(&type_var_map),
+                        ));
+                    }
+                    let target = lower_type_to_term_with_value_stack(
+                        self,
+                        &instance.instance_type,
+                        Some(&type_var_map),
+                        &value_stack,
+                    );
+                    self.type_store.add_type_instance_scheme(
+                        target,
+                        LocalContext::from_types(context_types),
+                        typeclass_id,
+                    );
+                }
             }
             Fact::Extends(typeclass, base_set, inhabitant_provider, _) => {
                 let tc_id = self.type_store.add_typeclass(typeclass);

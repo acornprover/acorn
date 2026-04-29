@@ -208,6 +208,13 @@ pub enum PotentialType {
 }
 
 impl PotentialType {
+    pub fn as_unresolved(&self) -> Option<&UnresolvedType> {
+        match self {
+            PotentialType::Unresolved(ut) => Some(ut),
+            PotentialType::Resolved(_) => None,
+        }
+    }
+
     pub fn resolve_args(
         self,
         params: Vec<DependentTypeArg>,
@@ -541,6 +548,16 @@ impl fmt::Display for FamilyParam {
 pub enum FamilyParamKind {
     Type(Option<Typeclass>),
     Value(AcornType),
+}
+
+/// A typeclass instance target, possibly quantified over datatype family parameters.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct TypeclassInstance {
+    pub instance_type: AcornType,
+    pub datatype: Datatype,
+    pub type_params: Vec<TypeParam>,
+    pub value_params: Vec<ValueParam>,
+    pub typeclass: Typeclass,
 }
 
 /// Every AcornValue has an AcornType.

@@ -774,10 +774,11 @@ fn types_compatible(
         pattern_var_type.as_ref().decompose()
     {
         // The bound term should be a type that implements this typeclass
-        if let Some(ground_id) = bound_term.as_type_atom() {
-            // is_instance_of handles both explicit instances and arbitrary types with
-            // compatible typeclass constraints
-            return kernel_context.type_store.is_instance_of(ground_id, *tc_id);
+        if kernel_context
+            .type_store
+            .type_term_is_instance_of(bound_term, query_context, *tc_id)
+        {
+            return true;
         }
         if let Some(var_id) = bound_term.atomic_variable() {
             let Some(var_type) = query_context.get_var_type(var_id as usize) else {
@@ -804,10 +805,12 @@ fn types_compatible(
                 var_type.as_ref().decompose()
             {
                 // bound_type should implement this typeclass
-                if let Some(ground_id) = bound_type.as_ref().as_type_atom() {
-                    // is_instance_of handles both explicit instances and arbitrary types with
-                    // compatible typeclass constraints
-                    return kernel_context.type_store.is_instance_of(ground_id, *tc_id);
+                if kernel_context.type_store.type_term_is_instance_of(
+                    bound_type.as_ref(),
+                    query_context,
+                    *tc_id,
+                ) {
+                    return true;
                 }
                 if let Some(bound_var_id) = bound_type.as_ref().atomic_variable() {
                     let Some(bound_var_type) = query_context.get_var_type(bound_var_id as usize)

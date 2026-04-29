@@ -327,8 +327,38 @@ impl<'a> Evaluator<'a> {
         {
             return Ok(value);
         }
-        self.inference()
-            .resolve_unresolved_with_type_params(unresolved, type_params, source)
+        let result = self.inference().resolve_unresolved_with_type_params(
+            unresolved.clone(),
+            type_params.clone(),
+            source,
+        );
+        if result.is_ok() {
+            return result;
+        }
+        if self.full_module_has_typeclass_instance(&unresolved, &type_params) {
+            return unresolved.resolve(source, type_params);
+        }
+        result
+    }
+
+    fn full_module_has_typeclass_instance(
+        &self,
+        unresolved: &UnresolvedConstant,
+        type_params: &[AcornType],
+    ) -> bool {
+        let ConstantName::TypeclassAttribute(_, typeclass, _) = &unresolved.name else {
+            return false;
+        };
+        let Some(receiver_type) = type_params.first() else {
+            return false;
+        };
+        if self.bindings.is_instance_of_type(receiver_type, typeclass) {
+            return false;
+        }
+        let Some(full_bindings) = self.project.get_bindings(self.bindings.module_id()) else {
+            return false;
+        };
+        full_bindings.is_instance_of_type(receiver_type, typeclass)
     }
 
     fn split_datatype_args(
@@ -442,14 +472,14 @@ impl<'a> Evaluator<'a> {
         attr_name: &str,
         source: &dyn ErrorContext,
     ) -> error::Result<PotentialValue> {
-        let Some((datatype, type_args, datatype_args)) = Self::datatype_args_for_type(base_type)
+        let Some((_datatype, _type_args, datatype_args)) = Self::datatype_args_for_type(base_type)
         else {
             return Err(source.error("not an attributable datatype"));
         };
 
         let (module_id, const_name) = match self
             .bindings
-            .resolve_datatype_attr_with_params(&datatype, &type_args, attr_name)
+            .resolve_datatype_attr_for_type(base_type, attr_name)
         {
             Ok((module_id, const_name)) => (module_id, const_name),
             Err(err) => return Err(source.error(&err)),
@@ -967,14 +997,14 @@ impl<'a> Evaluator<'a> {
 
         let function = match &base_type {
             AcornType::Data(_, _) | AcornType::Family(_, _) => {
-                let Some((datatype, type_args, datatype_args)) =
+                let Some((_datatype, _type_args, datatype_args)) =
                     Self::datatype_args_for_type(&base_type)
                 else {
                     unreachable!("data and family types should be attributable");
                 };
                 let (module_id, const_name) = match self
                     .bindings
-                    .resolve_datatype_attr_with_params(&datatype, &type_args, attr_name)
+                    .resolve_datatype_attr_for_type(&base_type, attr_name)
                 {
                     Ok((module_id, const_name)) => (module_id, const_name),
                     Err(err) => return Err(source.error(&err)),

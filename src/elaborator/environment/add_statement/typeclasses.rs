@@ -193,15 +193,161 @@ impl Environment {
         statement: &Statement,
         is: &InstanceStatement,
     ) -> error::Result<()> {
-        let type_expr = Expression::Singleton(is.type_name.clone());
-        let instance_type = self.evaluator(project).evaluate_type(&type_expr)?;
-        let instance_datatype = self.check_can_add_attributes(&is.type_name, &instance_type)?;
         let typeclass = self.evaluator(project).evaluate_typeclass(&is.typeclass)?;
+
+        let (instance_type, instance_datatype, family_scope, family_value_args) =
+            if is.type_params.is_empty() {
+                let type_expr = Expression::Singleton(is.type_name.clone());
+                let instance_type = self.evaluator(project).evaluate_type(&type_expr)?;
+                let instance_datatype = self
+                    .check_can_add_attributes(&is.type_name, &instance_type)?
+                    .clone();
+                (
+                    instance_type,
+                    instance_datatype,
+                    DatatypeFamilyScope {
+                        type_params: vec![],
+                        value_params: vec![],
+                    },
+                    vec![],
+                )
+            } else {
+                let potential = self
+                    .bindings
+                    .get_type_for_typename(is.type_name.text())
+                    .cloned()
+                    .ok_or_else(|| is.type_name.error("expected type name"))?;
+                let Some(unresolved) = potential.as_unresolved() else {
+                    return Err(is
+                        .type_name
+                        .error("instance parameters require a parameterized datatype"));
+                };
+                let Some(datatype) = unresolved.base_datatype().cloned() else {
+                    return Err(is
+                        .type_name
+                        .error("instance parameters require a datatype family"));
+                };
+                let expected_kinds = self
+                    .bindings
+                    .get_datatype_family_param_kinds(&datatype)
+                    .unwrap_or(&[])
+                    .to_vec();
+                let family_params = self
+                    .evaluator(project)
+                    .evaluate_family_params(&is.type_params)?;
+                if family_params.len() != expected_kinds.len() {
+                    return Err(is.type_name.error(&format!(
+                        "type {} expects {} parameters, but got {}",
+                        is.type_name.text(),
+                        expected_kinds.len(),
+                        family_params.len()
+                    )));
+                }
+                for (expr, (param, expected_kind)) in is
+                    .type_params
+                    .iter()
+                    .zip(family_params.iter().zip(expected_kinds.iter()))
+                {
+                    match (param, expected_kind) {
+                        (
+                            FamilyParam::Type(type_param),
+                            crate::elaborator::acorn_type::FamilyParamKind::Type(expected),
+                        ) if expected.is_none() || &type_param.typeclass == expected => {}
+                        (
+                            FamilyParam::Value(value_param),
+                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                        ) if &value_param.value_type == expected_type => {}
+                        (
+                            FamilyParam::Type(_),
+                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                        ) => {
+                            return Err(expr.name.error(&format!(
+                                "expected a dependent value parameter like '{}: {}'",
+                                expr.name.text(),
+                                expected_type
+                            )));
+                        }
+                        (
+                            FamilyParam::Value(_),
+                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                        ) => {
+                            return Err(expr
+                                .name
+                                .error("expected a type parameter here, not a value parameter"));
+                        }
+                        _ => {
+                            return Err(expr
+                                .name
+                                .error("instance parameter kind does not match datatype"));
+                        }
+                    }
+                }
+                for (expr, family_param) in is.type_params.iter().zip(&family_params) {
+                    if let Some(type_param) = family_param.as_type_param() {
+                        self.bindings
+                            .check_typename_available(&type_param.name, &expr.name)?;
+                    }
+                }
+
+                let family_scope = DatatypeFamilyScope {
+                    type_params: family_params
+                        .iter()
+                        .filter_map(|param| param.as_type_param().cloned())
+                        .collect(),
+                    value_params: family_params
+                        .iter()
+                        .filter_map(|param| param.as_value_param().cloned())
+                        .collect(),
+                };
+                let mut arbitrary_type_args = vec![];
+                for param in &family_scope.type_params {
+                    arbitrary_type_args.push(self.bindings.add_arbitrary_type(param.clone()));
+                }
+                let mut next_type_arg = 0usize;
+                let mut next_value_arg = 0usize;
+                let mut family_value_args = vec![];
+                let family_args = family_params
+                    .iter()
+                    .map(|param| match param {
+                        FamilyParam::Type(_) => {
+                            let arg =
+                                DependentTypeArg::Type(arbitrary_type_args[next_type_arg].clone());
+                            next_type_arg += 1;
+                            arg
+                        }
+                        FamilyParam::Value(value_param) => {
+                            let value = AcornValue::Variable(
+                                next_value_arg as AtomId,
+                                value_param.value_type.clone(),
+                            );
+                            next_value_arg += 1;
+                            family_value_args.push(value.clone());
+                            DependentTypeArg::Value(value)
+                        }
+                    })
+                    .collect();
+                let instance_type = potential.resolve_args(family_args, &is.type_name)?;
+                let instance_datatype = self
+                    .check_can_add_attributes(&is.type_name, &instance_type)?
+                    .clone();
+                (
+                    instance_type,
+                    instance_datatype,
+                    family_scope,
+                    family_value_args,
+                )
+            };
+
+        let family_type_args: Vec<_> = family_scope
+            .type_params
+            .iter()
+            .map(|param| AcornType::Arbitrary(param.clone()))
+            .collect();
 
         for base_typeclass in self.bindings.get_extends(&typeclass) {
             if !self
                 .bindings
-                .is_instance_of(&instance_datatype, &base_typeclass)
+                .is_instance_of_type(&instance_type, &base_typeclass)
             {
                 return Err(statement.error(&format!(
                     "'{}' must be an instance of '{}' in order to be an instance of '{}'",
@@ -226,13 +372,19 @@ impl Environment {
                             ),
                             ls,
                             ls.name_token.range(),
-                            None,
+                            if is.type_params.is_empty() {
+                                None
+                            } else {
+                                Some(&family_scope)
+                            },
                         )?;
 
                         pairs.push(self.bindings.check_instance_attribute(
                             &instance_type,
                             &typeclass,
                             ls.name_token.text(),
+                            &family_scope.type_params,
+                            &family_value_args,
                             &project,
                             substatement,
                         )?);
@@ -250,7 +402,11 @@ impl Environment {
                                 instance_datatype.clone(),
                             ),
                             Some(&instance_type),
-                            None,
+                            if is.type_params.is_empty() {
+                                None
+                            } else {
+                                Some(&family_scope)
+                            },
                             ds,
                             ds.name_token.range(),
                         )?;
@@ -259,6 +415,8 @@ impl Environment {
                             &instance_type,
                             &typeclass,
                             ds.name_token.text(),
+                            &family_scope.type_params,
+                            &family_value_args,
                             &project,
                             substatement,
                         )?);
@@ -297,7 +455,20 @@ impl Environment {
                         Some(name) => name,
                         None => return None,
                     };
-                    self.bindings.get_definition(&name).cloned()
+                    let definition = self.bindings.get_definition(&name)?.clone();
+                    let replacements: Vec<_> = family_scope
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .zip(family_type_args.iter().cloned())
+                        .map(|(param, arg)| (param.name, arg))
+                        .collect();
+                    let definition = definition.instantiate(&replacements);
+                    if family_value_args.is_empty() {
+                        Some(definition)
+                    } else {
+                        Some(AcornValue::apply(definition, family_value_args.clone()))
+                    }
                 });
                 conditions.push(condition);
                 continue;
@@ -331,13 +502,19 @@ impl Environment {
                     let tc_unresolved = tc_attr.to_unresolved(statement)?;
                     let tc_resolved =
                         tc_unresolved.resolve(statement, vec![instance_type.clone()])?;
+                    let tc_resolved = tc_resolved.genericize(&family_scope.type_params);
                     let tc_type = tc_resolved.get_type();
 
                     let dt_attr = self
                         .bindings
                         .get_constant_value(&datatype_attr_name)
                         .map_err(|e| statement.error(&e))?;
-                    let dt_value = dt_attr.as_value(statement)?;
+                    let dt_value = dt_attr.resolve_constant_with_datatype_args(
+                        &family_type_args,
+                        &family_value_args,
+                        statement,
+                    )?;
+                    let dt_value = dt_value.genericize(&family_scope.type_params);
                     let dt_type = dt_value.get_type();
 
                     if tc_type != dt_type {
@@ -356,12 +533,28 @@ impl Environment {
         }
 
         for (name, tc_type, dt_value, tc_resolved) in defaults_to_add {
+            let definition = if family_value_args.is_empty() {
+                dt_value
+            } else {
+                AcornValue::lambda(
+                    family_scope
+                        .value_params
+                        .iter()
+                        .map(|param| param.value_type.clone())
+                        .collect(),
+                    dt_value,
+                )
+            };
             self.define_constant(
                 name.clone(),
-                vec![],
-                vec![],
+                family_scope.type_params.clone(),
+                family_scope
+                    .value_params
+                    .iter()
+                    .map(|param| param.value_type.clone())
+                    .collect(),
                 tc_type,
-                Some(dt_value),
+                Some(definition),
                 statement.range(),
                 None,
             );
@@ -369,7 +562,12 @@ impl Environment {
                 .bindings
                 .get_constant_value(&name)
                 .map_err(|e| statement.error(&e))?
-                .as_value(statement)?;
+                .resolve_constant_with_datatype_args(
+                    &family_type_args,
+                    &family_value_args,
+                    statement,
+                )?
+                .genericize(&family_scope.type_params);
             pairs.push((tc_resolved, instance_impl));
         }
 
@@ -380,11 +578,14 @@ impl Environment {
             is.type_name.text(),
             &typeclass.name,
         );
-        let instance_fact = Fact::Instance(
-            instance_datatype.clone(),
-            typeclass.clone(),
-            instance_source.clone(),
-        );
+        let typeclass_instance = TypeclassInstance {
+            instance_type: instance_type.clone().genericize(&family_scope.type_params),
+            datatype: instance_datatype.clone(),
+            type_params: family_scope.type_params.clone(),
+            value_params: family_scope.value_params.clone(),
+            typeclass: typeclass.clone(),
+        };
+        let instance_fact = Fact::Instance(typeclass_instance.clone(), instance_source.clone());
 
         let node = if conditions.is_empty() {
             Node::Structural(instance_fact, None)
@@ -401,8 +602,8 @@ impl Environment {
             let block = Block::new(
                 project,
                 &self,
-                vec![],
-                vec![],
+                family_scope.type_params.clone(),
+                family_scope.value_block_args(),
                 block_params,
                 &statement.first_token,
                 &statement.last_token,
@@ -411,17 +612,38 @@ impl Environment {
             Node::Block(block, Some(instance_fact), None)
         };
 
+        for type_param in &family_scope.type_params {
+            self.bindings.remove_type(&type_param.name);
+        }
         let index = self.add_node(node);
         self.add_node_lines(index, &statement.range());
-        self.bindings
-            .add_instance_of(instance_datatype.clone(), typeclass);
+        self.bindings.add_typeclass_instance(typeclass_instance);
 
         for (public_attr, instance_impl) in pairs {
-            let bridge = Node::definition(
-                PotentialValue::Resolved(public_attr),
-                instance_impl,
-                instance_source.clone(),
-            );
+            let bridge =
+                if family_scope.type_params.is_empty() && family_scope.value_params.is_empty() {
+                    Node::definition(
+                        PotentialValue::Resolved(public_attr),
+                        instance_impl,
+                        instance_source.clone(),
+                    )
+                } else {
+                    let mut claim = public_attr.inflate_function_definition(instance_impl);
+                    let value_param_types: Vec<_> = family_scope
+                        .value_params
+                        .iter()
+                        .map(|param| param.value_type.clone())
+                        .collect();
+                    if !value_param_types.is_empty() {
+                        claim = AcornValue::ForAll(value_param_types, Box::new(claim));
+                    }
+                    let prop = Proposition::new(
+                        claim,
+                        family_scope.type_params.clone(),
+                        instance_source.clone(),
+                    );
+                    Node::Structural(Fact::Proposition(Arc::new(prop)), None)
+                };
             let index = self.add_node(bridge);
             self.add_node_lines(index, &statement.range());
         }

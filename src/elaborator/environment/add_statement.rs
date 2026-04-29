@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Range;
 
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, TypeParam, Typeclass, ValueParam, Variance,
+    AcornType, Datatype, DependentTypeArg, FamilyParam, TypeParam, Typeclass, TypeclassInstance,
+    ValueParam, Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::ConstructorInfo;
@@ -19,7 +20,6 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::{Source, SourceType};
 use crate::elaborator::stack::Stack;
-use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::AtomId;
 use crate::project::{ImportError, Project};
 use crate::syntax::expression::{Declaration, Expression};

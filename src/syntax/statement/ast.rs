@@ -249,6 +249,9 @@ pub struct InstanceStatement {
     /// The type that is an instance of the typeclass.
     pub type_name: Token,
 
+    /// Parameters for a family-wide instance scheme.
+    pub type_params: Vec<TypeParamExpr>,
+
     /// The typeclass that the type is an instance of.
     pub typeclass: Expression,
 

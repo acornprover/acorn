@@ -392,7 +392,8 @@ impl Statement {
             StatementInfo::Instance(is) => {
                 let mut doc = allocator
                     .text("instance ")
-                    .append(allocator.text(is.type_name.text()))
+                    .append(allocator.text(is.type_name.text()));
+                doc = write_type_params_pretty(allocator, doc, &is.type_params)
                     .append(allocator.text(": "))
                     .append(is.typeclass.pretty_ref(allocator, false));
                 if let Some(definitions) = &is.definitions {

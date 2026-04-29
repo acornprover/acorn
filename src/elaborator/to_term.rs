@@ -55,6 +55,15 @@ pub fn lower_type_to_term(
     lower_type_to_term_with_stack(kernel_context, acorn_type, type_var_map, &[])
 }
 
+pub fn lower_type_to_term_with_value_stack(
+    kernel_context: &mut KernelContext,
+    acorn_type: &AcornType,
+    type_var_map: Option<&TypeVarMap>,
+    stack: &[Term],
+) -> Term {
+    lower_type_to_term_with_stack(kernel_context, acorn_type, type_var_map, stack)
+}
+
 fn lower_type_to_term_with_stack(
     kernel_context: &mut KernelContext,
     acorn_type: &AcornType,

@@ -297,12 +297,25 @@ impl Block {
                 None
             }
             BlockParams::TypeRequirement(ref constraints, range) => {
+                let bound_constraints: Vec<_> = constraints
+                    .iter()
+                    .map(|constraint| {
+                        constraint
+                            .clone()
+                            .bind_values(0, 0, &internal_args)
+                            .to_arbitrary()
+                    })
+                    .collect();
                 // For backward compatibility, if there's exactly one constraint,
                 // return it as goal_prop for the old single-goal path.
                 // Multiple constraints will be handled separately below.
-                if constraints.len() == 1 {
+                if bound_constraints.len() == 1 {
                     let source = Source::block_goal(env.module_id, range, subenv.depth);
-                    Some(Proposition::new(constraints[0].clone(), vec![], source))
+                    Some(Proposition::new(
+                        bound_constraints[0].clone(),
+                        vec![],
+                        source,
+                    ))
                 } else {
                     None
                 }
@@ -361,7 +374,8 @@ impl Block {
         if let BlockParams::TypeRequirement(constraints, range) = params {
             if constraints.len() > 1 {
                 for constraint in constraints {
-                    let source = Source::block_goal(env.module_id, range, env.depth);
+                    let constraint = constraint.bind_values(0, 0, &internal_args).to_arbitrary();
+                    let source = Source::block_goal(env.module_id, range, subenv.depth);
                     let prop = Arc::new(Proposition::new(constraint, vec![], source));
                     let goal = Goal::interior(&subenv, prop.clone(), None)
                         .map_err(|e| error::Error::new(first_token, last_token, &e))?;
