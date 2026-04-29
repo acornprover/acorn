@@ -102,12 +102,17 @@ impl VerifierOutput {
         }
     }
 
-    /// Print a check-specific timing breakdown.
-    pub fn print_check_timing_breakdown(&self) {
+    /// Print a command-specific timing breakdown.
+    pub fn print_timing_breakdown(
+        &self,
+        title: &str,
+        build_phase_label: &str,
+        include_cert_throughput: bool,
+    ) {
         let total = self.timings.setup + self.timings.build_total;
 
         println!();
-        println!("Check timing:");
+        println!("{} timing:", title);
         println!(
             "project setup: {}",
             Self::format_duration(self.timings.setup)
@@ -125,12 +130,16 @@ impl VerifierOutput {
             Self::format_duration(self.timings.build_loading)
         );
         println!(
-            "certificate checking: {}",
+            "{}: {}",
+            build_phase_label,
             Self::format_duration(self.timings.build_verification)
         );
         println!("total measured: {}", Self::format_duration(total));
 
-        if self.metrics.certs_cached > 0 && self.timings.build_verification.as_secs_f64() > 0.0 {
+        if include_cert_throughput
+            && self.metrics.certs_cached > 0
+            && self.timings.build_verification.as_secs_f64() > 0.0
+        {
             let certs_per_second =
                 self.metrics.certs_cached as f64 / self.timings.build_verification.as_secs_f64();
             println!("certificate throughput: {:.0} certs/s", certs_per_second);

@@ -368,6 +368,13 @@ enum Command {
             help = "Print the detailed proof found by the prover for a selected goal, or for the only goal in the target."
         )]
         print_proof: bool,
+
+        /// Print phase timing information
+        #[clap(
+            long = "timing",
+            help = "Print phase timing information for this verification run."
+        )]
+        timing: bool,
     },
 
     /// Check all goals, erroring if any goal requires a search
@@ -416,6 +423,13 @@ enum Command {
             help = "Number of worker threads to use for full-module checking. Defaults to available parallelism."
         )]
         jobs: Option<usize>,
+
+        /// Print phase timing information
+        #[clap(
+            long = "timing",
+            help = "Print phase timing information for this check run."
+        )]
+        timing: bool,
     },
 
     /// Re-prove goals without using the cache
@@ -635,6 +649,7 @@ async fn main() {
             shallow,
             verbose,
             print_proof,
+            timing,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -716,6 +731,9 @@ async fn main() {
                     std::process::exit(1);
                 }
                 Ok(output) => {
+                    if timing {
+                        output.print_timing_breakdown("Verify", "verification/search", false);
+                    }
                     if !output.is_success() {
                         std::process::exit(1);
                     }
@@ -730,6 +748,7 @@ async fn main() {
             cert,
             strict,
             jobs,
+            timing,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -803,7 +822,9 @@ async fn main() {
                     std::process::exit(1);
                 }
                 Ok(output) => {
-                    output.print_check_timing_breakdown();
+                    if timing {
+                        output.print_timing_breakdown("Check", "certificate checking", true);
+                    }
                     if !output.is_success() {
                         std::process::exit(1);
                     }
@@ -1508,6 +1529,17 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_accepts_timing_flag() {
+        let args =
+            Args::try_parse_from(["acorn", "verify", "--timing"]).expect("flag should parse");
+
+        match args.command {
+            Some(Command::Verify { timing, .. }) => assert!(timing),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
     fn test_check_accepts_strict_flag() {
         let args = Args::try_parse_from(["acorn", "check", "--strict"])
             .expect("check strict flag should parse");
@@ -1525,6 +1557,16 @@ mod tests {
 
         match args.command {
             Some(Command::Check { jobs, .. }) => assert_eq!(jobs, Some(4)),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_check_accepts_timing_flag() {
+        let args = Args::try_parse_from(["acorn", "check", "--timing"]).expect("flag should parse");
+
+        match args.command {
+            Some(Command::Check { timing, .. }) => assert!(timing),
             _ => panic!("unexpected command"),
         }
     }
