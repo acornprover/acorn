@@ -150,6 +150,9 @@ pub struct Builder<'a> {
     /// Build metrics collected during verification.
     pub metrics: BuildMetrics,
 
+    /// Per-module timing data collected during verification.
+    pub module_timings: Vec<ModuleTiming>,
+
     /// When this flag is set, we emit build events when a goal is slow.
     pub log_when_slow: bool,
 
@@ -266,6 +269,15 @@ pub struct BuildMetrics {
     /// How many certificates were reused from the cache.
     pub certs_cached: i32,
 
+    /// How many cached certificates were checked.
+    pub cert_checks_total: i32,
+
+    /// How many cached certificate checks succeeded.
+    pub cert_checks_success: i32,
+
+    /// The total amount of time spent checking cached certificates, in seconds.
+    pub cert_check_time: f64,
+
     /// How many cached certificates were unused.
     pub certs_unused: i32,
 
@@ -286,6 +298,24 @@ pub struct BuildMetrics {
 
     /// Time spent verifying goals, checking certificates, or running prover search.
     pub verification_time: f64,
+}
+
+/// Timing data for work performed on one module during the verification phase.
+#[derive(Clone, Debug)]
+pub struct ModuleTiming {
+    pub module: ModuleDescriptor,
+    pub goals_total: i32,
+    pub goals_done: i32,
+    pub certs_cached: i32,
+    pub certs_created: i32,
+    pub cert_checks_total: i32,
+    pub cert_checks_success: i32,
+    pub cert_check_time: f64,
+    pub searches_total: i32,
+    pub searches_success: i32,
+    pub search_time: f64,
+    pub elapsed: f64,
+    pub skipped: bool,
 }
 
 #[derive(Debug)]
@@ -327,6 +357,9 @@ impl BuildMetrics {
         self.goals_done += result.goals_done;
         self.goals_success += result.goals_success;
         self.certs_cached += result.certs_cached;
+        self.cert_checks_total += result.cert_checks_total;
+        self.cert_checks_success += result.cert_checks_success;
+        self.cert_check_time += result.cert_check_time;
         self.certs_unused += result.certs_unused;
         self.certs_created += result.certs_created;
         self.searches_total += result.searches_total;
@@ -379,6 +412,33 @@ impl BuildMetrics {
             BuildStatus::Good => {
                 println!("Verification succeeded.");
             }
+        }
+    }
+}
+
+impl ModuleTiming {
+    fn from_metrics_delta(
+        module: ModuleDescriptor,
+        goals_total: i32,
+        before: &BuildMetrics,
+        after: &BuildMetrics,
+        elapsed: Duration,
+        skipped: bool,
+    ) -> Self {
+        Self {
+            module,
+            goals_total,
+            goals_done: after.goals_done - before.goals_done,
+            certs_cached: after.certs_cached - before.certs_cached,
+            certs_created: after.certs_created - before.certs_created,
+            cert_checks_total: after.cert_checks_total - before.cert_checks_total,
+            cert_checks_success: after.cert_checks_success - before.cert_checks_success,
+            cert_check_time: after.cert_check_time - before.cert_check_time,
+            searches_total: after.searches_total - before.searches_total,
+            searches_success: after.searches_success - before.searches_success,
+            search_time: after.search_time - before.search_time,
+            elapsed: elapsed.as_secs_f64(),
+            skipped,
         }
     }
 }
@@ -457,6 +517,7 @@ impl<'a> Builder<'a> {
             status: BuildStatus::Good,
             id: NEXT_BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             metrics: BuildMetrics::new(),
+            module_timings: Vec::new(),
             log_when_slow: false,
             log_secondary_errors: true,
             check_mode: false,
@@ -482,6 +543,32 @@ impl<'a> Builder<'a> {
             activation_limit: 2000,
             check_jobs: 1,
         }
+    }
+
+    fn record_module_timing(
+        &mut self,
+        module: ModuleDescriptor,
+        goals_total: i32,
+        before: &BuildMetrics,
+        elapsed: Duration,
+        skipped: bool,
+    ) {
+        self.module_timings.push(ModuleTiming::from_metrics_delta(
+            module,
+            goals_total,
+            before,
+            &self.metrics,
+            elapsed,
+            skipped,
+        ));
+    }
+
+    fn record_cert_check(&mut self, elapsed: Duration, succeeded: bool) {
+        self.metrics.cert_checks_total += 1;
+        if succeeded {
+            self.metrics.cert_checks_success += 1;
+        }
+        self.metrics.cert_check_time += elapsed.as_secs_f64();
     }
 
     fn default_event(&self) -> BuildEvent {
@@ -852,6 +939,7 @@ impl<'a> Builder<'a> {
             let normalized_goal =
                 lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
             let goal_kernel_context = &normalized_goal.kernel_context;
+            let check_start = std::time::Instant::now();
             let result = processor.check_cert(
                 cert,
                 Some(normalized_goal),
@@ -859,6 +947,9 @@ impl<'a> Builder<'a> {
                 self.project,
                 bindings,
             );
+            let check_elapsed = check_start.elapsed();
+            let check_succeeded = result.is_ok();
+            self.record_cert_check(check_elapsed, check_succeeded);
             match result {
                 Ok(_steps) => {
                     self.metrics.goals_done += 1;
@@ -886,13 +977,18 @@ impl<'a> Builder<'a> {
                     lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
                 let goal_kernel_context = &normalized_goal.kernel_context;
                 let (cert_to_use, check_result) = if self.clean_certs {
-                    match processor.clean_cert(
+                    let check_start = std::time::Instant::now();
+                    let result = processor.clean_cert(
                         cert,
                         Some(normalized_goal),
                         goal_kernel_context,
                         self.project,
                         bindings,
-                    ) {
+                    );
+                    let check_elapsed = check_start.elapsed();
+                    let check_succeeded = result.is_ok();
+                    self.record_cert_check(check_elapsed, check_succeeded);
+                    match result {
                         Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
                         Err(e) => {
                             return Err(BuildError::goal(
@@ -903,6 +999,7 @@ impl<'a> Builder<'a> {
                     }
                 } else {
                     // Normal path: just check the certificate
+                    let check_start = std::time::Instant::now();
                     let result = processor.check_cert_with_usage(
                         &cert,
                         Some(normalized_goal),
@@ -910,6 +1007,9 @@ impl<'a> Builder<'a> {
                         self.project,
                         bindings,
                     );
+                    let check_elapsed = check_start.elapsed();
+                    let check_succeeded = result.is_ok();
+                    self.record_cert_check(check_elapsed, check_succeeded);
                     match result {
                         Ok(checked_cert) => (
                             cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
@@ -1542,6 +1642,8 @@ impl<'a> Builder<'a> {
         // The second pass is the "proving phase".
         let verification_start = std::time::Instant::now();
         for (target, env) in targets.into_iter().zip(envs) {
+            let goal_count = env.iter_goals().count() as i32;
+
             // Skip modules that don't match the goal filter
             if let Some(ref filter) = self.goal_filter {
                 let filter_module = match filter {
@@ -1553,13 +1655,21 @@ impl<'a> Builder<'a> {
                 }
             }
 
+            let skip_metrics_before = self.metrics.clone();
+            let skip_start = std::time::Instant::now();
             if self.try_skip_unchanged_module(env.module_id, &target) {
                 // Update metrics to count the goals in this module as a success
-                let goal_count = env.iter_goals().count() as i32;
                 self.metrics.goals_done += goal_count;
                 self.metrics.goals_success += goal_count;
                 self.metrics.certs_cached += goal_count;
                 self.metrics.modules_cached += 1;
+                self.record_module_timing(
+                    target.clone(),
+                    goal_count,
+                    &skip_metrics_before,
+                    skip_start.elapsed(),
+                    true,
+                );
 
                 let event = BuildEvent {
                     progress: Some((self.metrics.goals_done, self.metrics.goals_total)),
@@ -1575,11 +1685,27 @@ impl<'a> Builder<'a> {
                 self.log_global(format!("reproving: {}", target));
             }
 
+            let module_metrics_before = self.metrics.clone();
+            let module_start = std::time::Instant::now();
             if let Err(e) = self.verify_module(&target, env) {
+                self.record_module_timing(
+                    target.clone(),
+                    goal_count,
+                    &module_metrics_before,
+                    module_start.elapsed(),
+                    false,
+                );
                 self.log_build_error(&e);
                 self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
                 return;
             }
+            self.record_module_timing(
+                target.clone(),
+                goal_count,
+                &module_metrics_before,
+                module_start.elapsed(),
+                false,
+            );
 
             // Early exit if we have a warning and exit_on_warning is enabled
             if self.exit_on_warning && !self.status.is_good() {

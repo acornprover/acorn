@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder};
+use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder, ModuleTiming};
 use crate::project::{Project, ProjectConfig};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
@@ -57,6 +57,9 @@ pub struct VerifierOutput {
     /// Timing information collected during verification.
     pub timings: VerifierTimings,
 
+    /// Per-module timing information collected during the build phase.
+    pub module_timings: Vec<ModuleTiming>,
+
     /// All build events collected during verification
     pub events: Vec<BuildEvent>,
 }
@@ -102,6 +105,10 @@ impl VerifierOutput {
         }
     }
 
+    fn format_seconds(seconds: f64) -> String {
+        Self::format_duration(Duration::from_secs_f64(seconds.max(0.0)))
+    }
+
     /// Print a command-specific timing breakdown.
     pub fn print_timing_breakdown(
         &self,
@@ -134,6 +141,32 @@ impl VerifierOutput {
             build_phase_label,
             Self::format_duration(self.timings.build_verification)
         );
+        if self.metrics.cert_checks_total > 0 {
+            println!(
+                "  cached cert checks: {} ({} ok / {} attempted)",
+                Self::format_seconds(self.metrics.cert_check_time),
+                self.metrics.cert_checks_success,
+                self.metrics.cert_checks_total
+            );
+        }
+        if self.metrics.searches_total > 0 {
+            println!(
+                "  proof search: {} ({} ok / {} attempted)",
+                Self::format_seconds(self.metrics.search_time),
+                self.metrics.searches_success,
+                self.metrics.searches_total
+            );
+        }
+        let accounted_time = self.metrics.cert_check_time + self.metrics.search_time;
+        let other_verification = self.timings.build_verification.as_secs_f64() - accounted_time;
+        if (self.metrics.cert_checks_total > 0 || self.metrics.searches_total > 0)
+            && other_verification > 0.001
+        {
+            println!(
+                "  other verification: {}",
+                Self::format_seconds(other_verification)
+            );
+        }
         println!("total measured: {}", Self::format_duration(total));
 
         if include_cert_throughput
@@ -143,6 +176,68 @@ impl VerifierOutput {
             let certs_per_second =
                 self.metrics.certs_cached as f64 / self.timings.build_verification.as_secs_f64();
             println!("certificate throughput: {:.0} certs/s", certs_per_second);
+        }
+    }
+
+    /// Print per-module timing details for verify runs.
+    pub fn print_verify_module_timing(&self) {
+        let skipped_count = self
+            .module_timings
+            .iter()
+            .filter(|timing| timing.skipped)
+            .count();
+        let mut rebuilt = self
+            .module_timings
+            .iter()
+            .filter(|timing| !timing.skipped)
+            .collect::<Vec<_>>();
+
+        println!();
+        println!("Verify module timing:");
+        println!("skipped modules: {}", skipped_count);
+        println!("rebuilt modules: {}", rebuilt.len());
+
+        if rebuilt.is_empty() {
+            return;
+        }
+
+        rebuilt.sort_by(|a, b| b.elapsed.total_cmp(&a.elapsed));
+        let limit = 12;
+
+        println!(
+            "  {:<32} {:>9} {:>9} {:>5} {:>10} {:>8} {:>11} {:>8}",
+            "module", "goals", "certs", "new", "cert time", "searches", "search time", "total"
+        );
+        for timing in rebuilt.iter().take(limit) {
+            let goals = format!("{}/{}", timing.goals_done, timing.goals_total);
+            let certs = if timing.cert_checks_total == 0 {
+                "-".to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    timing.cert_checks_success, timing.cert_checks_total
+                )
+            };
+            let searches = if timing.searches_total == 0 {
+                "-".to_string()
+            } else {
+                format!("{}/{}", timing.searches_success, timing.searches_total)
+            };
+            println!(
+                "  {:<32} {:>9} {:>9} {:>5} {:>10} {:>8} {:>11} {:>8}",
+                timing.module.to_string(),
+                goals,
+                certs,
+                timing.certs_created,
+                Self::format_seconds(timing.cert_check_time),
+                searches,
+                Self::format_seconds(timing.search_time),
+                Self::format_seconds(timing.elapsed)
+            );
+        }
+
+        if rebuilt.len() > limit {
+            println!("  ... {} more rebuilt modules", rebuilt.len() - limit);
         }
     }
 }
@@ -322,6 +417,7 @@ impl Verifier {
         // Create the output
         let status = self.builder.status;
         let metrics = self.builder.metrics.clone();
+        let module_timings = self.builder.module_timings.clone();
         let timings = VerifierTimings {
             setup: self.setup_time,
             cache_load: self.cache_load_time,
@@ -335,6 +431,7 @@ impl Verifier {
             status,
             metrics,
             timings,
+            module_timings,
             events,
         };
 
