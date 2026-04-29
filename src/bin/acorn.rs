@@ -15,6 +15,12 @@ use std::io::{self, Write};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use walkdir::WalkDir;
 
+fn default_check_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1)
+}
+
 /// Represents a line selection: either a single line or a range.
 #[derive(Clone, Debug)]
 pub enum LineSelection {
@@ -401,6 +407,15 @@ enum Command {
             help = "Reject any use of the axiom keyword."
         )]
         strict: bool,
+
+        /// Number of worker threads to use for full-module checking
+        #[clap(
+            short = 'j',
+            long = "jobs",
+            value_name = "JOBS",
+            help = "Number of worker threads to use for full-module checking. Defaults to available parallelism."
+        )]
+        jobs: Option<usize>,
     },
 
     /// Re-prove goals without using the cache
@@ -714,6 +729,7 @@ async fn main() {
             line_flag,
             cert,
             strict,
+            jobs,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
             {
@@ -740,6 +756,12 @@ async fn main() {
                 std::process::exit(1);
             }
 
+            let check_jobs = jobs.unwrap_or_else(default_check_jobs);
+            if check_jobs == 0 {
+                println!("Error: --jobs must be at least 1");
+                std::process::exit(1);
+            }
+
             let config = ProjectConfig {
                 use_filesystem: true,
                 read_cache: true,
@@ -759,6 +781,7 @@ async fn main() {
             verifier.builder.check_mode = true;
             verifier.builder.strict = strict;
             verifier.builder.check_hashes = false;
+            verifier.builder.check_jobs = check_jobs;
             verifier.builder.operation_verb = "checked";
 
             // Parse and set the certificate override if provided
@@ -1491,6 +1514,17 @@ mod tests {
 
         match args.command {
             Some(Command::Check { strict, .. }) => assert!(strict),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_check_accepts_jobs_flag() {
+        let args = Args::try_parse_from(["acorn", "check", "--jobs", "4"])
+            .expect("jobs flag should parse");
+
+        match args.command {
+            Some(Command::Check { jobs, .. }) => assert_eq!(jobs, Some(4)),
             _ => panic!("unexpected command"),
         }
     }

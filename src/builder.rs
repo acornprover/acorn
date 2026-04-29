@@ -233,6 +233,16 @@ pub struct Builder<'a> {
     /// Maximum number of non-factual activations before returning
     /// `ShallowExplosion` or `ActivationCap`.
     pub activation_limit: i32,
+
+    /// Number of worker threads to use for full-module check mode.
+    pub check_jobs: usize,
+}
+
+struct ModuleCheckResult {
+    index: usize,
+    status: BuildStatus,
+    metrics: BuildMetrics,
+    events: Vec<BuildEvent>,
 }
 
 /// Metrics collected during a build.
@@ -311,6 +321,17 @@ impl From<BuildError> for String {
 impl BuildMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn add_module_result(&mut self, result: &BuildMetrics) {
+        self.goals_done += result.goals_done;
+        self.goals_success += result.goals_success;
+        self.certs_cached += result.certs_cached;
+        self.certs_unused += result.certs_unused;
+        self.certs_created += result.certs_created;
+        self.searches_total += result.searches_total;
+        self.searches_success += result.searches_success;
+        self.search_time += result.search_time;
     }
 
     pub fn info_lines(&self) -> Vec<String> {
@@ -459,6 +480,7 @@ impl<'a> Builder<'a> {
             shallow_search: false,
             timeout_secs: 5.0,
             activation_limit: 2000,
+            check_jobs: 1,
         }
     }
 
@@ -1312,6 +1334,123 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    fn can_check_modules_in_parallel(&self, target_count: usize) -> bool {
+        self.check_mode
+            && self.check_jobs > 1
+            && target_count > 1
+            && self.goal_filter.is_none()
+            && self.cert_override.is_none()
+            && !self.clean_certs
+            && !self.print_proof
+            && !self.print_found_proof
+            && self.project.config.read_cache
+            && !self.project.config.write_cache
+    }
+
+    fn check_module_on_worker(
+        project: &Project,
+        cancellation_token: CancellationToken,
+        index: usize,
+        target: ModuleDescriptor,
+        env: &Environment,
+        strict: bool,
+        operation_verb: &'static str,
+    ) -> ModuleCheckResult {
+        let mut events = Vec::new();
+        let mut builder = Builder::new(project, cancellation_token, |event| events.push(event));
+        builder.check_mode = true;
+        builder.check_hashes = false;
+        builder.strict = strict;
+        builder.operation_verb = operation_verb;
+        builder.metrics.modules_total = 1;
+        builder.metrics.goals_total = env.iter_goals().count() as i32;
+        builder.build_cache = Some(BuildCache::new(project.build_dir.clone()));
+
+        if let Err(e) = builder.verify_module(&target, env) {
+            builder.log_build_error(&e);
+        }
+
+        let status = builder.status;
+        let metrics = builder.metrics.clone();
+        drop(builder);
+
+        ModuleCheckResult {
+            index,
+            status,
+            metrics,
+            events,
+        }
+    }
+
+    fn build_check_modules_parallel(
+        &mut self,
+        modules: Vec<(usize, ModuleDescriptor, &Environment)>,
+    ) {
+        let worker_count = self.check_jobs.min(modules.len()).max(1);
+        let mut buckets = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+        for (offset, module) in modules.into_iter().enumerate() {
+            buckets[offset % worker_count].push(module);
+        }
+
+        let project = self.project;
+        let strict = self.strict;
+        let operation_verb = self.operation_verb;
+        let cancellation_token = self.cancellation_token.clone();
+        let mut results = Vec::new();
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for bucket in buckets {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let token = cancellation_token.clone();
+                handles.push(scope.spawn(move || {
+                    bucket
+                        .into_iter()
+                        .map(|(index, target, env)| {
+                            Self::check_module_on_worker(
+                                project,
+                                token.clone(),
+                                index,
+                                target,
+                                env,
+                                strict,
+                                operation_verb,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }));
+            }
+
+            for handle in handles {
+                match handle.join() {
+                    Ok(mut worker_results) => results.append(&mut worker_results),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        });
+
+        results.sort_by_key(|result| result.index);
+
+        for result in results {
+            self.metrics.add_module_result(&result.metrics);
+            match result.status {
+                BuildStatus::Error => self.status = BuildStatus::Error,
+                BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
+                BuildStatus::Good | BuildStatus::Warning => {}
+            }
+
+            for mut event in result.events {
+                event.build_id = self.id;
+                if event.progress.is_some() {
+                    event.progress = Some((self.metrics.goals_done, self.metrics.goals_total));
+                }
+                (self.event_handler)(event);
+            }
+        }
+    }
+
     /// Builds all open modules, logging build events.
     pub fn build(&mut self) {
         // If clean_certs is enabled, disable check_hashes
@@ -1386,6 +1525,19 @@ impl<'a> Builder<'a> {
 
         // Track the total number of modules to build
         self.metrics.modules_total = envs.len() as i32;
+
+        if self.can_check_modules_in_parallel(targets.len()) {
+            let modules = targets
+                .into_iter()
+                .zip(envs)
+                .enumerate()
+                .map(|(index, (target, env))| (index, target.clone(), env))
+                .collect();
+            let verification_start = std::time::Instant::now();
+            self.build_check_modules_parallel(modules);
+            self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
+            return;
+        }
 
         // The second pass is the "proving phase".
         let verification_start = std::time::Instant::now();

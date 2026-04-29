@@ -19,6 +19,9 @@ fn main() {
             .expect("Failed to create verifier");
         verifier.builder.check_mode = true;
         verifier.builder.check_hashes = false;
+        verifier.builder.check_jobs = std::thread::available_parallelism()
+            .map(|threads| threads.get())
+            .unwrap_or(1);
 
         let output = verifier.run().unwrap();
         if !output.status.is_good() {
