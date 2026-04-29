@@ -270,6 +270,12 @@ pub struct BuildMetrics {
 
     /// The total amount of time spent in proof search, in seconds.
     pub search_time: f64,
+
+    /// Time spent collecting loaded environments and reporting load errors.
+    pub loading_time: f64,
+
+    /// Time spent verifying goals, checking certificates, or running prover search.
+    pub verification_time: f64,
 }
 
 #[derive(Debug)]
@@ -1339,6 +1345,7 @@ impl<'a> Builder<'a> {
 
         // The first phase is the "loading phase". We load modules and look for errors.
         // If there are errors, we won't try to do proving.
+        let loading_start = std::time::Instant::now();
         let mut envs = vec![];
         for target in &targets {
             let module = self.project.get_module(target);
@@ -1369,6 +1376,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
 
         if self.status.is_error() {
             return;
@@ -1380,6 +1388,7 @@ impl<'a> Builder<'a> {
         self.metrics.modules_total = envs.len() as i32;
 
         // The second pass is the "proving phase".
+        let verification_start = std::time::Instant::now();
         for (target, env) in targets.into_iter().zip(envs) {
             // Skip modules that don't match the goal filter
             if let Some(ref filter) = self.goal_filter {
@@ -1416,14 +1425,17 @@ impl<'a> Builder<'a> {
 
             if let Err(e) = self.verify_module(&target, env) {
                 self.log_build_error(&e);
+                self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
                 return;
             }
 
             // Early exit if we have a warning and exit_on_warning is enabled
             if self.exit_on_warning && !self.status.is_good() {
+                self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
                 return;
             }
         }
+        self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
 
         // If the build succeeded, remove unused certs that were preserved during verification
         if self.status.is_good() {

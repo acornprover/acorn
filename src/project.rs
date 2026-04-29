@@ -2,6 +2,7 @@ use core::panic;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{fmt, io};
 
 use regex::Regex;
@@ -82,6 +83,9 @@ pub struct Project {
     // The last known-good build cache.
     // This is different from the Builder's build cache, which is created during a build.
     pub build_cache: BuildCache,
+
+    // Time spent loading the build cache during project creation.
+    pub cache_load_time: Duration,
 
     // A flag for whether something is using the project to build right now.
     // Only used in the parallel server code.
@@ -226,11 +230,13 @@ impl Project {
         // Load the build cache.
         // We need to load it when reading (to use cached certs) OR when writing (to preserve
         // manifest entries from other modules during partial builds).
+        let cache_load_start = std::time::Instant::now();
         let build_cache = if config.read_cache || config.write_cache {
             BuildCache::load(build_dir.clone())?
         } else {
             BuildCache::new(build_dir.clone())
         };
+        let cache_load_time = cache_load_start.elapsed();
 
         Ok(Project {
             config,
@@ -240,6 +246,7 @@ impl Project {
             module_map: HashMap::new(),
             targets: HashSet::new(),
             build_cache,
+            cache_load_time,
             build_dir,
             building: false,
         })

@@ -3,6 +3,7 @@ use std::io::BufRead;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -53,8 +54,33 @@ pub struct VerifierOutput {
     /// Build metrics collected during verification
     pub metrics: BuildMetrics,
 
+    /// Timing information collected during verification.
+    pub timings: VerifierTimings,
+
     /// All build events collected during verification
     pub events: Vec<BuildEvent>,
+}
+
+/// Timing information for one verifier run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VerifierTimings {
+    /// Total time spent constructing the verifier, including cache and target loading.
+    pub setup: Duration,
+
+    /// Time spent loading the build cache.
+    pub cache_load: Duration,
+
+    /// Time spent adding targets, which loads and elaborates target modules.
+    pub target_load: Duration,
+
+    /// Time spent in the builder loading phase.
+    pub build_loading: Duration,
+
+    /// Time spent in the builder verification phase.
+    pub build_verification: Duration,
+
+    /// Total time spent in `Builder::build`.
+    pub build_total: Duration,
 }
 
 impl VerifierOutput {
@@ -65,6 +91,50 @@ impl VerifierOutput {
 
     pub fn is_success(&self) -> bool {
         self.status == BuildStatus::Good
+    }
+
+    fn format_duration(duration: Duration) -> String {
+        let seconds = duration.as_secs_f64();
+        if seconds >= 1.0 {
+            format!("{:.3}s", seconds)
+        } else {
+            format!("{:.1}ms", seconds * 1000.0)
+        }
+    }
+
+    /// Print a check-specific timing breakdown.
+    pub fn print_check_timing_breakdown(&self) {
+        let total = self.timings.setup + self.timings.build_total;
+
+        println!();
+        println!("Check timing:");
+        println!(
+            "project setup: {}",
+            Self::format_duration(self.timings.setup)
+        );
+        println!(
+            "  cache load: {}",
+            Self::format_duration(self.timings.cache_load)
+        );
+        println!(
+            "  target/module load: {}",
+            Self::format_duration(self.timings.target_load)
+        );
+        println!(
+            "build loading phase: {}",
+            Self::format_duration(self.timings.build_loading)
+        );
+        println!(
+            "certificate checking: {}",
+            Self::format_duration(self.timings.build_verification)
+        );
+        println!("total measured: {}", Self::format_duration(total));
+
+        if self.metrics.certs_cached > 0 && self.timings.build_verification.as_secs_f64() > 0.0 {
+            let certs_per_second =
+                self.metrics.certs_cached as f64 / self.timings.build_verification.as_secs_f64();
+            println!("certificate throughput: {:.0} certs/s", certs_per_second);
+        }
     }
 }
 
@@ -104,6 +174,15 @@ pub struct Verifier {
 
     /// The builder for verification
     pub builder: Builder<'static>,
+
+    /// Total time spent constructing this verifier.
+    setup_time: Duration,
+
+    /// Time spent loading the build cache.
+    cache_load_time: Duration,
+
+    /// Time spent loading target modules.
+    target_load_time: Duration,
 }
 
 impl Verifier {
@@ -121,10 +200,13 @@ impl Verifier {
         target: Option<String>,
         stdin_override: Option<&str>,
     ) -> Result<Self, String> {
+        let setup_start = std::time::Instant::now();
         let mut project = Project::new_local(&start_path, config.clone())?;
+        let cache_load_time = project.cache_load_time;
         let mut normalized_target = target.clone();
 
         // Add targets to the project
+        let target_load_start = std::time::Instant::now();
         if let Some(ref target) = target {
             if target == "-" {
                 let path = PathBuf::from("<stdin>");
@@ -145,6 +227,7 @@ impl Verifier {
         } else {
             project.add_src_targets();
         }
+        let target_load_time = target_load_start.elapsed();
 
         // Unsafe is to make this self-referential
         let project_box = Box::new(project);
@@ -175,6 +258,9 @@ impl Verifier {
             exit_on_warning: false,
             events,
             builder,
+            setup_time: setup_start.elapsed(),
+            cache_load_time,
+            target_load_time,
         })
     }
 
@@ -218,17 +304,28 @@ impl Verifier {
         self.builder.exit_on_warning = self.exit_on_warning;
 
         // Build
+        let build_start = std::time::Instant::now();
         self.builder.build();
+        let build_total = build_start.elapsed();
         self.builder.validate_goal_filter()?;
         self.builder.metrics.print(self.builder.status);
 
         // Create the output
         let status = self.builder.status;
         let metrics = self.builder.metrics.clone();
+        let timings = VerifierTimings {
+            setup: self.setup_time,
+            cache_load: self.cache_load_time,
+            target_load: self.target_load_time,
+            build_loading: Duration::from_secs_f64(metrics.loading_time),
+            build_verification: Duration::from_secs_f64(metrics.verification_time),
+            build_total,
+        };
         let events = self.events.take();
         let output = VerifierOutput {
             status,
             metrics,
+            timings,
             events,
         };
 

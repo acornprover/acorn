@@ -780,6 +780,7 @@ async fn main() {
                     std::process::exit(1);
                 }
                 Ok(output) => {
+                    output.print_check_timing_breakdown();
                     if !output.is_success() {
                         std::process::exit(1);
                     }
