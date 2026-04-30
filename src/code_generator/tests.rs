@@ -796,6 +796,22 @@ fn test_codegen_parenthesizes_if_in_binary_expression() {
 }
 
 #[test]
+fn test_codegen_parenthesizes_not_in_left_binary_operand() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/main.ac",
+        r#"
+            let r: (Bool, Bool) -> Bool = axiom
+
+            theorem goal(a: Bool, b: Bool, q: Bool) {
+                (not r(a, b)) != q
+            }
+            "#,
+    );
+    p.check_goal_code("main", "goal", "(not r(a, b)) != q");
+}
+
+#[test]
 fn test_codegen_uses_not_equals_for_nested_negative_equality() {
     let mut p = Project::new_mock();
     p.mock(

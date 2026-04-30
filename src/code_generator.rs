@@ -99,21 +99,15 @@ impl CodeGenerator<'_> {
             )
         };
 
-        if let AcornValue::Binary(left_op, _, _) = left {
-            if left_op.token_type().binary_precedence() < op.token_type().binary_precedence() {
-                left_expr = paren(left_expr);
-            }
-        }
-        if let AcornValue::IfThenElse(_, _, _) = left {
+        if left_expr.top_level_precedence(false) < op.token_type().binary_precedence()
+            || matches!(left, AcornValue::IfThenElse(_, _, _))
+        {
             left_expr = paren(left_expr);
         }
 
-        if let AcornValue::Binary(right_op, _, _) = right {
-            if right_op.token_type().binary_precedence() <= op.token_type().binary_precedence() {
-                right_expr = paren(right_expr);
-            }
-        }
-        if let AcornValue::IfThenElse(_, _, _) = right {
+        if right_expr.top_level_precedence(true) <= op.token_type().binary_precedence()
+            || matches!(right, AcornValue::IfThenElse(_, _, _))
+        {
             right_expr = paren(right_expr);
         }
 
