@@ -12,7 +12,8 @@ Use this skill when the user asks to profile the Acorn prover or verifier. The g
 - Run all commands from the `acorn` repo root.
 - Use this skill for profiling, performance-breakdown requests, and performance-sensitive changes
   that need release-mode timing baselines.
-- If the target is not specified, ask whether to profile `profile_reprove` or `profile_check`.
+- If the target is not specified, ask whether to profile `profile_load`, `profile_check`, or
+  `profile_reprove`.
 - In sandboxed Codex runs, if `perf`, `cargo install samply`, or profile recording is blocked, request escalated permissions instead of working around it.
 - After every successful profiling run, update `PROFILE.md` in the repo root.
 
@@ -48,6 +49,8 @@ Interpret these separately:
 - `check` measures full existing-proof correctness throughput.
 - `verify` measures incremental loading, manifest/hash skipping, and any necessary missing-proof search.
 - `reprove real.double_sum` measures prover behavior on a representative search workload.
+- `profile_load` isolates target-module setup by loading `real.double_sum` and its dependencies
+  without running build, certificate checking, or proof search.
 
 This is especially important after changes to core term or proof-search data structures, such as
 `Term`, `EqualityGraph`, `Pdt`, or `FingerprintX`.
@@ -82,6 +85,7 @@ When that happens:
 
 - `profile_reprove`: reprove `real.double_sum`, a representative prover/search workload
 - `profile_check`: check-mode workload for existing cached certificates
+- `profile_load`: load `real.double_sum` and its dependencies without running build/check/search
 
 ## Recording results in `PROFILE.md`
 
@@ -91,6 +95,7 @@ The file should have a separate section for each profile script:
 
 - `profile_reprove`
 - `profile_check`
+- `profile_load`
 
 When you profile one target successfully, update that target's section with the latest run instead of leaving stale data in place.
 
@@ -119,7 +124,8 @@ uname -s
 
 ### Build with frame pointers
 
-Frame pointers are required for accurate call-graph profiling. Replace `TARGET` with `reprove` or `check`.
+Frame pointers are required for accurate call-graph profiling. Replace `TARGET` with `reprove`,
+`check`, or `load`.
 
 ```bash
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_TARGET --profile=fastdev
@@ -160,7 +166,7 @@ cargo install samply
 
 ### Build profiling binary
 
-Replace `TARGET` with `reprove` or `check`.
+Replace `TARGET` with `reprove`, `check`, or `load`.
 
 ```bash
 cargo build --bin=profile_TARGET --profile=fastdev
