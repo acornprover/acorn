@@ -343,6 +343,44 @@ fn test_filesystem_project_supports_global_lib_module_lookup() {
 }
 
 #[test]
+fn test_cached_certificate_lib_reference_registers_dependency() {
+    use crate::certificate::{Certificate, CertificateStore};
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&build_dir).unwrap();
+    fs::write(temp_dir.path().join("acorn.toml"), "").unwrap();
+
+    fs::write(src_dir.join("util.ac"), "let util_fact: Bool = true\n").unwrap();
+    fs::write(src_dir.join("main.ac"), "theorem goal { true }\n").unwrap();
+    CertificateStore {
+        certs: vec![Certificate::new(
+            "goal".to_string(),
+            vec!["lib(util).util_fact".to_string()],
+        )],
+    }
+    .save(&build_dir.join("main.jsonl"))
+    .unwrap();
+
+    let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
+    p.add_target_by_name("main").unwrap();
+    let main_id = p.get_module_id_by_name("main").unwrap();
+    let util_id = p.get_module_id_by_name("util").unwrap();
+    assert!(
+        p.all_dependencies(main_id).contains(&util_id),
+        "cached certificate lib(util) reference should register util as a dependency",
+    );
+    assert!(
+        p.get_bindings(util_id).is_some(),
+        "cached certificate dependency should be loaded before certificate parsing",
+    );
+}
+
+#[test]
 fn test_target_outside_library() {
     let mut p = Project::new_mock();
     let outside_path = "/outside/foo.ac";
