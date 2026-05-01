@@ -84,3 +84,26 @@ theorem check_constraint(p: EqCheckedPair[Foo]) {
     p.eq implies p.first = p.second
 }
 ```
+
+## Function Satisfy Keeps Generic Structure Parameter Order
+
+This covers a regression where symbol registration inferred type parameters in
+alphabetical order rather than declaration order, swapping `O` and `M`.
+
+```acorn
+structure Inner[O, M] {
+    a: M -> O
+}
+
+structure Outer[O, M] {
+    first: Inner[O, M]
+}
+
+let make_outer[O, M](i: Inner[O, M]) -> result: Outer[O, M] satisfy {
+    result = Outer.new(i)
+}
+
+theorem make_outer_first[O, M](i: Inner[O, M]) {
+    make_outer(i).first = i
+}
+```
