@@ -1924,6 +1924,76 @@ theorem goal(s: Nat -> Container, h: Bool) {
     }
 
     #[test]
+    fn test_check_replays_typeclass_equal_type_lambda_certificate() {
+        let (acornlib, src, _) = setup();
+
+        src.child("bug.ac")
+            .write_str(
+                r#"
+typeclass T: TcB {
+    op: T -> T -> T
+}
+
+define preserves_op[Y: TcB, Z: TcB](f: Y -> Z) -> Bool {
+    forall(y1: Y, y2: Y) {
+        f(Y.op(y1, y2)) = Z.op(f(y1), f(y2))
+    }
+}
+
+theorem identity_lambda_preserves_op[Y: TcB] {
+    preserves_op[Y, Y](function(y: Y) { y })
+} by {
+    forall(y1: Y, y2: Y) {
+        function(y: Y) { y }(Y.op(y1, y2)) = Y.op(y1, y2)
+        function(y: Y) { y }(y1) = y1
+        function(y: Y) { y }(y2) = y2
+    }
+}
+"#,
+            )
+            .unwrap();
+
+        let reprove_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: false,
+            write_cache: true,
+        };
+        let mut reprove = Verifier::new(
+            acornlib.path().to_path_buf(),
+            reprove_config,
+            Some("bug".to_string()),
+        )
+        .expect("reprove verifier should construct");
+        reprove.builder.check_hashes = false;
+        reprove.builder.operation_verb = "reproved";
+
+        let output = reprove
+            .run()
+            .expect("initial reprove should create a certificate");
+        assert_eq!(output.status, BuildStatus::Good);
+
+        let check_config = ProjectConfig {
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+        };
+        let mut check = Verifier::new(
+            acornlib.path().to_path_buf(),
+            check_config,
+            Some("bug".to_string()),
+        )
+        .expect("check verifier should construct");
+        check.builder.check_hashes = false;
+        check.builder.check_mode = true;
+        check.builder.operation_verb = "checked";
+
+        let output = check
+            .run()
+            .expect("check should replay the generated certificate");
+        assert_eq!(output.status, BuildStatus::Good);
+    }
+
+    #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
         let (acornlib, src, build) = setup();
 
