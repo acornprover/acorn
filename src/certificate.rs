@@ -1605,14 +1605,61 @@ impl<'a> WitnessEmitter<'a> {
         &mut self,
         local_id: AtomId,
         step: CertificateStep,
-        parent_local_id: Option<AtomId>,
+        _parent_local_id: Option<AtomId>,
     ) -> Result<(), CodeGenError> {
         assert!(matches!(step, CertificateStep::Satisfy(_)));
+        let follow_on_clause = match &step {
+            CertificateStep::Satisfy(satisfy_step) => satisfy_step.specialized_clause.clone(),
+            CertificateStep::Claim(_) => unreachable!(),
+        };
         self.push_output_step(step)?;
         self.declared.insert(local_id);
         self.emitted_witnesses.push(local_id);
-        let _ = parent_local_id;
+        if let Some(clause) = follow_on_clause {
+            self.emit_nested_positive_exists_witness(local_id, &clause)?;
+        }
         Ok(())
+    }
+
+    fn emit_nested_positive_exists_witness(
+        &mut self,
+        parent_local_id: AtomId,
+        clause: &Clause,
+    ) -> Result<(), CodeGenError> {
+        let Some(reduction) = clause.positive_exists_reduction(&self.kernel_context) else {
+            return Ok(());
+        };
+        let module_id = self.witness_module_id(parent_local_id);
+        let opening = self.synthetic_witness_registry.open_positive_exists(
+            &mut self.kernel_context,
+            module_id,
+            clause,
+            &reduction,
+        );
+        let synthetic_local_id = opening
+            .term
+            .iter_atoms()
+            .find_map(|atom| match atom {
+                Atom::Symbol(Symbol::ScopedConstant(local_id)) => Some(*local_id),
+                _ => None,
+            })
+            .expect("synthetic witness term should reference its scoped constant");
+        let synthetic_witness = self
+            .synthetic_witness_registry
+            .get(synthetic_local_id)
+            .expect("synthetic witness should be registered");
+        let justification = Claim::new(clause.clone(), VariableMap::new())
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        let step = Certificate::witness_entry_to_step(
+            synthetic_witness,
+            justification,
+            &self.kernel_context,
+        )?;
+        self.emit_witness_step(
+            synthetic_local_id,
+            CertificateStep::Satisfy(step),
+            Some(parent_local_id),
+        )
     }
 
     fn emitted_witness_name_order(&self) -> Vec<AtomId> {

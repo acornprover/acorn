@@ -211,6 +211,29 @@ fn nested_bool_exists_clause(kernel_context: &mut KernelContext) -> crate::kerne
     )
 }
 
+fn double_bool_exists_self_neq_clause() -> crate::kernel::clause::Clause {
+    use crate::kernel::atom::Atom;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+
+    Clause::new(
+        vec![Literal::positive(Term::exists(
+            Term::bool_type(),
+            Term::exists(
+                Term::bool_type(),
+                Term::not(Term::eq(
+                    Term::bool_type(),
+                    Term::atom(Atom::BoundVariable(0)),
+                    Term::atom(Atom::BoundVariable(0)),
+                )),
+            ),
+        ))],
+        &LocalContext::empty(),
+    )
+}
+
 fn add_test_scoped_constant(
     kernel_context: &mut KernelContext,
     module_id: ModuleId,
@@ -799,6 +822,54 @@ fn test_emit_named_witnesses_opens_specialized_positive_exists_claim() {
     CertificateStep::Satisfy(step.clone())
         .validate_normalized_shape(&kernel_context)
         .expect("synthetic witness step should keep normalized witness clauses");
+}
+
+#[test]
+fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
+    use crate::kernel::checker::{Checker, StepReason};
+    use crate::prover::synthetic::WitnessRegistry;
+
+    let source_clause = double_bool_exists_self_neq_clause();
+    let mut kernel_context = KernelContext::new();
+    let reduction = source_clause
+        .positive_exists_reduction(&kernel_context)
+        .expect("outer exists should be reducible");
+    let mut witness_registry = WitnessRegistry::new();
+    witness_registry.open_positive_exists(
+        &mut kernel_context,
+        ModuleId::default(),
+        &source_clause,
+        &reduction,
+    );
+    let claim = Claim::new(source_clause.clone(), VariableMap::new())
+        .expect("source claim should normalize");
+
+    let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
+        vec![CertificateStep::Claim(claim)],
+        &witness_registry,
+        kernel_context,
+        ModuleId::default(),
+    )
+    .expect("named witness emission should succeed");
+
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .count(),
+        2,
+        "nested positive exists should emit one witness per binder"
+    );
+
+    let mut checker = Checker::new();
+    checker.insert_clause(
+        &source_clause.normalized(),
+        StepReason::Testing,
+        &updated_kernel_context,
+    );
+    checker
+        .check_cert_steps(&emitted, None, &updated_kernel_context)
+        .expect("nested synthetic witnesses should expose the contradiction");
 }
 
 #[test]
