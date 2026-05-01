@@ -520,10 +520,7 @@ impl SymbolTable {
                 } else {
                     // Polymorphic: compute the polymorphic type term.
                     //
-                    // Extract type params. Priority:
-                    // 1. If type_param_names is provided, extract TypeParams from generic_type
-                    //    using those names (to get typeclass constraints)
-                    // 2. Otherwise, extract from generic_type (Variable types)
+                    // Extract type params in the constant's declaration order.
                     let type_params: Vec<TypeParam> = {
                         struct NoContext;
                         impl crate::elaborator::error::ErrorContext for NoContext {
@@ -539,23 +536,7 @@ impl SymbolTable {
                         let mut vars = std::collections::HashMap::new();
                         let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
 
-                        if !c.type_param_names.is_empty() {
-                            // Use provided order, but get typeclass info from vars if available
-                            c.type_param_names
-                                .iter()
-                                .map(|name| {
-                                    vars.get(name).cloned().unwrap_or_else(|| TypeParam {
-                                        name: name.clone(),
-                                        typeclass: None,
-                                    })
-                                })
-                                .collect()
-                        } else {
-                            // Sort by name for consistency
-                            let mut params: Vec<_> = vars.values().cloned().collect();
-                            params.sort_by(|a, b| a.name.cmp(&b.name));
-                            params
-                        }
+                        c.ordered_type_params(&vars)
                     };
 
                     let variable_params: Vec<AcornType> = type_params
@@ -588,45 +569,27 @@ impl SymbolTable {
 
                 // Store polymorphic info for later use in denormalization
                 if is_polymorphic {
-                    // Determine type param names (use provided or extract from generic_type)
-                    let type_param_names: Vec<String> = if !c.type_param_names.is_empty() {
-                        c.type_param_names.clone()
-                    } else {
-                        // Extract variable names from generic_type
-                        struct NoContext;
-                        impl crate::elaborator::error::ErrorContext for NoContext {
-                            fn error(&self, msg: &str) -> crate::elaborator::error::Error {
-                                let empty_token = crate::syntax::token::Token::empty();
-                                crate::elaborator::error::Error::new(
-                                    &empty_token,
-                                    &empty_token,
-                                    msg,
-                                )
-                            }
+                    struct NoContext;
+                    impl crate::elaborator::error::ErrorContext for NoContext {
+                        fn error(&self, msg: &str) -> crate::elaborator::error::Error {
+                            let empty_token = crate::syntax::token::Token::empty();
+                            crate::elaborator::error::Error::new(&empty_token, &empty_token, msg)
                         }
-                        let mut vars = std::collections::HashMap::new();
-                        let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
-                        let mut names: Vec<_> = vars.keys().cloned().collect();
-                        names.sort();
-                        names
-                    };
+                    }
+                    let mut vars = std::collections::HashMap::new();
+                    let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
+                    let type_params = c.ordered_type_params(&vars);
+                    let type_param_names: Vec<String> =
+                        type_params.iter().map(|param| param.name.clone()).collect();
 
                     // Convert Arbitrary types to Variable types in generic_type
                     // The ConstantInstance we're visiting may have Arbitrary types,
                     // but we need Variable types for proper instantiation.
-                    let params_for_genericize: Vec<TypeParam> = type_param_names
-                        .iter()
-                        .map(|name| TypeParam {
-                            name: name.clone(),
-                            typeclass: None,
-                        })
-                        .collect();
-                    let generic_type_with_variables =
-                        c.generic_type.genericize(&params_for_genericize);
+                    let generic_type_with_variables = c.generic_type.genericize(&type_params);
                     let value_param_types = c
                         .value_param_types
                         .iter()
-                        .map(|ty| ty.genericize(&params_for_genericize))
+                        .map(|ty| ty.genericize(&type_params))
                         .collect();
 
                     self.polymorphic_info.insert(

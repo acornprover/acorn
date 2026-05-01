@@ -430,21 +430,7 @@ pub(crate) fn register_value_symbols(
             let mut vars = std::collections::HashMap::new();
             let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
 
-            let type_params: Vec<TypeParam> = if !c.type_param_names.is_empty() {
-                c.type_param_names
-                    .iter()
-                    .map(|name| {
-                        vars.get(name).cloned().unwrap_or_else(|| TypeParam {
-                            name: name.clone(),
-                            typeclass: None,
-                        })
-                    })
-                    .collect()
-            } else {
-                let mut params: Vec<_> = vars.values().cloned().collect();
-                params.sort_by(|a, b| a.name.cmp(&b.name));
-                params
-            };
+            let type_params = c.ordered_type_params(&vars);
 
             let type_var_map = build_type_var_map(kernel_context, &type_params);
             let type_param_count = type_params.len() as AtomId;
@@ -495,28 +481,16 @@ pub(crate) fn register_value_symbols(
             .add_constant(c.name.clone(), ctype, var_type);
 
         if is_polymorphic {
-            let type_param_names: Vec<String> = if !c.type_param_names.is_empty() {
-                c.type_param_names.clone()
-            } else {
-                let mut vars = std::collections::HashMap::new();
-                let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
-                let mut names: Vec<_> = vars.keys().cloned().collect();
-                names.sort();
-                names
-            };
-
-            let params_for_genericize: Vec<TypeParam> = type_param_names
-                .iter()
-                .map(|name| TypeParam {
-                    name: name.clone(),
-                    typeclass: None,
-                })
-                .collect();
-            let generic_type_with_variables = c.generic_type.genericize(&params_for_genericize);
+            let mut vars = std::collections::HashMap::new();
+            let _ = c.generic_type.find_type_vars(&mut vars, &NoContext);
+            let type_params = c.ordered_type_params(&vars);
+            let type_param_names: Vec<String> =
+                type_params.iter().map(|param| param.name.clone()).collect();
+            let generic_type_with_variables = c.generic_type.genericize(&type_params);
             let value_param_types = c
                 .value_param_types
                 .iter()
-                .map(|ty| ty.genericize(&params_for_genericize))
+                .map(|ty| ty.genericize(&type_params))
                 .collect();
 
             kernel_context.symbol_table.set_polymorphic_info(

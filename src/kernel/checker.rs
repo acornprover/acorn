@@ -1220,6 +1220,25 @@ mod tests {
     }
 
     #[test]
+    fn test_check_cert_steps_rejects_empty_non_contradictory_proof() {
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+
+        let mut checker = Checker::new();
+        let known = context.parse_clause("c0", &[]);
+        checker.insert_clause(&known, StepReason::Testing, &context);
+
+        let err = checker
+            .check_cert_steps(&[], None, &context)
+            .expect_err("empty proof should not check without an existing contradiction");
+        assert!(
+            err.to_string()
+                .contains("proof does not result in a contradiction"),
+            "unexpected checker error: {err}"
+        );
+    }
+
+    #[test]
     fn test_checker_problematic_negated_forall_clause_growth() {
         let (context, clause) = problematic_negated_forall_clause();
         let closure = checker_style_clause_closure(&context, clause, 40);

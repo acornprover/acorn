@@ -401,6 +401,46 @@ impl ConstantInstance {
         })
     }
 
+    pub fn ordered_type_params(&self, vars: &HashMap<String, TypeParam>) -> Vec<TypeParam> {
+        if !self.type_param_names.is_empty() {
+            return self
+                .type_param_names
+                .iter()
+                .map(|name| {
+                    vars.get(name).cloned().unwrap_or_else(|| TypeParam {
+                        name: name.clone(),
+                        typeclass: None,
+                    })
+                })
+                .collect();
+        }
+
+        if !self.params.is_empty() {
+            let mut params = Vec::with_capacity(self.params.len());
+            for param in &self.params {
+                let source_param = match param {
+                    AcornType::Variable(param) | AcornType::Arbitrary(param) => param,
+                    _ => {
+                        params.clear();
+                        break;
+                    }
+                };
+                params.push(
+                    vars.get(&source_param.name)
+                        .cloned()
+                        .unwrap_or_else(|| source_param.clone()),
+                );
+            }
+            if !params.is_empty() {
+                return params;
+            }
+        }
+
+        let mut params: Vec<_> = vars.values().cloned().collect();
+        params.sort_by(|a, b| a.name.cmp(&b.name));
+        params
+    }
+
     pub fn has_generic(&self) -> bool {
         self.params.iter().any(|t| t.has_generic())
             || self.instance_type.has_generic()
