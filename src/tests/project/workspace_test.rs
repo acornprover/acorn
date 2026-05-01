@@ -342,8 +342,7 @@ fn test_filesystem_project_supports_global_lib_module_lookup() {
     expect_build_ok(&mut p);
 }
 
-#[test]
-fn test_cached_certificate_lib_reference_registers_dependency() {
+fn create_cached_certificate_secret_import_project() -> (tempfile::TempDir, Project) {
     use crate::certificate::{Certificate, CertificateStore};
     use std::fs;
     use tempfile::TempDir;
@@ -368,15 +367,21 @@ fn test_cached_certificate_lib_reference_registers_dependency() {
 
     let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
     p.add_target_by_name("main").unwrap();
+    (temp_dir, p)
+}
+
+#[test]
+fn test_cached_certificate_lib_reference_does_not_affect_elaboration() {
+    let (_temp_dir, p) = create_cached_certificate_secret_import_project();
     let main_id = p.get_module_id_by_name("main").unwrap();
     let util_id = p.get_module_id_by_name("util").unwrap();
     assert!(
-        p.all_dependencies(main_id).contains(&util_id),
-        "cached certificate lib(util) reference should register util as a dependency",
+        !p.all_dependencies(main_id).contains(&util_id),
+        "cached certificate lib(util) reference should not register util as a dependency",
     );
     assert!(
-        p.get_bindings(util_id).is_some(),
-        "cached certificate dependency should be loaded before certificate parsing",
+        p.get_bindings(util_id).is_none(),
+        "cached certificate dependency should not be loaded as a secret import",
     );
 }
 

@@ -721,29 +721,6 @@ impl Project {
         }
     }
 
-    fn collect_lib_dependencies_from_cached_certificates(
-        &self,
-        descriptor: &ModuleDescriptor,
-        output: &mut BTreeSet<String>,
-    ) {
-        let Some(store) = self.build_cache.get_certificates(descriptor) else {
-            return;
-        };
-        for cert in &store.certs {
-            let Some(proof) = &cert.proof else {
-                continue;
-            };
-            for line in proof {
-                if !line.contains("lib(") {
-                    continue;
-                }
-                if let Ok(statement) = Statement::parse_str_with_options(line, true) {
-                    Self::collect_lib_dependencies_from_statement(&statement, output);
-                }
-            }
-        }
-    }
-
     fn parse_module_statements(text: &str, strict: bool) -> error::Result<Vec<Statement>> {
         let mut tokens = TokenIter::new(Token::scan(text));
         let mut statements = vec![];
@@ -1673,10 +1650,6 @@ impl Project {
         for statement in &statements {
             Self::collect_lib_dependencies_from_statement(statement, &mut lib_dependency_names);
         }
-        self.collect_lib_dependencies_from_cached_certificates(
-            descriptor,
-            &mut lib_dependency_names,
-        );
         let mut lib_dependencies = vec![];
         for module_name in lib_dependency_names {
             if current_module_name
