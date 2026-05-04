@@ -698,11 +698,218 @@ mod tests {
         let output = verifier.run().expect("eval should run");
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.eval_corpus_total, 1);
+        assert_eq!(output.metrics.eval_corpus_empty, 0);
         assert_eq!(output.metrics.eval_corpus_matched, 1);
         assert_eq!(output.metrics.eval_corpus_unmatched, 0);
         assert_eq!(output.metrics.eval_goals_skipped_uncertified, 1);
         assert_eq!(output.metrics.searches_total, 1);
         assert_eq!(output.metrics.searches_success, 1);
+    }
+
+    #[test]
+    fn test_eval_skip_omits_previous_plain_proposition() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                let p: Bool = axiom
+                let q: Bool = axiom
+
+                theorem wrapper {
+                    p or q
+                } by {
+                    p
+                    p or q
+                }
+                "#,
+            )
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "p or q".to_string(),
+                vec!["dummy proof step".to_string()],
+            )],
+        }
+        .save(build.child("foo.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0, 1];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.eval_corpus_total, 1);
+        assert_eq!(output.metrics.eval_corpus_matched, 1);
+        assert!(output.metrics.eval_goals_skipped_uncertified > 0);
+        assert_eq!(output.metrics.searches_total, 2);
+        assert_eq!(output.metrics.searches_success, 1);
+
+        let skip0 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 0)
+            .expect("skip=0 metrics should exist");
+        assert_eq!(skip0.searches_total, 1);
+        assert_eq!(skip0.searches_success, 1);
+        assert_eq!(skip0.ineligible, 0);
+
+        let skip1 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 1)
+            .expect("skip=1 metrics should exist");
+        assert_eq!(skip1.searches_total, 1);
+        assert_eq!(skip1.searches_success, 0);
+        assert_eq!(skip1.ineligible, 0);
+    }
+
+    #[test]
+    fn test_eval_skip_includes_empty_cached_proofs_for_nonzero_skip() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                let p: Bool = axiom
+                let q: Bool = axiom
+
+                theorem wrapper {
+                    p or q
+                } by {
+                    p
+                    p or q
+                }
+                "#,
+            )
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![Certificate::new("p or q".to_string(), vec![])],
+        }
+        .save(build.child("foo.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0, 1];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.eval_corpus_total, 1);
+        assert_eq!(output.metrics.eval_corpus_empty, 1);
+        assert_eq!(output.metrics.eval_corpus_matched, 1);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.searches_success, 0);
+
+        let skip0 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 0)
+            .expect("skip=0 metrics should exist");
+        assert_eq!(skip0.searches_total, 0);
+
+        let skip1 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 1)
+            .expect("skip=1 metrics should exist");
+        assert_eq!(skip1.searches_total, 1);
+        assert_eq!(skip1.searches_success, 0);
+        assert_eq!(skip1.ineligible, 0);
+    }
+
+    #[test]
+    fn test_eval_skip_respects_non_plain_barrier() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                let p: Bool = axiom
+                let q: Bool = axiom
+
+                theorem wrapper {
+                    p or q
+                } by {
+                    p
+
+                    let r: Bool = axiom
+
+                    p or q
+                }
+                "#,
+            )
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "p or q".to_string(),
+                vec!["dummy proof step".to_string()],
+            )],
+        }
+        .save(build.child("foo.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0, 1];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.searches_success, 1);
+
+        let skip1 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 1)
+            .expect("skip=1 metrics should exist");
+        assert_eq!(skip1.searches_total, 0);
+        assert_eq!(skip1.ineligible, 1);
     }
 
     #[test]

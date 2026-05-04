@@ -224,6 +224,38 @@ fn validate_goal_requires_single_line(
     Ok(())
 }
 
+fn parse_eval_skip_modes(raw: Option<&str>) -> Result<Vec<usize>, String> {
+    let raw = raw.unwrap_or("0").trim();
+    if raw.is_empty() {
+        return Err("--skip must not be empty".to_string());
+    }
+
+    let mut modes = Vec::new();
+    if raw.contains(',') {
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                return Err("--skip contains an empty entry".to_string());
+            }
+            let skip = part
+                .parse::<usize>()
+                .map_err(|_| format!("invalid --skip entry '{}'", part))?;
+            modes.push(skip);
+        }
+    } else {
+        for ch in raw.chars() {
+            let skip = ch
+                .to_digit(10)
+                .ok_or_else(|| format!("invalid --skip value '{}'", raw))?;
+            modes.push(skip as usize);
+        }
+    }
+
+    modes.sort_unstable();
+    modes.dedup();
+    Ok(modes)
+}
+
 fn validate_force_search_flags(
     force_search: bool,
     read_only: bool,
@@ -472,7 +504,7 @@ enum Command {
         timing: bool,
     },
 
-    /// Evaluate prover search on goals with nonempty cached proofs
+    /// Evaluate prover search on goals with cached proof targets
     Eval {
         /// Target module or file to evaluate (can be a filename or module name)
         #[clap(
@@ -507,6 +539,15 @@ enum Command {
             help = "Restrict proof search to the shallow proof fragment used by shallow verifier tests."
         )]
         shallow: bool,
+
+        /// Which previous plain proposition counts to omit when evaluating each benchmark goal
+        #[clap(
+            long,
+            default_value = "0",
+            help = "Evaluate with these skip modes. Use 0, 01, 012, or comma-separated values like 0,1,2.",
+            value_name = "SKIPS"
+        )]
+        skip: String,
 
         /// Print phase timing information
         #[clap(
@@ -945,12 +986,20 @@ async fn main() {
             timeout,
             activations,
             shallow,
+            skip,
             timing,
         }) => {
             if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
+            let skip_modes = match parse_eval_skip_modes(Some(&skip)) {
+                Ok(modes) => modes,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
             let config = ProjectConfig {
                 use_filesystem: true,
@@ -970,6 +1019,7 @@ async fn main() {
             verifier.builder.check_hashes = false;
             verifier.builder.force_search = true;
             verifier.builder.eval_mode = true;
+            verifier.builder.eval_skip_modes = skip_modes;
             verifier.builder.shallow_search = shallow;
             verifier.builder.operation_verb = "proved";
             verifier.exit_on_warning = fail_fast;
@@ -1550,9 +1600,10 @@ mod tests {
     use clap::{error::ErrorKind, Parser};
 
     use super::{
-        filter_selected_goals, resolve_print_proof_line_selection, validate_activations_flag,
-        validate_force_search_flags, validate_goal_flag, validate_goal_requires_single_line,
-        validate_print_proof_flag, validate_verbose_flag, Args, Command, LineSelection,
+        filter_selected_goals, parse_eval_skip_modes, resolve_print_proof_line_selection,
+        validate_activations_flag, validate_force_search_flags, validate_goal_flag,
+        validate_goal_requires_single_line, validate_print_proof_flag, validate_verbose_flag, Args,
+        Command, LineSelection,
     };
 
     #[test]
@@ -1756,6 +1807,8 @@ mod tests {
             "--activations",
             "20",
             "--shallow",
+            "--skip",
+            "01",
             "--timing",
         ])
         .expect("eval command should parse");
@@ -1767,6 +1820,7 @@ mod tests {
                 timeout,
                 activations,
                 shallow,
+                skip,
                 timing,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
@@ -1774,10 +1828,26 @@ mod tests {
                 assert_eq!(timeout, Some(1.0));
                 assert_eq!(activations, Some(20));
                 assert!(shallow);
+                assert_eq!(skip, "01");
                 assert!(timing);
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_eval_skip_modes() {
+        assert_eq!(parse_eval_skip_modes(None).unwrap(), vec![0]);
+        assert_eq!(parse_eval_skip_modes(Some("01")).unwrap(), vec![0, 1]);
+        assert_eq!(parse_eval_skip_modes(Some("210")).unwrap(), vec![0, 1, 2]);
+        assert_eq!(parse_eval_skip_modes(Some("0,1,2")).unwrap(), vec![0, 1, 2]);
+        assert_eq!(
+            parse_eval_skip_modes(Some(" 2, 0, 2 ")).unwrap(),
+            vec![0, 2]
+        );
+        assert!(parse_eval_skip_modes(Some("")).is_err());
+        assert!(parse_eval_skip_modes(Some("0,,1")).is_err());
+        assert!(parse_eval_skip_modes(Some("a")).is_err());
     }
 
     #[test]

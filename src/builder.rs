@@ -132,6 +132,72 @@ pub enum GoalFilter {
     },
 }
 
+#[derive(Clone, Debug)]
+struct EvalSkipTail<T> {
+    max_skip: usize,
+    checkpoints: Vec<T>,
+}
+
+impl<T: Clone> EvalSkipTail<T> {
+    fn new(max_skip: usize) -> Self {
+        Self {
+            max_skip,
+            checkpoints: Vec::new(),
+        }
+    }
+
+    fn record_plain(&mut self, checkpoint: T) {
+        if self.max_skip == 0 {
+            return;
+        }
+        self.checkpoints.push(checkpoint);
+        if self.checkpoints.len() > self.max_skip {
+            self.checkpoints.remove(0);
+        }
+    }
+
+    fn record_barrier(&mut self) {
+        self.checkpoints.clear();
+    }
+
+    fn checkpoint_for(&self, skip: usize) -> Option<T> {
+        if skip == 0 || skip > self.checkpoints.len() {
+            return None;
+        }
+        self.checkpoints.get(self.checkpoints.len() - skip).cloned()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvalProofKind {
+    Empty,
+    Nonempty,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EvalGoalCounts {
+    empty: usize,
+    nonempty: usize,
+}
+
+impl EvalGoalCounts {
+    fn total(&self) -> usize {
+        self.empty + self.nonempty
+    }
+
+    fn take(&mut self) -> Option<EvalProofKind> {
+        if self.nonempty > 0 {
+            self.nonempty -= 1;
+            return Some(EvalProofKind::Nonempty);
+        }
+        if self.empty > 0 {
+            self.empty -= 1;
+            return Some(EvalProofKind::Empty);
+        }
+        None
+    }
+}
+
 /// The Builder contains all the mutable state for a single build.
 /// This is separate from the Project because you can read information from the Project from other
 /// threads while a build is ongoing, but a Builder is only used by the build itself.
@@ -186,6 +252,9 @@ pub struct Builder<'a> {
 
     /// Only search goals that have a nonempty cached proof, for prover evaluation.
     pub eval_mode: bool,
+
+    /// Eval skip modes to run for each benchmark goal.
+    pub eval_skip_modes: Vec<usize>,
 
     /// The current module we are proving.
     current_module: Option<ModuleDescriptor>,
@@ -320,8 +389,11 @@ pub struct BuildMetrics {
     /// Whether the build is a prover evaluation run.
     pub eval_mode: bool,
 
-    /// Number of nonempty cached proof certificates in the selected modules.
+    /// Number of cached proof certificates in the selected benchmark corpus.
     pub eval_corpus_total: i32,
+
+    /// Number of included benchmark proofs whose cached proof is empty.
+    pub eval_corpus_empty: i32,
 
     /// Number of cached benchmark proofs that matched a current source goal.
     pub eval_corpus_matched: i32,
@@ -332,11 +404,115 @@ pub struct BuildMetrics {
     /// Number of current source goals skipped because they are not in the benchmark corpus.
     pub eval_goals_skipped_uncertified: i32,
 
+    /// Per-skip proof search metrics for eval runs.
+    pub eval_skip_metrics: Vec<EvalSkipMetrics>,
+
     /// Time spent collecting loaded environments and reporting load errors.
     pub loading_time: f64,
 
     /// Time spent verifying goals, checking certificates, or running prover search.
     pub verification_time: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EvalSkipMetrics {
+    pub skip: usize,
+    pub ineligible: i32,
+    pub searches_total: i32,
+    pub searches_success: i32,
+    pub search_time: f64,
+    pub searches_timeout: i32,
+    pub searches_exhausted: i32,
+    pub searches_activation_cap: i32,
+    pub searches_shallow_exhausted: i32,
+    pub searches_shallow_explosion: i32,
+    pub searches_inconsistent: i32,
+    pub searches_interrupted: i32,
+}
+
+impl EvalSkipMetrics {
+    fn new(skip: usize) -> Self {
+        Self {
+            skip,
+            ..Self::default()
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        assert_eq!(self.skip, other.skip);
+        self.ineligible += other.ineligible;
+        self.searches_total += other.searches_total;
+        self.searches_success += other.searches_success;
+        self.search_time += other.search_time;
+        self.searches_timeout += other.searches_timeout;
+        self.searches_exhausted += other.searches_exhausted;
+        self.searches_activation_cap += other.searches_activation_cap;
+        self.searches_shallow_exhausted += other.searches_shallow_exhausted;
+        self.searches_shallow_explosion += other.searches_shallow_explosion;
+        self.searches_inconsistent += other.searches_inconsistent;
+        self.searches_interrupted += other.searches_interrupted;
+    }
+
+    fn record_search(&mut self, outcome: Outcome, elapsed_secs: f64) {
+        self.searches_total += 1;
+        self.search_time += elapsed_secs;
+        match outcome {
+            Outcome::Success => self.searches_success += 1,
+            Outcome::ShallowExhausted => self.searches_shallow_exhausted += 1,
+            Outcome::ShallowExplosion => self.searches_shallow_explosion += 1,
+            Outcome::Exhausted => self.searches_exhausted += 1,
+            Outcome::Inconsistent => self.searches_inconsistent += 1,
+            Outcome::Timeout => self.searches_timeout += 1,
+            Outcome::Interrupted => self.searches_interrupted += 1,
+            Outcome::ActivationCap => self.searches_activation_cap += 1,
+        }
+    }
+
+    fn failure_buckets(&self) -> Vec<String> {
+        search_failure_buckets(
+            self.searches_timeout,
+            self.searches_exhausted,
+            self.searches_activation_cap,
+            self.searches_shallow_exhausted,
+            self.searches_shallow_explosion,
+            self.searches_inconsistent,
+            self.searches_interrupted,
+        )
+    }
+}
+
+fn search_failure_buckets(
+    searches_timeout: i32,
+    searches_exhausted: i32,
+    searches_activation_cap: i32,
+    searches_shallow_exhausted: i32,
+    searches_shallow_explosion: i32,
+    searches_inconsistent: i32,
+    searches_interrupted: i32,
+) -> Vec<String> {
+    let mut buckets = Vec::new();
+    if searches_timeout > 0 {
+        buckets.push(format!("{} timeout", searches_timeout));
+    }
+    if searches_exhausted > 0 {
+        buckets.push(format!("{} exhausted", searches_exhausted));
+    }
+    if searches_activation_cap > 0 {
+        buckets.push(format!("{} activation cap", searches_activation_cap));
+    }
+    if searches_shallow_exhausted > 0 {
+        buckets.push(format!("{} shallow exhausted", searches_shallow_exhausted));
+    }
+    if searches_shallow_explosion > 0 {
+        buckets.push(format!("{} shallow explosion", searches_shallow_explosion));
+    }
+    if searches_inconsistent > 0 {
+        buckets.push(format!("{} inconsistent", searches_inconsistent));
+    }
+    if searches_interrupted > 0 {
+        buckets.push(format!("{} interrupted", searches_interrupted));
+    }
+    buckets
 }
 
 /// Timing data for work performed on one module during the verification phase.
@@ -392,6 +568,38 @@ impl BuildMetrics {
         Self::default()
     }
 
+    fn eval_skip_metrics_mut(&mut self, skip: usize) -> &mut EvalSkipMetrics {
+        if let Some(index) = self
+            .eval_skip_metrics
+            .iter()
+            .position(|metrics| metrics.skip == skip)
+        {
+            return &mut self.eval_skip_metrics[index];
+        }
+        self.eval_skip_metrics.push(EvalSkipMetrics::new(skip));
+        self.eval_skip_metrics
+            .sort_unstable_by_key(|metrics| metrics.skip);
+        let index = self
+            .eval_skip_metrics
+            .iter()
+            .position(|metrics| metrics.skip == skip)
+            .expect("just inserted skip metrics");
+        &mut self.eval_skip_metrics[index]
+    }
+
+    fn ensure_eval_skip_metrics(&mut self, skip: usize) {
+        self.eval_skip_metrics_mut(skip);
+    }
+
+    fn record_eval_skip_ineligible(&mut self, skip: usize) {
+        self.eval_skip_metrics_mut(skip).ineligible += 1;
+    }
+
+    fn record_eval_skip_search(&mut self, skip: usize, outcome: Outcome, elapsed_secs: f64) {
+        self.eval_skip_metrics_mut(skip)
+            .record_search(outcome, elapsed_secs);
+    }
+
     fn add_module_result(&mut self, result: &BuildMetrics) {
         self.goals_done += result.goals_done;
         self.goals_success += result.goals_success;
@@ -413,9 +621,14 @@ impl BuildMetrics {
         self.searches_interrupted += result.searches_interrupted;
         self.eval_mode |= result.eval_mode;
         self.eval_corpus_total += result.eval_corpus_total;
+        self.eval_corpus_empty += result.eval_corpus_empty;
         self.eval_corpus_matched += result.eval_corpus_matched;
         self.eval_corpus_unmatched += result.eval_corpus_unmatched;
         self.eval_goals_skipped_uncertified += result.eval_goals_skipped_uncertified;
+        for skip_metrics in &result.eval_skip_metrics {
+            self.eval_skip_metrics_mut(skip_metrics.skip)
+                .add(skip_metrics);
+        }
     }
 
     pub fn info_lines(&self) -> Vec<String> {
@@ -423,9 +636,15 @@ impl BuildMetrics {
 
         if self.eval_mode {
             lines.push(format!(
-                "{} benchmark proofs with nonempty cached proofs",
+                "{} benchmark proofs with eligible cached proofs",
                 self.eval_corpus_total
             ));
+            if self.eval_corpus_empty > 0 {
+                lines.push(format!(
+                    "{} benchmark proofs have empty cached proofs (omitted for skip=0)",
+                    self.eval_corpus_empty
+                ));
+            }
             lines.push(format!(
                 "{} benchmark goals matched current source",
                 self.eval_corpus_matched
@@ -438,7 +657,7 @@ impl BuildMetrics {
             }
             if self.eval_goals_skipped_uncertified > 0 {
                 lines.push(format!(
-                    "{} current goals skipped without nonempty cached proofs",
+                    "{} current goals skipped without eligible cached proofs",
                     self.eval_goals_skipped_uncertified
                 ));
             }
@@ -470,36 +689,47 @@ impl BuildMetrics {
         }
         let failures = self.searches_total - self.searches_success;
         if failures > 0 {
-            let mut buckets = Vec::new();
-            if self.searches_timeout > 0 {
-                buckets.push(format!("{} timeout", self.searches_timeout));
-            }
-            if self.searches_exhausted > 0 {
-                buckets.push(format!("{} exhausted", self.searches_exhausted));
-            }
-            if self.searches_activation_cap > 0 {
-                buckets.push(format!("{} activation cap", self.searches_activation_cap));
-            }
-            if self.searches_shallow_exhausted > 0 {
-                buckets.push(format!(
-                    "{} shallow exhausted",
-                    self.searches_shallow_exhausted
-                ));
-            }
-            if self.searches_shallow_explosion > 0 {
-                buckets.push(format!(
-                    "{} shallow explosion",
-                    self.searches_shallow_explosion
-                ));
-            }
-            if self.searches_inconsistent > 0 {
-                buckets.push(format!("{} inconsistent", self.searches_inconsistent));
-            }
-            if self.searches_interrupted > 0 {
-                buckets.push(format!("{} interrupted", self.searches_interrupted));
-            }
+            let buckets = search_failure_buckets(
+                self.searches_timeout,
+                self.searches_exhausted,
+                self.searches_activation_cap,
+                self.searches_shallow_exhausted,
+                self.searches_shallow_explosion,
+                self.searches_inconsistent,
+                self.searches_interrupted,
+            );
             if !buckets.is_empty() {
                 lines.push(format!("search failures: {}", buckets.join(", ")));
+            }
+        }
+        let show_skip_metrics = self.eval_mode
+            && self
+                .eval_skip_metrics
+                .iter()
+                .any(|metrics| metrics.skip != 0 || metrics.ineligible > 0);
+        if show_skip_metrics {
+            for metrics in &self.eval_skip_metrics {
+                let mut line = format!(
+                    "skip={}: {}/{} searches succeeded",
+                    metrics.skip, metrics.searches_success, metrics.searches_total
+                );
+                if metrics.ineligible > 0 {
+                    line.push_str(&format!(", {} ineligible", metrics.ineligible));
+                }
+                if metrics.searches_total > 0 {
+                    let search_time_ms =
+                        1000.0 * metrics.search_time / metrics.searches_total as f64;
+                    line.push_str(&format!(", {:.1} ms average", search_time_ms));
+                }
+                lines.push(line);
+                let buckets = metrics.failure_buckets();
+                if !buckets.is_empty() {
+                    lines.push(format!(
+                        "skip={} search failures: {}",
+                        metrics.skip,
+                        buckets.join(", ")
+                    ));
+                }
             }
         }
         if self.eval_mode {
@@ -652,6 +882,7 @@ impl<'a> Builder<'a> {
             exit_on_warning: false,
             force_search: false,
             eval_mode: false,
+            eval_skip_modes: vec![0],
             current_module: None,
             single_line_goal_count: 0,
             current_module_good: true,
@@ -697,16 +928,26 @@ impl<'a> Builder<'a> {
         self.metrics.cert_check_time += elapsed.as_secs_f64();
     }
 
-    fn eval_goal_counts(&self, target: &ModuleDescriptor) -> Option<HashMap<String, usize>> {
+    fn eval_goal_counts(
+        &self,
+        target: &ModuleDescriptor,
+    ) -> Option<HashMap<String, EvalGoalCounts>> {
         if !self.eval_mode {
             return None;
         }
 
-        let mut counts = HashMap::new();
+        let include_empty = self.eval_skip_modes.iter().any(|&skip| skip > 0);
+        let mut counts: HashMap<String, EvalGoalCounts> = HashMap::new();
         if let Some(store) = self.project.build_cache.get_certificates(target) {
             for cert in &store.certs {
-                if cert.proof.as_ref().is_some_and(|proof| !proof.is_empty()) {
-                    *counts.entry(cert.goal.clone()).or_insert(0) += 1;
+                if let Some(proof) = &cert.proof {
+                    if proof.is_empty() {
+                        if include_empty {
+                            counts.entry(cert.goal.clone()).or_default().empty += 1;
+                        }
+                    } else {
+                        counts.entry(cert.goal.clone()).or_default().nonempty += 1;
+                    }
                 }
             }
         }
@@ -800,7 +1041,13 @@ impl<'a> Builder<'a> {
     /// Called when a single proof search completes.
     /// Statistics are tracked here.
     /// env should be the environment that the proof happened in.
-    pub fn search_finished(&mut self, goal: &Goal, outcome: Outcome, elapsed: Duration) {
+    pub fn search_finished(
+        &mut self,
+        goal: &Goal,
+        outcome: Outcome,
+        elapsed: Duration,
+        eval_skip: Option<usize>,
+    ) {
         // Time conversion
         let secs = elapsed.as_secs() as f64;
         let subsec_nanos = elapsed.subsec_nanos() as f64;
@@ -808,52 +1055,79 @@ impl<'a> Builder<'a> {
         let elapsed_str = format!("{:.3}s", elapsed_f64);
 
         // Tracking statistics
-        self.metrics.goals_done += 1;
+        let counts_goal_progress = !self.eval_mode || eval_skip == Some(0);
+        if counts_goal_progress {
+            self.metrics.goals_done += 1;
+        }
         self.metrics.searches_total += 1;
         self.metrics.search_time += elapsed_f64;
+        if let Some(skip) = eval_skip {
+            self.metrics
+                .record_eval_skip_search(skip, outcome, elapsed_f64);
+        }
+        let skip_phrase = match eval_skip {
+            Some(skip) if self.eval_mode => format!(" with skip={}", skip),
+            _ => String::new(),
+        };
 
         match outcome {
             Outcome::Success => {
                 // The search was a success.
-                self.metrics.goals_success += 1;
+                if counts_goal_progress {
+                    self.metrics.goals_success += 1;
+                }
                 self.metrics.searches_success += 1;
                 if self.log_when_slow && elapsed_f64 > 0.1 {
                     self.log_info(&goal, &format!("took {}", elapsed_str));
                 }
-                self.log_verified(goal.first_line, goal.last_line);
+                if counts_goal_progress {
+                    self.log_verified(goal.first_line, goal.last_line);
+                }
             }
             Outcome::ShallowExhausted => {
                 self.metrics.searches_shallow_exhausted += 1;
                 self.log_warning(
                     &goal,
-                    &format!("could not be {} (shallow exhaustion)", self.operation_verb),
+                    &format!(
+                        "could not be {}{} (shallow exhaustion)",
+                        self.operation_verb, skip_phrase
+                    ),
                 )
             }
             Outcome::ShallowExplosion => {
                 self.metrics.searches_shallow_explosion += 1;
                 self.log_warning(
                     &goal,
-                    &format!("could not be {} (shallow explosion)", self.operation_verb),
+                    &format!(
+                        "could not be {}{} (shallow explosion)",
+                        self.operation_verb, skip_phrase
+                    ),
                 )
             }
             Outcome::Exhausted => {
                 self.metrics.searches_exhausted += 1;
                 self.log_warning(
                     &goal,
-                    &format!("could not be {} (exhaustion)", self.operation_verb),
+                    &format!(
+                        "could not be {}{} (exhaustion)",
+                        self.operation_verb, skip_phrase
+                    ),
                 )
             }
             Outcome::Inconsistent => {
                 self.metrics.searches_inconsistent += 1;
-                self.log_warning(&goal, "- prover found an inconsistency")
+                self.log_warning(
+                    &goal,
+                    &format!("prover found an inconsistency{}", skip_phrase),
+                )
             }
             Outcome::Timeout => {
                 self.metrics.searches_timeout += 1;
                 self.log_warning(
                     &goal,
                     &format!(
-                        "could not be {} (timeout after {})",
-                        self.operation_verb, elapsed_str
+                        "could not be {}{} (timeout after {})",
+                        self.operation_verb, skip_phrase, elapsed_str
                     ),
                 )
             }
@@ -867,7 +1141,10 @@ impl<'a> Builder<'a> {
                 self.metrics.searches_activation_cap += 1;
                 self.log_warning(
                     &goal,
-                    &format!("could not be {} (hit activation cap)", self.operation_verb),
+                    &format!(
+                        "could not be {}{} (hit activation cap)",
+                        self.operation_verb, skip_phrase
+                    ),
                 )
             }
         }
@@ -1089,6 +1366,7 @@ impl<'a> Builder<'a> {
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
         lowered_goal: Option<&LoweredGoal>,
+        eval_skip: Option<usize>,
     ) -> Result<(), BuildError> {
         // Check if we've been cancelled before starting any work
         if self.cancellation_token.is_cancelled() {
@@ -1379,20 +1657,108 @@ impl<'a> Builder<'a> {
                 },
             }
         }
-        self.search_finished(goal, outcome, start.elapsed());
+        self.search_finished(goal, outcome, start.elapsed(), eval_skip);
+        Ok(())
+    }
+
+    fn eval_max_skip(&self) -> usize {
+        if !self.eval_mode {
+            return 0;
+        }
+        self.eval_skip_modes.iter().copied().max().unwrap_or(0)
+    }
+
+    fn processor_with_imports(
+        &self,
+        mut processor: Rc<Processor>,
+        bindings: &crate::elaborator::binding_map::BindingMap,
+    ) -> Result<Rc<Processor>, BuildError> {
+        if !processor.has_imports_for_bindings(bindings) {
+            Rc::make_mut(&mut processor).add_imports_from_bindings(bindings, self.project)?;
+        }
+        Ok(processor)
+    }
+
+    fn is_plain_anonymous_claim(node: &Node) -> bool {
+        match node {
+            Node::Claim(_, Fact::Proposition(prop), _, _) => {
+                matches!(prop.source.source_type, SourceType::Anonymous)
+            }
+            _ => false,
+        }
+    }
+
+    fn update_eval_skip_tail(
+        &self,
+        tail: &mut EvalSkipTail<Rc<Processor>>,
+        node: &Node,
+        checkpoint_before_node: Rc<Processor>,
+    ) {
+        if !self.eval_mode || self.eval_max_skip() == 0 {
+            return;
+        }
+        if Self::is_plain_anonymous_claim(node) {
+            tail.record_plain(checkpoint_before_node);
+        } else {
+            tail.record_barrier();
+        }
+    }
+
+    fn verify_eval_goal(
+        &mut self,
+        processor: Rc<Processor>,
+        goal: &Goal,
+        bindings: &crate::elaborator::binding_map::BindingMap,
+        new_certs: &mut Vec<Certificate>,
+        worklist: &mut CertificateWorklist,
+        lowered_goal: Option<&LoweredGoal>,
+        eval_skip_tail: &EvalSkipTail<Rc<Processor>>,
+        eval_proof_kind: EvalProofKind,
+    ) -> Result<(), BuildError> {
+        let skip_modes = self.eval_skip_modes.clone();
+        for skip in skip_modes {
+            if skip == 0 && eval_proof_kind == EvalProofKind::Empty {
+                continue;
+            }
+            let search_processor = if skip == 0 {
+                Rc::clone(&processor)
+            } else {
+                match eval_skip_tail.checkpoint_for(skip) {
+                    Some(checkpoint) => checkpoint,
+                    None => {
+                        self.metrics.record_eval_skip_ineligible(skip);
+                        continue;
+                    }
+                }
+            };
+            let search_processor = self.processor_with_imports(search_processor, bindings)?;
+            self.verify_goal(
+                search_processor,
+                goal,
+                bindings,
+                new_certs,
+                worklist,
+                lowered_goal,
+                Some(skip),
+            )?;
+            if self.exit_on_warning && !self.status.is_good() {
+                break;
+            }
+        }
         Ok(())
     }
 
     /// Verifies a node and all its children recursively.
     /// builder tracks statistics and results for the build.
     /// If verify_node encounters an error, it stops, leaving node in a borked state.
-    pub fn verify_node(
+    fn verify_node(
         &mut self,
         mut processor: Rc<Processor>,
         cursor: &mut NodeCursor,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
-        eval_goal_counts: &mut Option<HashMap<String, usize>>,
+        eval_goal_counts: &mut Option<HashMap<String, EvalGoalCounts>>,
+        eval_skip_tail: &EvalSkipTail<Rc<Processor>>,
     ) -> Result<(), BuildError> {
         if !cursor.requires_verification() {
             return Ok(());
@@ -1405,6 +1771,7 @@ impl<'a> Builder<'a> {
 
         if cursor.num_children() > 0 {
             // We need to recurse into children
+            let mut child_eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
             cursor.descend(0);
             loop {
                 self.verify_node(
@@ -1413,6 +1780,7 @@ impl<'a> Builder<'a> {
                     new_certs,
                     worklist,
                     eval_goal_counts,
+                    &child_eval_skip_tail,
                 )?;
 
                 // Early exit if we have a warning and exit_on_warning is enabled
@@ -1420,12 +1788,18 @@ impl<'a> Builder<'a> {
                     break;
                 }
 
+                let checkpoint_before_node = Rc::clone(&processor);
                 if cursor.node().get_fact().is_some() {
                     let normalized = cursor.node().lowered_fact().ok_or_else(|| {
                         BuildError::new(Default::default(), "missing lowered fact".to_string())
                     })?;
                     Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
                 }
+                self.update_eval_skip_tail(
+                    &mut child_eval_skip_tail,
+                    cursor.node(),
+                    checkpoint_before_node,
+                );
 
                 if cursor.has_next() {
                     cursor.next();
@@ -1464,26 +1838,46 @@ impl<'a> Builder<'a> {
                 return Ok(());
             }
         }
-        if let Some(counts) = eval_goal_counts.as_mut() {
-            let Some(count) = counts.get_mut(&goal.name) else {
+        let eval_proof_kind = if let Some(counts) = eval_goal_counts.as_mut() {
+            let Some(counts) = counts.get_mut(&goal.name) else {
                 self.metrics.eval_goals_skipped_uncertified += 1;
                 return Ok(());
             };
-            if *count == 0 {
-                self.metrics.eval_goals_skipped_uncertified += 1;
-                return Ok(());
+            match counts.take() {
+                Some(kind) => {
+                    self.metrics.eval_corpus_matched += 1;
+                    Some(kind)
+                }
+                None => {
+                    self.metrics.eval_goals_skipped_uncertified += 1;
+                    return Ok(());
+                }
             }
-            *count -= 1;
-            self.metrics.eval_corpus_matched += 1;
+        } else {
+            None
+        };
+        if self.eval_mode {
+            self.verify_eval_goal(
+                processor,
+                &goal,
+                cursor.bindings(),
+                new_certs,
+                worklist,
+                normalized_goal,
+                eval_skip_tail,
+                eval_proof_kind.expect("eval mode has proof kind"),
+            )?;
+        } else {
+            self.verify_goal(
+                processor,
+                &goal,
+                cursor.bindings(),
+                new_certs,
+                worklist,
+                normalized_goal,
+                None,
+            )?;
         }
-        self.verify_goal(
-            processor,
-            &goal,
-            cursor.bindings(),
-            new_certs,
-            worklist,
-            normalized_goal,
-        )?;
 
         Ok(())
     }
@@ -1523,7 +1917,10 @@ impl<'a> Builder<'a> {
         };
         let mut eval_goal_counts = self.eval_goal_counts(target);
         if let Some(counts) = &eval_goal_counts {
-            self.metrics.eval_corpus_total += counts.values().sum::<usize>() as i32;
+            self.metrics.eval_corpus_total +=
+                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
+            self.metrics.eval_corpus_empty +=
+                counts.values().map(|counts| counts.empty).sum::<usize>() as i32;
         }
         let mut new_certs = vec![];
 
@@ -1544,6 +1941,7 @@ impl<'a> Builder<'a> {
                 )?
             };
             let mut processor = Rc::new(processor);
+            let mut eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
 
             // Loop over all the nodes that are right below the top level.
             loop {
@@ -1557,6 +1955,7 @@ impl<'a> Builder<'a> {
                         &mut new_certs,
                         &mut worklist,
                         &mut eval_goal_counts,
+                        &eval_skip_tail,
                     )?;
 
                     // Early exit if we have a warning and exit_on_warning is enabled
@@ -1569,17 +1968,24 @@ impl<'a> Builder<'a> {
                 if !cursor.has_next() {
                     break;
                 }
+                let checkpoint_before_node = Rc::clone(&processor);
                 if cursor.node().get_fact().is_some() {
                     let normalized = cursor.node().lowered_fact().ok_or_else(|| {
                         BuildError::new(Default::default(), "missing lowered fact".to_string())
                     })?;
                     Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
                 }
+                self.update_eval_skip_tail(
+                    &mut eval_skip_tail,
+                    cursor.node(),
+                    checkpoint_before_node,
+                );
                 cursor.next();
             }
         }
         if let Some(counts) = &eval_goal_counts {
-            self.metrics.eval_corpus_unmatched += counts.values().sum::<usize>() as i32;
+            self.metrics.eval_corpus_unmatched +=
+                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
         }
 
         let module_good = if env.nodes.is_empty() {
@@ -1749,6 +2155,14 @@ impl<'a> Builder<'a> {
             self.force_search = true;
             self.check_hashes = false;
             self.metrics.eval_mode = true;
+            if self.eval_skip_modes.is_empty() {
+                self.eval_skip_modes.push(0);
+            }
+            self.eval_skip_modes.sort_unstable();
+            self.eval_skip_modes.dedup();
+            for skip in self.eval_skip_modes.clone() {
+                self.metrics.ensure_eval_skip_metrics(skip);
+            }
         }
 
         // Initialize the build cache
@@ -2003,7 +2417,39 @@ impl<'a> Builder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_check_cert_error, format_goal_panic_message, panic_payload_to_string};
+    use super::{
+        compact_check_cert_error, format_goal_panic_message, panic_payload_to_string, EvalSkipTail,
+    };
+
+    #[test]
+    fn test_eval_skip_tail_tracks_consecutive_plain_checkpoints() {
+        let mut tail = EvalSkipTail::new(2);
+        assert_eq!(tail.checkpoint_for(1), None);
+
+        tail.record_plain(10);
+        assert_eq!(tail.checkpoint_for(0), None);
+        assert_eq!(tail.checkpoint_for(1), Some(10));
+        assert_eq!(tail.checkpoint_for(2), None);
+
+        tail.record_plain(20);
+        assert_eq!(tail.checkpoint_for(1), Some(20));
+        assert_eq!(tail.checkpoint_for(2), Some(10));
+
+        tail.record_plain(30);
+        assert_eq!(tail.checkpoint_for(1), Some(30));
+        assert_eq!(tail.checkpoint_for(2), Some(20));
+        assert_eq!(tail.checkpoint_for(3), None);
+
+        tail.record_barrier();
+        assert_eq!(tail.checkpoint_for(1), None);
+    }
+
+    #[test]
+    fn test_eval_skip_tail_disabled_when_max_skip_is_zero() {
+        let mut tail = EvalSkipTail::new(0);
+        tail.record_plain(10);
+        assert_eq!(tail.checkpoint_for(1), None);
+    }
 
     #[test]
     fn test_compact_check_cert_error_strips_generic_debug() {
