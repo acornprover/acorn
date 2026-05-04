@@ -909,7 +909,7 @@ impl<'a> TermBridge<'a> {
                 ));
             }
 
-            if let Some(next_type) = remaining_head_type.type_apply_with_arg(arg) {
+            if let Some(next_type) = remaining_head_type.type_apply_with_arg(arg.as_ref()) {
                 remaining_head_type = next_type;
             }
         }

@@ -260,7 +260,7 @@ impl KernelContext {
             }
             let arg = type_args[type_arg_index].clone();
             witness = witness.apply(std::slice::from_ref(&arg));
-            witness_type = witness_type.type_apply_with_arg(&arg)?;
+            witness_type = witness_type.type_apply_with_arg(arg.as_ref())?;
             type_arg_index += 1;
         }
 
@@ -276,7 +276,7 @@ impl KernelContext {
             }
             let arg = self.find_inhabitant_with_seen(&input_type, local_context, seen)?;
             witness = witness.apply(std::slice::from_ref(&arg));
-            witness_type = witness_type.type_apply_with_arg(&arg)?;
+            witness_type = witness_type.type_apply_with_arg(arg.as_ref())?;
 
             if witness_type == *target_type {
                 return Some(witness);

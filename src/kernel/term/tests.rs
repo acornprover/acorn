@@ -279,7 +279,7 @@ fn test_polymorphic_type_application() {
     let correct_type = Term::pi(Term::type_sort(), Term::atom(Atom::BoundVariable(0)));
     let concrete_type = Term::parse("c0");
 
-    let result = correct_type.type_apply_with_arg(&concrete_type);
+    let result = correct_type.type_apply_with_arg(concrete_type.as_ref());
     assert!(result.is_some());
     assert_eq!(
         format!("{}", result.unwrap()),
@@ -293,7 +293,7 @@ fn test_free_variable_not_substituted_in_type_apply() {
     let pi_with_free = Term::pi(Term::type_sort(), Term::atom(Atom::FreeVariable(0)));
     let concrete_type = Term::parse("c0");
 
-    let result = pi_with_free.type_apply_with_arg(&concrete_type);
+    let result = pi_with_free.type_apply_with_arg(concrete_type.as_ref());
     assert!(result.is_some());
     assert_eq!(
         format!("{}", result.unwrap()),

@@ -459,6 +459,13 @@ impl<'a> TermRef<'a> {
         }
     }
 
+    /// Check if this term contains any bound variables.
+    pub fn has_bound_variable(&self) -> bool {
+        self.components
+            .iter()
+            .any(|c| matches!(c, TermComponent::Atom(Atom::BoundVariable(_))))
+    }
+
     /// Split an existential quantifier into (binder_type, body).
     /// Returns None if the term is not an Exists.
     pub fn split_exists(&self) -> Option<(TermRef<'a>, TermRef<'a>)> {
@@ -618,8 +625,7 @@ impl<'a> TermRef<'a> {
                 // The function has type A -> B, so the application has type B
                 let func_type = func.get_type_with_context(local_context, kernel_context);
                 // For dependent types, we need to substitute the argument into the output type
-                let arg_term = arg.to_owned();
-                let result = func_type.type_apply_with_arg(&arg_term).unwrap_or_else(|| {
+                let result = func_type.type_apply_with_arg(arg).unwrap_or_else(|| {
                     panic!(
                         "Function type expected but not found during type application.\n\
                          func = {}\n\
@@ -790,8 +796,7 @@ impl<'a> TermRef<'a> {
                     kernel_context,
                 )?;
 
-                let arg_term = arg.to_owned();
-                func_type.type_apply_with_arg(&arg_term).ok_or_else(|| {
+                func_type.type_apply_with_arg(arg).ok_or_else(|| {
                     format!(
                         "Function type expected but not found during type application.\n\
                          func = {}\n\
@@ -1842,18 +1847,17 @@ impl Term {
     /// For non-dependent types like `A -> B`, this just returns B.
     /// For dependent types like `Pi(Type, b0 -> b0)`, applying `Int` gives `Int -> Int`.
     /// Returns None if this is not a Pi type.
-    pub fn type_apply_with_arg(&self, arg: &Term) -> Option<Term> {
+    pub fn type_apply_with_arg(&self, arg: TermRef<'_>) -> Option<Term> {
         self.as_ref().split_pi().map(|(_input, output)| {
-            let output = output.to_owned();
-            let result = if output.has_bound_variable() {
+            if output.has_bound_variable() {
                 // Dependent type: substitute and shift
-                let substituted = output.substitute_bound(0, arg);
+                let arg = arg.to_owned();
+                let substituted = output.to_owned().substitute_bound(0, &arg);
                 substituted.shift_bound(0, -1)
             } else {
-                // Non-dependent type: just return output
-                output
-            };
-            result
+                // Non-dependent type: just return output without touching arg
+                output.to_owned()
+            }
         })
     }
 
@@ -2624,12 +2628,7 @@ impl Term {
 
     /// Check if this term contains any bound variables.
     pub fn has_bound_variable(&self) -> bool {
-        for component in &self.components {
-            if let TermComponent::Atom(Atom::BoundVariable(_)) = component {
-                return true;
-            }
-        }
-        false
+        self.as_ref().has_bound_variable()
     }
 
     /// Check if this term has any bound variables that escape their enclosing Pi type.
