@@ -492,13 +492,6 @@ enum Command {
         #[clap(long = "save-results", help = "Save reproved results to the cache.")]
         save_results: bool,
 
-        /// Visit modules in reverse alphabetical order during a whole-project reprove
-        #[clap(
-            long,
-            help = "Visit modules in reverse alphabetical order during a whole-project reprove."
-        )]
-        reverse: bool,
-
         /// Print the activated proof steps and final contradiction details for a single selected goal
         #[clap(
             long,
@@ -843,7 +836,6 @@ async fn main() {
             activations,
             shallow,
             save_results,
-            reverse,
             verbose,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
@@ -910,7 +902,6 @@ async fn main() {
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
             verifier.builder.shallow_search = shallow;
-            verifier.builder.reverse_targets = reverse;
             verifier.builder.operation_verb = "reproved";
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -1381,8 +1372,8 @@ async fn main() {
 mod tests {
     use acorn::interfaces::GoalInfo;
     use assert_fs::prelude::*;
+    use assert_fs::TempDir;
     use clap::{error::ErrorKind, Parser};
-    use tempfile::TempDir;
 
     use super::{
         filter_selected_goals, resolve_print_proof_line_selection, validate_activations_flag,
@@ -1598,16 +1589,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reprove_accepts_reverse_flag() {
-        let args =
-            Args::try_parse_from(["acorn", "reprove", "--reverse"]).expect("flag should parse");
-        match args.command {
-            Some(Command::Reprove { reverse, .. }) => assert!(reverse),
-            _ => panic!("unexpected command"),
-        }
-    }
-
-    #[test]
     fn test_reprove_accepts_shallow_flag() {
         let args =
             Args::try_parse_from(["acorn", "reprove", "--shallow"]).expect("flag should parse");
@@ -1620,6 +1601,12 @@ mod tests {
     #[test]
     fn test_reprove_rejects_legacy_save_flag() {
         let error = Args::try_parse_from(["acorn", "reprove", "--write-cache"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn test_reprove_rejects_reverse_flag() {
+        let error = Args::try_parse_from(["acorn", "reprove", "--reverse"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
