@@ -181,6 +181,12 @@ pub struct Builder<'a> {
     /// should be reverted, so there's no point continuing verification.
     pub exit_on_warning: bool,
 
+    /// Force proof search instead of using cached certificates.
+    pub force_search: bool,
+
+    /// Only search goals that have a nonempty cached proof, for prover evaluation.
+    pub eval_mode: bool,
+
     /// The current module we are proving.
     current_module: Option<ModuleDescriptor>,
 
@@ -290,6 +296,42 @@ pub struct BuildMetrics {
     /// The total amount of time spent in proof search, in seconds.
     pub search_time: f64,
 
+    /// Number of proof searches that timed out.
+    pub searches_timeout: i32,
+
+    /// Number of proof searches that exhausted the search space.
+    pub searches_exhausted: i32,
+
+    /// Number of proof searches that hit the activation cap.
+    pub searches_activation_cap: i32,
+
+    /// Number of shallow searches that exhausted the shallow fragment.
+    pub searches_shallow_exhausted: i32,
+
+    /// Number of shallow searches that hit the shallow explosion guard.
+    pub searches_shallow_explosion: i32,
+
+    /// Number of proof searches that found an inconsistency.
+    pub searches_inconsistent: i32,
+
+    /// Number of proof searches that were interrupted.
+    pub searches_interrupted: i32,
+
+    /// Whether the build is a prover evaluation run.
+    pub eval_mode: bool,
+
+    /// Number of nonempty cached proof certificates in the selected modules.
+    pub eval_corpus_total: i32,
+
+    /// Number of cached benchmark proofs that matched a current source goal.
+    pub eval_corpus_matched: i32,
+
+    /// Number of cached benchmark proofs that did not match a current source goal.
+    pub eval_corpus_unmatched: i32,
+
+    /// Number of current source goals skipped because they are not in the benchmark corpus.
+    pub eval_goals_skipped_uncertified: i32,
+
     /// Time spent collecting loaded environments and reporting load errors.
     pub loading_time: f64,
 
@@ -362,25 +404,62 @@ impl BuildMetrics {
         self.searches_total += result.searches_total;
         self.searches_success += result.searches_success;
         self.search_time += result.search_time;
+        self.searches_timeout += result.searches_timeout;
+        self.searches_exhausted += result.searches_exhausted;
+        self.searches_activation_cap += result.searches_activation_cap;
+        self.searches_shallow_exhausted += result.searches_shallow_exhausted;
+        self.searches_shallow_explosion += result.searches_shallow_explosion;
+        self.searches_inconsistent += result.searches_inconsistent;
+        self.searches_interrupted += result.searches_interrupted;
+        self.eval_mode |= result.eval_mode;
+        self.eval_corpus_total += result.eval_corpus_total;
+        self.eval_corpus_matched += result.eval_corpus_matched;
+        self.eval_corpus_unmatched += result.eval_corpus_unmatched;
+        self.eval_goals_skipped_uncertified += result.eval_goals_skipped_uncertified;
     }
 
     pub fn info_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
-        if self.modules_cached > 0 {
+        if self.eval_mode {
             lines.push(format!(
-                "{}/{} modules cached",
-                self.modules_cached, self.modules_total
+                "{} benchmark proofs with nonempty cached proofs",
+                self.eval_corpus_total
             ));
+            lines.push(format!(
+                "{} benchmark goals matched current source",
+                self.eval_corpus_matched
+            ));
+            if self.eval_corpus_unmatched > 0 {
+                lines.push(format!(
+                    "{} benchmark proofs unmatched by current source",
+                    self.eval_corpus_unmatched
+                ));
+            }
+            if self.eval_goals_skipped_uncertified > 0 {
+                lines.push(format!(
+                    "{} current goals skipped without nonempty cached proofs",
+                    self.eval_goals_skipped_uncertified
+                ));
+            }
         }
-        if self.certs_created > 0 {
-            lines.push(format!("{} certificates created", self.certs_created));
-        }
-        if self.certs_cached > 0 {
-            lines.push(format!("{} certificates cached", self.certs_cached));
-        }
-        if self.certs_unused > 0 {
-            lines.push(format!("{} certificates unused", self.certs_unused));
+
+        if !self.eval_mode {
+            if self.modules_cached > 0 {
+                lines.push(format!(
+                    "{}/{} modules cached",
+                    self.modules_cached, self.modules_total
+                ));
+            }
+            if self.certs_created > 0 {
+                lines.push(format!("{} certificates created", self.certs_created));
+            }
+            if self.certs_cached > 0 {
+                lines.push(format!("{} certificates cached", self.certs_cached));
+            }
+            if self.certs_unused > 0 {
+                lines.push(format!("{} certificates unused", self.certs_unused));
+            }
         }
         lines.push(format!("{} searches performed", self.searches_total));
         if self.searches_total > 0 {
@@ -389,7 +468,48 @@ impl BuildMetrics {
             let search_time_ms = 1000.0 * self.search_time / self.searches_total as f64;
             lines.push(format!("{:.1} ms average search time", search_time_ms));
         }
-        lines.push(format!("{}/{} OK", self.goals_success, self.goals_total));
+        let failures = self.searches_total - self.searches_success;
+        if failures > 0 {
+            let mut buckets = Vec::new();
+            if self.searches_timeout > 0 {
+                buckets.push(format!("{} timeout", self.searches_timeout));
+            }
+            if self.searches_exhausted > 0 {
+                buckets.push(format!("{} exhausted", self.searches_exhausted));
+            }
+            if self.searches_activation_cap > 0 {
+                buckets.push(format!("{} activation cap", self.searches_activation_cap));
+            }
+            if self.searches_shallow_exhausted > 0 {
+                buckets.push(format!(
+                    "{} shallow exhausted",
+                    self.searches_shallow_exhausted
+                ));
+            }
+            if self.searches_shallow_explosion > 0 {
+                buckets.push(format!(
+                    "{} shallow explosion",
+                    self.searches_shallow_explosion
+                ));
+            }
+            if self.searches_inconsistent > 0 {
+                buckets.push(format!("{} inconsistent", self.searches_inconsistent));
+            }
+            if self.searches_interrupted > 0 {
+                buckets.push(format!("{} interrupted", self.searches_interrupted));
+            }
+            if !buckets.is_empty() {
+                lines.push(format!("search failures: {}", buckets.join(", ")));
+            }
+        }
+        if self.eval_mode {
+            lines.push(format!(
+                "{}/{} benchmark searches succeeded",
+                self.searches_success, self.searches_total
+            ));
+        } else {
+            lines.push(format!("{}/{} OK", self.goals_success, self.goals_total));
+        }
 
         lines
     }
@@ -404,10 +524,18 @@ impl BuildMetrics {
                 println!("Build failed.");
             }
             BuildStatus::Warning => {
-                println!("Verification failed.");
+                if self.eval_mode {
+                    println!("Evaluation completed with failed searches.");
+                } else {
+                    println!("Verification failed.");
+                }
             }
             BuildStatus::Good => {
-                println!("Verification succeeded.");
+                if self.eval_mode {
+                    println!("Evaluation succeeded.");
+                } else {
+                    println!("Verification succeeded.");
+                }
             }
         }
     }
@@ -522,6 +650,8 @@ impl<'a> Builder<'a> {
             clean_certs: false,
             strict: false,
             exit_on_warning: false,
+            force_search: false,
+            eval_mode: false,
             current_module: None,
             single_line_goal_count: 0,
             current_module_good: true,
@@ -565,6 +695,22 @@ impl<'a> Builder<'a> {
             self.metrics.cert_checks_success += 1;
         }
         self.metrics.cert_check_time += elapsed.as_secs_f64();
+    }
+
+    fn eval_goal_counts(&self, target: &ModuleDescriptor) -> Option<HashMap<String, usize>> {
+        if !self.eval_mode {
+            return None;
+        }
+
+        let mut counts = HashMap::new();
+        if let Some(store) = self.project.build_cache.get_certificates(target) {
+            for cert in &store.certs {
+                if cert.proof.as_ref().is_some_and(|proof| !proof.is_empty()) {
+                    *counts.entry(cert.goal.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        Some(counts)
     }
 
     fn default_event(&self) -> BuildEvent {
@@ -676,35 +822,54 @@ impl<'a> Builder<'a> {
                 }
                 self.log_verified(goal.first_line, goal.last_line);
             }
-            Outcome::ShallowExhausted => self.log_warning(
-                &goal,
-                &format!("could not be {} (shallow exhaustion)", self.operation_verb),
-            ),
-            Outcome::ShallowExplosion => self.log_warning(
-                &goal,
-                &format!("could not be {} (shallow explosion)", self.operation_verb),
-            ),
-            Outcome::Exhausted => self.log_warning(
-                &goal,
-                &format!("could not be {} (exhaustion)", self.operation_verb),
-            ),
-            Outcome::Inconsistent => self.log_warning(&goal, "- prover found an inconsistency"),
-            Outcome::Timeout => self.log_warning(
-                &goal,
-                &format!(
-                    "could not be {} (timeout after {})",
-                    self.operation_verb, elapsed_str
-                ),
-            ),
+            Outcome::ShallowExhausted => {
+                self.metrics.searches_shallow_exhausted += 1;
+                self.log_warning(
+                    &goal,
+                    &format!("could not be {} (shallow exhaustion)", self.operation_verb),
+                )
+            }
+            Outcome::ShallowExplosion => {
+                self.metrics.searches_shallow_explosion += 1;
+                self.log_warning(
+                    &goal,
+                    &format!("could not be {} (shallow explosion)", self.operation_verb),
+                )
+            }
+            Outcome::Exhausted => {
+                self.metrics.searches_exhausted += 1;
+                self.log_warning(
+                    &goal,
+                    &format!("could not be {} (exhaustion)", self.operation_verb),
+                )
+            }
+            Outcome::Inconsistent => {
+                self.metrics.searches_inconsistent += 1;
+                self.log_warning(&goal, "- prover found an inconsistency")
+            }
+            Outcome::Timeout => {
+                self.metrics.searches_timeout += 1;
+                self.log_warning(
+                    &goal,
+                    &format!(
+                        "could not be {} (timeout after {})",
+                        self.operation_verb, elapsed_str
+                    ),
+                )
+            }
             Outcome::Interrupted => {
+                self.metrics.searches_interrupted += 1;
                 // Should this really be an error?
                 let error = BuildError::goal(&goal, "was interrupted");
                 self.log_build_error(&error);
             }
-            Outcome::ActivationCap => self.log_warning(
-                &goal,
-                &format!("could not be {} (hit activation cap)", self.operation_verb),
-            ),
+            Outcome::ActivationCap => {
+                self.metrics.searches_activation_cap += 1;
+                self.log_warning(
+                    &goal,
+                    &format!("could not be {} (hit activation cap)", self.operation_verb),
+                )
+            }
         }
     }
 
@@ -962,7 +1127,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if !self.print_found_proof {
+        if !self.print_found_proof && !self.force_search {
             // Check for a cached cert
             let indexes = worklist.get_indexes(&goal.name);
             for i in indexes {
@@ -1227,6 +1392,7 @@ impl<'a> Builder<'a> {
         cursor: &mut NodeCursor,
         new_certs: &mut Vec<Certificate>,
         worklist: &mut CertificateWorklist,
+        eval_goal_counts: &mut Option<HashMap<String, usize>>,
     ) -> Result<(), BuildError> {
         if !cursor.requires_verification() {
             return Ok(());
@@ -1241,7 +1407,13 @@ impl<'a> Builder<'a> {
             // We need to recurse into children
             cursor.descend(0);
             loop {
-                self.verify_node(Rc::clone(&processor), cursor, new_certs, worklist)?;
+                self.verify_node(
+                    Rc::clone(&processor),
+                    cursor,
+                    new_certs,
+                    worklist,
+                    eval_goal_counts,
+                )?;
 
                 // Early exit if we have a warning and exit_on_warning is enabled
                 if self.exit_on_warning && !self.status.is_good() {
@@ -1292,6 +1464,18 @@ impl<'a> Builder<'a> {
                 return Ok(());
             }
         }
+        if let Some(counts) = eval_goal_counts.as_mut() {
+            let Some(count) = counts.get_mut(&goal.name) else {
+                self.metrics.eval_goals_skipped_uncertified += 1;
+                return Ok(());
+            };
+            if *count == 0 {
+                self.metrics.eval_goals_skipped_uncertified += 1;
+                return Ok(());
+            }
+            *count -= 1;
+            self.metrics.eval_corpus_matched += 1;
+        }
         self.verify_goal(
             processor,
             &goal,
@@ -1337,6 +1521,10 @@ impl<'a> Builder<'a> {
         } else {
             CertificateWorklist::new(CertificateStore { certs: vec![] })
         };
+        let mut eval_goal_counts = self.eval_goal_counts(target);
+        if let Some(counts) = &eval_goal_counts {
+            self.metrics.eval_corpus_total += counts.values().sum::<usize>() as i32;
+        }
         let mut new_certs = vec![];
 
         if !env.nodes.is_empty() {
@@ -1368,6 +1556,7 @@ impl<'a> Builder<'a> {
                         &mut cursor,
                         &mut new_certs,
                         &mut worklist,
+                        &mut eval_goal_counts,
                     )?;
 
                     // Early exit if we have a warning and exit_on_warning is enabled
@@ -1388,6 +1577,9 @@ impl<'a> Builder<'a> {
                 }
                 cursor.next();
             }
+        }
+        if let Some(counts) = &eval_goal_counts {
+            self.metrics.eval_corpus_unmatched += counts.values().sum::<usize>() as i32;
         }
 
         let module_good = if env.nodes.is_empty() {
@@ -1552,6 +1744,11 @@ impl<'a> Builder<'a> {
         // If clean_certs is enabled, disable check_hashes
         if self.clean_certs {
             self.check_hashes = false;
+        }
+        if self.eval_mode {
+            self.force_search = true;
+            self.check_hashes = false;
+            self.metrics.eval_mode = true;
         }
 
         // Initialize the build cache
@@ -1729,7 +1926,7 @@ impl<'a> Builder<'a> {
         module_id: ModuleId,
         target: &ModuleDescriptor,
     ) -> bool {
-        if !self.check_hashes {
+        if !self.check_hashes || self.force_search {
             return false;
         }
 

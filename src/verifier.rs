@@ -651,6 +651,61 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_only_searches_goals_with_nonempty_cached_proofs() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem benchmark {
+                    true
+                }
+
+                theorem skipped {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![
+                Certificate::new(
+                    "benchmark".to_string(),
+                    vec!["dummy proof step".to_string()],
+                ),
+                Certificate::new("skipped".to_string(), vec![]),
+            ],
+        }
+        .save(build.child("foo.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.eval_corpus_total, 1);
+        assert_eq!(output.metrics.eval_corpus_matched, 1);
+        assert_eq!(output.metrics.eval_corpus_unmatched, 0);
+        assert_eq!(output.metrics.eval_goals_skipped_uncertified, 1);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.searches_success, 1);
+    }
+
+    #[test]
     fn test_read_only_check_does_not_trim_cached_cert_steps() {
         let (acornlib, src, build) = setup();
 

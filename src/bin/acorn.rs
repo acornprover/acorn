@@ -472,6 +472,50 @@ enum Command {
         timing: bool,
     },
 
+    /// Evaluate prover search on goals with nonempty cached proofs
+    Eval {
+        /// Target module or file to evaluate (can be a filename or module name)
+        #[clap(
+            value_name = "TARGET",
+            help = "Module or filename to evaluate. If not provided, evaluates all files in the library."
+        )]
+        target: Option<String>,
+
+        /// Exit immediately on the first search failure
+        #[clap(long, help = "Exit immediately on the first search failure.")]
+        fail_fast: bool,
+
+        /// Timeout in seconds for proof search (default: 5)
+        #[clap(
+            long,
+            help = "Timeout in seconds for proof search.",
+            value_name = "SECONDS"
+        )]
+        timeout: Option<f32>,
+
+        /// Maximum number of non-factual activations before stopping the search
+        #[clap(
+            long,
+            help = "Maximum number of non-factual activations before stopping the search.",
+            value_name = "COUNT"
+        )]
+        activations: Option<u32>,
+
+        /// Restrict proof search to the shallow proof fragment
+        #[clap(
+            long,
+            help = "Restrict proof search to the shallow proof fragment used by shallow verifier tests."
+        )]
+        shallow: bool,
+
+        /// Print phase timing information
+        #[clap(
+            long = "timing",
+            help = "Print phase timing information for this evaluation run."
+        )]
+        timing: bool,
+    },
+
     /// Compatibility alias for `verify --force-search`
     #[clap(hide = true)]
     Reprove {
@@ -777,6 +821,7 @@ async fn main() {
             verifier.goal_index = goal;
             verifier.builder.check_mode = false;
             verifier.builder.check_hashes = !force_search && !ignore_hash;
+            verifier.builder.force_search = force_search;
             verifier.builder.shallow_search = shallow;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -894,6 +939,64 @@ async fn main() {
             }
         }
 
+        Some(Command::Eval {
+            target,
+            fail_fast,
+            timeout,
+            activations,
+            shallow,
+            timing,
+        }) => {
+            if let Err(e) = validate_activations_flag(activations) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+
+            let config = ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            };
+
+            let mut verifier = match Verifier::new(current_dir, config, target) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("{}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            verifier.builder.check_mode = false;
+            verifier.builder.check_hashes = false;
+            verifier.builder.force_search = true;
+            verifier.builder.eval_mode = true;
+            verifier.builder.shallow_search = shallow;
+            verifier.builder.operation_verb = "proved";
+            verifier.exit_on_warning = fail_fast;
+            if let Some(t) = timeout {
+                verifier.builder.timeout_secs = t;
+            }
+            if let Some(limit) = activations {
+                verifier.builder.activation_limit = limit as i32;
+            }
+
+            match verifier.run() {
+                Err(e) => {
+                    println!("{}", e);
+                    std::process::exit(1);
+                }
+                Ok(output) => {
+                    if timing {
+                        output.print_timing_breakdown("Eval", "proof search", false);
+                        output.print_verify_module_timing();
+                    }
+                    if output.status.is_error() {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
         Some(Command::Reprove {
             target,
             line_positional,
@@ -971,6 +1074,7 @@ async fn main() {
             verifier.goal_index = goal;
             verifier.builder.check_mode = false; // Run search like verify does
             verifier.builder.check_hashes = false; // Don't skip based on hashes
+            verifier.builder.force_search = true;
             verifier.builder.shallow_search = shallow;
             verifier.builder.operation_verb = "reproved";
             verifier.exit_on_warning = fail_fast;
@@ -1636,6 +1740,42 @@ mod tests {
 
         match args.command {
             Some(Command::Verify { timing, .. }) => assert!(timing),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_eval_command_parses() {
+        let args = Args::try_parse_from([
+            "acorn",
+            "eval",
+            "nat.nat_base",
+            "--fail-fast",
+            "--timeout",
+            "1",
+            "--activations",
+            "20",
+            "--shallow",
+            "--timing",
+        ])
+        .expect("eval command should parse");
+
+        match args.command {
+            Some(Command::Eval {
+                target,
+                fail_fast,
+                timeout,
+                activations,
+                shallow,
+                timing,
+            }) => {
+                assert_eq!(target.as_deref(), Some("nat.nat_base"));
+                assert!(fail_fast);
+                assert_eq!(timeout, Some(1.0));
+                assert_eq!(activations, Some(20));
+                assert!(shallow);
+                assert!(timing);
+            }
             _ => panic!("unexpected command"),
         }
     }
