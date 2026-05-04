@@ -24,29 +24,31 @@
 - `cargo run --profile release -- verify [target]` is the normal incremental way to check Acorn
   code. It uses the cache when possible and searches for missing proofs when necessary.
 
-- `cargo run --profile release -- reprove [target]` bypasses cached proofs and forces prover
-  search. Use it only for testing prover behavior, not for routine correctness checks or cache
-  rewrites.
+- `cargo run --profile release -- verify [target] --force-search` bypasses cached proofs and
+  forces prover search. Use it only for testing prover behavior, not for routine correctness checks
+  or cache rewrites.
 
 - If we run into an error during check mode, to debug it, it can help to
   run check just on the module that failed at a higher log level. For example:
   `RUST_LOG=acorn=trace cargo run --profile release -- check list.list_base`
 
 - To rewrite certificate caches without testing prover search, use `verify --ignore-hash`, not
-  `reprove`. For example:
+  `verify --force-search`. For example:
   `cargo run --profile release -- verify finite_group --ignore-hash`
 
-  `reprove` forces the prover to run and should be reserved for testing prover behavior.
+  `verify --force-search` forces the prover to run and should be reserved for testing prover
+  behavior.
 
-- A "full reprove" is slow, but sometimes finds obscure bugs that nothing else finds. We generally
-  only want to do this when the user asks for it:
+- A full force-search run is slow, but sometimes finds obscure bugs that nothing else finds. We
+  generally only want to do this when the user asks for it:
 
-  `cargo run --profile release --features validate -- reprove`
+  `cargo run --profile release --features validate -- verify --force-search`
 
-  When you do a full reprove, it's okay if some propositions can't be verified. What indicates a real problem is if the prover crashes.
+  When you do a full force-search run, it's okay if some propositions can't be verified. What
+  indicates a real problem is if the prover crashes.
 
-- If we find errors during a "check" or "reprove" operation, we should add a unit test that catches
-  this case.
+- If we find errors during a "check" or force-search operation, we should add a unit test that
+  catches this case.
 
 - If we change normalization, clausification, claim serialization, or claim parsing, we must
   continue to satisfy the normalization contract in `docs/normalization.md`. In particular, exact

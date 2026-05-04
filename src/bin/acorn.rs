@@ -224,6 +224,24 @@ fn validate_goal_requires_single_line(
     Ok(())
 }
 
+fn validate_force_search_flags(
+    force_search: bool,
+    read_only: bool,
+    save_results: bool,
+    line_selection: &Option<LineSelection>,
+) -> Result<(), String> {
+    if save_results && !force_search {
+        return Err("--save-results requires --force-search".to_string());
+    }
+    if read_only && save_results {
+        return Err("--read-only cannot be used with --save-results".to_string());
+    }
+    if force_search && save_results && line_selection.is_some() {
+        return Err("--save-results cannot be used with a line number selection".to_string());
+    }
+    Ok(())
+}
+
 fn filter_selected_goals(
     goal_infos: Vec<GoalInfo>,
     goal_index: Option<usize>,
@@ -297,7 +315,7 @@ enum Command {
         /// Target module or file to verify (can be a filename, module name, or module:line)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to verify. Supports TARGET:LINE syntax. If not provided, verifies all files in the library. If \"-\" is provided, it reads from stdin."
+            help = "Module or filename to verify. Supports TARGET:LINE syntax, and TARGET:START-END with --force-search. If not provided, verifies all files in the library. If \"-\" is provided, it reads from stdin."
         )]
         target: Option<String>,
 
@@ -320,6 +338,20 @@ enum Command {
         )]
         read_only: bool,
 
+        /// Prove goals by running proof search instead of using cached certificates
+        #[clap(
+            long = "force-search",
+            help = "Prove goals by running proof search instead of using cached certificates."
+        )]
+        force_search: bool,
+
+        /// Save force-search results to the cache
+        #[clap(
+            long = "save-results",
+            help = "Save force-search results to the cache. Requires --force-search."
+        )]
+        save_results: bool,
+
         /// Search for a proof at a specific line number (requires target)
         #[clap(
             long = "line",
@@ -327,6 +359,14 @@ enum Command {
             value_name = "LINE"
         )]
         line_flag: Option<u32>,
+
+        /// 1-based goal index when the selected line has multiple goals
+        #[clap(
+            long = "goal",
+            help = "1-based goal index when the selected line has multiple goals.",
+            value_name = "INDEX"
+        )]
+        goal: Option<usize>,
 
         /// Exit immediately on the first verification failure
         #[clap(long, help = "Exit immediately on the first verification failure.")]
@@ -432,12 +472,13 @@ enum Command {
         timing: bool,
     },
 
-    /// Re-prove goals without using the cache
+    /// Compatibility alias for `verify --force-search`
+    #[clap(hide = true)]
     Reprove {
-        /// Target module or file to reprove (can be a filename, module name, module:line, or module:start-end)
+        /// Target module or file to prove with forced search (can be a filename, module name, module:line, or module:start-end)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to reprove. Supports TARGET:LINE and TARGET:START-END syntax for single line or line range. If not provided, reproves all files in the library."
+            help = "Module or filename to prove with forced search. Supports TARGET:LINE and TARGET:START-END syntax for single line or line range. If not provided, proves all files in the library with forced search."
         )]
         target: Option<String>,
 
@@ -488,8 +529,11 @@ enum Command {
         )]
         shallow: bool,
 
-        /// Save reproved results to the cache
-        #[clap(long = "save-results", help = "Save reproved results to the cache.")]
+        /// Save force-search results to the cache
+        #[clap(
+            long = "save-results",
+            help = "Save force-search results to the cache."
+        )]
         save_results: bool,
 
         /// Print the activated proof steps and final contradiction details for a single selected goal
@@ -635,7 +679,10 @@ async fn main() {
             line_positional,
             ignore_hash,
             read_only,
+            force_search,
+            save_results,
             line_flag,
+            goal,
             fail_fast,
             timeout,
             activations,
@@ -665,6 +712,10 @@ async fn main() {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
+            if let Err(e) = validate_goal_flag(goal) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
 
             let line_sel = match resolve_print_proof_line_selection(
                 &current_dir,
@@ -678,12 +729,24 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            if let Err(e) = validate_goal_requires_single_line(goal, &line_sel) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) =
+                validate_force_search_flags(force_search, read_only, save_results, &line_sel)
+            {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
 
-            // Verify command doesn't support line ranges
             let line_selection = match line_sel {
                 Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
+                Some(LineSelection::Range(start, end)) if force_search => {
+                    Some(VerifierLineSelection::Range(start, end))
+                }
                 Some(LineSelection::Range(_, _)) => {
-                    println!("Error: verify command does not support line ranges");
+                    println!("Error: verify command only supports line ranges with --force-search");
                     std::process::exit(1);
                 }
                 None => None,
@@ -691,8 +754,12 @@ async fn main() {
 
             let config = ProjectConfig {
                 use_filesystem: true,
-                read_cache: true,
-                write_cache: !read_only,
+                read_cache: !force_search,
+                write_cache: if force_search {
+                    save_results
+                } else {
+                    !read_only
+                },
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -707,8 +774,9 @@ async fn main() {
             verifier.builder.print_found_proof = print_proof;
             verifier.builder.verbose = verbose;
             verifier.line_selection = line_selection;
+            verifier.goal_index = goal;
             verifier.builder.check_mode = false;
-            verifier.builder.check_hashes = !ignore_hash;
+            verifier.builder.check_hashes = !force_search && !ignore_hash;
             verifier.builder.shallow_search = shallow;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -864,7 +932,8 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            // Convert to verifier's LineSelection type - reprove supports both single lines and ranges
+            // Convert to verifier's LineSelection type. Forced search supports both single lines
+            // and ranges.
             let line_selection = match line_sel {
                 Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
                 Some(LineSelection::Range(start, end)) => {
@@ -880,7 +949,8 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            // Reprove doesn't read from cache; optionally writes with --save-results
+            // The compatibility command doesn't read from cache; optionally writes with
+            // --save-results.
             let config = ProjectConfig {
                 use_filesystem: true,
                 read_cache: false,
@@ -1377,8 +1447,8 @@ mod tests {
 
     use super::{
         filter_selected_goals, resolve_print_proof_line_selection, validate_activations_flag,
-        validate_goal_flag, validate_goal_requires_single_line, validate_print_proof_flag,
-        validate_verbose_flag, Args, Command, LineSelection,
+        validate_force_search_flags, validate_goal_flag, validate_goal_requires_single_line,
+        validate_print_proof_flag, validate_verbose_flag, Args, Command, LineSelection,
     };
 
     #[test]
@@ -1459,6 +1529,18 @@ mod tests {
     }
 
     #[test]
+    fn test_force_search_flag_validation() {
+        assert!(validate_force_search_flags(false, false, true, &None).is_err());
+        assert!(validate_force_search_flags(true, true, true, &None).is_err());
+        assert!(
+            validate_force_search_flags(true, false, true, &Some(LineSelection::Single(10)))
+                .is_err()
+        );
+        assert!(validate_force_search_flags(true, false, true, &None).is_ok());
+        assert!(validate_force_search_flags(true, true, false, &None).is_ok());
+    }
+
+    #[test]
     fn test_filter_selected_goals_returns_requested_goal() {
         let goals = vec![
             GoalInfo {
@@ -1516,6 +1598,33 @@ mod tests {
 
         match args.command {
             Some(Command::Verify { shallow, .. }) => assert!(shallow),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_verify_accepts_force_search_flags() {
+        let args = Args::try_parse_from([
+            "acorn",
+            "verify",
+            "--force-search",
+            "--save-results",
+            "--goal",
+            "2",
+        ])
+        .expect("force-search flags should parse");
+
+        match args.command {
+            Some(Command::Verify {
+                force_search,
+                save_results,
+                goal,
+                ..
+            }) => {
+                assert!(force_search);
+                assert!(save_results);
+                assert_eq!(goal, Some(2));
+            }
             _ => panic!("unexpected command"),
         }
     }

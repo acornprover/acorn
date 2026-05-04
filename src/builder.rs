@@ -77,7 +77,7 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
 
 fn format_goal_panic_message(panic_message: &str, module_name: &str, external_line: u32) -> String {
     format!(
-        "panic during certificate generation at {module_name}:{external_line}: {panic_message}\nRepro command: acorn reprove {module_name} --line {external_line}",
+        "panic during certificate generation at {module_name}:{external_line}: {panic_message}\nRepro command: acorn verify {module_name} --line {external_line} --force-search",
     )
 }
 
@@ -1136,7 +1136,7 @@ impl<'a> Builder<'a> {
                                     let compact_error = compact_check_cert_error(&e.to_string());
                                     panic!(
                                         "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                         Repro command: acorn reprove {} --line {}",
+                                         Repro command: acorn verify {} --line {} --force-search",
                                         goal.name,
                                         module_name,
                                         external_line,
@@ -1168,7 +1168,7 @@ impl<'a> Builder<'a> {
                                     let compact_error = compact_check_cert_error(&e.to_string());
                                     panic!(
                                         "newly generated cert should be checkable for goal '{}' at {}:{}: {}\n\
-                                         Repro command: acorn reprove {} --line {}",
+                                         Repro command: acorn verify {} --line {} --force-search",
                                         goal.name,
                                         module_name,
                                         external_line,
@@ -1200,7 +1200,7 @@ impl<'a> Builder<'a> {
                             let external_line = goal.first_line + 1;
                             panic!(
                                 "full prover should create a certificate for goal '{}' at {}:{}: {}\n\
-                                 Repro command: acorn reprove {} --line {}",
+                                 Repro command: acorn verify {} --line {} --force-search",
                                 goal.name, module_name, external_line, e, module_name, external_line
                             );
                         }
@@ -1673,9 +1673,9 @@ impl<'a> Builder<'a> {
                 continue;
             }
 
-            // Log module name when doing whole-project reprove (not check, not reading cache, no goal filter)
-            if self.goal_filter.is_none() && !self.check_hashes && !self.check_mode {
-                self.log_global(format!("reproving: {}", target));
+            // Log module name when forcing whole-project proof search.
+            if self.goal_filter.is_none() && !self.project.config.read_cache && !self.check_mode {
+                self.log_global(format!("force-searching: {}", target));
             }
 
             let module_metrics_before = self.metrics.clone();
@@ -1838,6 +1838,6 @@ mod tests {
         let message = format_goal_panic_message("internal panic", "finite_group", 114);
         assert!(message.contains("internal panic"));
         assert!(message.contains("panic during certificate generation at finite_group:114"));
-        assert!(message.contains("acorn reprove finite_group --line 114"));
+        assert!(message.contains("acorn verify finite_group --line 114 --force-search"));
     }
 }

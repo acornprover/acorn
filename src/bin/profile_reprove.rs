@@ -1,5 +1,5 @@
-// A representative run of the reprove command, to use for profiling.
-// This reproving the real.double_sum module.
+// A representative force-search run, to use for profiling.
+// This reproves the real.double_sum module.
 //
 // To profile using samply:
 //
@@ -20,7 +20,7 @@ fn main() {
     for _ in 0..1 {
         let config = ProjectConfig {
             use_filesystem: true,
-            read_cache: false, // Force us to actually reprove
+            read_cache: false, // Force fresh proof search
             write_cache: false,
         };
 
