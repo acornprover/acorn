@@ -288,9 +288,10 @@ impl Clause {
     }
 
     fn normalize_literals_for_clause(literal: Literal) -> Vec<Literal> {
-        let right = normalize_clause_term(&literal.right);
+        let right = normalize_clause_term(literal.right.as_ref());
         if right.is_true() {
-            let (left, positive) = normalize_signed_clause_term(&literal.left, literal.positive);
+            let (left, positive) =
+                normalize_signed_clause_term(literal.left.as_ref(), literal.positive);
             if let Some(args) = Self::split_symbol_application(&left, Symbol::Eq, 3) {
                 return vec![Literal::new(positive, args[1].clone(), args[2].clone())];
             }
@@ -299,7 +300,7 @@ impl Clause {
 
         vec![Literal::new(
             literal.positive,
-            normalize_clause_term(&literal.left),
+            normalize_clause_term(literal.left.as_ref()),
             right,
         )]
     }

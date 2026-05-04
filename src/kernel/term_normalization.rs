@@ -19,12 +19,25 @@ use crate::kernel::literal::Literal;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 
-fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
-    let (head, args) = term.as_ref().split_application_multi()?;
+fn split_symbol_application<'a>(
+    term: TermRef<'a>,
+    symbol: Symbol,
+    arity: usize,
+) -> Option<Vec<TermRef<'a>>> {
+    if !term.is_application() {
+        return None;
+    }
+    let mut args = Vec::with_capacity(arity);
+    let mut current = term;
+    while let Some((func, arg)) = current.split_application() {
+        args.push(arg);
+        current = func;
+    }
     if args.len() != arity {
         return None;
     }
-    match head.get_head_atom() {
+    args.reverse();
+    match current.get_head_atom() {
         Atom::Symbol(s) if *s == symbol => Some(args),
         _ => None,
     }
@@ -196,24 +209,23 @@ fn eta_reduce_single_lambda(term: &Term) -> Option<Term> {
 }
 
 fn cancel_double_negation(term: &Term) -> Option<Term> {
-    let args = split_symbol_application(term, Symbol::Not, 1)?;
-    let inner_args = split_symbol_application(&args[0], Symbol::Not, 1)?;
-    Some(inner_args[0].clone())
+    let args = split_symbol_application(term.as_ref(), Symbol::Not, 1)?;
+    let inner_args = split_symbol_application(args[0], Symbol::Not, 1)?;
+    Some(inner_args[0].to_owned())
 }
 
 fn normalize_fully_applied_eq(term: &Term) -> Option<Term> {
-    let args = split_symbol_application(term, Symbol::Eq, 3)?;
-    let eq_type = args[0].clone();
-    let left = args[1].clone();
-    let right = args[2].clone();
+    let args = split_symbol_application(term.as_ref(), Symbol::Eq, 3)?;
+    let left = args[1];
+    let right = args[2];
     let already_ordered = match (left.atomic_variable(), right.atomic_variable()) {
         (Some(left_var), Some(right_var)) => left_var <= right_var,
-        _ => left <= right,
+        _ => left.to_owned() <= right.to_owned(),
     };
     if already_ordered {
         return None;
     }
-    Some(Term::eq(eq_type, right, left))
+    Some(Term::eq(args[0].to_owned(), right.to_owned(), left.to_owned()))
 }
 
 /// Recursively beta-reduces head lambda applications within an arbitrary term.
@@ -286,14 +298,14 @@ pub fn normalize_term(term: &Term) -> Term {
 /// This is the shared polarity-aware term rewriting used by clause normalization.
 /// It pushes `not` through the built-in boolean connectives and quantifiers, while
 /// preserving the historical clause-normalization behavior.
-pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -> Term {
+pub(crate) fn normalize_clause_term_with_polarity(term: TermRef<'_>, positive: bool) -> Term {
     if let Some(args) = split_symbol_application(term, Symbol::Not, 1) {
-        return normalize_clause_term_with_polarity(&args[0], !positive);
+        return normalize_clause_term_with_polarity(args[0], !positive);
     }
 
     if let Some(args) = split_symbol_application(term, Symbol::And, 2) {
-        let left = normalize_clause_term_with_polarity(&args[0], positive);
-        let right = normalize_clause_term_with_polarity(&args[1], positive);
+        let left = normalize_clause_term_with_polarity(args[0], positive);
+        let right = normalize_clause_term_with_polarity(args[1], positive);
         return if positive {
             Term::and(left, right)
         } else {
@@ -302,8 +314,8 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
     }
 
     if let Some(args) = split_symbol_application(term, Symbol::Or, 2) {
-        let left = normalize_clause_term_with_polarity(&args[0], positive);
-        let right = normalize_clause_term_with_polarity(&args[1], positive);
+        let left = normalize_clause_term_with_polarity(args[0], positive);
+        let right = normalize_clause_term_with_polarity(args[1], positive);
         return if positive {
             Term::or(left, right)
         } else {
@@ -311,10 +323,10 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
         };
     }
 
-    match term.as_ref().decompose() {
+    match term.decompose() {
         Decomposition::ForAll(binder_type, body) => {
-            let binder_type = normalize_clause_term(&binder_type.to_owned());
-            let body = normalize_clause_term_with_polarity(&body.to_owned(), positive);
+            let binder_type = normalize_clause_term(binder_type);
+            let body = normalize_clause_term_with_polarity(body, positive);
             if positive {
                 Term::forall(binder_type, body)
             } else {
@@ -322,8 +334,8 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
             }
         }
         Decomposition::Exists(binder_type, body) => {
-            let binder_type = normalize_clause_term(&binder_type.to_owned());
-            let body = normalize_clause_term_with_polarity(&body.to_owned(), positive);
+            let binder_type = normalize_clause_term(binder_type);
+            let body = normalize_clause_term_with_polarity(body, positive);
             if positive {
                 Term::exists(binder_type, body)
             } else {
@@ -332,14 +344,14 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
         }
         Decomposition::Atom(_) => {
             if positive {
-                term.clone()
+                term.to_owned()
             } else {
-                Term::not(term.clone())
+                Term::not(term.to_owned())
             }
         }
         Decomposition::Application(function, argument) => {
-            let function = normalize_clause_term(&function.to_owned());
-            let argument = normalize_clause_term(&argument.to_owned());
+            let function = normalize_clause_term(function);
+            let argument = normalize_clause_term(argument);
             let rebuilt = function.apply(&[argument]);
             let rebuilt = normalize_fully_applied_eq(&rebuilt).unwrap_or(rebuilt);
             if positive {
@@ -349,8 +361,8 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
             }
         }
         Decomposition::Pi(input, output) => {
-            let input = normalize_clause_term(&input.to_owned());
-            let output = normalize_clause_term(&output.to_owned());
+            let input = normalize_clause_term(input);
+            let output = normalize_clause_term(output);
             let rebuilt = Term::pi(input, output);
             if positive {
                 rebuilt
@@ -359,8 +371,8 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
             }
         }
         Decomposition::Lambda(input, body) => {
-            let input = normalize_clause_term(&input.to_owned());
-            let body = normalize_clause_term(&body.to_owned());
+            let input = normalize_clause_term(input);
+            let body = normalize_clause_term(body);
             let rebuilt = Term::lambda(input, body);
             if positive {
                 rebuilt
@@ -372,20 +384,20 @@ pub(crate) fn normalize_clause_term_with_polarity(term: &Term, positive: bool) -
 }
 
 /// Normalize a term for clause normalization under positive polarity.
-pub(crate) fn normalize_clause_term(term: &Term) -> Term {
+pub(crate) fn normalize_clause_term(term: TermRef<'_>) -> Term {
     normalize_clause_term_with_polarity(term, true)
 }
 
 /// Normalize a signed boolean term for clause normalization, possibly changing both the term
 /// and its sign.
-pub(crate) fn normalize_signed_clause_term(term: &Term, positive: bool) -> (Term, bool) {
+pub(crate) fn normalize_signed_clause_term(term: TermRef<'_>, positive: bool) -> (Term, bool) {
     if let Some(args) = split_symbol_application(term, Symbol::Not, 1) {
-        return normalize_signed_clause_term(&args[0], !positive);
+        return normalize_signed_clause_term(args[0], !positive);
     }
 
     if let Some(args) = split_symbol_application(term, Symbol::Or, 2) {
-        let left = normalize_clause_term_with_polarity(&args[0], false);
-        let right = normalize_clause_term_with_polarity(&args[1], false);
+        let left = normalize_clause_term_with_polarity(args[0], false);
+        let right = normalize_clause_term_with_polarity(args[1], false);
         return (Term::and(left, right), !positive);
     }
 
@@ -627,21 +639,24 @@ mod tests {
     fn test_normalize_term_with_polarity_pushes_negation_through_or() {
         let term = Term::or(Term::parse("c0"), Term::parse("c1"));
         let expected = Term::and(Term::not(Term::parse("c0")), Term::not(Term::parse("c1")));
-        assert_eq!(normalize_clause_term_with_polarity(&term, false), expected);
+        assert_eq!(normalize_clause_term_with_polarity(term.as_ref(), false), expected);
     }
 
     #[test]
     fn test_normalize_signed_term_rewrites_signed_or() {
         let term = Term::or(Term::parse("c0"), Term::parse("c1"));
         let expected = Term::and(Term::not(Term::parse("c0")), Term::not(Term::parse("c1")));
-        assert_eq!(normalize_signed_clause_term(&term, true), (expected, false));
+        assert_eq!(
+            normalize_signed_clause_term(term.as_ref(), true),
+            (expected, false)
+        );
     }
 
     #[test]
     fn test_normalize_term_with_polarity_orders_fully_applied_eq() {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
-        assert_eq!(normalize_clause_term_with_polarity(&term, true), expected);
+        assert_eq!(normalize_clause_term_with_polarity(term.as_ref(), true), expected);
     }
 
     #[test]

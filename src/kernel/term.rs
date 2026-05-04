@@ -2457,17 +2457,32 @@ impl Term {
         if args.is_empty() {
             return self.clone();
         }
-        let mut result = self.clone();
-        for arg in args {
-            let right_offset = (1 + result.components.len()) as u16;
-            let mut components =
-                Vec::with_capacity(1 + result.components.len() + arg.components.len());
+        let n = args.len();
+        let self_len = self.components.len();
+        let total_args_len: usize = args.iter().map(|a| a.components.len()).sum();
+        let total_len = n + self_len + total_args_len;
+
+        let mut components = Vec::with_capacity(total_len);
+
+        // Layout: [App_outer, ..., App_inner, self_components, arg[0], ..., arg[n-1]]
+        // App at output index i (0 = outermost) has right_offset relative to its own subslice
+        // equal to (n - i) + self_len + sum(arg_lens[0..n-1-i]).
+        // We push outermost first and walk a running offset inward by subtracting
+        // (1 + arg_lens[n-2-i]) at each step.
+        let mut right_offset =
+            (n + self_len + total_args_len - args[n - 1].components.len()) as u16;
+        for i in 0..n {
             components.push(TermComponent::Application { right_offset });
-            components.extend(result.components.iter().copied());
-            components.extend(arg.components.iter().copied());
-            result = Term::from_components(components);
+            if i + 1 < n {
+                right_offset -= 1 + args[n - 2 - i].components.len() as u16;
+            }
         }
-        result
+        components.extend_from_slice(&self.components);
+        for arg in args {
+            components.extend_from_slice(&arg.components);
+        }
+
+        Term::from_components(components)
     }
 
     /// Build a term from a spine (function + arguments).
