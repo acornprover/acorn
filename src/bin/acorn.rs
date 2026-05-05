@@ -225,7 +225,7 @@ fn validate_goal_requires_single_line(
 }
 
 fn parse_eval_skip_modes(raw: Option<&str>) -> Result<Vec<usize>, String> {
-    let raw = raw.unwrap_or("0").trim();
+    let raw = raw.unwrap_or("0,1").trim();
     if raw.is_empty() {
         return Err("--skip must not be empty".to_string());
     }
@@ -543,7 +543,7 @@ enum Command {
         /// Which previous plain proposition counts to omit when evaluating each benchmark goal
         #[clap(
             long,
-            default_value = "0",
+            default_value = "0,1",
             help = "Evaluate with these skip modes. Use 0, 01, 012, or comma-separated values like 0,1,2.",
             value_name = "SKIPS"
         )]
@@ -1837,7 +1837,7 @@ mod tests {
 
     #[test]
     fn test_parse_eval_skip_modes() {
-        assert_eq!(parse_eval_skip_modes(None).unwrap(), vec![0]);
+        assert_eq!(parse_eval_skip_modes(None).unwrap(), vec![0, 1]);
         assert_eq!(parse_eval_skip_modes(Some("01")).unwrap(), vec![0, 1]);
         assert_eq!(parse_eval_skip_modes(Some("210")).unwrap(), vec![0, 1, 2]);
         assert_eq!(parse_eval_skip_modes(Some("0,1,2")).unwrap(), vec![0, 1, 2]);

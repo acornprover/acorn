@@ -835,6 +835,7 @@ mod tests {
         )
         .expect("eval verifier should construct");
         verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
         verifier.builder.force_search = true;
         verifier.builder.check_hashes = false;
         verifier.builder.operation_verb = "proved";

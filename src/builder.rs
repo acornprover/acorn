@@ -894,7 +894,7 @@ impl<'a> Builder<'a> {
             exit_on_warning: false,
             force_search: false,
             eval_mode: false,
-            eval_skip_modes: vec![0],
+            eval_skip_modes: vec![0, 1],
             current_module: None,
             single_line_goal_count: 0,
             current_module_good: true,
@@ -2178,7 +2178,7 @@ impl<'a> Builder<'a> {
             self.check_hashes = false;
             self.metrics.eval_mode = true;
             if self.eval_skip_modes.is_empty() {
-                self.eval_skip_modes.push(0);
+                self.eval_skip_modes.extend([0, 1]);
             }
             self.eval_skip_modes.sort_unstable();
             self.eval_skip_modes.dedup();
