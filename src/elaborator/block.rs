@@ -112,6 +112,20 @@ fn body_contains_explicit_false(body: &Body) -> bool {
     body.statements.iter().any(is_explicit_false_claim)
 }
 
+/// Flattens a nested top-level `and` into its conjuncts. Returns a one-element vector for
+/// non-conjunctions. Both the left and right arms are recursed into so that
+/// `(A and B) and (C and D)` becomes `[A, B, C, D]`.
+fn split_conjuncts(value: AcornValue) -> Vec<AcornValue> {
+    match value {
+        AcornValue::Binary(BinaryOp::And, left, right) => {
+            let mut out = split_conjuncts(*left);
+            out.extend(split_conjuncts(*right));
+            out
+        }
+        other => vec![other],
+    }
+}
+
 impl Block {
     fn apply_with_dependent_args(
         value: AcornValue,
@@ -358,16 +372,47 @@ impl Block {
 
         // If there is a goal proposition, add it as a child node at the end of the environment.
         // This allows the goal to use all facts from the block's internal nodes.
+        //
+        // If the goal is a top-level conjunction, split it into one Claim per conjunct so each
+        // direction gets its own search budget. The proven conjuncts together imply the
+        // conjunction, which is what the enclosing block exposes as its external fact.
         if let Some(prop) = goal_prop {
             let goal_range = prop.source.range;
-            let prop = Arc::new(prop);
-            let goal = Goal::interior(&subenv, prop.clone(), theorem_alias)
-                .map_err(|e| error::Error::new(first_token, last_token, &e))?;
-            let fact = Fact::Proposition(prop);
-            let goal_node = Node::Claim(goal, fact, None, None);
-            let goal_index = subenv.add_node(goal_node);
-            // Map the goal node to the appropriate source lines
-            subenv.add_node_lines(goal_index, &goal_range);
+            let conjuncts = split_conjuncts(prop.value.clone());
+            if conjuncts.len() > 1 {
+                let last_idx = conjuncts.len() - 1;
+                for (i, conjunct) in conjuncts.into_iter().enumerate() {
+                    let conjunct_prop =
+                        Arc::new(Proposition::new(conjunct, vec![], prop.source.clone()));
+                    // Only the last conjunct carries the theorem alias. Duplicating it would
+                    // add no new refutation path: each sub-goal already has the strictly
+                    // stronger per-conjunct counterfactual (e.g. `not A`), whereas the alias
+                    // path only yields `not A or not B` via the function definition. Putting
+                    // the alias on every sibling would also replicate the higher-order
+                    // paramodulation cost (the curried `theorem_name(prefix)` unifying with
+                    // generic library lemmas over `T -> Bool`) in each sub-search. Keep it on
+                    // one conjunct as a conservative carry-over for inductive-hypothesis use.
+                    let alias = if i == last_idx {
+                        theorem_alias.clone()
+                    } else {
+                        None
+                    };
+                    let goal = Goal::interior(&subenv, conjunct_prop.clone(), alias)
+                        .map_err(|e| error::Error::new(first_token, last_token, &e))?;
+                    let fact = Fact::Proposition(conjunct_prop);
+                    let goal_node = Node::Claim(goal, fact, None, None);
+                    let goal_index = subenv.add_node(goal_node);
+                    subenv.add_node_lines(goal_index, &goal_range);
+                }
+            } else {
+                let prop = Arc::new(prop);
+                let goal = Goal::interior(&subenv, prop.clone(), theorem_alias)
+                    .map_err(|e| error::Error::new(first_token, last_token, &e))?;
+                let fact = Fact::Proposition(prop);
+                let goal_node = Node::Claim(goal, fact, None, None);
+                let goal_index = subenv.add_node(goal_node);
+                subenv.add_node_lines(goal_index, &goal_range);
+            }
         }
 
         // Handle multiple type requirements by adding each as a separate goal node
