@@ -295,7 +295,7 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
     ) -> Result<Self, String> {
-        Self::new_inner(start_path, config, target, None, false, true)
+        Self::new_inner(start_path, config, target, None, false, false)
     }
 
     pub fn new_for_check(
@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_surface_checks_explicit_pending_target() {
+    fn test_verify_runs_search_for_explicit_pending_target() {
         let (acornlib, _src, _build) = setup();
 
         let pending = acornlib.child("pending");
@@ -711,11 +711,12 @@ mod tests {
         .unwrap();
         targeted.builder.check_hashes = false;
         let targeted_output = targeted.run().unwrap();
-        assert_eq!(targeted_output.status, BuildStatus::Good);
-        assert_eq!(targeted_output.metrics.goals_total, 0);
-        assert_eq!(targeted_output.metrics.pending_modules_total, 1);
-        assert_eq!(targeted_output.metrics.pending_goals_total, 1);
-        assert_eq!(targeted_output.metrics.searches_total, 0);
+        assert_eq!(targeted_output.status, BuildStatus::Warning);
+        assert_eq!(targeted_output.metrics.goals_total, 1);
+        assert_eq!(targeted_output.metrics.goals_success, 0);
+        assert_eq!(targeted_output.metrics.pending_modules_total, 0);
+        assert_eq!(targeted_output.metrics.pending_goals_total, 0);
+        assert_eq!(targeted_output.metrics.searches_total, 1);
     }
 
     #[test]
