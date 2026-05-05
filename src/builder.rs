@@ -676,12 +676,6 @@ impl BuildMetrics {
                     self.modules_cached, self.modules_total
                 ));
             }
-            if self.pending_modules_total > 0 {
-                lines.push(format!(
-                    "{} pending goals elaborated in {} modules",
-                    self.pending_goals_total, self.pending_modules_total
-                ));
-            }
             if self.certs_created > 0 {
                 lines.push(format!("{} certificates created", self.certs_created));
             }
@@ -751,6 +745,12 @@ impl BuildMetrics {
             ));
         } else {
             lines.push(format!("{}/{} OK", self.goals_success, self.goals_total));
+            if self.pending_modules_total > 0 {
+                lines.push(format!(
+                    "{} pending goals elaborated in {} modules",
+                    self.pending_goals_total, self.pending_modules_total
+                ));
+            }
         }
 
         lines
@@ -2440,8 +2440,32 @@ impl<'a> Builder<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_check_cert_error, format_goal_panic_message, panic_payload_to_string, EvalSkipTail,
+        compact_check_cert_error, format_goal_panic_message, panic_payload_to_string, BuildMetrics,
+        EvalSkipTail,
     };
+
+    #[test]
+    fn test_info_lines_put_pending_elaboration_after_ok() {
+        let metrics = BuildMetrics {
+            goals_total: 2,
+            goals_success: 2,
+            pending_modules_total: 1,
+            pending_goals_total: 3,
+            ..BuildMetrics::default()
+        };
+
+        let lines = metrics.info_lines();
+        let ok_index = lines
+            .iter()
+            .position(|line| line == "2/2 OK")
+            .expect("OK summary should be present");
+        let pending_index = lines
+            .iter()
+            .position(|line| line == "3 pending goals elaborated in 1 modules")
+            .expect("pending elaboration summary should be present");
+
+        assert!(pending_index > ok_index);
+    }
 
     #[test]
     fn test_eval_skip_tail_tracks_consecutive_plain_checkpoints() {
