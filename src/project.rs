@@ -947,6 +947,19 @@ impl Project {
         }
     }
 
+    #[doc(hidden)]
+    pub fn profile_visit_envs_mut<F>(&mut self, mut visitor: F)
+    where
+        F: FnMut(ModuleId, &mut Environment),
+    {
+        for (index, module) in self.modules.iter_mut().enumerate() {
+            let LoadState::Ok(env) = &mut module.state else {
+                continue;
+            };
+            visitor(ModuleId(index as u16), env);
+        }
+    }
+
     /// You have to use the canonical descriptor, here. You can't use the path for a module
     /// that can also be referenced by name.
     pub fn get_env(&self, descriptor: &ModuleDescriptor) -> Option<&Environment> {

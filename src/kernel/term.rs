@@ -2022,6 +2022,16 @@ impl Term {
         TermRef::new(&self.components)
     }
 
+    #[doc(hidden)]
+    pub fn profile_component_len(&self) -> usize {
+        self.components.len()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_component_capacity_bytes(&self) -> usize {
+        self.components.capacity() * std::mem::size_of::<TermComponent>()
+    }
+
     /// Get the head atom of this term.
     pub fn get_head_atom(&self) -> &Atom {
         // Find the head atom by skipping through nested Application markers

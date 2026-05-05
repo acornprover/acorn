@@ -151,6 +151,24 @@ pub struct SymbolTable {
     inhabited_typeclass_witnesses: ImHashMap<TypeclassId, Symbol>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SymbolTableProfileCounts {
+    pub global_constant_modules: usize,
+    pub global_constants: usize,
+    pub global_constant_types: usize,
+    pub scoped_constants: usize,
+    pub scoped_constant_types: usize,
+    pub name_to_symbol: usize,
+    pub instance_to_symbol: usize,
+    pub polymorphic_info: usize,
+    pub match_eliminator_info: usize,
+    pub type_to_element: usize,
+    pub inhabited_type_constructors: usize,
+    pub inhabited_type_constructor_witnesses: usize,
+    pub inhabited_typeclasses: usize,
+    pub inhabited_typeclass_witnesses: usize,
+}
+
 impl SymbolTable {
     pub fn new() -> SymbolTable {
         SymbolTable {
@@ -167,6 +185,34 @@ impl SymbolTable {
             inhabited_type_constructor_witnesses: ImHashMap::new(),
             inhabited_typeclasses: ImHashSet::new(),
             inhabited_typeclass_witnesses: ImHashMap::new(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn profile_counts(&self) -> SymbolTableProfileCounts {
+        SymbolTableProfileCounts {
+            global_constant_modules: self.global_constants.len(),
+            global_constants: self
+                .global_constants
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            global_constant_types: self
+                .global_constant_types
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            scoped_constants: self.scoped_constants.len(),
+            scoped_constant_types: self.scoped_constant_types.len(),
+            name_to_symbol: self.name_to_symbol.len(),
+            instance_to_symbol: self.instance_to_symbol.len(),
+            polymorphic_info: self.polymorphic_info.len(),
+            match_eliminator_info: self.match_eliminator_info.len(),
+            type_to_element: self.type_to_element.len(),
+            inhabited_type_constructors: self.inhabited_type_constructors.len(),
+            inhabited_type_constructor_witnesses: self.inhabited_type_constructor_witnesses.len(),
+            inhabited_typeclasses: self.inhabited_typeclasses.len(),
+            inhabited_typeclass_witnesses: self.inhabited_typeclass_witnesses.len(),
         }
     }
 

@@ -98,13 +98,6 @@ pub struct Environment {
     /// The line number of the last statement we processed (for detecting blank lines).
     pub last_statement_line: Option<u32>,
 
-    /// Stores the kernel context state after processing imports.
-    /// This can be cloned to create a Processor without re-normalizing imports.
-    pub import_kernel_context: Option<KernelContext>,
-
-    /// Stores lowered facts from imports.
-    pub lowered_imports: Vec<LoweredFact>,
-
     /// Stores the kernel context state after processing all facts.
     pub kernel_context: Option<KernelContext>,
 
@@ -133,8 +126,6 @@ impl Environment {
             module_doc_comments: Vec::new(),
             at_module_beginning: true,
             last_statement_line: None,
-            import_kernel_context: None,
-            lowered_imports: Vec::new(),
             kernel_context: None,
             lowered_module_facts: Vec::new(),
             citation_statements: Vec::new(),
@@ -159,8 +150,6 @@ impl Environment {
             module_doc_comments: Vec::new(), // Child environments don't inherit module doc comments
             at_module_beginning: false,      // Child environments are never at module beginning
             last_statement_line: None,
-            import_kernel_context: None,
-            lowered_imports: Vec::new(),
             kernel_context: None,
             lowered_module_facts: Vec::new(),
             citation_statements: Vec::new(),
@@ -771,7 +760,6 @@ impl Environment {
         project: &Project,
         imported_modules: &mut HashSet<ModuleId>,
         kernel_context: &mut KernelContext,
-        mut lowered_imports: Option<&mut Vec<LoweredFact>>,
     ) {
         let direct_dependencies = bindings.direct_dependencies();
         if direct_dependencies
@@ -798,11 +786,6 @@ impl Environment {
                     .as_ref()
                     .unwrap_or_else(|| panic!("Dependency {} not lowered", module_id.0));
                 kernel_context.merge_imports(dep_kernel_context);
-                if let Some(lowered_imports) = lowered_imports.as_mut() {
-                    for normalized in &dep_env.lowered_module_facts {
-                        lowered_imports.push(normalized.clone());
-                    }
-                }
             }
         }
     }
@@ -838,14 +821,8 @@ impl Environment {
             &mut deps,
         );
 
-        // Add imported facts from dependencies.
-        // If a dependency has lowered state, merge it and reuse the lowered facts.
-        // Otherwise, fall back to lowering (shouldn't happen in practice).
-        //
-        // Important: we only copy lowered_module_facts (the dependency's own facts),
-        // not lowered_imports. The transitive imports are handled by processing
-        // dependencies in topological order - each dependency's own facts are added
-        // when we process that dependency directly.
+        // Add imported symbols/types from dependencies. The dependency facts themselves are not
+        // copied into this environment; Processor loads them from dependency module summaries.
         for dep_id in deps {
             if imported_modules.insert(dep_id) {
                 let dep_env = project
@@ -856,28 +833,17 @@ impl Environment {
                     .as_ref()
                     .unwrap_or_else(|| panic!("Dependency {} not lowered", dep_id.0));
                 kernel_context.merge_imports(dep_kernel_context);
-                for normalized in &dep_env.lowered_module_facts {
-                    self.lowered_imports.push(normalized.clone());
-                }
             }
         }
-
-        // Store the kernel context state after processing imports.
-        // This can be cloned by Processor::with_imports to avoid re-lowering.
-        self.import_kernel_context = Some(kernel_context.clone());
 
         // Now lower goals. For each goal, we compute the kernel_context state that matches
         // what verification sees. This iterates through nodes in order, adding facts to
         // the kernel_context as we go (mirroring verify_node behavior).
-        let import_kernel_context = self
-            .import_kernel_context
-            .clone()
-            .expect("import kernel context should be present");
         let binding_states = self.binding_states.clone();
         let final_kernel_context = Self::lower_nodes_pass(
             &mut self.nodes,
             &binding_states,
-            &import_kernel_context,
+            &kernel_context,
             &imported_modules,
             project,
             &mut first_error,
@@ -938,7 +904,6 @@ impl Environment {
                 project,
                 &mut imported_modules,
                 &mut current_kernel_context,
-                None,
             );
             match node {
                 Node::Structural(fact, normalized_fact_slot) => {

@@ -438,6 +438,16 @@ impl VariableMap {
             .filter_map(|(i, opt)| opt.as_ref().map(|term| (i, term)))
     }
 
+    #[doc(hidden)]
+    pub fn profile_slot_count(&self) -> usize {
+        self.map.len()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
     pub fn apply_to_all<F>(&mut self, mut f: F)
     where
         F: FnMut(&Term) -> Term,

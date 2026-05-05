@@ -56,6 +56,25 @@ struct TypeclassInstanceScheme {
     context: LocalContext,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypeStoreProfileCounts {
+    pub ground_type_modules: usize,
+    pub ground_types: usize,
+    pub ground_param_kind_modules: usize,
+    pub ground_param_kinds: usize,
+    pub datatype_to_ground_id: usize,
+    pub arbitrary_to_ground_id: usize,
+    pub typeclass_to_id: usize,
+    pub typeclass_modules: usize,
+    pub typeclasses: usize,
+    pub typeclass_extends_sets: usize,
+    pub typeclass_extends_entries: usize,
+    pub typeclass_instances_sets: usize,
+    pub typeclass_instances_entries: usize,
+    pub typeclass_instance_scheme_sets: usize,
+    pub typeclass_instance_schemes: usize,
+}
+
 impl TypeStore {
     pub fn new() -> TypeStore {
         // Bool and TypeSort are Symbol variants, not GroundTypeIds.
@@ -70,6 +89,59 @@ impl TypeStore {
             typeclass_extends: ImVector::new(),
             typeclass_instances: ImVector::new(),
             typeclass_instance_schemes: ImVector::new(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn profile_counts(&self) -> TypeStoreProfileCounts {
+        TypeStoreProfileCounts {
+            ground_type_modules: self.ground_id_to_type.len(),
+            ground_types: self
+                .ground_id_to_type
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            ground_param_kind_modules: self.ground_id_to_param_kinds.len(),
+            ground_param_kinds: self
+                .ground_id_to_param_kinds
+                .iter()
+                .map(|module| module.iter().map(|kinds| kinds.len()).sum::<usize>())
+                .sum(),
+            datatype_to_ground_id: self.datatype_to_ground_id.len(),
+            arbitrary_to_ground_id: self.arbitrary_to_ground_id.len(),
+            typeclass_to_id: self.typeclass_to_id.len(),
+            typeclass_modules: self.id_to_typeclass.len(),
+            typeclasses: self.id_to_typeclass.iter().map(|module| module.len()).sum(),
+            typeclass_extends_sets: self
+                .typeclass_extends
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            typeclass_extends_entries: self
+                .typeclass_extends
+                .iter()
+                .map(|module| module.iter().map(|set| set.len()).sum::<usize>())
+                .sum(),
+            typeclass_instances_sets: self
+                .typeclass_instances
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            typeclass_instances_entries: self
+                .typeclass_instances
+                .iter()
+                .map(|module| module.iter().map(|set| set.len()).sum::<usize>())
+                .sum(),
+            typeclass_instance_scheme_sets: self
+                .typeclass_instance_schemes
+                .iter()
+                .map(|module| module.len())
+                .sum(),
+            typeclass_instance_schemes: self
+                .typeclass_instance_schemes
+                .iter()
+                .map(|module| module.iter().map(|schemes| schemes.len()).sum::<usize>())
+                .sum(),
         }
     }
 

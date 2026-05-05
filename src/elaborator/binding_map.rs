@@ -87,9 +87,24 @@ pub struct BindingMap {
     instance_attr_defs: HashMap<InstanceName, InstanceAttributeDefinition>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BindingMapProfileCounts {
+    pub constant_defs: usize,
+    pub typename_to_type: usize,
+    pub type_to_typename: usize,
+    pub datatype_defs: usize,
+    pub name_to_typeclass: usize,
+    pub typeclass_defs: usize,
+    pub unqualified: usize,
+    pub constant_to_alias: usize,
+    pub name_to_module: usize,
+    pub module_info: usize,
+    pub instance_attr_defs: usize,
+}
+
 impl BindingMap {
-    pub fn new(module: ModuleId) -> Self {
-        let mut answer = BindingMap {
+    fn empty(module: ModuleId) -> Self {
+        BindingMap {
             module_id: module,
             constant_defs: HashMap::new(),
             typename_to_type: BTreeMap::new(),
@@ -103,7 +118,11 @@ impl BindingMap {
             numerals: None,
             instance_attr_defs: HashMap::new(),
             datatype_defs: HashMap::new(),
-        };
+        }
+    }
+
+    pub fn new(module: ModuleId) -> Self {
+        let mut answer = Self::empty(module);
         let dummy_token = Token::empty();
         answer
             .add_type_alias(
@@ -115,6 +134,11 @@ impl BindingMap {
         answer
     }
 
+    #[doc(hidden)]
+    pub fn profile_empty(module: ModuleId) -> Self {
+        Self::empty(module)
+    }
+
     pub fn module_id(&self) -> ModuleId {
         self.module_id
     }
@@ -122,6 +146,23 @@ impl BindingMap {
     /// Returns the default data type for numeric literals, if set.
     pub fn numerals(&self) -> Option<&Datatype> {
         self.numerals.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_counts(&self) -> BindingMapProfileCounts {
+        BindingMapProfileCounts {
+            constant_defs: self.constant_defs.len(),
+            typename_to_type: self.typename_to_type.len(),
+            type_to_typename: self.type_to_typename.len(),
+            datatype_defs: self.datatype_defs.len(),
+            name_to_typeclass: self.name_to_typeclass.len(),
+            typeclass_defs: self.typeclass_defs.len(),
+            unqualified: self.unqualified.len(),
+            constant_to_alias: self.constant_to_alias.len(),
+            name_to_module: self.name_to_module.len(),
+            module_info: self.module_info.len(),
+            instance_attr_defs: self.instance_attr_defs.len(),
+        }
     }
 
     /// Whether this type has this attribute in the current context.

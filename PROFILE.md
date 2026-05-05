@@ -14,39 +14,61 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-04-29
-- Git hash: `c34ae04b211fa44d11fc084e1387314a6494417f`
-- Command: `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --bin=profile_check --profile=fastdev`; timed run with `/usr/bin/time -p target/fastdev/profile_check`; sampled run with `perf record -g --call-graph fp -o perf.data target/fastdev/profile_check`
-- Machine: `freedom`; Ubuntu 22.04 kernel `6.8.0-110-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
-- Timing: warm timed run completed successfully in `real 14.22`, `user 13.92`, `sys 0.29`; sampled run captured `58,120` core samples and wrote `14.813 MB` of `perf.data`; check processed `16,343` cached certificates with no searches
-- Summary: `profile_check` is still dominated by the same term-normalization, allocation, and certificate-checking costs as the 2026-04-15 baseline. Wall time increased from `7.77s` to `14.22s` (`1.83x`), while sampled core cycles increased from `31,655` to `58,120` samples (`1.84x`). Because the top self-time functions are nearly unchanged, this looks more like acornlib/certificate corpus growth than a distinct new checker hotspot. The new CLI timing breakdown also shows about `3.26s` in project/target module loading and about `10.89s` in certificate checking for `cargo run --profile release -- check`.
+- Date: 2026-05-05
+- Git hash: `4e6f69fc` plus local uncommitted changes
+- Command: `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --bin acorn --profile=fastdev`; memory run with `/usr/bin/time -v target/release/acorn check --jobs 1`; allocator stats with `MIMALLOC_SHOW_STATS=1 target/release/acorn check --jobs 1`; page-fault profile with `perf record -g --call-graph fp -e page-faults -o perf.data target/fastdev/acorn check --jobs 1`; retained heap diagnostic with `cargo run --profile release --bin profile_memory`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
+- Timing: single-worker release check completed successfully in `49.20s` wall, `48.47s` user, `0.72s` sys; maximum RSS was `7,455,696 KB` (`7.1 GiB`); mimalloc reported `8.0 GiB` reserved, `7.9 GiB` committed, and `7.1 GiB` process RSS; page-fault profile captured `3,233` samples / about `123,270` events. After removing retained lowered imports and import kernel contexts, `profile_memory` full check-style load reached `6.14 GiB` HWM after `8.40s` of target/dependency load, down from the prior `7.10 GiB` diagnostic HWM.
+- Summary: The high RSS is primarily established during verifier setup and target/module loading, before the certificate-checking phase. A sampled run reached about `7.47 GiB` RSS by the time `verifying 173 modules...` printed, then only grew to about `7.51 GiB` during checking. The page-fault profile agrees: `86.6%` of sampled page faults are under `Verifier::new_for_check`, and `81.2%` under `Project::add_src_targets` / `Project::load_module`. The retained heap diagnostic shows the source text is not the issue: loading still retains `18,447` environments, `86,633` nodes, `105,080` binding snapshots, and `132,986` lowered `KernelContext` snapshots. Certificate replay contributes some additional allocation, but it is not the main source of peak RSS.
 - Breakdown:
 
 ```text
-Top-Down Breakdown
+Page-Fault Top-Down Breakdown
 ============================================================
 
-100.0%  profile_check
-├── ~23%  Verifier::new / Project::add_src_targets
-│   └── module loading and elaboration
-│       └── 13.5%  Environment::run_lowering_pass
-└── 78.6%  Verifier::run
-    └── 77.2%  Builder::build
-        └── 77.2%  Builder::verify_module
-            ├── 57.9%  Builder::verify_node (recursive)
-            │   ├── certificate replay via Processor::check_cert_with_usage
-            │   │   ├── Checker::check_cert_steps / Checker::insert_clause
-            │   │   └── Certificate::parse_cert_steps_internal / ClaimCodec
-            │   └── imported/local fact insertion via Processor::add_lowered_fact
-            └── term normalization and allocation hot paths
+99.1%  acorn main
+└── 86.6%  Verifier::new_for_check / Verifier::new_inner
+    └── 81.2%  Project::add_src_targets
+        └── 81.1%  Project::load_module
+            ├── 35.6%  Environment::add_statement
+            │   ├── 16.7%  Block::new
+            │   ├──  8.4%  recursive Project::load_module_by_name
+            │   ├──  3.1%  BindingMap::add_unqualified_constant
+            │   └──  cloning / im::HashMap insertion / AcornValue and AcornType allocation
+            └──  ~3.5%  Environment::run_lowering_pass and lower_nodes_pass
+                ├── lower_fact / lower_goal
+                ├── SymbolTable::merge_imports
+                └── KernelContext / SymbolTable / TypeStore persistent structure updates
 
-Top self-time:
-- 9.5% `TermRef::split_application_multi`
-- 6.4% `mi_free`
-- 6.3% `TermRef::to_owned`
-- 6.1% `_mi_page_malloc`
-- 4.8% `__memmove_avx_unaligned_erms`
-- 4.4% `mi_heap_malloc_aligned_at`
-- 4.1% `TermRef::decompose`
-- 4.0% `term_normalization::split_symbol_application`
+Secondary page-fault paths during Builder::build:
+├── Processor::add_imports_from_bindings / add_lowered_fact
+├── Checker::insert_clause_internal
+└── Processor::check_cert_with_usage cloning Checker / EqualityGraph
+
+Retained Heap Diagnostic
+============================================================
+
+rss after full check-style load: 6.14 GiB (6.14 GiB HWM)
+
+retained object counts:
+├── 173 modules, 18,447 environments, 86,633 nodes
+├── 105,080 binding snapshots with 38,972,184 summed binding entries
+├── 96,253 module/node lowered facts containing 95,850 proof steps
+├── 36,733 lowered goals containing 39,567 proof steps
+├── 173 environment kernel contexts
+└── 132,986 lowered kernel contexts
+
+destructive clear sequence, order-sensitive but useful for retained buckets:
+├── clear node/module lowered facts: -921 MiB
+├── clear environment kernel contexts: -304 MiB
+├── clear binding snapshots: -14 MiB RSS after prior clears
+├── clear token/line maps: -285 MiB
+├── clear node payloads: -1.64 GiB
+└── clear remaining nodes / block environment tree: -2.76 GiB
+
+largest retained local-lowered-fact modules:
+├── set: 5,587 steps / 5,587 facts
+├── relation_transport: 4,029 steps / 4,031 facts
+├── order: 3,772 steps / 3,795 facts
+└── order_iso: 3,396 steps / 3,396 facts
 ```

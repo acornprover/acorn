@@ -68,6 +68,10 @@ test = false
 name = "profile_load"
 test = false
 
+[[bin]]
+name = "profile_memory"
+test = false
+
 # Fast, but including debug info.
 [profile.fastdev]
 inherits = "release"

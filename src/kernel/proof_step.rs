@@ -385,6 +385,36 @@ impl PremiseMap {
         self.raw_maps.is_empty()
     }
 
+    #[doc(hidden)]
+    pub fn profile_raw_maps(&self) -> &[VariableMap] {
+        &self.raw_maps
+    }
+
+    #[doc(hidden)]
+    pub fn profile_raw_maps_capacity(&self) -> usize {
+        self.raw_maps.capacity()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_var_ids_capacity(&self) -> usize {
+        self.var_ids.capacity()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_var_ids_len(&self) -> usize {
+        self.var_ids.len()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_pre_norm_context(&self) -> &LocalContext {
+        &self.pre_norm_context
+    }
+
+    #[doc(hidden)]
+    pub fn profile_witness_map(&self) -> &VariableMap {
+        &self.witness_map
+    }
+
     /// Compute the inner step's conclusion map for Simplification reconstruction.
     /// Maps pre-norm variables to concrete terms using var_ids and the outer conclusion_map.
     ///
