@@ -338,6 +338,12 @@ pub struct BuildMetrics {
     /// The number of goals that were successfully proven.
     pub goals_success: i32,
 
+    /// The number of pending modules that were elaborated without proof checking.
+    pub pending_modules_total: i32,
+
+    /// The number of pending goals that were elaborated without proof checking.
+    pub pending_goals_total: i32,
+
     /// How many certificates were reused from the cache.
     pub certs_cached: i32,
 
@@ -670,6 +676,12 @@ impl BuildMetrics {
                     self.modules_cached, self.modules_total
                 ));
             }
+            if self.pending_modules_total > 0 {
+                lines.push(format!(
+                    "{} pending goals elaborated in {} modules",
+                    self.pending_goals_total, self.pending_modules_total
+                ));
+            }
             if self.certs_created > 0 {
                 lines.push(format!("{} certificates created", self.certs_created));
             }
@@ -975,7 +987,13 @@ impl<'a> Builder<'a> {
 
     /// Called when a single module is loaded successfully.
     pub fn module_loaded(&mut self, env: &Environment) {
-        self.metrics.goals_total += env.iter_goals().count() as i32;
+        let goal_count = env.iter_goals().count() as i32;
+        if self.project.is_surface_check_module(env.module_id) {
+            self.metrics.pending_modules_total += 1;
+            self.metrics.pending_goals_total += goal_count;
+        } else {
+            self.metrics.goals_total += goal_count;
+        }
     }
 
     /// Called when the entire loading phase is done.
@@ -1923,6 +1941,10 @@ impl<'a> Builder<'a> {
                 counts.values().map(|counts| counts.empty).sum::<usize>() as i32;
         }
         let mut new_certs = vec![];
+
+        if self.project.is_surface_check_target(target) {
+            return Ok(());
+        }
 
         if !env.nodes.is_empty() {
             self.module_proving_started(target.clone());

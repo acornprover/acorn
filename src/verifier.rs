@@ -295,7 +295,15 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
     ) -> Result<Self, String> {
-        Self::new_inner(start_path, config, target, None)
+        Self::new_inner(start_path, config, target, None, false, true)
+    }
+
+    pub fn new_for_check(
+        start_path: PathBuf,
+        config: ProjectConfig,
+        target: Option<String>,
+    ) -> Result<Self, String> {
+        Self::new_inner(start_path, config, target, None, true, true)
     }
 
     fn new_inner(
@@ -303,6 +311,8 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
         stdin_override: Option<&str>,
+        include_pending_dir: bool,
+        surface_check_pending_targets: bool,
     ) -> Result<Self, String> {
         let setup_start = std::time::Instant::now();
         let mut project = Project::new_local(&start_path, config.clone())?;
@@ -323,13 +333,20 @@ impl Verifier {
             } else if target.ends_with(".ac") {
                 // Looks like a filename
                 let path = resolve_target_path(&start_path, target);
-                project.add_target_by_path(&path)?;
+                if surface_check_pending_targets && project.is_pending_path(&path) {
+                    project.add_surface_target_by_path(&path)?;
+                } else {
+                    project.add_target_by_path(&path)?;
+                }
                 normalized_target = Some(path.to_string_lossy().into_owned());
             } else {
                 project.add_target_by_name(target)?;
             }
         } else {
             project.add_src_targets();
+            if include_pending_dir {
+                project.add_pending_targets();
+            }
         }
         let target_load_time = target_load_start.elapsed();
 
@@ -375,7 +392,7 @@ impl Verifier {
         target: Option<String>,
         stdin_override: Option<&str>,
     ) -> Result<Self, String> {
-        Self::new_inner(start_path, config, target, stdin_override)
+        Self::new_inner(start_path, config, target, stdin_override, false, false)
     }
 
     /// Returns VerifierOutput on success or clean failure.
@@ -605,6 +622,132 @@ mod tests {
         assert_eq!(output3.metrics.certs_unused, 0);
         // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_check_surface_checks_pending_directory() {
+        let (acornlib, _src, _build) = setup();
+
+        let pending = acornlib.child("pending");
+        pending.create_dir_all().unwrap();
+        pending
+            .child("obvious_but_unproved.ac")
+            .write_str(
+                r#"
+                theorem not_ready {
+                    false
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.goals_total, 0);
+        assert_eq!(output.metrics.goals_success, 0);
+        assert_eq!(output.metrics.pending_modules_total, 1);
+        assert_eq!(output.metrics.pending_goals_total, 1);
+        assert_eq!(output.metrics.searches_total, 0);
+        assert_eq!(output.metrics.cert_checks_total, 0);
+
+        let mut targeted = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pending/obvious_but_unproved.ac".to_string()),
+        )
+        .unwrap();
+        targeted.builder.check_mode = true;
+        targeted.builder.check_hashes = false;
+        let targeted_output = targeted.run().unwrap();
+        assert_eq!(targeted_output.status, BuildStatus::Good);
+        assert_eq!(targeted_output.metrics.goals_total, 0);
+        assert_eq!(targeted_output.metrics.pending_modules_total, 1);
+        assert_eq!(targeted_output.metrics.pending_goals_total, 1);
+    }
+
+    #[test]
+    fn test_verify_surface_checks_explicit_pending_target() {
+        let (acornlib, _src, _build) = setup();
+
+        let pending = acornlib.child("pending");
+        pending.create_dir_all().unwrap();
+        pending
+            .child("not_ready.ac")
+            .write_str(
+                r#"
+                theorem not_ready {
+                    false
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut all_src = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        all_src.builder.check_hashes = false;
+        let all_src_output = all_src.run().unwrap();
+        assert_eq!(all_src_output.status, BuildStatus::Good);
+        assert_eq!(all_src_output.metrics.pending_modules_total, 0);
+        assert_eq!(all_src_output.metrics.pending_goals_total, 0);
+
+        let mut targeted = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pending/not_ready.ac".to_string()),
+        )
+        .unwrap();
+        targeted.builder.check_hashes = false;
+        let targeted_output = targeted.run().unwrap();
+        assert_eq!(targeted_output.status, BuildStatus::Good);
+        assert_eq!(targeted_output.metrics.goals_total, 0);
+        assert_eq!(targeted_output.metrics.pending_modules_total, 1);
+        assert_eq!(targeted_output.metrics.pending_goals_total, 1);
+        assert_eq!(targeted_output.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_check_rejects_pending_elaboration_errors() {
+        let (acornlib, _src, _build) = setup();
+
+        let pending = acornlib.child("pending");
+        pending.create_dir_all().unwrap();
+        pending
+            .child("bad_statement.ac")
+            .write_str(
+                r#"
+                theorem bad_statement {
+                    true(true)
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Error);
+        assert_eq!(output.metrics.pending_modules_total, 0);
+        assert_eq!(output.metrics.pending_goals_total, 0);
     }
 
     #[test]

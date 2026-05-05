@@ -80,6 +80,10 @@ pub struct Project {
     // The module names that we want to build.
     pub targets: HashSet<ModuleDescriptor>,
 
+    // Targets that should be elaborated but not proved. This is used for pending/
+    // files that record intended theorem statements and proof attempts.
+    surface_check_targets: HashSet<ModuleDescriptor>,
+
     // The last known-good build cache.
     // This is different from the Builder's build cache, which is created during a build.
     pub build_cache: BuildCache,
@@ -245,6 +249,7 @@ impl Project {
             modules: vec![],
             module_map: HashMap::new(),
             targets: HashSet::new(),
+            surface_check_targets: HashSet::new(),
             build_cache,
             cache_load_time,
             build_dir,
@@ -399,6 +404,17 @@ impl Project {
         self.register_all_modules();
         let descriptor = self.descriptor_from_path(path)?;
         self.add_target_by_descriptor(&descriptor)
+    }
+
+    // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
+    // The target will be loaded during builds, but its proof goals will not be checked.
+    pub fn add_surface_target_by_path(&mut self, path: &Path) -> Result<(), ImportError> {
+        self.register_all_modules();
+        let descriptor = self.descriptor_from_path(path)?;
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        let result = self.add_target_by_descriptor(&canonical_descriptor);
+        self.surface_check_targets.insert(canonical_descriptor);
+        result
     }
 
     // Pre-registers all modules from the src directory with stable ModuleIds.
@@ -759,6 +775,56 @@ impl Project {
             // Ignore errors when adding all targets
             let _ = self.add_target_by_path(&path);
         }
+    }
+
+    fn pending_dir(&self) -> Option<PathBuf> {
+        self.src_dir.parent().map(|parent| parent.join("pending"))
+    }
+
+    pub fn is_pending_path(&self, path: &Path) -> bool {
+        self.pending_dir()
+            .is_some_and(|pending_dir| path.strip_prefix(pending_dir).is_ok())
+    }
+
+    // Adds a surface-check target for all files in the optional 'pending' directory.
+    pub fn add_pending_targets(&mut self) {
+        if !self.config.use_filesystem {
+            panic!("cannot add_pending_targets without filesystem access")
+        }
+
+        let Some(pending_dir) = self.pending_dir() else {
+            return;
+        };
+        if !pending_dir.is_dir() {
+            return;
+        }
+
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in WalkDir::new(&pending_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if path.extension() == Some(std::ffi::OsStr::new("ac")) {
+                    paths.push(path.to_path_buf());
+                }
+            }
+        }
+        paths.sort();
+
+        for path in paths {
+            let _ = self.add_surface_target_by_path(&path);
+        }
+    }
+
+    pub fn is_surface_check_target(&self, descriptor: &ModuleDescriptor) -> bool {
+        self.surface_check_targets.contains(descriptor)
+    }
+
+    pub fn is_surface_check_module(&self, module_id: ModuleId) -> bool {
+        self.get_module_descriptor(module_id)
+            .is_some_and(|descriptor| self.is_surface_check_target(descriptor))
     }
 
     // Whether we currently have this version of a file.

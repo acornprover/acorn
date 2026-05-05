@@ -455,7 +455,7 @@ enum Command {
         /// Target module or file to check (can be a filename, module name, or module:line)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to check. Supports TARGET:LINE syntax. If not provided, checks all files in the library."
+            help = "Module or filename to check. Supports TARGET:LINE syntax. If not provided, checks src/ and elaborates pending/ if present."
         )]
         target: Option<String>,
 
@@ -935,7 +935,7 @@ async fn main() {
                 write_cache: false,
             };
 
-            let mut verifier = match Verifier::new(current_dir, config, target) {
+            let mut verifier = match Verifier::new_for_check(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("{}", e);
