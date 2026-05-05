@@ -41,6 +41,26 @@ jobs:
           echo ORT_LIB_LOCATION: ${{ env.ORT_LIB_LOCATION }}
           Get-ChildItem -Path ${{ env.ORT_LIB_LOCATION }} -Recurse
 
+      - name: Compute Cargo cache key
+        id: cargo-cache-key
+        shell: bash
+        run: |
+          # Ignore the local package version so release commits do not create new multi-GB caches.
+          lock_hash=$(
+            awk '
+              previous == "name = \"acorn\"" && $0 ~ /^version = / {
+                print "version = \"0.0.0\""
+                previous = $0
+                next
+              }
+              {
+                print
+                previous = $0
+              }
+            ' Cargo.lock | sha256sum | cut -d " " -f 1
+          )
+          echo "lock_hash=$lock_hash" >> "$GITHUB_OUTPUT"
+
       - name: Cache Cargo Build
         uses: actions/cache@v4
         with:
@@ -48,7 +68,7 @@ jobs:
             target
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.cargo-cache-key.outputs.lock_hash }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
