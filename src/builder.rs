@@ -1136,7 +1136,7 @@ impl<'a> Builder<'a> {
                 self.metrics.searches_inconsistent += 1;
                 self.log_warning(
                     &goal,
-                    &format!("prover found an inconsistency{}", skip_phrase),
+                    &format!("prover found inconsistent assumptions{}", skip_phrase),
                 )
             }
             Outcome::Timeout => {
