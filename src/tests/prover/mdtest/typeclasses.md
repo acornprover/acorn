@@ -1,5 +1,110 @@
 # Typeclasses
 
+## Dependent Value Parameter Instance Condition Avoids Capturing Binders
+
+The `Subspace` instance has a dependent value parameter `a: Set[T]`.
+The `open_big_union` condition should instantiate the ambient set witness
+without capturing the surrounding generated binders.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    define big_union_contains[T](c: Set[T] -> Bool, x: T) -> Bool {
+        exists(s: Set[T]) {
+            c(s) and s.contains(x)
+        }
+    }
+
+    define big_union[T](c: Set[T] -> Bool) -> Set[T] {
+        Set[T].new(big_union_contains(c))
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+
+        open_big_union(c: Set[T] -> Bool) {
+            (forall(s: Set[T]) { c(s) implies T.is_open(s) })
+                implies T.is_open(big_union(c))
+        }
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
+        let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
+            exists(v: Set[T]) {
+                T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
+                    v.contains(x.value)
+                })
+            }
+        }
+    }
+```
+
+## Dependent Value Parameter Function Infers From Argument
+
+The dependent value parameter `a: Set[T]` should be inferred from
+`u: Set[Subspace[T, a]]` at the call site.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
+        true
+    }
+
+    theorem implicit_call[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) {
+        subspace_open(u)
+    }
+```
+
+## Dependent Value Parameter Function Accepts Explicit Argument
+
+The same dependent value parameter should also be passable explicitly
+using the family-application spelling.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
+        true
+    }
+
+    theorem explicit_call[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) {
+        subspace_open[T, a](u)
+    }
+```
+
 ## Prover Handles Instance Let
 
 Prover coverage for instances, typeclasses, and related language features.
