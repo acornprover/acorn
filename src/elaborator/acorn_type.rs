@@ -533,6 +533,33 @@ impl FamilyParam {
             FamilyParam::Value(value_param) => Some(value_param),
         }
     }
+
+    pub fn canonical_kinds(params: &[FamilyParam]) -> Vec<FamilyParamKind> {
+        let mut answer = vec![];
+        let mut replacements = vec![];
+        let mut next_type_index = 0;
+        for param in params {
+            match param {
+                FamilyParam::Type(type_param) => {
+                    answer.push(FamilyParamKind::Type(type_param.typeclass.clone()));
+                    replacements.push((
+                        type_param.name.clone(),
+                        AcornType::Arbitrary(TypeParam {
+                            name: format!("T{}", next_type_index),
+                            typeclass: type_param.typeclass.clone(),
+                        }),
+                    ));
+                    next_type_index += 1;
+                }
+                FamilyParam::Value(value_param) => {
+                    answer.push(FamilyParamKind::Value(
+                        value_param.value_type.instantiate(&replacements),
+                    ));
+                }
+            }
+        }
+        answer
+    }
 }
 
 impl fmt::Display for FamilyParam {
@@ -803,16 +830,20 @@ impl AcornType {
         result
     }
 
-    pub(crate) fn instantiate_with_stack(
+    pub(crate) fn instantiate_with_base_stack(
         &self,
         stack_size: AtomId,
+        base_stack_size: AtomId,
         params: &[(String, AcornType)],
     ) -> AcornType {
         match self {
             AcornType::Variable(param) | AcornType::Arbitrary(param) => {
                 for (param_name, param_type) in params {
                     if &param.name == param_name {
-                        return param_type.insert_stack(0, stack_size);
+                        assert!(stack_size >= base_stack_size);
+                        return param_type
+                            .clone()
+                            .insert_stack(base_stack_size, stack_size - base_stack_size);
                     }
                 }
                 self.clone()
@@ -823,40 +854,58 @@ impl AcornType {
                     .arg_types
                     .iter()
                     .map(|t| {
-                        let instantiated = t.instantiate_with_stack(current_stack_size, params);
+                        let instantiated = t.instantiate_with_base_stack(
+                            current_stack_size,
+                            base_stack_size,
+                            params,
+                        );
                         current_stack_size += 1;
                         instantiated
                     })
                     .collect();
                 AcornType::functional(
                     arg_types,
-                    function_type
-                        .return_type
-                        .instantiate_with_stack(current_stack_size, params),
+                    function_type.return_type.instantiate_with_base_stack(
+                        current_stack_size,
+                        base_stack_size,
+                        params,
+                    ),
                 )
             }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
                 types
                     .iter()
-                    .map(|t| t.instantiate_with_stack(stack_size, params))
+                    .map(|t| t.instantiate_with_base_stack(stack_size, base_stack_size, params))
                     .collect(),
             ),
             AcornType::Family(datatype, args) => AcornType::Family(
                 datatype.clone(),
                 args.iter()
                     .map(|arg| match arg {
-                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
-                            acorn_type.instantiate_with_stack(stack_size, params),
-                        ),
-                        DependentTypeArg::Value(value) => {
-                            DependentTypeArg::Value(value.instantiate(params))
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.instantiate_with_base_stack(
+                                stack_size,
+                                base_stack_size,
+                                params,
+                            ))
                         }
+                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
+                            value.instantiate_with_base_stack(stack_size, base_stack_size, params),
+                        ),
                     })
                     .collect(),
             ),
             _ => self.clone(),
         }
+    }
+
+    pub(crate) fn instantiate_with_stack(
+        &self,
+        stack_size: AtomId,
+        params: &[(String, AcornType)],
+    ) -> AcornType {
+        self.instantiate_with_base_stack(stack_size, 0, params)
     }
 
     /// Replaces type variables in the provided list with the corresponding type.

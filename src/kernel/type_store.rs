@@ -189,14 +189,31 @@ impl TypeStore {
         }
     }
 
-    fn param_kind_for_arg(&mut self, arg: &DependentTypeArg) -> Term {
-        match arg {
-            DependentTypeArg::Type(acorn_type) => self.param_kind_for_type_arg(acorn_type),
-            DependentTypeArg::Value(value) => {
-                self.add_type_internal(&value.get_type());
-                self.to_type_term(&value.get_type())
+    fn param_kinds_for_dependent_args(&mut self, args: &[DependentTypeArg]) -> Vec<Term> {
+        let mut param_kinds = vec![];
+        let mut type_var_map = StdHashMap::new();
+        let mut type_param_count: AtomId = 0;
+        for arg in args {
+            match arg {
+                DependentTypeArg::Type(acorn_type) => {
+                    let kind = self.param_kind_for_type_arg(acorn_type);
+                    if let AcornType::Variable(param) | AcornType::Arbitrary(param) = acorn_type {
+                        type_var_map.insert(param.name.clone(), (type_param_count, kind.clone()));
+                    }
+                    type_param_count += 1;
+                    param_kinds.push(kind);
+                }
+                DependentTypeArg::Value(value) => {
+                    let value_type = value.get_type();
+                    self.add_type_internal(&value_type);
+                    let kind = self
+                        .to_type_term_with_vars(&value_type, Some(&type_var_map))
+                        .convert_free_to_bound(type_param_count as u16);
+                    param_kinds.push(kind);
+                }
             }
         }
+        param_kinds
     }
 
     fn update_datatype_param_kinds(&mut self, datatype: &Datatype, param_kinds: Vec<Term>) {
@@ -276,10 +293,7 @@ impl TypeStore {
                     .expect("datatype should be registered");
                 let existing_kinds = self.get_param_kinds(ground_id);
                 if existing_kinds.is_empty() || existing_kinds.len() < args.len() {
-                    let param_kinds: Vec<Term> = args
-                        .iter()
-                        .map(|arg| self.param_kind_for_arg(arg))
-                        .collect();
+                    let param_kinds = self.param_kinds_for_dependent_args(args);
                     self.update_datatype_param_kinds(datatype, param_kinds);
                 }
             }
@@ -1656,6 +1670,7 @@ impl Default for TypeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elaborator::acorn_value::AcornValue;
 
     #[test]
     fn test_type_store_defaults() {
@@ -1718,6 +1733,48 @@ mod tests {
         let (input2, output) = rest.split_pi().unwrap();
         assert!(input2.is_bool_type());
         assert!(output.is_bool_type());
+    }
+
+    #[test]
+    fn test_family_value_param_kind_can_depend_on_type_param() {
+        let mut store = TypeStore::new();
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        store.add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        store.set_datatype_arity(&set_datatype, 1);
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let typeclass = Typeclass {
+            module_id: ModuleId(0),
+            name: "Blah".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: Some(typeclass),
+        };
+        let t = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype, vec![t.clone()]);
+        let family_type = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t)),
+            ],
+        );
+
+        store.add_type(&family_type);
+
+        let ground_id = store
+            .get_ground_id_by_name("Subspace")
+            .expect("Subspace should be registered");
+        let param_kinds = store.get_param_kinds(ground_id);
+        assert_eq!(param_kinds.len(), 2);
+        assert!(param_kinds[0].as_ref().is_type_param_kind());
+        assert!(!param_kinds[1].as_ref().is_type_param_kind());
     }
 
     #[test]

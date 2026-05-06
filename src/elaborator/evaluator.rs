@@ -250,8 +250,12 @@ impl<'a> Evaluator<'a> {
     /// tracking, but we still need to preserve the temporary instance-member context.
     /// Reconstructing via `Evaluator::new(...)` would silently drop that context and change how
     /// explicit typeclass attributes resolve inside an `instance` body.
-    fn fork(&self, bindings: &'a BindingMap, token_map: Option<&'a mut TokenMap>) -> Self {
-        Self {
+    fn fork<'b>(
+        &'b self,
+        bindings: &'b BindingMap,
+        token_map: Option<&'b mut TokenMap>,
+    ) -> Evaluator<'b> {
+        Evaluator {
             project: self.project,
             bindings,
             token_map,
@@ -602,6 +606,9 @@ impl<'a> Evaluator<'a> {
                         )));
                     }
                     let mut instance_params = vec![];
+                    let mut type_replacements = vec![];
+                    let mut value_args = vec![];
+                    let mut next_type_index = 0;
                     for (param_expr, param_kind) in param_exprs.iter().zip(&ut.params) {
                         match param_kind {
                             FamilyParamKind::Type(_) => {
@@ -610,9 +617,12 @@ impl<'a> Evaluator<'a> {
                                     .evaluate_type_with_stack(stack, param_expr)
                                     .is_ok()
                                 {
-                                    instance_params.push(DependentTypeArg::Type(
-                                        self.evaluate_type_with_stack(stack, param_expr)?,
-                                    ));
+                                    let type_arg =
+                                        self.evaluate_type_with_stack(stack, param_expr)?;
+                                    type_replacements
+                                        .push((format!("T{}", next_type_index), type_arg.clone()));
+                                    next_type_index += 1;
+                                    instance_params.push(DependentTypeArg::Type(type_arg));
                                     continue;
                                 }
                                 if let Ok(value) = self
@@ -624,16 +634,22 @@ impl<'a> Evaluator<'a> {
                                         &value.get_type(),
                                     ));
                                 }
-                                instance_params.push(DependentTypeArg::Type(
-                                    self.evaluate_type_with_stack(stack, param_expr)?,
-                                ));
+                                let type_arg = self.evaluate_type_with_stack(stack, param_expr)?;
+                                type_replacements
+                                    .push((format!("T{}", next_type_index), type_arg.clone()));
+                                next_type_index += 1;
+                                instance_params.push(DependentTypeArg::Type(type_arg));
                             }
                             FamilyParamKind::Value(value_type) => {
+                                let expected_type = value_type
+                                    .instantiate(&type_replacements)
+                                    .bind_value_params(&value_args);
                                 let value = self.evaluate_value_with_stack(
                                     stack,
                                     param_expr,
-                                    Some(value_type),
+                                    Some(&expected_type),
                                 )?;
+                                value_args.push(value.clone());
                                 instance_params.push(DependentTypeArg::Value(value));
                             }
                         }
@@ -2033,6 +2049,10 @@ impl<'a> Evaluator<'a> {
         exprs: &[TypeParamExpr],
     ) -> error::Result<Vec<FamilyParam>> {
         let mut answer: Vec<FamilyParam> = vec![];
+        let mut scoped_bindings = self.bindings.clone();
+        let mut scoped_stack = Stack::new();
+        let project = self.project;
+        let current_instance_context = self.current_instance_context.clone();
         for expr in exprs {
             if expr.type_expr.is_some() {
                 return Err(expr.name.error(
@@ -2040,52 +2060,62 @@ impl<'a> Evaluator<'a> {
                 ));
             }
 
-            if let Some(annotation) = expr.typeclass.as_ref() {
+            let param = if let Some(annotation) = expr.typeclass.as_ref() {
                 if self
-                    .fork(self.bindings, None)
+                    .fork(&scoped_bindings, None)
                     .evaluate_typeclass(annotation)
                     .is_ok()
                 {
-                    let typeclass = self.evaluate_typeclass(annotation)?;
-                    let param = FamilyParam::Type(TypeParam {
+                    let typeclass = Evaluator {
+                        project,
+                        bindings: &scoped_bindings,
+                        token_map: self.token_map.as_deref_mut(),
+                        current_instance_context: current_instance_context.clone(),
+                    }
+                    .evaluate_typeclass(annotation)?;
+                    FamilyParam::Type(TypeParam {
                         name: expr.name.text().to_string(),
                         typeclass: Some(typeclass),
-                    });
-                    if answer
-                        .iter()
-                        .any(|existing| existing.name() == param.name())
-                    {
-                        return Err(expr.name.error("duplicate parameter"));
+                    })
+                } else if self
+                    .fork(&scoped_bindings, None)
+                    .evaluate_type_with_stack(&mut scoped_stack, annotation)
+                    .is_ok()
+                {
+                    let value_type = Evaluator {
+                        project,
+                        bindings: &scoped_bindings,
+                        token_map: self.token_map.as_deref_mut(),
+                        current_instance_context: current_instance_context.clone(),
                     }
-                    answer.push(param);
-                    continue;
-                }
-                if let Ok(value_type) = self.fork(self.bindings, None).evaluate_type(annotation) {
-                    let param = FamilyParam::Value(ValueParam {
+                    .evaluate_type_with_stack(&mut scoped_stack, annotation)?;
+                    FamilyParam::Value(ValueParam {
                         name: expr.name.text().to_string(),
                         value_type,
-                    });
-                    if answer
-                        .iter()
-                        .any(|existing| existing.name() == param.name())
-                    {
-                        return Err(expr.name.error("duplicate parameter"));
-                    }
-                    answer.push(param);
-                    continue;
+                    })
+                } else {
+                    return Err(annotation.error("expected a typeclass constraint or a value type"));
                 }
-                return Err(annotation.error("expected a typeclass constraint or a value type"));
-            }
-
-            let param = FamilyParam::Type(TypeParam {
-                name: expr.name.text().to_string(),
-                typeclass: None,
-            });
+            } else {
+                FamilyParam::Type(TypeParam {
+                    name: expr.name.text().to_string(),
+                    typeclass: None,
+                })
+            };
             if answer
                 .iter()
                 .any(|existing| existing.name() == param.name())
             {
                 return Err(expr.name.error("duplicate parameter"));
+            }
+            match &param {
+                FamilyParam::Type(type_param) => {
+                    scoped_bindings.check_typename_available(&type_param.name, &expr.name)?;
+                    scoped_bindings.add_arbitrary_type(type_param.clone());
+                }
+                FamilyParam::Value(value_param) => {
+                    scoped_stack.insert(value_param.name.clone(), value_param.value_type.clone());
+                }
             }
             answer.push(param);
         }

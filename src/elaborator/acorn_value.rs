@@ -376,6 +376,33 @@ impl ConstantInstance {
         answer
     }
 
+    fn instantiate_with_base_stack(
+        &self,
+        stack_size: AtomId,
+        base_stack_size: AtomId,
+        params: &[(String, AcornType)],
+    ) -> ConstantInstance {
+        let mut answer = self.same_name(
+            self.params
+                .iter()
+                .map(|t| t.instantiate_with_base_stack(stack_size, base_stack_size, params))
+                .collect(),
+            self.instance_type
+                .instantiate_with_base_stack(stack_size, base_stack_size, params),
+        );
+        answer.value_param_types = self
+            .value_param_types
+            .iter()
+            .map(|t| t.instantiate_with_base_stack(stack_size, base_stack_size, params))
+            .collect();
+        answer.bound_value_args = self
+            .bound_value_args
+            .iter()
+            .map(|value| value.instantiate_with_base_stack(stack_size, base_stack_size, params))
+            .collect();
+        answer
+    }
+
     pub fn bind_value_params(
         &self,
         values: &[AcornValue],
@@ -556,7 +583,9 @@ impl ConstantInstance {
                 && receiver == typeclass.name
                 && self.params.len() == 1
             {
-                if let AcornType::Data(param_datatype, _) = &self.params[0] {
+                if let AcornType::Data(param_datatype, _) | AcornType::Family(param_datatype, _) =
+                    &self.params[0]
+                {
                     if param_datatype == datatype {
                         return Some(DefinedName::Instance(InstanceName {
                             typeclass: typeclass.clone(),
@@ -1827,26 +1856,54 @@ impl AcornValue {
         stack_size: AtomId,
         params: &[(String, AcornType)],
     ) -> AcornValue {
+        self.instantiate_with_base_stack(stack_size, 0, params)
+    }
+
+    pub(crate) fn instantiate_with_ambient_stack(
+        &self,
+        ambient_stack_size: AtomId,
+        params: &[(String, AcornType)],
+    ) -> AcornValue {
+        self.clone()
+            .insert_stack(0, ambient_stack_size)
+            .instantiate_with_base_stack(ambient_stack_size, ambient_stack_size, params)
+    }
+
+    pub(crate) fn instantiate_with_base_stack(
+        &self,
+        stack_size: AtomId,
+        base_stack_size: AtomId,
+        params: &[(String, AcornType)],
+    ) -> AcornValue {
         match self {
-            AcornValue::Variable(i, var_type) => {
-                AcornValue::Variable(*i, var_type.instantiate_with_stack(stack_size, params))
-            }
+            AcornValue::Variable(i, var_type) => AcornValue::Variable(
+                *i,
+                var_type.instantiate_with_base_stack(stack_size, base_stack_size, params),
+            ),
             AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
-                function: Box::new(app.function.instantiate_with_stack(stack_size, params)),
+                function: Box::new(app.function.instantiate_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    params,
+                )),
                 args: app
                     .args
                     .iter()
-                    .map(|x| x.instantiate_with_stack(stack_size, params))
+                    .map(|x| x.instantiate_with_base_stack(stack_size, base_stack_size, params))
                     .collect(),
             }),
             AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
-                function: Box::new(app.function.instantiate_with_stack(stack_size, params)),
+                function: Box::new(app.function.instantiate_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    params,
+                )),
                 type_param_names: app.type_param_names.clone(),
                 type_param_constraints: app.type_param_constraints.clone(),
                 type_args: app
                     .type_args
                     .iter()
-                    .map(|x| x.instantiate_with_stack(stack_size, params))
+                    .map(|x| x.instantiate_with_base_stack(stack_size, base_stack_size, params))
                     .collect(),
             }),
             AcornValue::Lambda(args, value) => {
@@ -1854,15 +1911,22 @@ impl AcornValue {
                 let args = args
                     .iter()
                     .map(|arg_type| {
-                        let instantiated =
-                            arg_type.instantiate_with_stack(current_stack_size, params);
+                        let instantiated = arg_type.instantiate_with_base_stack(
+                            current_stack_size,
+                            base_stack_size,
+                            params,
+                        );
                         current_stack_size += 1;
                         instantiated
                     })
                     .collect::<Vec<_>>();
                 AcornValue::Lambda(
                     args,
-                    Box::new(value.instantiate_with_stack(current_stack_size, params)),
+                    Box::new(value.instantiate_with_base_stack(
+                        current_stack_size,
+                        base_stack_size,
+                        params,
+                    )),
                 )
             }
             AcornValue::ForAll(args, value) => {
@@ -1870,15 +1934,22 @@ impl AcornValue {
                 let args = args
                     .iter()
                     .map(|arg_type| {
-                        let instantiated =
-                            arg_type.instantiate_with_stack(current_stack_size, params);
+                        let instantiated = arg_type.instantiate_with_base_stack(
+                            current_stack_size,
+                            base_stack_size,
+                            params,
+                        );
                         current_stack_size += 1;
                         instantiated
                     })
                     .collect::<Vec<_>>();
                 AcornValue::ForAll(
                     args,
-                    Box::new(value.instantiate_with_stack(current_stack_size, params)),
+                    Box::new(value.instantiate_with_base_stack(
+                        current_stack_size,
+                        base_stack_size,
+                        params,
+                    )),
                 )
             }
             AcornValue::Exists(args, value) => {
@@ -1886,32 +1957,44 @@ impl AcornValue {
                 let args = args
                     .iter()
                     .map(|arg_type| {
-                        let instantiated =
-                            arg_type.instantiate_with_stack(current_stack_size, params);
+                        let instantiated = arg_type.instantiate_with_base_stack(
+                            current_stack_size,
+                            base_stack_size,
+                            params,
+                        );
                         current_stack_size += 1;
                         instantiated
                     })
                     .collect::<Vec<_>>();
                 AcornValue::Exists(
                     args,
-                    Box::new(value.instantiate_with_stack(current_stack_size, params)),
+                    Box::new(value.instantiate_with_base_stack(
+                        current_stack_size,
+                        base_stack_size,
+                        params,
+                    )),
                 )
             }
-            AcornValue::Grouping(value) => {
-                AcornValue::Grouping(Box::new(value.instantiate_with_stack(stack_size, params)))
-            }
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(
+                value.instantiate_with_base_stack(stack_size, base_stack_size, params),
+            )),
             AcornValue::Binary(op, left, right) => AcornValue::Binary(
                 *op,
-                Box::new(left.instantiate_with_stack(stack_size, params)),
-                Box::new(right.instantiate_with_stack(stack_size, params)),
+                Box::new(left.instantiate_with_base_stack(stack_size, base_stack_size, params)),
+                Box::new(right.instantiate_with_base_stack(stack_size, base_stack_size, params)),
             ),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
-                Box::new(cond.instantiate_with_stack(stack_size, params)),
-                Box::new(if_value.instantiate_with_stack(stack_size, params)),
-                Box::new(else_value.instantiate_with_stack(stack_size, params)),
+                Box::new(cond.instantiate_with_base_stack(stack_size, base_stack_size, params)),
+                Box::new(if_value.instantiate_with_base_stack(stack_size, base_stack_size, params)),
+                Box::new(else_value.instantiate_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    params,
+                )),
             ),
             AcornValue::Match(scrutinee, cases) => {
-                let new_scrutinee = scrutinee.instantiate_with_stack(stack_size, params);
+                let new_scrutinee =
+                    scrutinee.instantiate_with_base_stack(stack_size, base_stack_size, params);
                 let new_cases = cases
                     .iter()
                     .map(|case| {
@@ -1920,20 +2003,25 @@ impl AcornValue {
                             .new_vars
                             .iter()
                             .map(|t| {
-                                let instantiated =
-                                    t.instantiate_with_stack(current_stack_size, params);
+                                let instantiated = t.instantiate_with_base_stack(
+                                    current_stack_size,
+                                    base_stack_size,
+                                    params,
+                                );
                                 current_stack_size += 1;
                                 instantiated
                             })
                             .collect();
                         MatchCase {
                             new_vars,
-                            pattern: case.pattern.instantiate_with_stack(
+                            pattern: case.pattern.instantiate_with_base_stack(
                                 stack_size + case.new_vars.len() as AtomId,
+                                base_stack_size,
                                 params,
                             ),
-                            result: case.result.instantiate_with_stack(
+                            result: case.result.instantiate_with_base_stack(
                                 stack_size + case.new_vars.len() as AtomId,
+                                base_stack_size,
                                 params,
                             ),
                             constructor_index: case.constructor_index,
@@ -1943,14 +2031,20 @@ impl AcornValue {
                     .collect();
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
             }
-            AcornValue::Not(x) => {
-                AcornValue::Not(Box::new(x.instantiate_with_stack(stack_size, params)))
-            }
+            AcornValue::Not(x) => AcornValue::Not(Box::new(x.instantiate_with_base_stack(
+                stack_size,
+                base_stack_size,
+                params,
+            ))),
             AcornValue::Try(x, t) => AcornValue::Try(
-                Box::new(x.instantiate_with_stack(stack_size, params)),
-                t.instantiate_with_stack(stack_size, params),
+                Box::new(x.instantiate_with_base_stack(stack_size, base_stack_size, params)),
+                t.instantiate_with_base_stack(stack_size, base_stack_size, params),
             ),
-            AcornValue::Constant(c) => AcornValue::Constant(c.instantiate(params)),
+            AcornValue::Constant(c) => AcornValue::Constant(c.instantiate_with_base_stack(
+                stack_size,
+                base_stack_size,
+                params,
+            )),
             AcornValue::Bool(_) => self.clone(),
         }
     }
@@ -3073,6 +3167,47 @@ mod tests {
         );
 
         assert_eq!(bound, expected);
+    }
+
+    #[test]
+    fn test_instantiate_with_ambient_stack_keeps_outer_value_arg() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let x_param = TypeParam {
+            name: "X".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let set_t = AcornType::Data(set_datatype, vec![AcornType::Variable(t_param.clone())]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(AcornType::Variable(t_param)),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t)),
+            ],
+        );
+        let universal = AcornValue::forall(
+            vec![AcornType::Variable(x_param.clone())],
+            AcornValue::Variable(0, AcornType::Variable(x_param.clone())),
+        );
+
+        let instantiated =
+            universal.instantiate_with_ambient_stack(1, &[("X".to_string(), subspace_t_a.clone())]);
+
+        let expected = AcornValue::forall(
+            vec![subspace_t_a.clone()],
+            AcornValue::Variable(1, subspace_t_a),
+        );
+        assert_eq!(instantiated, expected);
     }
 
     #[test]

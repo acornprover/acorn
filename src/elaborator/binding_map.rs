@@ -2008,6 +2008,7 @@ impl BindingMap {
         typeclass: &Typeclass,
         condition_name: &str,
         instance_type: &AcornType,
+        ambient_stack_size: crate::kernel::atom::AtomId,
         project: &Project,
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
@@ -2035,7 +2036,8 @@ impl BindingMap {
             v => v,
         };
         let unsafe_param = (params[0].name.clone(), instance_type.clone());
-        let unsafe_instance = universal.instantiate(&[unsafe_param]);
+        let unsafe_instance =
+            universal.instantiate_with_ambient_stack(ambient_stack_size, &[unsafe_param]);
 
         Ok(unsafe_instance)
     }

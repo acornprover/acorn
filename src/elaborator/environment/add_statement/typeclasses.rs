@@ -243,23 +243,28 @@ impl Environment {
                         family_params.len()
                     )));
                 }
-                for (expr, (param, expected_kind)) in is
-                    .type_params
-                    .iter()
-                    .zip(family_params.iter().zip(expected_kinds.iter()))
-                {
-                    match (param, expected_kind) {
+                let family_param_kinds = FamilyParam::canonical_kinds(&family_params);
+                for (expr, ((param, param_kind), expected_kind)) in is.type_params.iter().zip(
+                    family_params
+                        .iter()
+                        .zip(&family_param_kinds)
+                        .zip(expected_kinds.iter()),
+                ) {
+                    match (param, param_kind, expected_kind) {
                         (
                             FamilyParam::Type(type_param),
-                            crate::elaborator::acorn_type::FamilyParamKind::Type(expected),
+                            FamilyParamKind::Type(_),
+                            FamilyParamKind::Type(expected),
                         ) if expected.is_none() || &type_param.typeclass == expected => {}
                         (
-                            FamilyParam::Value(value_param),
-                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
-                        ) if &value_param.value_type == expected_type => {}
+                            FamilyParam::Value(_),
+                            FamilyParamKind::Value(value_type),
+                            FamilyParamKind::Value(expected_type),
+                        ) if value_type == expected_type => {}
                         (
                             FamilyParam::Type(_),
-                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                            FamilyParamKind::Type(_),
+                            FamilyParamKind::Value(expected_type),
                         ) => {
                             return Err(expr.name.error(&format!(
                                 "expected a dependent value parameter like '{}: {}'",
@@ -269,7 +274,8 @@ impl Environment {
                         }
                         (
                             FamilyParam::Value(_),
-                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                            FamilyParamKind::Value(_),
+                            FamilyParamKind::Type(_),
                         ) => {
                             return Err(expr
                                 .name
@@ -447,6 +453,7 @@ impl Environment {
                     &typeclass,
                     &attr_name,
                     &instance_type,
+                    family_scope.value_params.len() as AtomId,
                     project,
                     statement,
                 )?;
@@ -632,7 +639,7 @@ impl Environment {
                     let value_param_types: Vec<_> = family_scope
                         .value_params
                         .iter()
-                        .map(|param| param.value_type.clone())
+                        .map(|param| param.value_type.genericize(&family_scope.type_params))
                         .collect();
                     if !value_param_types.is_empty() {
                         claim = AcornValue::ForAll(value_param_types, Box::new(claim));

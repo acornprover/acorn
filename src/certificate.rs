@@ -18,6 +18,7 @@ use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::elaborator::stack::Stack;
+use crate::elaborator::to_term::{build_type_var_map, lower_type_to_term};
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
@@ -754,16 +755,12 @@ impl Certificate {
 
         let constant_name = ConstantName::unqualified(bindings.module_id(), name);
         kernel_context.type_store.add_type(constant_type);
-        let type_args: Vec<AcornType> = type_params
-            .iter()
-            .map(|param| AcornType::Variable(param.clone()))
-            .collect();
         let mut symbol_type = if type_params.is_empty() {
-            kernel_context.type_store.to_type_term(constant_type)
+            lower_type_to_term(kernel_context, constant_type, None)
         } else {
-            kernel_context
-                .type_store
-                .to_polymorphic_type_term(constant_type, &type_args)
+            let type_var_map = build_type_var_map(kernel_context, type_params);
+            lower_type_to_term(kernel_context, constant_type, Some(&type_var_map))
+                .convert_free_to_bound(type_params.len() as u16)
         };
         for param in type_params.iter().rev() {
             let input_type = if let Some(typeclass) = &param.typeclass {

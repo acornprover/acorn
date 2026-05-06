@@ -2932,8 +2932,10 @@ impl Term {
                         let bound_id = depth + num_type_params - 1 - *i;
                         Term::atom(Atom::BoundVariable(bound_id))
                     }
-                    Atom::BoundVariable(i) => {
-                        // Shift existing BoundVariables up to make room for new type param binders
+                    Atom::BoundVariable(i) if *i >= depth => {
+                        // Shift references to outer binders up to make room for the new binders.
+                        // Bound variables below the current depth belong to binders inside this term
+                        // and must keep referring to those local binders.
                         Term::atom(Atom::BoundVariable(*i + num_type_params))
                     }
                     _ => self.clone(),

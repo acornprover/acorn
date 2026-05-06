@@ -145,7 +145,7 @@ impl Environment {
         let definition_string = Some(statement.to_string());
         let potential_type = self.bindings.add_potential_type_with_family_params(
             &ss.name_token,
-            family_params.iter().map(|param| param.kind()).collect(),
+            FamilyParam::canonical_kinds(&family_params),
             doc_comments,
             Some(ss.name_token.range()),
             definition_string,

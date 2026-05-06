@@ -303,6 +303,43 @@ fn test_free_variable_not_substituted_in_type_apply() {
 }
 
 #[test]
+fn test_type_apply_preserves_later_dependent_binders() {
+    let dependent_self_type = Term::parse("c1(b1, b0)");
+    let symbol_type = Term::pi(
+        Term::type_sort(),
+        Term::pi(
+            Term::parse("c2(b0)"),
+            Term::pi(dependent_self_type, Term::bool_type()),
+        ),
+    );
+
+    let after_type = symbol_type
+        .type_apply_with_arg(&Term::new_variable(0))
+        .expect("first application");
+    assert_eq!(
+        format!("{}", after_type),
+        "(c2(x0) -> (c1(x0, b0) -> Bool))"
+    );
+
+    let after_value = after_type
+        .type_apply_with_arg(&Term::new_variable(1))
+        .expect("second application");
+    assert_eq!(format!("{}", after_value), "(c1(x0, x1) -> Bool)");
+}
+
+#[test]
+fn test_convert_free_to_bound_preserves_existing_local_binders() {
+    let function_type = Term::pi(
+        Term::parse("c2(x0)"),
+        Term::pi(Term::parse("c1(x0, b0)"), Term::bool_type()),
+    );
+
+    let converted = function_type.convert_free_to_bound(1);
+
+    assert_eq!(format!("{}", converted), "(c2(b0) -> (c1(b1, b0) -> Bool))");
+}
+
+#[test]
 fn test_checked_type_with_context_rejects_invalid_typeclass_type_arg() {
     let mut kctx = KernelContext::new();
 

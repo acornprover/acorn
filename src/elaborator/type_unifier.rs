@@ -276,11 +276,7 @@ impl<'a> TypeUnifier<'a> {
                 }
                 match generic_value {
                     AcornValue::Variable(_, generic_type) => {
-                        if &instance_value.get_type() == generic_type {
-                            Ok(())
-                        } else {
-                            Err(Error::Other)
-                        }
+                        self.match_instance(generic_type, &instance_value.get_type())
                     }
                     _ => Err(Error::Other),
                 }
@@ -497,7 +493,7 @@ impl<'a> TypeUnifier<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elaborator::acorn_type::TypeParam;
+    use crate::elaborator::acorn_type::{DependentTypeArg, TypeParam};
 
     /// A dummy registry that says nothing is an instance of anything.
     struct DummyRegistry;
@@ -626,5 +622,50 @@ mod tests {
         let result = unifier.match_instance(&t, &AcornType::Bool);
         assert!(result.is_ok(), "Unifying T with Bool should succeed");
         assert_eq!(unifier.mapping.get("T"), Some(&AcornType::Bool));
+    }
+
+    #[test]
+    fn test_dependent_value_arg_type_uses_type_mapping() {
+        let registry = DummyRegistry;
+        let mut unifier = TypeUnifier::new(&registry);
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let generic_t = AcornType::Variable(t_param.clone());
+        let instance_t = AcornType::Arbitrary(t_param.clone());
+        let generic_set_t = AcornType::Data(set_datatype.clone(), vec![generic_t.clone()]);
+        let instance_set_t = AcornType::Data(set_datatype, vec![instance_t.clone()]);
+        let generic_value = AcornValue::Variable(0, generic_set_t);
+        let instance_value = AcornValue::Variable(0, instance_set_t);
+        let generic_subspace = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(generic_t),
+                DependentTypeArg::Value(generic_value),
+            ],
+        );
+        let instance_subspace = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(instance_t.clone()),
+                DependentTypeArg::Value(instance_value),
+            ],
+        );
+
+        let result = unifier.match_instance(&generic_subspace, &instance_subspace);
+        assert!(
+            result.is_ok(),
+            "dependent value argument type should use the mapped type parameter"
+        );
+        assert_eq!(unifier.mapping.get("T"), Some(&instance_t));
     }
 }

@@ -413,7 +413,6 @@ pub(crate) fn register_value_symbols(
         if kernel_context.symbol_table.get_symbol(&c.name).is_some() {
             return;
         }
-
         let symbol_value_param_types =
             if value_params_are_visible_prefix(&c.name, &c.generic_type, &c.value_param_types) {
                 vec![]

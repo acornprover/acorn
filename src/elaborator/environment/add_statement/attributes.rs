@@ -50,31 +50,39 @@ impl Environment {
                     )));
                 }
 
-                for ((expr, family_param), expected_kind) in ats
+                let family_param_kinds = FamilyParam::canonical_kinds(&family_params);
+                for (((expr, family_param), family_param_kind), expected_kind) in ats
                     .type_params
                     .iter()
                     .zip(&family_params)
+                    .zip(&family_param_kinds)
                     .zip(&expected_param_kinds)
                 {
-                    match (family_param, expected_kind) {
+                    match (family_param, family_param_kind, expected_kind) {
                         (
-                            crate::elaborator::acorn_type::FamilyParam::Type(_),
-                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                            FamilyParam::Type(_),
+                            FamilyParamKind::Type(_),
+                            FamilyParamKind::Type(_),
                         ) => {}
                         (
-                            crate::elaborator::acorn_type::FamilyParam::Value(value_param),
-                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                            FamilyParam::Value(_),
+                            FamilyParamKind::Value(value_type),
+                            FamilyParamKind::Value(expected_type),
+                        ) if value_type == expected_type => {}
+                        (
+                            FamilyParam::Value(_),
+                            FamilyParamKind::Value(value_type),
+                            FamilyParamKind::Value(expected_type),
                         ) => {
-                            if value_param.value_type != *expected_type {
-                                return Err(expr.name.error(&format!(
-                                    "expected a value parameter of type {}, but found {}",
-                                    expected_type, value_param.value_type
-                                )));
-                            }
+                            return Err(expr.name.error(&format!(
+                                "expected a value parameter of type {}, but found {}",
+                                expected_type, value_type
+                            )));
                         }
                         (
-                            crate::elaborator::acorn_type::FamilyParam::Type(_),
-                            crate::elaborator::acorn_type::FamilyParamKind::Value(expected_type),
+                            FamilyParam::Type(_),
+                            FamilyParamKind::Type(_),
+                            FamilyParamKind::Value(expected_type),
                         ) => {
                             return Err(expr.name.error(&format!(
                                 "expected a dependent value parameter like '{}: {}'",
@@ -83,13 +91,15 @@ impl Environment {
                             )));
                         }
                         (
-                            crate::elaborator::acorn_type::FamilyParam::Value(_),
-                            crate::elaborator::acorn_type::FamilyParamKind::Type(_),
+                            FamilyParam::Value(_),
+                            FamilyParamKind::Value(_),
+                            FamilyParamKind::Type(_),
                         ) => {
                             return Err(expr
                                 .name
                                 .error("expected a type parameter here, not a value parameter"));
                         }
+                        _ => unreachable!("family parameter kind should match the parameter"),
                     }
                 }
                 for (expr, family_param) in ats.type_params.iter().zip(&family_params) {

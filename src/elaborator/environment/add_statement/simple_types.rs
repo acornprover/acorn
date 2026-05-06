@@ -42,17 +42,13 @@ impl Environment {
             let definition_string = Some(statement.to_string());
             self.bindings.add_potential_type_with_family_params(
                 &ts.name_token,
-                family_params
-                    .into_iter()
-                    .map(|param| param.kind())
-                    .collect(),
+                FamilyParam::canonical_kinds(&family_params),
                 doc_comments,
                 Some(ts.name_token.range()),
                 definition_string,
             );
         } else {
-            let family_param_kinds: Vec<_> =
-                family_params.iter().map(|param| param.kind()).collect();
+            let family_param_kinds = FamilyParam::canonical_kinds(&family_params);
             let type_params: Vec<_> = family_params
                 .iter()
                 .filter_map(|param| param.as_type_param().cloned())

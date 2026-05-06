@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::Range;
 
-use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_type::{AcornType, PotentialType, TypeParam};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::environment::{Environment, LineType};
 use crate::elaborator::error::{self, ErrorContext};
@@ -159,6 +159,13 @@ impl Block {
         let param_pairs: Vec<(String, AcornType)> = type_params
             .iter()
             .map(|param| {
+                if let Some(PotentialType::Resolved(AcornType::Arbitrary(existing))) =
+                    subenv.bindings.get_type_for_typename(&param.name)
+                {
+                    if existing == param {
+                        return (param.name.clone(), AcornType::Arbitrary(existing.clone()));
+                    }
+                }
                 (
                     param.name.clone(),
                     subenv.bindings.add_arbitrary_type(param.clone()),

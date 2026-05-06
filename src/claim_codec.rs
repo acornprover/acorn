@@ -6,6 +6,7 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::stack::Stack;
+use crate::elaborator::to_term::lower_type_to_term;
 use crate::kernel::atom::AtomId;
 use crate::kernel::certificate_step::Claim;
 use crate::kernel::clause::Clause;
@@ -301,11 +302,10 @@ impl ClaimCodec {
                     }
                 };
                 if let Some(selected_type) = selected_type {
+                    let mut type_context = kernel_context.clone();
                     resolved_type_var_map.set(
                         var_id as AtomId,
-                        kernel_context
-                            .type_store
-                            .to_type_term_with_vars(&selected_type, None),
+                        lower_type_to_term(&mut type_context, &selected_type, None),
                     );
                     roundtrip_type_args.push(selected_type);
                 } else {

@@ -405,6 +405,7 @@ impl Environment {
             let mut fn_value = AcornValue::lambda(arg_types, v);
 
             let params = if let Some(datatype_params) = datatype_params {
+                fn_value = lambda_over_datatype_value_params(Some(datatype_params), fn_value);
                 fn_value = fn_value.genericize(&datatype_params.type_params);
 
                 if !fn_param_names.is_empty() {
@@ -419,7 +420,6 @@ impl Environment {
                 fn_param_names
             };
 
-            let fn_value = lambda_over_datatype_value_params(datatype_params, fn_value);
             self.define_constant(
                 defined_name,
                 params,

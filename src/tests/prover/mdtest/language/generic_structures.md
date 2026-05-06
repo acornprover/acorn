@@ -85,6 +85,59 @@ theorem check_constraint(p: EqCheckedPair[Foo]) {
 }
 ```
 
+## Dependent Value Parameter Uses Earlier Typeclass Parameter
+
+This covers structure family parameters where a later value parameter depends on
+an earlier constrained type parameter.
+
+```acorn
+type Set[T]: axiom
+
+typeclass T: Blah {
+    marker: T -> Bool
+}
+
+structure Subspace[T: Blah, a: Set[T]] {
+    value: T
+}
+```
+
+## Dependent Structure Projections And Instances
+
+```acorn
+type Set[T]: axiom
+
+typeclass T: Blah {
+    marker: T -> Bool
+}
+
+structure Subspace[T: Blah, a: Set[T]] {
+    value: T
+}
+
+theorem subspace_round_trip[T: Blah, a: Set[T]](x: T) {
+    Subspace[T, a].new(x).value = x
+}
+
+typeclass X: AlwaysTrue {
+    ok: X -> Bool
+
+    ok_true(x: X) {
+        x.ok
+    }
+}
+
+instance Subspace[T: Blah, a: Set[T]]: AlwaysTrue {
+    define ok(self) -> Bool {
+        true
+    }
+}
+
+theorem subspace_ok[T: Blah, a: Set[T]](x: Subspace[T, a]) {
+    x.ok
+}
+```
+
 ## Function Satisfy Keeps Generic Structure Parameter Order
 
 This covers a regression where symbol registration inferred type parameters in
