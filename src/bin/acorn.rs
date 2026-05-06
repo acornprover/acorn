@@ -517,13 +517,14 @@ enum Command {
         #[clap(long, help = "Exit immediately on the first search failure.")]
         fail_fast: bool,
 
-        /// Timeout in seconds for proof search (default: 5)
+        /// Timeout in seconds for proof search
         #[clap(
             long,
+            default_value_t = 1.0,
             help = "Timeout in seconds for proof search.",
             value_name = "SECONDS"
         )]
-        timeout: Option<f32>,
+        timeout: f32,
 
         /// Maximum number of non-factual activations before stopping the search
         #[clap(
@@ -1039,9 +1040,7 @@ async fn main() {
             verifier.builder.check_jobs = eval_jobs;
             verifier.builder.operation_verb = "proved";
             verifier.exit_on_warning = fail_fast;
-            if let Some(t) = timeout {
-                verifier.builder.timeout_secs = t;
-            }
+            verifier.builder.timeout_secs = timeout;
             if let Some(limit) = activations {
                 verifier.builder.activation_limit = limit as i32;
             }
@@ -1844,13 +1843,23 @@ mod tests {
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
                 assert!(fail_fast);
-                assert_eq!(timeout, Some(1.0));
+                assert_eq!(timeout, 1.0);
                 assert_eq!(activations, Some(20));
                 assert!(shallow);
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert!(timing);
             }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_eval_default_timeout_is_one_second() {
+        let args = Args::try_parse_from(["acorn", "eval"]).expect("eval command should parse");
+
+        match args.command {
+            Some(Command::Eval { timeout, .. }) => assert_eq!(timeout, 1.0),
             _ => panic!("unexpected command"),
         }
     }

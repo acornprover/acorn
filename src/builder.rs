@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -319,6 +319,13 @@ struct ModuleBuildResult {
     metrics: BuildMetrics,
     module_timings: Vec<ModuleTiming>,
     events: Vec<BuildEvent>,
+}
+
+struct ScheduledModule<'a> {
+    index: usize,
+    target: ModuleDescriptor,
+    env: &'a Environment,
+    work_estimate: usize,
 }
 
 #[derive(Clone)]
@@ -930,7 +937,7 @@ impl<'a> Builder<'a> {
             project,
             event_handler,
             status: BuildStatus::Good,
-            id: NEXT_BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            id: NEXT_BUILD_ID.fetch_add(1, Ordering::SeqCst),
             metrics: BuildMetrics::new(),
             module_timings: Vec::new(),
             log_when_slow: false,
@@ -2112,6 +2119,36 @@ impl<'a> Builder<'a> {
             && !self.project.config.write_cache
     }
 
+    fn eval_module_search_estimate(&self, target: &ModuleDescriptor) -> usize {
+        let has_skip_zero = self.eval_skip_modes.contains(&0);
+        let nonzero_skip_count = self
+            .eval_skip_modes
+            .iter()
+            .filter(|&&skip| skip > 0)
+            .count();
+
+        let Some(store) = self.project.build_cache.get_certificates(target) else {
+            return 0;
+        };
+        store
+            .certs
+            .iter()
+            .map(|cert| match &cert.proof {
+                Some(proof) if proof.is_empty() => nonzero_skip_count,
+                Some(_) => nonzero_skip_count + usize::from(has_skip_zero),
+                None => 0,
+            })
+            .sum()
+    }
+
+    fn module_work_estimate(&self, target: &ModuleDescriptor, env: &Environment) -> usize {
+        if self.eval_mode {
+            self.eval_module_search_estimate(target)
+        } else {
+            env.iter_goals().count()
+        }
+    }
+
     fn build_module_on_worker(
         project: &Project,
         cancellation_token: CancellationToken,
@@ -2159,38 +2196,51 @@ impl<'a> Builder<'a> {
 
     fn build_modules_parallel(&mut self, modules: Vec<(usize, ModuleDescriptor, &Environment)>) {
         let worker_count = self.check_jobs.min(modules.len()).max(1);
-        let mut buckets = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
-        for (offset, module) in modules.into_iter().enumerate() {
-            buckets[offset % worker_count].push(module);
-        }
+        let mut modules = modules
+            .into_iter()
+            .map(|(index, target, env)| ScheduledModule {
+                work_estimate: self.module_work_estimate(&target, env),
+                index,
+                target,
+                env,
+            })
+            .collect::<Vec<_>>();
+        modules.sort_by(|a, b| {
+            b.work_estimate
+                .cmp(&a.work_estimate)
+                .then_with(|| a.index.cmp(&b.index))
+        });
 
         let project = self.project;
         let worker_config = ModuleWorkerConfig::from_builder(self);
         let cancellation_token = self.cancellation_token.clone();
+        let next_module = AtomicUsize::new(0);
         let mut results = Vec::new();
 
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
-            for bucket in buckets {
-                if bucket.is_empty() {
-                    continue;
-                }
+            for _ in 0..worker_count {
                 let token = cancellation_token.clone();
                 let config = worker_config.clone();
+                let modules = &modules;
+                let next_module = &next_module;
                 handles.push(scope.spawn(move || {
-                    bucket
-                        .into_iter()
-                        .map(|(index, target, env)| {
-                            Self::build_module_on_worker(
-                                project,
-                                token.clone(),
-                                index,
-                                target,
-                                env,
-                                &config,
-                            )
-                        })
-                        .collect::<Vec<_>>()
+                    let mut worker_results = Vec::new();
+                    loop {
+                        let module_index = next_module.fetch_add(1, Ordering::Relaxed);
+                        let Some(module) = modules.get(module_index) else {
+                            break;
+                        };
+                        worker_results.push(Self::build_module_on_worker(
+                            project,
+                            token.clone(),
+                            module.index,
+                            module.target.clone(),
+                            module.env,
+                            &config,
+                        ));
+                    }
+                    worker_results
                 }));
             }
 
