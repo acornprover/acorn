@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use walkdir::WalkDir;
 
-fn default_check_jobs() -> usize {
+fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|threads| threads.get())
         .unwrap_or(1)
@@ -540,6 +540,15 @@ enum Command {
         )]
         shallow: bool,
 
+        /// Number of worker threads to use for full-module evaluation
+        #[clap(
+            short = 'j',
+            long = "jobs",
+            value_name = "JOBS",
+            help = "Number of worker threads to use for full-module evaluation. Defaults to available parallelism."
+        )]
+        jobs: Option<usize>,
+
         /// Which previous plain proposition counts to omit when evaluating each benchmark goal
         #[clap(
             long,
@@ -923,7 +932,7 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            let check_jobs = jobs.unwrap_or_else(default_check_jobs);
+            let check_jobs = jobs.unwrap_or_else(default_jobs);
             if check_jobs == 0 {
                 println!("Error: --jobs must be at least 1");
                 std::process::exit(1);
@@ -986,6 +995,7 @@ async fn main() {
             timeout,
             activations,
             shallow,
+            jobs,
             skip,
             timing,
         }) => {
@@ -1000,6 +1010,11 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            let eval_jobs = jobs.unwrap_or_else(default_jobs);
+            if eval_jobs == 0 {
+                println!("Error: --jobs must be at least 1");
+                std::process::exit(1);
+            }
 
             let config = ProjectConfig {
                 use_filesystem: true,
@@ -1021,6 +1036,7 @@ async fn main() {
             verifier.builder.eval_mode = true;
             verifier.builder.eval_skip_modes = skip_modes;
             verifier.builder.shallow_search = shallow;
+            verifier.builder.check_jobs = eval_jobs;
             verifier.builder.operation_verb = "proved";
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -1807,6 +1823,8 @@ mod tests {
             "--activations",
             "20",
             "--shallow",
+            "--jobs",
+            "3",
             "--skip",
             "01",
             "--timing",
@@ -1820,6 +1838,7 @@ mod tests {
                 timeout,
                 activations,
                 shallow,
+                jobs,
                 skip,
                 timing,
             }) => {
@@ -1828,6 +1847,7 @@ mod tests {
                 assert_eq!(timeout, Some(1.0));
                 assert_eq!(activations, Some(20));
                 assert!(shallow);
+                assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert!(timing);
             }

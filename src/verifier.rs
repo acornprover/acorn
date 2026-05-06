@@ -852,6 +852,73 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_can_search_modules_in_parallel() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem foo_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("bar.ac")
+            .write_str(
+                r#"
+                theorem bar_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "foo_goal".to_string(),
+                vec!["dummy proof step".to_string()],
+            )],
+        }
+        .save(build.child("foo.jsonl").path())
+        .unwrap();
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "bar_goal".to_string(),
+                vec!["dummy proof step".to_string()],
+            )],
+        }
+        .save(build.child("bar.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+            },
+            None,
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.check_jobs = 2;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("parallel eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.eval_corpus_total, 2);
+        assert_eq!(output.metrics.eval_corpus_matched, 2);
+        assert_eq!(output.metrics.eval_corpus_unmatched, 0);
+        assert_eq!(output.metrics.searches_total, 2);
+        assert_eq!(output.metrics.searches_success, 2);
+        assert_eq!(output.module_timings.len(), 2);
+    }
+
+    #[test]
     fn test_eval_skip_omits_previous_plain_proposition() {
         let (acornlib, src, build) = setup();
 
