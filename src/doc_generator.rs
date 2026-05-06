@@ -61,6 +61,18 @@ impl<'a> DocGenerator<'a> {
         DocGenerator { project }
     }
 
+    fn heading_id(prefix: &str, title: &str) -> String {
+        let mut id = prefix.to_string();
+        for c in title.chars() {
+            if c.is_ascii_alphanumeric() {
+                id.push(c.to_ascii_lowercase());
+            } else if c == '_' || c == '-' {
+                id.push('-');
+            }
+        }
+        id
+    }
+
     /// Checks if we should document an entity (type or typeclass) from this module.
     /// Returns Ok(true) if we should document it, Ok(false) if we should skip it,
     /// or an error if there's a conflict.
@@ -111,7 +123,8 @@ impl<'a> DocGenerator<'a> {
         doc_comments: Option<&Vec<String>>,
         module_id: crate::module::ModuleId,
     ) -> Result<(), DocError> {
-        writeln!(file, "# {}", title)?;
+        let heading_id = Self::heading_id("entity-", title);
+        writeln!(file, "# {} <!-- #{} -->", title, heading_id)?;
 
         // Write definition string if it exists
         if let Some(definition) = definition_string {
