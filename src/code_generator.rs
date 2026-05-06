@@ -1931,9 +1931,10 @@ impl CodeGenerator<'_> {
 
                 if c.params.len() == 1 {
                     if let Some((module_id, entity, attr)) = c.name.as_attribute() {
-                        if self
-                            .bindings
-                            .inherits_attributes(&c.params[0], module_id, entity)
+                        if matches!(c.name, ConstantName::TypeclassAttribute(..))
+                            && self
+                                .bindings
+                                .inherits_attributes(&c.params[0], module_id, entity)
                         {
                             // We can use receiver+attribute syntax
                             let lhs = self.type_to_expr(&c.params[0])?;

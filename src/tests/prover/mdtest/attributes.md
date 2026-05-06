@@ -119,6 +119,40 @@ Just testing that we can define something, then immediately prove the definition
     
 ```
 
+## Nested Static Attribute Certificate Replay
+
+```acorn
+    inductive MyList[T] {
+        nil
+        cons(T, MyList[T])
+    }
+
+    structure Box[T] {
+        items: MyList[T]
+    }
+
+    define box_from_list[T](items: MyList[T]) -> Box[T] {
+        Box.new(items)
+    }
+
+    attributes Box[T] {
+        let from_list: MyList[T] -> Box[T] = box_from_list
+    }
+
+    define nested_list[A](items: MyList[A]) -> MyList[Box[A]] {
+        MyList.nil[Box[A]]
+    }
+
+    define nested_box[A](items: MyList[A]) -> Box[Box[A]] {
+        Box.from_list[Box[A]](nested_list[A](items))
+    }
+
+    theorem nested_box_unfold[A](items: MyList[A]) {
+        nested_box[A](items) = Box.from_list[Box[A]](nested_list[A](items))
+    }
+    
+```
+
 ## Proving With Let Satisfy Attribute
 
 ```acorn
