@@ -14,6 +14,22 @@ use crate::kernel::variable_map::VariableMap;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PassivePushStats {
+    pub pushed_steps: usize,
+    pub scoring_time_secs: f64,
+    pub indexing_time_secs: f64,
+}
+
+impl PassivePushStats {
+    fn add(&mut self, other: PassivePushStats) {
+        self.pushed_steps += other.pushed_steps;
+        self.scoring_time_secs += other.scoring_time_secs;
+        self.indexing_time_secs += other.indexing_time_secs;
+    }
+}
 
 // The PassiveSet stores a bunch of clauses.
 // A clause in the passive set can be activated, and it can be simplified, but to do
@@ -173,14 +189,30 @@ impl PassiveSet {
     }
 
     // Adding many new steps at once.
-    pub fn push_batch(&mut self, steps: Vec<ProofStep>, kernel_context: &KernelContext) {
+    pub fn push_batch(
+        &mut self,
+        steps: Vec<ProofStep>,
+        kernel_context: &KernelContext,
+    ) -> PassivePushStats {
         if steps.is_empty() {
-            return;
+            return PassivePushStats::default();
         }
+        let pushed_steps = steps.len();
+        let scoring_start = Instant::now();
         let features = steps.iter().map(Features::new).collect::<Vec<_>>();
         let scores = Score::batch(self.scorer.as_ref(), &features);
+        let scoring_time_secs = scoring_start.elapsed().as_secs_f64();
+
+        let indexing_start = Instant::now();
         for (step, score) in steps.into_iter().zip(scores.into_iter()) {
             self.push_with_score(step, score, kernel_context);
+        }
+        let indexing_time_secs = indexing_start.elapsed().as_secs_f64();
+
+        PassivePushStats {
+            pushed_steps,
+            scoring_time_secs,
+            indexing_time_secs,
         }
     }
 
@@ -289,7 +321,7 @@ impl PassiveSet {
         right: &Term,
         positive: bool,
         flipped: bool,
-    ) {
+    ) -> PassivePushStats {
         let mut new_steps = vec![];
         for &(clause_id, literal_index) in
             self.literals
@@ -412,7 +444,7 @@ impl PassiveSet {
             new_steps.push(simplified);
         }
 
-        self.push_batch(new_steps, kernel_context);
+        self.push_batch(new_steps, kernel_context)
     }
 
     pub fn get_contradiction(&self) -> Option<Vec<ProofStep>> {
@@ -437,11 +469,11 @@ impl PassiveSet {
         step: &ProofStep,
         active_set: &ActiveSet,
         kernel_context: &KernelContext,
-    ) {
+    ) -> PassivePushStats {
         assert!(step.clause.literals.len() == 1);
         let local_context = step.clause.get_local_context();
         let literal = &step.clause.literals[0];
-        self.simplify_one_direction(
+        let mut stats = self.simplify_one_direction(
             activated_id,
             &step,
             local_context,
@@ -454,7 +486,7 @@ impl PassiveSet {
         );
         if !literal.strict_kbo() {
             let (right, left, reversed_context) = literal.normalized_reversed(local_context);
-            self.simplify_one_direction(
+            let reversed_stats = self.simplify_one_direction(
                 activated_id,
                 &step,
                 &reversed_context,
@@ -465,7 +497,9 @@ impl PassiveSet {
                 literal.positive,
                 true,
             );
+            stats.add(reversed_stats);
         }
+        stats
     }
 
     // The number of clauses remaining in the passive set.

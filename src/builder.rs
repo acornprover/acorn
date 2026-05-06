@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -22,7 +22,7 @@ use crate::module::{LoadState, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::proof_display::display_certificate_lines;
-use crate::prover::{Outcome, ProverMode};
+use crate::prover::{Outcome, ProverMode, SearchStats};
 
 static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
 const MAX_CHECK_CERT_ERROR_CHARS: usize = 600;
@@ -468,6 +468,9 @@ pub struct BuildMetrics {
     /// Per-skip proof search metrics for eval runs.
     pub eval_skip_metrics: Vec<EvalSkipMetrics>,
 
+    /// Aggregate search instrumentation for eval runs.
+    pub eval_search_instrumentation: EvalSearchInstrumentation,
+
     /// Time spent collecting loaded environments and reporting load errors.
     pub loading_time: f64,
 
@@ -542,6 +545,111 @@ impl EvalSkipMetrics {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct EvalSearchInstrumentation {
+    pub searches: i32,
+    pub initial_passive_total: usize,
+    pub initial_active_total: usize,
+    pub final_passive_total: usize,
+    pub final_active_total: usize,
+    pub max_passive_total: usize,
+    pub max_passive_peak: usize,
+    pub activated_steps: usize,
+    pub factual_activations: usize,
+    pub nonfactual_activations: usize,
+    pub generated_steps: usize,
+    pub accepted_steps: usize,
+    pub auto_rejected_steps: usize,
+    pub simplified_away_steps: usize,
+    pub passive_simplification_steps: usize,
+    pub scoring_time_secs: f64,
+    pub passive_indexing_time_secs: f64,
+    pub activation_time_secs: f64,
+    pub active_inference_time_secs: f64,
+    pub active_simplification_time_secs: f64,
+    pub passive_simplification_time_secs: f64,
+    pub activated_by_rule: BTreeMap<String, usize>,
+    pub generated_by_rule: BTreeMap<String, usize>,
+}
+
+impl EvalSearchInstrumentation {
+    fn add_search(&mut self, stats: &SearchStats) {
+        self.searches += 1;
+        self.initial_passive_total += stats.initial_passive_len;
+        self.initial_active_total += stats.initial_active_len;
+        self.final_passive_total += stats.final_passive_len;
+        self.final_active_total += stats.final_active_len;
+        self.max_passive_total += stats.max_passive_len;
+        self.max_passive_peak = self.max_passive_peak.max(stats.max_passive_len);
+        self.activated_steps += stats.activated_steps;
+        self.factual_activations += stats.factual_activations;
+        self.nonfactual_activations += stats.nonfactual_activations;
+        self.generated_steps += stats.generated_steps;
+        self.accepted_steps += stats.accepted_steps;
+        self.auto_rejected_steps += stats.auto_rejected_steps;
+        self.simplified_away_steps += stats.simplified_away_steps;
+        self.passive_simplification_steps += stats.passive_simplification_steps;
+        self.scoring_time_secs += stats.scoring_time_secs;
+        self.passive_indexing_time_secs += stats.passive_indexing_time_secs;
+        self.activation_time_secs += stats.activation_time_secs;
+        self.active_inference_time_secs += stats.active_inference_time_secs;
+        self.active_simplification_time_secs += stats.active_simplification_time_secs;
+        self.passive_simplification_time_secs += stats.passive_simplification_time_secs;
+        for (rule, count) in &stats.activated_by_rule {
+            *self.activated_by_rule.entry(rule.clone()).or_default() += count;
+        }
+        for (rule, count) in &stats.generated_by_rule {
+            *self.generated_by_rule.entry(rule.clone()).or_default() += count;
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.searches += other.searches;
+        self.initial_passive_total += other.initial_passive_total;
+        self.initial_active_total += other.initial_active_total;
+        self.final_passive_total += other.final_passive_total;
+        self.final_active_total += other.final_active_total;
+        self.max_passive_total += other.max_passive_total;
+        self.max_passive_peak = self.max_passive_peak.max(other.max_passive_peak);
+        self.activated_steps += other.activated_steps;
+        self.factual_activations += other.factual_activations;
+        self.nonfactual_activations += other.nonfactual_activations;
+        self.generated_steps += other.generated_steps;
+        self.accepted_steps += other.accepted_steps;
+        self.auto_rejected_steps += other.auto_rejected_steps;
+        self.simplified_away_steps += other.simplified_away_steps;
+        self.passive_simplification_steps += other.passive_simplification_steps;
+        self.scoring_time_secs += other.scoring_time_secs;
+        self.passive_indexing_time_secs += other.passive_indexing_time_secs;
+        self.activation_time_secs += other.activation_time_secs;
+        self.active_inference_time_secs += other.active_inference_time_secs;
+        self.active_simplification_time_secs += other.active_simplification_time_secs;
+        self.passive_simplification_time_secs += other.passive_simplification_time_secs;
+        for (rule, count) in &other.activated_by_rule {
+            *self.activated_by_rule.entry(rule.clone()).or_default() += count;
+        }
+        for (rule, count) in &other.generated_by_rule {
+            *self.generated_by_rule.entry(rule.clone()).or_default() += count;
+        }
+    }
+
+    fn avg_usize(value: usize, searches: i32) -> f64 {
+        if searches == 0 {
+            0.0
+        } else {
+            value as f64 / searches as f64
+        }
+    }
+
+    fn avg_secs_ms(value: f64, searches: i32) -> f64 {
+        if searches == 0 {
+            0.0
+        } else {
+            1000.0 * value / searches as f64
+        }
+    }
+}
+
 fn search_failure_buckets(
     searches_timeout: i32,
     searches_exhausted: i32,
@@ -574,6 +682,32 @@ fn search_failure_buckets(
         buckets.push(format!("{} interrupted", searches_interrupted));
     }
     buckets
+}
+
+fn top_rule_summary(counts: &BTreeMap<String, usize>, limit: usize) -> Option<String> {
+    if counts.is_empty() {
+        return None;
+    }
+
+    let mut entries = counts.iter().collect::<Vec<_>>();
+    entries.sort_by(|(rule_a, count_a), (rule_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| rule_a.cmp(rule_b))
+    });
+
+    let mut parts = entries
+        .iter()
+        .take(limit)
+        .map(|(rule, count)| format!("{} {}", count, rule))
+        .collect::<Vec<_>>();
+    if entries.len() > limit {
+        let other = entries
+            .iter()
+            .skip(limit)
+            .map(|(_, count)| **count)
+            .sum::<usize>();
+        parts.push(format!("{} other", other));
+    }
+    Some(parts.join(", "))
 }
 
 /// Timing data for work performed on one module during the verification phase.
@@ -661,6 +795,10 @@ impl BuildMetrics {
             .record_search(outcome, elapsed_secs);
     }
 
+    fn record_eval_search_instrumentation(&mut self, stats: &SearchStats) {
+        self.eval_search_instrumentation.add_search(stats);
+    }
+
     fn add_module_result(&mut self, result: &BuildMetrics) {
         self.goals_done += result.goals_done;
         self.goals_success += result.goals_success;
@@ -690,6 +828,8 @@ impl BuildMetrics {
             self.eval_skip_metrics_mut(skip_metrics.skip)
                 .add(skip_metrics);
         }
+        self.eval_search_instrumentation
+            .add(&result.eval_search_instrumentation);
     }
 
     pub fn info_lines(&self) -> Vec<String> {
@@ -761,6 +901,47 @@ impl BuildMetrics {
             );
             if !buckets.is_empty() {
                 lines.push(format!("search failures: {}", buckets.join(", ")));
+            }
+        }
+        if self.eval_mode && self.eval_search_instrumentation.searches > 0 {
+            let stats = &self.eval_search_instrumentation;
+            let searches = stats.searches;
+            lines.push(format!(
+                "eval internals: {:.1} initial passive avg, {:.1} max passive avg ({} peak), {:.1} final passive avg",
+                EvalSearchInstrumentation::avg_usize(stats.initial_passive_total, searches),
+                EvalSearchInstrumentation::avg_usize(stats.max_passive_total, searches),
+                stats.max_passive_peak,
+                EvalSearchInstrumentation::avg_usize(stats.final_passive_total, searches),
+            ));
+            lines.push(format!(
+                "eval activations: {} factual ({:.1}/search), {} non-factual ({:.1}/search)",
+                stats.factual_activations,
+                EvalSearchInstrumentation::avg_usize(stats.factual_activations, searches),
+                stats.nonfactual_activations,
+                EvalSearchInstrumentation::avg_usize(stats.nonfactual_activations, searches),
+            ));
+            lines.push(format!(
+                "eval generated: {} candidates ({:.1}/search), {} accepted, {} auto-rejected, {} simplified away, {} passive simplifications",
+                stats.generated_steps,
+                EvalSearchInstrumentation::avg_usize(stats.generated_steps, searches),
+                stats.accepted_steps,
+                stats.auto_rejected_steps,
+                stats.simplified_away_steps,
+                stats.passive_simplification_steps,
+            ));
+            lines.push(format!(
+                "eval timing internals: {:.1} ms active inference/search, {:.1} ms active simplification/search, {:.1} ms passive simplification/search, {:.1} ms scoring/search, {:.1} ms passive indexing/search",
+                EvalSearchInstrumentation::avg_secs_ms(stats.active_inference_time_secs, searches),
+                EvalSearchInstrumentation::avg_secs_ms(stats.active_simplification_time_secs, searches),
+                EvalSearchInstrumentation::avg_secs_ms(stats.passive_simplification_time_secs, searches),
+                EvalSearchInstrumentation::avg_secs_ms(stats.scoring_time_secs, searches),
+                EvalSearchInstrumentation::avg_secs_ms(stats.passive_indexing_time_secs, searches),
+            ));
+            if let Some(summary) = top_rule_summary(&stats.activated_by_rule, 6) {
+                lines.push(format!("eval activated rules: {}", summary));
+            }
+            if let Some(summary) = top_rule_summary(&stats.generated_by_rule, 6) {
+                lines.push(format!("eval generated rules: {}", summary));
             }
         }
         let show_skip_metrics = self.eval_mode
@@ -1598,6 +1779,11 @@ impl<'a> Builder<'a> {
             }
         };
         let outcome = processor.search(mode, goal_kernel_context);
+        if self.eval_mode {
+            if let Some(stats) = processor.last_search_stats() {
+                self.metrics.record_eval_search_instrumentation(stats);
+            }
+        }
         if self.verbose {
             processor
                 .prover()
