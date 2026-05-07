@@ -66,6 +66,61 @@ The dependent value parameter `a: Set[T]` should be inferred from
     }
 ```
 
+## Dependent Value Parameter Instance Empty Set Certificate
+
+The generated certificate for an instance `open_empty` axiom should preserve
+the value parameter `a: Set[T]` when the goal mentions
+`Set[Subspace[T, a]].empty_set`.
+
+Ignored while dependent value parameter telescope handling is being refactored.
+
+```acorn-ignore
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    define constant_false[T](x: T) -> Bool {
+        false
+    }
+
+    attributes Set[T] {
+        let empty_set = Set[T].new(constant_false[T])
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+
+        open_empty {
+            T.is_open(Set[T].empty_set)
+        }
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    define subspace_open[T: TopologicalSpace, a: Set[T]](
+        u: Set[Subspace[T, a]]) -> Bool {
+        exists(v: Set[T]) {
+            T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
+                v.contains(x.value)
+            })
+        }
+    }
+
+    axiom subspace_open_empty_carrier[T: TopologicalSpace, a: Set[T]] {
+        subspace_open(Set[Subspace[T, a]].empty_set)
+    }
+
+    instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
+        let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
+            subspace_open(u)
+        }
+    }
+```
+
 ## Dependent Value Parameter Function Accepts Explicit Argument
 
 The same dependent value parameter should also be passable explicitly
