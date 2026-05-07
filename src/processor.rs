@@ -13,7 +13,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
 use crate::project::Project;
-use crate::prover::{Outcome, Prover, ProverMode};
+use crate::prover::{Outcome, Prover, ProverMode, SearchStats};
 use tokio_util::sync::CancellationToken;
 
 /// The processor represents what we do with a stream of facts.
@@ -223,6 +223,10 @@ impl Processor {
             .as_mut()
             .expect("processor was created without prover support")
             .search(mode, kernel_context)
+    }
+
+    pub fn last_search_stats(&self) -> Option<&SearchStats> {
+        self.prover.as_ref()?.last_search_stats()
     }
 
     /// Creates a certificate from the current proof state.

@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
 use super::active_set::ActiveSet;
-use super::passive_set::PassiveSet;
+use super::passive_set::{PassivePushStats, PassiveSet};
 use super::proof::Proof;
 use super::synthetic::WitnessRegistry;
 use crate::certificate::Certificate;
@@ -23,7 +23,7 @@ use crate::kernel::proof_step::{
     BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, ShallowStatus, Truthiness,
 };
 use crate::kernel::EqualityGraphContradiction;
-use crate::prover::{Outcome, ProverMode};
+use crate::prover::{Outcome, ProverMode, SearchStats};
 
 /// A traditional saturation prover. Uses just a bit of AI for scoring.
 ///
@@ -67,6 +67,12 @@ pub struct Prover {
 
     /// Metadata for prover-generated existential witnesses.
     witness_registry: WitnessRegistry,
+
+    /// Instrumentation for the search currently in progress.
+    search_stats: SearchStats,
+
+    /// Instrumentation from the most recent completed search.
+    last_search_stats: Option<SearchStats>,
 }
 
 impl Prover {
@@ -151,7 +157,29 @@ impl Prover {
             goal: None,
             kernel_context: None,
             witness_registry: WitnessRegistry::new(),
+            search_stats: SearchStats::default(),
+            last_search_stats: None,
         }
+    }
+
+    pub fn last_search_stats(&self) -> Option<&SearchStats> {
+        self.last_search_stats.as_ref()
+    }
+
+    fn record_passive_push_stats(&mut self, stats: PassivePushStats) {
+        self.search_stats.scoring_time_secs += stats.scoring_time_secs;
+        self.search_stats.passive_indexing_time_secs += stats.indexing_time_secs;
+        self.search_stats.max_passive_len = self
+            .search_stats
+            .max_passive_len
+            .max(self.passive_set.len());
+    }
+
+    fn finish_search(&mut self, outcome: Outcome) -> Outcome {
+        self.search_stats.final_passive_len = self.passive_set.len();
+        self.search_stats.final_active_len = self.active_set.len();
+        self.last_search_stats = Some(self.search_stats.clone());
+        outcome
     }
 
     /// Returns an iterator over the active proof steps
@@ -665,7 +693,9 @@ impl Prover {
     /// Activates the next clause from the queue, unless we're already done.
     /// Returns whether the prover finished.
     fn activate_next(&mut self, kernel_context: &mut KernelContext, shallow_only: bool) -> bool {
+        let activation_start = std::time::Instant::now();
         if self.final_step.is_some() {
+            self.search_stats.activation_time_secs += activation_start.elapsed().as_secs_f64();
             return true;
         }
 
@@ -677,6 +707,7 @@ impl Prover {
                 "found passive contradiction"
             );
             self.report_passive_contradiction(passive_steps, kernel_context);
+            self.search_stats.activation_time_secs += activation_start.elapsed().as_secs_f64();
             return true;
         }
 
@@ -689,9 +720,11 @@ impl Prover {
                     goal = self.goal_name_for_trace(),
                     "passive set exhausted"
                 );
+                self.search_stats.activation_time_secs += activation_start.elapsed().as_secs_f64();
                 return true;
             }
         };
+        self.search_stats.record_activation(&step);
 
         trace!(
             target: "acorn::prover::activation",
@@ -722,6 +755,7 @@ impl Prover {
         } else {
             self.activate(step, kernel_context, shallow_only)
         };
+        self.search_stats.activation_time_secs += activation_start.elapsed().as_secs_f64();
         finished
     }
 
@@ -744,12 +778,18 @@ impl Prover {
         // Use the step for simplification
         let activated_id = self.active_set.next_id();
         if activated_step.clause.literals.len() == 1 {
-            self.passive_set.simplify(
+            let passive_simplification_start = std::time::Instant::now();
+            let push_stats = self.passive_set.simplify(
                 activated_id,
                 &activated_step,
                 &self.active_set,
                 kernel_context,
             );
+            let elapsed = passive_simplification_start.elapsed().as_secs_f64();
+            let push_elapsed = push_stats.scoring_time_secs + push_stats.indexing_time_secs;
+            self.search_stats.passive_simplification_time_secs += (elapsed - push_elapsed).max(0.0);
+            self.search_stats.passive_simplification_steps += push_stats.pushed_steps;
+            self.record_passive_push_stats(push_stats);
         }
 
         // Generate new clauses
@@ -758,38 +798,54 @@ impl Prover {
             .as_ref()
             .map(|goal| goal.module_id)
             .unwrap_or_default();
+        let active_inference_start = std::time::Instant::now();
         let (alt_activated_id, generated_steps) = self.active_set.activate(
             activated_step,
             kernel_context,
             &mut self.witness_registry,
             module_id,
         );
+        self.search_stats.active_inference_time_secs +=
+            active_inference_start.elapsed().as_secs_f64();
+        self.search_stats.record_generated_batch(&generated_steps);
         assert_eq!(activated_id, alt_activated_id);
 
         let mut new_steps = vec![];
+        let active_simplification_start = std::time::Instant::now();
         for step in generated_steps {
             if step.finishes_proof() {
                 if self.maybe_finish_with_step(step, shallow_only) {
+                    self.search_stats.active_simplification_time_secs +=
+                        active_simplification_start.elapsed().as_secs_f64();
                     return true;
                 }
                 continue;
             }
 
             if step.automatic_reject() {
+                self.search_stats.auto_rejected_steps += 1;
                 continue;
             }
 
             if let Some(simple_step) = self.active_set.simplify(step, kernel_context) {
                 if simple_step.clause.is_impossible() {
                     if self.maybe_finish_with_step(simple_step, shallow_only) {
+                        self.search_stats.active_simplification_time_secs +=
+                            active_simplification_start.elapsed().as_secs_f64();
                         return true;
                     }
                     continue;
                 }
                 new_steps.push(simple_step);
+            } else {
+                self.search_stats.simplified_away_steps += 1;
             }
         }
-        self.passive_set.push_batch(new_steps, kernel_context);
+        self.search_stats.active_simplification_time_secs +=
+            active_simplification_start.elapsed().as_secs_f64();
+        let push_stats = self.passive_set.push_batch(new_steps, kernel_context);
+        self.search_stats.accepted_steps += push_stats.pushed_steps;
+        self.record_passive_push_stats(push_stats);
         if let Some(passive_steps) = self.passive_set.get_contradiction() {
             trace!(
                 target: "acorn::prover::activation",
@@ -898,6 +954,9 @@ impl Prover {
         mode: ProverMode,
         kernel_context: &mut KernelContext,
     ) -> Outcome {
+        self.search_stats = SearchStats::new(self.passive_set.len(), self.active_set.len());
+        self.last_search_stats = None;
+
         // Convert mode to actual parameters
         let (activation_limit, seconds, shallow_only) = match mode {
             ProverMode::Interactive {
@@ -920,7 +979,7 @@ impl Prover {
                     loop {
                         for token in &self.cancellation_tokens {
                             if token.is_cancelled() {
-                                return Outcome::Interrupted;
+                                return self.finish_search(Outcome::Interrupted);
                             }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -932,46 +991,46 @@ impl Prover {
         let start_time = std::time::Instant::now();
         loop {
             if let Some(outcome) = self.check_shallow_frontier(shallow_only, kernel_context) {
-                return outcome;
+                return self.finish_search(outcome);
             }
             if self.activate_next(kernel_context, shallow_only) {
                 // The prover terminated. Determine which outcome that is.
                 if let Some(final_step) = &self.final_step {
                     if final_step.truthiness == Truthiness::Counterfactual {
                         // The normal success case
-                        return Outcome::Success;
+                        return self.finish_search(Outcome::Success);
                     }
                     if let Some(goal) = &self.goal {
                         if goal.inconsistency_okay {
                             // We found an inconsistency in our assumptions, but it's okay
-                            return Outcome::Success;
+                            return self.finish_search(Outcome::Success);
                         }
                     }
                     // We found an inconsistency and it's not okay
-                    return Outcome::Inconsistent;
+                    return self.finish_search(Outcome::Inconsistent);
                 }
-                return Outcome::Exhausted;
+                return self.finish_search(Outcome::Exhausted);
             }
             for token in &self.cancellation_tokens {
                 if token.is_cancelled() {
-                    return Outcome::Interrupted;
+                    return self.finish_search(Outcome::Interrupted);
                 }
             }
             if let Some(outcome) = self.check_shallow_frontier(shallow_only, kernel_context) {
-                return outcome;
+                return self.finish_search(outcome);
             }
             if self.passive_set.is_empty() {
-                return Outcome::Exhausted;
+                return self.finish_search(Outcome::Exhausted);
             }
             if self.nonfactual_activations >= activation_limit {
                 if self.passive_set.can_pop_for_verification() {
-                    return Outcome::ShallowExplosion;
+                    return self.finish_search(Outcome::ShallowExplosion);
                 }
-                return Outcome::ActivationCap;
+                return self.finish_search(Outcome::ActivationCap);
             }
             let elapsed = start_time.elapsed().as_secs_f32();
             if elapsed >= seconds {
-                return Outcome::Timeout;
+                return self.finish_search(Outcome::Timeout);
             }
         }
     }
