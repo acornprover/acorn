@@ -121,6 +121,85 @@ Ignored while dependent value parameter telescope handling is being refactored.
     }
 ```
 
+## Dependent Value Parameter Family Predicate Hypothesis
+
+A theorem with both a structure value parameter `a: Set[T]` and a function
+parameter `fam: Set[Subspace[T, a]] -> Bool` should not confuse those value
+parameter slots while lowering a hypothesis over `Set[Subspace[T, a]]`.
+
+Ignored while dependent value parameter telescope handling is being refactored.
+
+```acorn-ignore
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    theorem family_predicate_hypothesis[T: TopologicalSpace, a: Set[T]](
+        fam: Set[Subspace[T, a]] -> Bool, p: Subspace[T, a]) {
+        (forall(s: Set[Subspace[T, a]]) {
+            fam(s) implies s.contains(p)
+        }) implies true
+    }
+```
+
+## Dependent Value Parameter Inline Instance Big Union
+
+The inline `Subspace[T, a]: TopologicalSpace` instance should discharge the
+`open_big_union` obligation for its generated `is_open` function.
+
+Ignored while dependent value parameter telescope handling is being refactored.
+
+```acorn-ignore
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    define big_union_contains[T](c: Set[T] -> Bool, x: T) -> Bool {
+        exists(s: Set[T]) {
+            c(s) and s.contains(x)
+        }
+    }
+
+    define big_union[T](c: Set[T] -> Bool) -> Set[T] {
+        Set[T].new(big_union_contains(c))
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+
+        open_big_union(c: Set[T] -> Bool) {
+            (forall(s: Set[T]) { c(s) implies T.is_open(s) })
+                implies T.is_open(big_union(c))
+        }
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
+        let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
+            exists(v: Set[T]) {
+                T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
+                    v.contains(x.value)
+                })
+            }
+        }
+    }
+```
+
 ## Dependent Value Parameter Function Accepts Explicit Argument
 
 The same dependent value parameter should also be passable explicitly
