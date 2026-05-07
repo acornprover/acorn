@@ -1322,6 +1322,13 @@ impl<'a> Evaluator<'a> {
 
                         match self.project.get_module_id_by_name(&module_name) {
                             Some(module_id) => {
+                                #[cfg(feature = "sci")]
+                                if self.bindings.get_module_info(module_id).is_none() {
+                                    return Err(module_expr.error(&format!(
+                                        "module '{}' is not available through this module's imports",
+                                        module_name
+                                    )));
+                                }
                                 return Ok(NamedEntity::Module(module_id));
                             }
                             None => {
