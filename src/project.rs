@@ -96,9 +96,35 @@ pub struct Project {
     pub building: bool,
 }
 
+/// The main workflow a project instance is serving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageMode {
+    /// Full-library cached certificate replay.
+    Check,
+
+    /// Command-line verification, proof search, cache updates, and diagnostics.
+    Verify,
+
+    /// Long-lived language-server state for navigation and editor features.
+    Ide,
+}
+
+impl UsageMode {
+    pub fn keeps_ide_metadata(self) -> bool {
+        matches!(self, UsageMode::Ide)
+    }
+
+    pub fn is_batch(self) -> bool {
+        matches!(self, UsageMode::Check | UsageMode::Verify)
+    }
+}
+
 /// Configuration options for the project.
 #[derive(Clone)]
 pub struct ProjectConfig {
+    // The main workflow this project is serving.
+    pub usage_mode: UsageMode,
+
     // Whether we permit loading files from the filesystem.
     // If false, this indicates we only want mocked files.
     pub use_filesystem: bool,
@@ -113,6 +139,7 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: true,
@@ -349,6 +376,7 @@ impl Project {
         let mock_dir = PathBuf::from(localize_mock_filename("/mock"));
         let build_dir = mock_dir.join("build");
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: false,
             read_cache: false,
             write_cache: false,
@@ -1779,6 +1807,9 @@ impl Project {
         // We ignore errors here since some facts may intentionally fail to normalize
         // (e.g., exists over uninhabited types in test cases).
         let _ = env.run_lowering_pass(self);
+        if self.config.usage_mode == UsageMode::Check {
+            env.discard_ide_metadata();
+        }
 
         let mut content_hasher = blake3::Hasher::new();
         content_hasher.update(text.as_bytes());

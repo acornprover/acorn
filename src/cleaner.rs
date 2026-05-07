@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::Range;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::node::Node;
 use crate::module::{LoadState, ModuleDescriptor};
-use crate::project::{ImportError, Project, ProjectConfig, ProjectError};
+use crate::project::{ImportError, Project, ProjectConfig, ProjectError, UsageMode};
 use crate::verifier::Verifier;
 
 /// A ModuleCleaner analyzes loaded modules to extract information about claims and proofs.
@@ -70,6 +70,7 @@ impl ModuleCleaner {
     pub fn ranges(&self) -> Result<Vec<Range>, CleanerError> {
         // Load a fresh project
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
@@ -146,6 +147,7 @@ impl ModuleCleaner {
     pub fn try_delete(&self, range: Range) -> Result<bool, CleanerError> {
         // Get the file path
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
@@ -390,6 +392,7 @@ impl ModuleCleaner {
     /// We do this textually by looking for patterns like "} by {\n}" or "forall(...) {\n}" and removing them.
     fn remove_empty_blocks(&self) -> Result<(), CleanerError> {
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
@@ -473,6 +476,7 @@ impl ModuleCleaner {
     /// Counts the number of lines in the module file.
     fn count_lines(&self) -> Result<usize, CleanerError> {
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
@@ -501,6 +505,7 @@ impl ProjectCleaner {
     pub fn clean(&self) -> Result<CleanStats, CleanerError> {
         // Load the project to discover all modules
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,

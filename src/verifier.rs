@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder, ModuleTiming};
-use crate::project::{Project, ProjectConfig};
+use crate::project::{Project, ProjectConfig, UsageMode};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     let path = PathBuf::from(target);
@@ -300,9 +300,10 @@ impl Verifier {
 
     pub fn new_for_check(
         start_path: PathBuf,
-        config: ProjectConfig,
+        mut config: ProjectConfig,
         target: Option<String>,
     ) -> Result<Self, String> {
+        config.usage_mode = UsageMode::Check;
         Self::new_inner(start_path, config, target, None, true, true)
     }
 
@@ -905,6 +906,7 @@ mod tests {
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -972,6 +974,7 @@ mod tests {
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1028,6 +1031,7 @@ mod tests {
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1099,6 +1103,7 @@ mod tests {
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1174,6 +1179,7 @@ mod tests {
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1228,6 +1234,7 @@ mod tests {
         let original = std::fs::read_to_string(cert_path.path()).unwrap();
 
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
@@ -2177,6 +2184,7 @@ instance Nat: Two
         // Phase 2: Reprove only module_a with reprove-style config (read_cache: false, write_cache: true)
         // This is what `reprove module_a --save-results` does
         let reprove_config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
@@ -2218,6 +2226,7 @@ instance Nat: Two
             .unwrap();
 
         let reprove_config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
@@ -2316,6 +2325,7 @@ theorem fix_neg(a: Int) {
             + 1;
 
         let reprove_config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
             write_cache: false,
@@ -2404,6 +2414,7 @@ theorem goal(s: Nat -> Container, h: Bool) {
             + 1;
 
         let reprove_config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
             write_cache: false,
@@ -2456,6 +2467,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
             .unwrap();
 
         let reprove_config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
@@ -2475,6 +2487,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
         assert_eq!(output.status, BuildStatus::Good);
 
         let check_config = ProjectConfig {
+            usage_mode: UsageMode::Check,
             use_filesystem: true,
             read_cache: true,
             write_cache: false,

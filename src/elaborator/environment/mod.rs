@@ -340,6 +340,22 @@ impl Environment {
         &self.module_doc_comments
     }
 
+    pub fn discard_ide_metadata(&mut self) {
+        self.token_map = TokenMap::new();
+        self.line_types.clear();
+        self.line_types.shrink_to_fit();
+        self.doc_comments.clear();
+        self.doc_comments.shrink_to_fit();
+        self.module_doc_comments.clear();
+        self.module_doc_comments.shrink_to_fit();
+
+        for node in &mut self.nodes {
+            if let Node::Block(block, _, _) = node {
+                block.env.discard_ide_metadata();
+            }
+        }
+    }
+
     /// Defines a new constant, adding a node for its definition and also tracking its definition range.
     pub fn define_constant(
         &mut self,

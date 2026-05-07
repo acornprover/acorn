@@ -20,7 +20,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::interfaces::{
     DocumentProgress, ProgressParams, ProgressResponse, SelectionParams, SelectionResponse,
 };
-use crate::project::{Project, ProjectConfig, SelectionInfo};
+use crate::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
 
 // Trait abstracting the LSP client methods we need
 #[async_trait::async_trait]
@@ -323,6 +323,7 @@ impl AcornLanguageServer {
 
         // The cache is always readable, only sometimes writable.
         let config = ProjectConfig {
+            usage_mode: UsageMode::Ide,
             write_cache,
             ..Default::default()
         };

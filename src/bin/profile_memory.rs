@@ -14,7 +14,7 @@ use acorn::kernel::symbol_table::SymbolTableProfileCounts;
 use acorn::kernel::term::Term;
 use acorn::kernel::type_store::TypeStoreProfileCounts;
 use acorn::kernel::variable_map::VariableMap;
-use acorn::project::{Project, ProjectConfig};
+use acorn::project::{Project, ProjectConfig, UsageMode};
 use mimalloc::MiMalloc;
 use std::hint::black_box;
 use std::mem::size_of;
@@ -173,8 +173,11 @@ fn main() {
     sample("start", &mut samples);
 
     let project_start = Instant::now();
-    let mut project = Project::new_local(&current_dir, ProjectConfig::default())
-        .expect("failed to create project");
+    let config = ProjectConfig {
+        usage_mode: UsageMode::Check,
+        ..ProjectConfig::default()
+    };
+    let mut project = Project::new_local(&current_dir, config).expect("failed to create project");
     let project_time = project_start.elapsed();
     sample("after project setup", &mut samples);
 

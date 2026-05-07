@@ -6,7 +6,10 @@
 //   cargo build --bin=profile_reprove --profile=fastdev
 //   samply record target/fastdev/profile_reprove
 
-use acorn::{project::ProjectConfig, verifier::Verifier};
+use acorn::{
+    project::{ProjectConfig, UsageMode},
+    verifier::Verifier,
+};
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -19,6 +22,7 @@ fn main() {
     let current_dir = std::env::current_dir().unwrap();
     for _ in 0..1 {
         let config = ProjectConfig {
+            usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false, // Force fresh proof search
             write_cache: false,

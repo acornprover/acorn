@@ -6,7 +6,7 @@ use acorn::doc_generator::DocGenerator;
 use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::ModuleDescriptor;
-use acorn::project::{Project, ProjectConfig, SelectionInfo};
+use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -150,6 +150,7 @@ fn resolve_print_proof_line_selection(
     }
 
     let config = ProjectConfig {
+        usage_mode: UsageMode::Verify,
         use_filesystem: true,
         read_cache: false,
         write_cache: false,
@@ -848,6 +849,7 @@ async fn main() {
             };
 
             let config = ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: !force_search,
                 write_cache: if force_search {
@@ -940,6 +942,7 @@ async fn main() {
             }
 
             let config = ProjectConfig {
+                usage_mode: UsageMode::Check,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1018,6 +1021,7 @@ async fn main() {
             }
 
             let config = ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
@@ -1120,6 +1124,7 @@ async fn main() {
             // The compatibility command doesn't read from cache; optionally writes with
             // --save-results.
             let config = ProjectConfig {
+                usage_mode: UsageMode::Verify,
                 use_filesystem: true,
                 read_cache: false,
                 write_cache: save_results,
@@ -1367,6 +1372,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
+                    usage_mode: UsageMode::Verify,
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
@@ -1461,6 +1467,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
+                    usage_mode: UsageMode::Verify,
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
@@ -1536,6 +1543,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
+                    usage_mode: UsageMode::Verify,
                     use_filesystem: true,
                     read_cache: true,
                     write_cache: false,
