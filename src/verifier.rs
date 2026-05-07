@@ -674,6 +674,86 @@ mod tests {
         assert_eq!(targeted_output.metrics.pending_goals_total, 1);
     }
 
+    #[cfg(feature = "sci")]
+    #[test]
+    fn test_sci_rejects_cached_certificate_unimported_lib_reference() {
+        let (acornlib, src, build) = setup();
+
+        src.child("util.ac")
+            .write_str("let contradiction: Bool = false\n")
+            .unwrap();
+        src.child("main.ac")
+            .write_str("theorem goal { false }\n")
+            .unwrap();
+
+        CertificateStore {
+            certs: vec![Certificate::new(
+                "goal".to_string(),
+                vec!["lib(util).contradiction".to_string()],
+            )],
+        }
+        .save(build.child("main.jsonl").path())
+        .unwrap();
+
+        let mut verifier = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Error);
+        assert_eq!(output.metrics.cert_checks_total, 1);
+        assert_eq!(output.metrics.searches_total, 0);
+        assert!(output.events.iter().any(|event| {
+            event.log_message.as_ref().is_some_and(|message| {
+                message.contains("module 'util' is not available through this module's imports")
+            })
+        }));
+    }
+
+    #[cfg(feature = "sci")]
+    #[test]
+    fn test_sci_allows_imported_lib_reference_in_certificate_line() {
+        let (_acornlib, src, build) = setup();
+
+        src.child("util.ac")
+            .write_str("let util_fact: Bool = true\n")
+            .unwrap();
+        src.child("main.ac")
+            .write_str(
+                r#"
+                from util import util_fact
+
+                theorem goal { true }
+                "#,
+            )
+            .unwrap();
+
+        let mut project = Project::new(
+            src.path().to_path_buf(),
+            build.path().to_path_buf(),
+            ProjectConfig::default(),
+        )
+        .unwrap();
+        project.add_src_targets();
+        let main_id = project.get_module_id_by_name("main").unwrap();
+        let mut bindings = std::borrow::Cow::Borrowed(project.get_bindings(main_id).unwrap());
+        let mut kernel_context =
+            std::borrow::Cow::Owned(crate::kernel::kernel_context::KernelContext::new());
+
+        Certificate::parse_code_line(
+            "lib(util).util_fact",
+            &project,
+            &mut bindings,
+            &mut kernel_context,
+        )
+        .expect("sci should allow certificate references to imported modules");
+    }
+
     #[test]
     fn test_verify_runs_search_for_explicit_pending_target() {
         let (acornlib, _src, _build) = setup();
