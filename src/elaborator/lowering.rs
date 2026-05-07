@@ -375,13 +375,13 @@ impl KernelContext {
         match fact {
             Fact::Instance(instance, _) => {
                 let typeclass_id = self.type_store.add_typeclass(&instance.typeclass);
-                if instance.type_params.is_empty() && instance.value_params.is_empty() {
+                if instance.is_concrete() {
                     self.type_store
                         .add_type_instance(&instance.instance_type, typeclass_id);
                 } else {
-                    let type_var_map = build_type_var_map(self, &instance.type_params);
+                    let type_var_map = build_type_var_map(self, instance.type_params());
                     let mut context_types = vec![];
-                    for type_param in &instance.type_params {
+                    for type_param in instance.type_params() {
                         let kind = if let Some(typeclass) = &type_param.typeclass {
                             let tc_id = self.type_store.add_typeclass(typeclass);
                             Term::typeclass(tc_id)
@@ -391,16 +391,16 @@ impl KernelContext {
                         context_types.push(kind);
                     }
                     let value_stack: Vec<_> = instance
-                        .value_params
+                        .value_params()
                         .iter()
                         .enumerate()
                         .map(|(i, _)| {
                             Term::atom(Atom::FreeVariable(
-                                (instance.type_params.len() + i) as AtomId,
+                                (instance.type_params().len() + i) as AtomId,
                             ))
                         })
                         .collect();
-                    for value_param in &instance.value_params {
+                    for value_param in instance.value_params() {
                         context_types.push(lower_type_to_term(
                             self,
                             &value_param.value_type,

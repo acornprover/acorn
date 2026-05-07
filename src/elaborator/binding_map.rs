@@ -9,8 +9,8 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Range};
 
 use crate::code_generator::CodeGenerator;
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, DependentTypeArg, FamilyParamKind, PotentialType, TypeParam, Typeclass,
-    TypeclassInstance, UnresolvedType, Variance,
+    AcornType, Datatype, DependentTypeArg, FamilyParamKind, PotentialType, Telescope, TypeParam,
+    Typeclass, TypeclassInstance, UnresolvedType, Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
@@ -1035,15 +1035,14 @@ impl BindingMap {
         let instance = TypeclassInstance {
             instance_type: AcornType::Data(datatype.clone(), vec![]),
             datatype: datatype.clone(),
-            type_params: vec![],
-            value_params: vec![],
+            family_params: Telescope::empty(),
             typeclass: typeclass.clone(),
         };
         self.add_typeclass_instance(instance);
     }
 
     pub fn add_typeclass_instance(&mut self, instance: TypeclassInstance) {
-        if instance.type_params.is_empty() && instance.value_params.is_empty() {
+        if instance.is_concrete() {
             self.datatype_defs
                 .entry(instance.datatype.clone())
                 .or_insert_with(DatatypeDefinition::new)

@@ -1,6 +1,4 @@
 use super::*;
-use crate::elaborator::acorn_type::{DependentTypeArg, FamilyParam};
-
 impl Environment {
     pub(super) fn add_structure_statement(
         &mut self,
@@ -19,14 +17,8 @@ impl Environment {
         let family_params = self
             .evaluator(project)
             .evaluate_family_params(&ss.type_params)?;
-        let type_params: Vec<_> = family_params
-            .iter()
-            .filter_map(|param| param.as_type_param().cloned())
-            .collect();
-        let value_params: Vec<_> = family_params
-            .iter()
-            .filter_map(|param| param.as_value_param().cloned())
-            .collect();
+        let type_params = family_params.type_params().to_vec();
+        let value_params = family_params.value_params().to_vec();
         let value_param_types: Vec<_> = value_params
             .iter()
             .map(|param| param.value_type.clone())
@@ -44,33 +36,8 @@ impl Environment {
         for type_param in &type_params {
             arbitrary_params.push(self.bindings.add_arbitrary_type(type_param.clone()));
         }
-        let datatype_value_args: Vec<_> = value_params
-            .iter()
-            .enumerate()
-            .map(|(i, value_param)| {
-                AcornValue::Variable(i as AtomId, value_param.value_type.clone())
-            })
-            .collect();
-        let mut next_type_arg = 0usize;
-        let mut next_value_arg = 0usize;
-        let family_args: Vec<_> = family_params
-            .iter()
-            .map(|param| match param {
-                FamilyParam::Type(_) => {
-                    let arg = DependentTypeArg::Type(arbitrary_params[next_type_arg].clone());
-                    next_type_arg += 1;
-                    arg
-                }
-                FamilyParam::Value(value_param) => {
-                    let arg = DependentTypeArg::Value(AcornValue::Variable(
-                        next_value_arg as AtomId,
-                        value_param.value_type.clone(),
-                    ));
-                    next_value_arg += 1;
-                    arg
-                }
-            })
-            .collect();
+        let (family_args, datatype_value_args) =
+            family_params.family_args_for_type_args(&arbitrary_params);
         let mut family_stack = Stack::new();
         for value_param in &value_params {
             family_stack.insert(value_param.name.clone(), value_param.value_type.clone());
@@ -145,7 +112,7 @@ impl Environment {
         let definition_string = Some(statement.to_string());
         let potential_type = self.bindings.add_potential_type_with_family_params(
             &ss.name_token,
-            FamilyParam::canonical_kinds(&family_params),
+            family_params.canonical_kinds(),
             doc_comments,
             Some(ss.name_token.range()),
             definition_string,

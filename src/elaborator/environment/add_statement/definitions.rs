@@ -286,7 +286,7 @@ impl Environment {
                         .name_token
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
-                p.type_params.clone()
+                p.type_params().to_vec()
             }
             None => local_type_params,
         };
@@ -406,15 +406,15 @@ impl Environment {
 
             let params = if let Some(datatype_params) = datatype_params {
                 fn_value = lambda_over_datatype_value_params(Some(datatype_params), fn_value);
-                fn_value = fn_value.genericize(&datatype_params.type_params);
+                fn_value = fn_value.genericize(datatype_params.type_params());
 
                 if !fn_param_names.is_empty() {
                     fn_value = fn_value.genericize(&fn_param_names);
-                    let mut combined_params = datatype_params.type_params.clone();
+                    let mut combined_params = datatype_params.type_params().to_vec();
                     combined_params.extend(fn_param_names);
                     combined_params
                 } else {
-                    datatype_params.type_params.clone()
+                    datatype_params.type_params().to_vec()
                 }
             } else {
                 fn_param_names
@@ -439,11 +439,11 @@ impl Environment {
         let new_axiom_type = AcornType::functional(arg_types, value_type);
         let params = if let Some(datatype_params) = datatype_params {
             if !fn_param_names.is_empty() {
-                let mut combined_params = datatype_params.type_params.clone();
+                let mut combined_params = datatype_params.type_params().to_vec();
                 combined_params.extend(fn_param_names);
                 combined_params
             } else {
-                datatype_params.type_params.clone()
+                datatype_params.type_params().to_vec()
             }
         } else {
             fn_param_names
@@ -652,7 +652,7 @@ impl Environment {
         }
 
         let family_value_param_count = datatype_params
-            .map(|params| params.value_params.len() as AtomId)
+            .map(|params| params.value_params().len() as AtomId)
             .unwrap_or(0)
             + local_family_params.value_params.len() as AtomId;
         let family_value_param_types = datatype_value_param_types(datatype_params);
@@ -688,7 +688,7 @@ impl Environment {
                         .token()
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
-                p.type_params.clone()
+                p.type_params().to_vec()
             }
             None => local_type_params.clone(),
         };
@@ -873,7 +873,7 @@ impl Environment {
                 Some(&mut self.token_map),
             )?;
         let family_value_param_count = datatype_params
-            .map(|params| params.value_params.len() as AtomId)
+            .map(|params| params.value_params().len() as AtomId)
             .unwrap_or(0);
         let family_value_param_types = datatype_value_param_types(datatype_params);
         let explicit_value_param_types =
@@ -907,7 +907,7 @@ impl Environment {
 
         let function_type = AcornType::functional(arg_types.clone(), return_type);
         let mut all_type_params = datatype_params
-            .map(|params| params.type_params.clone())
+            .map(|params| params.type_params().to_vec())
             .unwrap_or_default();
         all_type_params.extend(fn_type_params);
         let generic_function_type = function_type.clone().genericize(&all_type_params);
@@ -950,7 +950,7 @@ impl Environment {
         if explicit_value_param_types.is_empty() && !family_value_param_types.is_empty() {
             let family_value_args = datatype_params
                 .expect("family value params should have a datatype scope")
-                .value_params
+                .value_params()
                 .iter()
                 .enumerate()
                 .map(|(i, value_param)| {

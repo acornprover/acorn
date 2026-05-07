@@ -562,6 +562,142 @@ impl FamilyParam {
     }
 }
 
+/// An ordered list of type and value parameters.
+///
+/// Later value-parameter types are interpreted in the scope of earlier parameters.
+/// This wraps the existing `FamilyParam` representation so call sites can keep
+/// source order as the source of truth while still getting cheap split views
+/// for older APIs that need type params and value params separately.
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct Telescope {
+    params: Vec<FamilyParam>,
+    type_params: Vec<TypeParam>,
+    value_params: Vec<ValueParam>,
+}
+
+impl Telescope {
+    pub fn new(params: Vec<FamilyParam>) -> Telescope {
+        let type_params = params
+            .iter()
+            .filter_map(|param| param.as_type_param().cloned())
+            .collect();
+        let value_params = params
+            .iter()
+            .filter_map(|param| param.as_value_param().cloned())
+            .collect();
+        Telescope {
+            params,
+            type_params,
+            value_params,
+        }
+    }
+
+    pub fn empty() -> Telescope {
+        Telescope::default()
+    }
+
+    pub fn params(&self) -> &[FamilyParam] {
+        &self.params
+    }
+
+    pub fn type_params(&self) -> &[TypeParam] {
+        &self.type_params
+    }
+
+    pub fn value_params(&self) -> &[ValueParam] {
+        &self.value_params
+    }
+
+    pub fn into_params(self) -> Vec<FamilyParam> {
+        self.params
+    }
+
+    pub fn len(&self) -> usize {
+        self.params.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, FamilyParam> {
+        self.params.iter()
+    }
+
+    pub fn canonical_kinds(&self) -> Vec<FamilyParamKind> {
+        FamilyParam::canonical_kinds(&self.params)
+    }
+
+    pub fn value_param_types(&self) -> Vec<AcornType> {
+        self.value_params
+            .iter()
+            .map(|param| param.value_type.clone())
+            .collect()
+    }
+
+    pub fn value_block_args(&self) -> Vec<(String, AcornType)> {
+        self.value_params
+            .iter()
+            .map(|param| (param.name.clone(), param.value_type.clone()))
+            .collect()
+    }
+
+    pub fn family_args_for_type_args(
+        &self,
+        type_args: &[AcornType],
+    ) -> (Vec<DependentTypeArg>, Vec<AcornValue>) {
+        let mut next_type_arg = 0usize;
+        let mut next_value_arg = 0usize;
+        let mut value_args = vec![];
+        let family_args = self
+            .params
+            .iter()
+            .map(|param| match param {
+                FamilyParam::Type(_) => {
+                    let arg = DependentTypeArg::Type(type_args[next_type_arg].clone());
+                    next_type_arg += 1;
+                    arg
+                }
+                FamilyParam::Value(value_param) => {
+                    let value = AcornValue::Variable(
+                        next_value_arg as AtomId,
+                        value_param.value_type.clone(),
+                    );
+                    next_value_arg += 1;
+                    value_args.push(value.clone());
+                    DependentTypeArg::Value(value)
+                }
+            })
+            .collect();
+        assert_eq!(next_type_arg, type_args.len());
+        (family_args, value_args)
+    }
+}
+
+impl IntoIterator for Telescope {
+    type Item = FamilyParam;
+    type IntoIter = std::vec::IntoIter<FamilyParam>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Telescope {
+    type Item = &'a FamilyParam;
+    type IntoIter = std::slice::Iter<'a, FamilyParam>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.params.iter()
+    }
+}
+
+impl From<Vec<FamilyParam>> for Telescope {
+    fn from(params: Vec<FamilyParam>) -> Self {
+        Telescope::new(params)
+    }
+}
+
 impl fmt::Display for FamilyParam {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -582,9 +718,64 @@ pub enum FamilyParamKind {
 pub struct TypeclassInstance {
     pub instance_type: AcornType,
     pub datatype: Datatype,
-    pub type_params: Vec<TypeParam>,
-    pub value_params: Vec<ValueParam>,
+    pub family_params: Telescope,
     pub typeclass: Typeclass,
+}
+
+impl TypeclassInstance {
+    pub fn type_params(&self) -> &[TypeParam] {
+        self.family_params.type_params()
+    }
+
+    pub fn value_params(&self) -> &[ValueParam] {
+        self.family_params.value_params()
+    }
+
+    pub fn is_concrete(&self) -> bool {
+        self.family_params.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telescope_preserves_family_order_while_exposing_split_views() {
+        let t = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let u = TypeParam {
+            name: "U".to_string(),
+            typeclass: None,
+        };
+        let n = ValueParam {
+            name: "n".to_string(),
+            value_type: AcornType::Bool,
+        };
+        let telescope = Telescope::new(vec![
+            FamilyParam::Type(t.clone()),
+            FamilyParam::Value(n.clone()),
+            FamilyParam::Type(u.clone()),
+        ]);
+
+        assert_eq!(telescope.type_params(), &[t.clone(), u.clone()]);
+        assert_eq!(telescope.value_params(), std::slice::from_ref(&n));
+
+        let type_args = vec![AcornType::Arbitrary(t.clone()), AcornType::Arbitrary(u)];
+        let (family_args, value_args) = telescope.family_args_for_type_args(&type_args);
+
+        assert_eq!(
+            family_args,
+            vec![
+                DependentTypeArg::Type(AcornType::Arbitrary(t)),
+                DependentTypeArg::Value(AcornValue::Variable(0, AcornType::Bool)),
+                DependentTypeArg::Type(type_args[1].clone()),
+            ]
+        );
+        assert_eq!(value_args, vec![AcornValue::Variable(0, AcornType::Bool)]);
+    }
 }
 
 /// Every AcornValue has an AcornType.

@@ -50,7 +50,7 @@ impl Environment {
                     )));
                 }
 
-                let family_param_kinds = FamilyParam::canonical_kinds(&family_params);
+                let family_param_kinds = family_params.canonical_kinds();
                 for (((expr, family_param), family_param_kind), expected_kind) in ats
                     .type_params
                     .iter()
@@ -109,44 +109,13 @@ impl Environment {
                     }
                 }
 
-                let family_scope = DatatypeFamilyScope {
-                    type_params: family_params
-                        .iter()
-                        .filter_map(|param| param.as_type_param().cloned())
-                        .collect(),
-                    value_params: family_params
-                        .iter()
-                        .filter_map(|param| param.as_value_param().cloned())
-                        .collect(),
-                };
+                let family_scope = DatatypeFamilyScope::new(family_params.clone());
                 let mut arbitrary_type_args = vec![];
-                for param in &family_scope.type_params {
+                for param in family_scope.type_params() {
                     arbitrary_type_args.push(self.bindings.add_arbitrary_type(param.clone()));
                 }
-                let mut next_type_arg = 0usize;
-                let mut next_value_arg = 0usize;
-                let family_args = family_params
-                    .iter()
-                    .map(|param| match param {
-                        crate::elaborator::acorn_type::FamilyParam::Type(_) => {
-                            let arg = crate::elaborator::acorn_type::DependentTypeArg::Type(
-                                arbitrary_type_args[next_type_arg].clone(),
-                            );
-                            next_type_arg += 1;
-                            arg
-                        }
-                        crate::elaborator::acorn_type::FamilyParam::Value(value_param) => {
-                            let arg = crate::elaborator::acorn_type::DependentTypeArg::Value(
-                                AcornValue::Variable(
-                                    next_value_arg as AtomId,
-                                    value_param.value_type.clone(),
-                                ),
-                            );
-                            next_value_arg += 1;
-                            arg
-                        }
-                    })
-                    .collect();
+                let (family_args, _) =
+                    family_params.family_args_for_type_args(&arbitrary_type_args);
                 let instance_type = potential.resolve_args(family_args, &ats.name_token)?;
                 let datatype = self
                     .check_can_add_attributes(&ats.name_token, &instance_type)?
@@ -221,7 +190,7 @@ impl Environment {
                         }
                     }
                 }
-                for type_param in &family_scope.type_params {
+                for type_param in family_scope.type_params() {
                     self.bindings.remove_type(&type_param.name);
                 }
                 Ok(())
@@ -338,10 +307,8 @@ impl Environment {
             typeclass: Some(typeclass.clone()),
         };
         let instance_type = self.bindings.add_arbitrary_type(type_param.clone());
-        let family_scope = DatatypeFamilyScope {
-            type_params: vec![type_param],
-            value_params: vec![],
-        };
+        let family_scope =
+            DatatypeFamilyScope::new(Telescope::new(vec![FamilyParam::Type(type_param)]));
 
         for substatement in &ats.body.statements {
             match &substatement.statement {

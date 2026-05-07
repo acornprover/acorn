@@ -205,10 +205,7 @@ impl Environment {
                 (
                     instance_type,
                     instance_datatype,
-                    DatatypeFamilyScope {
-                        type_params: vec![],
-                        value_params: vec![],
-                    },
+                    DatatypeFamilyScope::default(),
                     vec![],
                 )
             } else {
@@ -243,7 +240,7 @@ impl Environment {
                         family_params.len()
                     )));
                 }
-                let family_param_kinds = FamilyParam::canonical_kinds(&family_params);
+                let family_param_kinds = family_params.canonical_kinds();
                 for (expr, ((param, param_kind), expected_kind)) in is.type_params.iter().zip(
                     family_params
                         .iter()
@@ -295,43 +292,13 @@ impl Environment {
                     }
                 }
 
-                let family_scope = DatatypeFamilyScope {
-                    type_params: family_params
-                        .iter()
-                        .filter_map(|param| param.as_type_param().cloned())
-                        .collect(),
-                    value_params: family_params
-                        .iter()
-                        .filter_map(|param| param.as_value_param().cloned())
-                        .collect(),
-                };
+                let family_scope = DatatypeFamilyScope::new(family_params.clone());
                 let mut arbitrary_type_args = vec![];
-                for param in &family_scope.type_params {
+                for param in family_scope.type_params() {
                     arbitrary_type_args.push(self.bindings.add_arbitrary_type(param.clone()));
                 }
-                let mut next_type_arg = 0usize;
-                let mut next_value_arg = 0usize;
-                let mut family_value_args = vec![];
-                let family_args = family_params
-                    .iter()
-                    .map(|param| match param {
-                        FamilyParam::Type(_) => {
-                            let arg =
-                                DependentTypeArg::Type(arbitrary_type_args[next_type_arg].clone());
-                            next_type_arg += 1;
-                            arg
-                        }
-                        FamilyParam::Value(value_param) => {
-                            let value = AcornValue::Variable(
-                                next_value_arg as AtomId,
-                                value_param.value_type.clone(),
-                            );
-                            next_value_arg += 1;
-                            family_value_args.push(value.clone());
-                            DependentTypeArg::Value(value)
-                        }
-                    })
-                    .collect();
+                let (family_args, family_value_args) =
+                    family_params.family_args_for_type_args(&arbitrary_type_args);
                 let instance_type = potential.resolve_args(family_args, &is.type_name)?;
                 let instance_datatype = self
                     .check_can_add_attributes(&is.type_name, &instance_type)?
@@ -345,7 +312,7 @@ impl Environment {
             };
 
         let family_type_args: Vec<_> = family_scope
-            .type_params
+            .type_params()
             .iter()
             .map(|param| AcornType::Arbitrary(param.clone()))
             .collect();
@@ -389,7 +356,7 @@ impl Environment {
                             &instance_type,
                             &typeclass,
                             ls.name_token.text(),
-                            &family_scope.type_params,
+                            family_scope.type_params(),
                             &family_value_args,
                             &project,
                             substatement,
@@ -421,7 +388,7 @@ impl Environment {
                             &instance_type,
                             &typeclass,
                             ds.name_token.text(),
-                            &family_scope.type_params,
+                            family_scope.type_params(),
                             &family_value_args,
                             &project,
                             substatement,
@@ -453,11 +420,11 @@ impl Environment {
                     &typeclass,
                     &attr_name,
                     &instance_type,
-                    family_scope.value_params.len() as AtomId,
+                    family_scope.value_params().len() as AtomId,
                     project,
                     statement,
                 )?;
-                let family_value_stack_size = family_scope.value_params.len() as AtomId;
+                let family_value_stack_size = family_scope.value_params().len() as AtomId;
                 let condition = unsafe_condition.replace_constants_with_base_stack(
                     family_value_stack_size,
                     family_value_stack_size,
@@ -469,7 +436,7 @@ impl Environment {
                         };
                         let definition = self.bindings.get_definition(&name)?.clone();
                         let replacements: Vec<_> = family_scope
-                            .type_params
+                            .type_params()
                             .iter()
                             .cloned()
                             .zip(family_type_args.iter().cloned())
@@ -519,7 +486,7 @@ impl Environment {
                     let tc_unresolved = tc_attr.to_unresolved(statement)?;
                     let tc_resolved =
                         tc_unresolved.resolve(statement, vec![instance_type.clone()])?;
-                    let tc_resolved = tc_resolved.genericize(&family_scope.type_params);
+                    let tc_resolved = tc_resolved.genericize(family_scope.type_params());
                     let tc_type = tc_resolved.get_type();
 
                     let dt_attr = self
@@ -531,7 +498,7 @@ impl Environment {
                         &family_value_args,
                         statement,
                     )?;
-                    let dt_value = dt_value.genericize(&family_scope.type_params);
+                    let dt_value = dt_value.genericize(family_scope.type_params());
                     let dt_type = dt_value.get_type();
 
                     if tc_type != dt_type {
@@ -555,7 +522,7 @@ impl Environment {
             } else {
                 AcornValue::lambda(
                     family_scope
-                        .value_params
+                        .value_params()
                         .iter()
                         .map(|param| param.value_type.clone())
                         .collect(),
@@ -564,9 +531,9 @@ impl Environment {
             };
             self.define_constant(
                 name.clone(),
-                family_scope.type_params.clone(),
+                family_scope.type_params().to_vec(),
                 family_scope
-                    .value_params
+                    .value_params()
                     .iter()
                     .map(|param| param.value_type.clone())
                     .collect(),
@@ -584,7 +551,7 @@ impl Environment {
                     &family_value_args,
                     statement,
                 )?
-                .genericize(&family_scope.type_params);
+                .genericize(family_scope.type_params());
             pairs.push((tc_resolved, instance_impl));
         }
 
@@ -596,10 +563,9 @@ impl Environment {
             &typeclass.name,
         );
         let typeclass_instance = TypeclassInstance {
-            instance_type: instance_type.clone().genericize(&family_scope.type_params),
+            instance_type: instance_type.clone().genericize(family_scope.type_params()),
             datatype: instance_datatype.clone(),
-            type_params: family_scope.type_params.clone(),
-            value_params: family_scope.value_params.clone(),
+            family_params: family_scope.clone_telescope(),
             typeclass: typeclass.clone(),
         };
         let instance_fact = Fact::Instance(typeclass_instance.clone(), instance_source.clone());
@@ -619,7 +585,7 @@ impl Environment {
             let block = Block::new(
                 project,
                 &self,
-                family_scope.type_params.clone(),
+                family_scope.type_params().to_vec(),
                 family_scope.value_block_args(),
                 block_params,
                 &statement.first_token,
@@ -629,7 +595,7 @@ impl Environment {
             Node::Block(block, Some(instance_fact), None)
         };
 
-        for type_param in &family_scope.type_params {
+        for type_param in family_scope.type_params() {
             self.bindings.remove_type(&type_param.name);
         }
         let index = self.add_node(node);
@@ -637,30 +603,29 @@ impl Environment {
         self.bindings.add_typeclass_instance(typeclass_instance);
 
         for (public_attr, instance_impl) in pairs {
-            let bridge =
-                if family_scope.type_params.is_empty() && family_scope.value_params.is_empty() {
-                    Node::definition(
-                        PotentialValue::Resolved(public_attr),
-                        instance_impl,
-                        instance_source.clone(),
-                    )
-                } else {
-                    let mut claim = public_attr.inflate_function_definition(instance_impl);
-                    let value_param_types: Vec<_> = family_scope
-                        .value_params
-                        .iter()
-                        .map(|param| param.value_type.genericize(&family_scope.type_params))
-                        .collect();
-                    if !value_param_types.is_empty() {
-                        claim = AcornValue::ForAll(value_param_types, Box::new(claim));
-                    }
-                    let prop = Proposition::new(
-                        claim,
-                        family_scope.type_params.clone(),
-                        instance_source.clone(),
-                    );
-                    Node::Structural(Fact::Proposition(Arc::new(prop)), None)
-                };
+            let bridge = if family_scope.is_empty() {
+                Node::definition(
+                    PotentialValue::Resolved(public_attr),
+                    instance_impl,
+                    instance_source.clone(),
+                )
+            } else {
+                let mut claim = public_attr.inflate_function_definition(instance_impl);
+                let value_param_types: Vec<_> = family_scope
+                    .value_params()
+                    .iter()
+                    .map(|param| param.value_type.genericize(family_scope.type_params()))
+                    .collect();
+                if !value_param_types.is_empty() {
+                    claim = AcornValue::ForAll(value_param_types, Box::new(claim));
+                }
+                let prop = Proposition::new(
+                    claim,
+                    family_scope.type_params().to_vec(),
+                    instance_source.clone(),
+                );
+                Node::Structural(Fact::Proposition(Arc::new(prop)), None)
+            };
             let index = self.add_node(bridge);
             self.add_node_lines(index, &statement.range());
         }

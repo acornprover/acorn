@@ -1,6 +1,6 @@
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, PotentialType, TypeParam,
-    Typeclass, ValueParam,
+    AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, PotentialType, Telescope,
+    TypeParam, Typeclass, ValueParam,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
@@ -24,7 +24,7 @@ use crate::syntax::token_map::TokenMap;
 #[derive(Debug, Clone)]
 pub enum AttributesTypeArgs {
     /// Generic parameters like `attributes Set[K]` or `attributes Zmod[k: Nat]`
-    Generic(Vec<FamilyParam>),
+    Generic(Telescope),
     /// Concrete types like `attributes Set[Color]`
     Concrete(Vec<AcornType>),
 }
@@ -1838,7 +1838,7 @@ impl<'a> Evaluator<'a> {
                                     .take(type_param_count)
                                     .zip(unresolved.params.iter())
                                 {
-                                    let type_param = self.evaluate_type(expr)?;
+                                    let type_param = self.evaluate_type_with_stack(stack, expr)?;
                                     type_replacements
                                         .push((param.name.clone(), type_param.clone()));
                                     type_params.push(type_param);
@@ -1883,7 +1883,7 @@ impl<'a> Evaluator<'a> {
 
                 // Typecheck the function
                 let function_type = function.get_type();
-                let function_type = match function_type {
+                let function_type = match &function_type {
                     AcornType::Function(f) => f,
                     _ => {
                         return Err(function_expr.error("cannot apply a non-function"));
@@ -1912,8 +1912,15 @@ impl<'a> Evaluator<'a> {
                     PotentialValue::Resolved(function) => {
                         // Simple, no-type-inference-necessary construction
                         let mut args = vec![];
-                        for (i, arg_expr) in arg_exprs.iter().enumerate() {
-                            let arg_type: &AcornType = &function_type.arg_types[i];
+                        for arg_expr in &arg_exprs {
+                            let partial = AcornValue::apply(function.clone(), args.clone());
+                            let partial_type = partial.get_type();
+                            let AcornType::Function(partial_function_type) = partial_type else {
+                                return Err(args_expr.error("too many arguments"));
+                            };
+                            let Some(arg_type) = partial_function_type.arg_types.first() else {
+                                return Err(args_expr.error("too many arguments"));
+                            };
                             let arg =
                                 self.evaluate_value_with_stack(stack, arg_expr, Some(arg_type))?;
                             args.push(arg);
@@ -2084,10 +2091,7 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
-    pub fn evaluate_family_params(
-        &mut self,
-        exprs: &[TypeParamExpr],
-    ) -> error::Result<Vec<FamilyParam>> {
+    pub fn evaluate_family_params(&mut self, exprs: &[TypeParamExpr]) -> error::Result<Telescope> {
         let mut answer: Vec<FamilyParam> = vec![];
         let mut scoped_bindings = self.bindings.clone();
         let mut scoped_stack = Stack::new();
@@ -2159,7 +2163,7 @@ impl<'a> Evaluator<'a> {
             }
             answer.push(param);
         }
-        Ok(answer)
+        Ok(Telescope::new(answer))
     }
 
     /// Evaluates a list of type parameter expressions.
@@ -2170,7 +2174,7 @@ impl<'a> Evaluator<'a> {
     ) -> error::Result<Vec<TypeParam>> {
         let mut answer: Vec<TypeParam> = vec![];
         let params = self.evaluate_family_params(exprs)?;
-        for (expr, param) in exprs.iter().zip(params) {
+        for (expr, param) in exprs.iter().zip(params.into_params()) {
             match param {
                 FamilyParam::Type(type_param) => {
                     self.bindings
@@ -2199,7 +2203,7 @@ impl<'a> Evaluator<'a> {
         exprs: &[TypeParamExpr],
     ) -> error::Result<AttributesTypeArgs> {
         if exprs.is_empty() {
-            return Ok(AttributesTypeArgs::Generic(vec![]));
+            return Ok(AttributesTypeArgs::Generic(Telescope::empty()));
         }
 
         // Check if each identifier refers to an existing type
@@ -2373,6 +2377,144 @@ mod tests {
                 })),
             ]
         );
+    }
+
+    #[test]
+    fn test_value_type_arguments_can_reference_stack_variables() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        bindings.add_potential_type_with_family_params(
+            &TokenType::Identifier.new_token("Set"),
+            vec![FamilyParamKind::Type(None)],
+            vec![],
+            None,
+            None,
+        );
+        let t0 = TypeParam {
+            name: "T0".to_string(),
+            typeclass: None,
+        };
+        let set_t0 = AcornType::Data(set_datatype.clone(), vec![AcornType::Arbitrary(t0.clone())]);
+        bindings.add_potential_type_with_family_params(
+            &TokenType::Identifier.new_token("Subspace"),
+            vec![FamilyParamKind::Type(None), FamilyParamKind::Value(set_t0)],
+            vec![],
+            None,
+            None,
+        );
+        let x_param = TypeParam {
+            name: "X".to_string(),
+            typeclass: None,
+        };
+        let set_x = AcornType::Data(
+            set_datatype.clone(),
+            vec![AcornType::Arbitrary(x_param.clone())],
+        );
+        bindings.add_datatype_attribute(
+            &set_datatype,
+            "empty_set",
+            vec![x_param.clone()],
+            vec![],
+            set_x.genericize(std::slice::from_ref(&x_param)),
+            None,
+            None,
+            vec![],
+            "empty_set".to_string(),
+        );
+
+        let expression = Expression::parse_value_string(
+            "function[T0](x0: Set[T0]) { Set.empty_set[Subspace[T0, x0]] }[Bool]",
+        )
+        .unwrap();
+        Evaluator::new(&project, &bindings, None)
+            .evaluate_value(&expression, None)
+            .expect("dependent type arguments should see the function value-parameter scope");
+    }
+
+    #[test]
+    fn test_dependent_visible_value_argument_updates_later_arg_type() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let base_type = AcornType::Data(
+            Datatype {
+                module_id: ModuleId(0),
+                name: "Base".to_string(),
+            },
+            vec![],
+        );
+        let set_base = AcornType::Data(set_datatype.clone(), vec![base_type.clone()]);
+        let PotentialValue::Resolved(carrier) = bindings.add_unqualified_constant(
+            "carrier",
+            vec![],
+            vec![],
+            set_base.clone(),
+            None,
+            None,
+            vec![],
+            None,
+            "carrier".to_string(),
+        ) else {
+            panic!("carrier should be a resolved constant");
+        };
+        let subspace_base_x0 = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(base_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_base.clone())),
+            ],
+        );
+        let subspace_base_carrier = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(base_type.clone()),
+                DependentTypeArg::Value(carrier),
+            ],
+        );
+        bindings.add_unqualified_constant(
+            "subset",
+            vec![],
+            vec![],
+            AcornType::Data(set_datatype.clone(), vec![subspace_base_carrier]),
+            None,
+            None,
+            vec![],
+            None,
+            "subset".to_string(),
+        );
+        bindings.add_unqualified_constant(
+            "subspace_open",
+            vec![],
+            vec![],
+            AcornType::functional(
+                vec![
+                    set_base,
+                    AcornType::Data(set_datatype, vec![subspace_base_x0]),
+                ],
+                AcornType::Bool,
+            ),
+            None,
+            None,
+            vec![],
+            None,
+            "subspace_open".to_string(),
+        );
+
+        let expression = Expression::parse_value_string("subspace_open(carrier, subset)").unwrap();
+        Evaluator::new(&project, &bindings, None)
+            .evaluate_value(&expression, Some(&AcornType::Bool))
+            .expect("later argument type should be specialized by earlier visible arguments");
     }
 
     #[test]

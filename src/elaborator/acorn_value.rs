@@ -403,6 +403,49 @@ impl ConstantInstance {
         }
     }
 
+    fn instance_type_after_binding_values(
+        &self,
+        first_binding_index: AtomId,
+        stack_size: AtomId,
+        values: &[AcornValue],
+    ) -> AcornType {
+        let params: Vec<_> = self
+            .params
+            .iter()
+            .map(|t| t.bind_values(first_binding_index, stack_size, values))
+            .collect();
+        let value_param_types: Vec<_> = self
+            .value_param_types
+            .iter()
+            .map(|t| t.bind_values(first_binding_index, stack_size, values))
+            .collect();
+        let bound_value_args: Vec<_> = self
+            .bound_value_args
+            .iter()
+            .map(|value| {
+                value
+                    .clone()
+                    .bind_values(first_binding_index, stack_size, values)
+            })
+            .collect();
+        if !self.type_param_names.is_empty() && self.type_param_names.len() == params.len() {
+            let named_params: Vec<_> = self.type_param_names.iter().cloned().zip(params).collect();
+            let generic_type =
+                self.generic_type
+                    .bind_values(first_binding_index, stack_size, values);
+            let instance_type = generic_type.instantiate(&named_params);
+            ConstantInstance::instance_type_with_bound_value_params_for(
+                &self.name,
+                &instance_type,
+                &value_param_types,
+                &bound_value_args,
+            )
+        } else {
+            self.instance_type
+                .bind_values(first_binding_index, stack_size, values)
+        }
+    }
+
     pub fn instantiate(&self, params: &[(String, AcornType)]) -> ConstantInstance {
         let mut answer = self.same_name(
             self.params.iter().map(|t| t.instantiate(params)).collect(),
@@ -1366,19 +1409,21 @@ impl AcornValue {
                 AcornValue::Match(Box::new(new_scrutinee), new_cases)
             }
             AcornValue::Constant(c) => AcornValue::Constant(ConstantInstance {
-                name: c.name,
+                name: c.name.clone(),
                 params: c
                     .params
                     .iter()
                     .map(|t| t.bind_values(first_binding_index, stack_size, values))
                     .collect(),
-                instance_type: c
-                    .instance_type
-                    .bind_values(first_binding_index, stack_size, values),
+                instance_type: c.instance_type_after_binding_values(
+                    first_binding_index,
+                    stack_size,
+                    values,
+                ),
                 generic_type: c
                     .generic_type
                     .bind_values(first_binding_index, stack_size, values),
-                type_param_names: c.type_param_names,
+                type_param_names: c.type_param_names.clone(),
                 value_param_types: c
                     .value_param_types
                     .iter()
@@ -3440,5 +3485,111 @@ mod tests {
             vec![AcornValue::Variable(1, nat_type)],
         );
         assert_eq!(applied.get_type(), option_fin_of_n);
+    }
+
+    #[test]
+    fn test_binding_values_recomputes_constant_type_from_bound_params() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let x_param = TypeParam {
+            name: "X".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+        let generic_type = AcornType::functional(
+            vec![
+                AcornType::Data(
+                    set_datatype.clone(),
+                    vec![AcornType::Variable(x_param.clone())],
+                ),
+                AcornType::Variable(x_param.clone()),
+            ],
+            AcornType::Bool,
+        );
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let instance_type = generic_type.instantiate(&[("X".to_string(), subspace_t_a)]);
+        let contains = ConstantInstance {
+            name: ConstantName::datatype_attr(ModuleId(0), set_datatype, "contains"),
+            params: vec![AcornType::Family(
+                subspace_datatype.clone(),
+                vec![
+                    DependentTypeArg::Type(t_type.clone()),
+                    DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+                ],
+            )],
+            instance_type,
+            generic_type,
+            type_param_names: vec!["X".to_string()],
+            value_param_types: vec![],
+            bound_value_args: vec![],
+        };
+        let a_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "a"),
+            vec![],
+            set_t.clone(),
+            set_t.clone(),
+            vec![],
+            vec![],
+        );
+        let subspace_t_a_const = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type),
+                DependentTypeArg::Value(a_const.clone()),
+            ],
+        );
+        let fam_type = AcornType::functional(
+            vec![AcornType::Data(
+                Datatype {
+                    module_id: ModuleId(0),
+                    name: "Set".to_string(),
+                },
+                vec![subspace_t_a_const.clone()],
+            )],
+            AcornType::Bool,
+        );
+        let fam_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "fam"),
+            vec![],
+            fam_type.clone(),
+            fam_type,
+            vec![],
+            vec![],
+        );
+        let p_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "p"),
+            vec![],
+            subspace_t_a_const.clone(),
+            subspace_t_a_const.clone(),
+            vec![],
+            vec![],
+        );
+
+        let AcornValue::Constant(bound) =
+            AcornValue::Constant(contains).bind_values(0, 1, &[a_const, fam_const, p_const])
+        else {
+            panic!("expected constant");
+        };
+        let AcornType::Function(function_type) = bound.instance_type else {
+            panic!("expected function type");
+        };
+        assert_eq!(function_type.arg_types[1], subspace_t_a_const);
     }
 }

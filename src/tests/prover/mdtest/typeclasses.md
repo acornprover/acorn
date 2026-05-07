@@ -72,9 +72,7 @@ The generated certificate for an instance `open_empty` axiom should preserve
 the value parameter `a: Set[T]` when the goal mentions
 `Set[Subspace[T, a]].empty_set`.
 
-Ignored while dependent value parameter telescope handling is being refactored.
-
-```acorn-ignore
+```acorn
     structure Set[T] {
         contains: T -> Bool
     }
@@ -127,9 +125,7 @@ A theorem with both a structure value parameter `a: Set[T]` and a function
 parameter `fam: Set[Subspace[T, a]] -> Bool` should not confuse those value
 parameter slots while lowering a hypothesis over `Set[Subspace[T, a]]`.
 
-Ignored while dependent value parameter telescope handling is being refactored.
-
-```acorn-ignore
+```acorn
     structure Set[T] {
         contains: T -> Bool
     }
@@ -152,14 +148,54 @@ Ignored while dependent value parameter telescope handling is being refactored.
     }
 ```
 
+## Dependent Value Parameter Let Satisfy Uses Outer Parameter
+
+A nested `let ... satisfy` block should keep the enclosing structure value
+parameter `n: Nat` distinct from the witness `a: Int` when it lowers a claim
+that reads `z.carrier`.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    type Nat: axiom
+    type Int: axiom
+
+    define rel(n: Nat, a: Int, b: Int) -> Bool {
+        axiom
+    }
+
+    define equivalence_class(n: Nat, a: Int) -> Set[Int] {
+        Set[Int].new(function(x: Int) { rel(n, a, x) })
+    }
+
+    structure Zmod[n: Nat] {
+        carrier: Set[Int]
+    }
+
+    axiom has_representative[n: Nat](z: Zmod[n]) {
+        exists(a: Int) {
+            z.carrier = equivalence_class(n, a)
+        }
+    }
+
+    theorem dependent_satisfy_keeps_outer_param[n: Nat](z: Zmod[n]) {
+        true
+    } by {
+        let a: Int satisfy {
+            z.carrier = equivalence_class(n, a)
+        }
+    }
+```
+
 ## Dependent Value Parameter Inline Instance Big Union
 
-The inline `Subspace[T, a]: TopologicalSpace` instance should discharge the
-`open_big_union` obligation for its generated `is_open` function.
+The `Subspace[T, a]: TopologicalSpace` instance should be able to discharge the
+`open_big_union` obligation when the generated `is_open` function is backed by
+an explicit helper theorem.
 
-Ignored while dependent value parameter telescope handling is being refactored.
-
-```acorn-ignore
+```acorn
     structure Set[T] {
         contains: T -> Bool
     }
@@ -189,12 +225,30 @@ Ignored while dependent value parameter telescope handling is being refactored.
         a.contains(value)
     }
 
+    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
+        exists(v: Set[T]) {
+            T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
+                v.contains(x.value)
+            })
+        }
+    }
+
+    axiom subspace_open_big_union[T: TopologicalSpace](a: Set[T]) {
+        forall(c: Set[Subspace[T, a]] -> Bool) {
+            (forall(s: Set[Subspace[T, a]]) {
+                c(s) implies subspace_open(s)
+            }) implies subspace_open(big_union(c))
+        }
+    }
+
     instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
         let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
-            exists(v: Set[T]) {
-                T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
-                    v.contains(x.value)
-                })
+            subspace_open(u)
+        }
+    } by {
+        forall(c: Set[Subspace[T, a]] -> Bool) {
+            if forall(s: Set[Subspace[T, a]]) { c(s) implies subspace_open(s) } {
+                subspace_open(big_union(c))
             }
         }
     }

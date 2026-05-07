@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Range;
 
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, TypeParam, Typeclass,
+    AcornType, Datatype, FamilyParam, FamilyParamKind, Telescope, TypeParam, Typeclass,
     TypeclassInstance, ValueParam, Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
@@ -44,35 +44,48 @@ use super::{Environment, LineType};
 /// - reintroduce the value params into local stacks/proof blocks when elaborating bodies
 #[derive(Clone, Debug, Default)]
 struct DatatypeFamilyScope {
-    type_params: Vec<TypeParam>,
-    value_params: Vec<ValueParam>,
+    telescope: Telescope,
 }
 
 impl DatatypeFamilyScope {
+    fn new(telescope: Telescope) -> DatatypeFamilyScope {
+        DatatypeFamilyScope { telescope }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.telescope.is_empty()
+    }
+
+    fn type_params(&self) -> &[TypeParam] {
+        self.telescope.type_params()
+    }
+
+    fn value_params(&self) -> &[ValueParam] {
+        self.telescope.value_params()
+    }
+
+    fn clone_telescope(&self) -> Telescope {
+        self.telescope.clone()
+    }
+
     fn type_params_slice(&self) -> &[TypeParam] {
-        &self.type_params
+        self.type_params()
     }
 
     fn value_params_slice(&self) -> &[ValueParam] {
-        &self.value_params
+        self.value_params()
     }
 
     fn value_param_types(&self) -> Vec<AcornType> {
-        self.value_params
-            .iter()
-            .map(|param| param.value_type.clone())
-            .collect()
+        self.telescope.value_param_types()
     }
 
     fn value_block_args(&self) -> Vec<(String, AcornType)> {
-        self.value_params
-            .iter()
-            .map(|param| (param.name.clone(), param.value_type.clone()))
-            .collect()
+        self.telescope.value_block_args()
     }
 
     fn bind_value_stack(&self, stack: &mut Stack) {
-        for param in &self.value_params {
+        for param in self.value_params() {
             stack.insert(param.name.clone(), param.value_type.clone());
         }
     }

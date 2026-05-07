@@ -673,9 +673,11 @@ impl<'a> TermBridge<'a> {
         match term.as_ref().decompose() {
             crate::kernel::term::Decomposition::Lambda(input, body) => {
                 let input_term = input.to_owned();
-                let input_type = self.quote_type_with_context(
+                let input_type = self.quote_type_with_context_remapped(
                     input_term.clone(),
                     local_context,
+                    var_remapping,
+                    type_var_id_to_name,
                     instantiate_type_vars,
                 );
 
@@ -719,9 +721,11 @@ impl<'a> TermBridge<'a> {
             }
             crate::kernel::term::Decomposition::ForAll(binder_type, body) => {
                 let binder_type_term = binder_type.to_owned();
-                let binder_acorn_type = self.quote_type_with_context(
+                let binder_acorn_type = self.quote_type_with_context_remapped(
                     binder_type_term.clone(),
                     local_context,
+                    var_remapping,
+                    type_var_id_to_name,
                     instantiate_type_vars,
                 );
 
@@ -765,9 +769,11 @@ impl<'a> TermBridge<'a> {
             }
             crate::kernel::term::Decomposition::Exists(binder_type, body) => {
                 let binder_type_term = binder_type.to_owned();
-                let binder_acorn_type = self.quote_type_with_context(
+                let binder_acorn_type = self.quote_type_with_context_remapped(
                     binder_type_term.clone(),
                     local_context,
+                    var_remapping,
+                    type_var_id_to_name,
                     instantiate_type_vars,
                 );
 
@@ -1500,7 +1506,9 @@ impl<'a> TermBridge<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elaborator::acorn_type::{AcornType, TypeParam, Typeclass};
+    use crate::elaborator::acorn_type::{
+        AcornType, Datatype, DependentTypeArg, TypeParam, Typeclass,
+    };
     use crate::elaborator::names::ConstantName;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
@@ -1615,6 +1623,67 @@ mod tests {
                 name: "G".to_string(),
                 typeclass: Some(group),
             })
+        );
+    }
+
+    #[test]
+    fn test_quote_clause_remaps_dependent_inner_forall_binder_type() {
+        let mut kernel_context = KernelContext::new();
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        kernel_context
+            .type_store
+            .add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        kernel_context
+            .type_store
+            .set_datatype_arity(&set_datatype, 1);
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let type_param = TypeParam {
+            name: "T0".to_string(),
+            typeclass: None,
+        };
+        let t0 = AcornType::Variable(type_param.clone());
+        let set_t0 = AcornType::Data(set_datatype.clone(), vec![t0.clone()]);
+        let subspace_t0_x0 = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t0.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t0.clone())),
+            ],
+        );
+        kernel_context.type_store.add_type(&subspace_t0_x0);
+
+        let local_context = LocalContext::from_types(vec![
+            Term::type_sort(),
+            kernel_context.parse_type("Set[T0]"),
+            kernel_context.parse_type("Set[Subspace[T0, x1]] -> Bool"),
+        ]);
+        let inner_binder_type = kernel_context.parse_type("Set[Subspace[T0, x1]]");
+        let inner_forall = Term::forall(inner_binder_type, kernel_context.parse_term("x2(b0)"));
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(inner_forall)],
+            &local_context,
+        );
+
+        let value = kernel_context.quote_clause(&clause, None, None, false);
+        let AcornValue::ForAll(_, body) = value else {
+            panic!("quoted clause should preserve visible value locals");
+        };
+        let AcornValue::Binary(BinaryOp::Equals, inner, _) = body.as_ref() else {
+            panic!("positive forall literal should be quoted as equality to true");
+        };
+        let AcornValue::ForAll(inner_types, _) = inner.as_ref() else {
+            panic!("quoted literal should contain the inner forall");
+        };
+
+        assert_eq!(
+            inner_types[0],
+            AcornType::Data(set_datatype, vec![subspace_t0_x0])
         );
     }
 
