@@ -674,9 +674,8 @@ mod tests {
         assert_eq!(targeted_output.metrics.pending_goals_total, 1);
     }
 
-    #[cfg(feature = "sci")]
     #[test]
-    fn test_sci_rejects_cached_certificate_unimported_lib_reference() {
+    fn test_rejects_cached_certificate_unimported_lib_reference() {
         let (acornlib, src, build) = setup();
 
         src.child("util.ac")
@@ -715,9 +714,8 @@ mod tests {
         }));
     }
 
-    #[cfg(feature = "sci")]
     #[test]
-    fn test_sci_allows_imported_lib_reference_in_certificate_line() {
+    fn test_allows_imported_lib_reference_in_certificate_line() {
         let (_acornlib, src, build) = setup();
 
         src.child("util.ac")
@@ -751,7 +749,7 @@ mod tests {
             &mut bindings,
             &mut kernel_context,
         )
-        .expect("sci should allow certificate references to imported modules");
+        .expect("strict imports should allow certificate references to imported modules");
     }
 
     #[test]

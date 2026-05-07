@@ -44,9 +44,6 @@ default = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []
-# Strict cert imports: cached certificate code may only reference modules that
-# are visible through the checked module's source dependency closure.
-sci = []
 
 [lib]
 doctest = false
