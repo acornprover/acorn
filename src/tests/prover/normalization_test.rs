@@ -234,7 +234,6 @@ fn test_type_only_theorem_citation_expands() {
 }
 
 #[test]
-#[ignore]
 fn test_defined_goal_conjunction_of_forall_issue_44_repro() {
     // I made some changes from the actual issue 44. But now it works.
     verify_succeeds(
