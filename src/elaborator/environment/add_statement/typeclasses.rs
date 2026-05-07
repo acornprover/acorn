@@ -457,26 +457,36 @@ impl Environment {
                     project,
                     statement,
                 )?;
-                let condition = unsafe_condition.replace_constants(0, &|ci| {
-                    let name = match ci.to_defined_instance_name(&typeclass, &instance_datatype) {
-                        Some(name) => name,
-                        None => return None,
-                    };
-                    let definition = self.bindings.get_definition(&name)?.clone();
-                    let replacements: Vec<_> = family_scope
-                        .type_params
-                        .iter()
-                        .cloned()
-                        .zip(family_type_args.iter().cloned())
-                        .map(|(param, arg)| (param.name, arg))
-                        .collect();
-                    let definition = definition.instantiate(&replacements);
-                    if family_value_args.is_empty() {
-                        Some(definition)
-                    } else {
-                        Some(AcornValue::apply(definition, family_value_args.clone()))
-                    }
-                });
+                let family_value_stack_size = family_scope.value_params.len() as AtomId;
+                let condition = unsafe_condition.replace_constants_with_base_stack(
+                    family_value_stack_size,
+                    family_value_stack_size,
+                    &|ci| {
+                        let name = match ci.to_defined_instance_name(&typeclass, &instance_datatype)
+                        {
+                            Some(name) => name,
+                            None => return None,
+                        };
+                        let definition = self.bindings.get_definition(&name)?.clone();
+                        let replacements: Vec<_> = family_scope
+                            .type_params
+                            .iter()
+                            .cloned()
+                            .zip(family_type_args.iter().cloned())
+                            .map(|(param, arg)| (param.name, arg))
+                            .collect();
+                        let definition = definition
+                            .instantiate_with_ambient_stack(family_value_stack_size, &replacements);
+                        if family_value_args.is_empty() {
+                            Some(definition)
+                        } else {
+                            Some(
+                                AcornValue::apply(definition, family_value_args.clone())
+                                    .expand_lambdas(family_value_stack_size),
+                            )
+                        }
+                    },
+                );
                 conditions.push(condition);
                 continue;
             }

@@ -12,7 +12,7 @@ use crate::elaborator::acorn_type::{
     AcornType, Datatype, DependentTypeArg, FamilyParamKind, PotentialType, TypeParam, Typeclass,
     TypeclassInstance, UnresolvedType, Variance,
 };
-use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, TypeApplication};
+use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::named_entity::NamedEntity;
@@ -23,6 +23,7 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::termination_checker::TerminationChecker;
 use crate::elaborator::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
+use crate::kernel::atom::AtomId;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::Project;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -384,6 +385,23 @@ impl BindingMap {
     ) -> Option<(&AcornValue, &[TypeParam])> {
         let info = self.constant_defs.get(constant_name)?;
         Some((info.definition.as_ref()?, info.value.unresolved_params()))
+    }
+
+    /// Returns the definition, canonical type parameters, and public generic type for a constant.
+    ///
+    /// For datatype-family attributes, the stored definition is lambda-wrapped over hidden
+    /// family value parameters, but the public constant type is not. Callers that validate
+    /// constant instances should compare against this public type rather than `definition.get_type()`.
+    pub fn get_definition_params_and_type(
+        &self,
+        constant_name: &ConstantName,
+    ) -> Option<(&AcornValue, &[TypeParam], AcornType)> {
+        let info = self.constant_defs.get(constant_name)?;
+        Some((
+            info.definition.as_ref()?,
+            info.value.unresolved_params(),
+            info.value.get_type(),
+        ))
     }
 
     /// Iterate through all the typeclasses that this typeclass extends.
@@ -2334,6 +2352,7 @@ impl BindingMap {
             bindings: &BindingMap,
             value: &AcornValue,
             project: &Project,
+            stack_size: AtomId,
         ) -> Option<AcornValue> {
             match value {
                 AcornValue::Constant(c) => {
@@ -2348,7 +2367,7 @@ impl BindingMap {
                         .zip(c.params.iter())
                         .map(|(param, t)| (param.name.clone(), t.clone()))
                         .collect();
-                    Some(def.instantiate(&pairs))
+                    Some(def.instantiate_with_ambient_stack(stack_size, &pairs))
                 }
                 AcornValue::TypeApplication(app) => {
                     Some(AcornValue::TypeApplication(TypeApplication {
@@ -2356,6 +2375,7 @@ impl BindingMap {
                             bindings,
                             &app.function,
                             project,
+                            stack_size,
                         )?),
                         type_param_names: app.type_param_names.clone(),
                         type_param_constraints: app.type_param_constraints.clone(),
@@ -2363,20 +2383,137 @@ impl BindingMap {
                     }))
                 }
                 AcornValue::Application(app) => {
-                    Some(AcornValue::Application(FunctionApplication {
-                        function: Box::new(expand_citation_value(
-                            bindings,
-                            &app.function,
-                            project,
-                        )?),
-                        args: app.args.clone(),
-                    }))
+                    let function =
+                        expand_citation_value(bindings, &app.function, project, stack_size);
+                    let mut changed = function.is_some();
+                    let args = app
+                        .args
+                        .iter()
+                        .map(|arg| {
+                            if let Some(arg) =
+                                expand_citation_value(bindings, arg, project, stack_size)
+                            {
+                                changed = true;
+                                arg
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect();
+                    changed.then(|| {
+                        AcornValue::Application(FunctionApplication {
+                            function: Box::new(
+                                function.unwrap_or_else(|| app.function.as_ref().clone()),
+                            ),
+                            args,
+                        })
+                    })
+                }
+                AcornValue::Lambda(arg_types, body) => expand_citation_value(
+                    bindings,
+                    body,
+                    project,
+                    stack_size + arg_types.len() as AtomId,
+                )
+                .map(|body| AcornValue::Lambda(arg_types.clone(), Box::new(body))),
+                AcornValue::ForAll(arg_types, body) => expand_citation_value(
+                    bindings,
+                    body,
+                    project,
+                    stack_size + arg_types.len() as AtomId,
+                )
+                .map(|body| AcornValue::ForAll(arg_types.clone(), Box::new(body))),
+                AcornValue::Exists(arg_types, body) => expand_citation_value(
+                    bindings,
+                    body,
+                    project,
+                    stack_size + arg_types.len() as AtomId,
+                )
+                .map(|body| AcornValue::Exists(arg_types.clone(), Box::new(body))),
+                AcornValue::Binary(op, left, right) => {
+                    let new_left = expand_citation_value(bindings, left, project, stack_size);
+                    let new_right = expand_citation_value(bindings, right, project, stack_size);
+                    if new_left.is_some() || new_right.is_some() {
+                        Some(AcornValue::Binary(
+                            *op,
+                            Box::new(new_left.unwrap_or_else(|| left.as_ref().clone())),
+                            Box::new(new_right.unwrap_or_else(|| right.as_ref().clone())),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                AcornValue::Not(inner) => {
+                    expand_citation_value(bindings, inner, project, stack_size)
+                        .map(|inner| AcornValue::Not(Box::new(inner)))
+                }
+                AcornValue::Try(inner, result_type) => {
+                    expand_citation_value(bindings, inner, project, stack_size)
+                        .map(|inner| AcornValue::Try(Box::new(inner), result_type.clone()))
+                }
+                AcornValue::Grouping(inner) => {
+                    expand_citation_value(bindings, inner, project, stack_size)
+                        .map(|inner| AcornValue::Grouping(Box::new(inner)))
+                }
+                AcornValue::IfThenElse(cond, if_value, else_value) => {
+                    let new_cond = expand_citation_value(bindings, cond, project, stack_size);
+                    let new_if_value =
+                        expand_citation_value(bindings, if_value, project, stack_size);
+                    let new_else_value =
+                        expand_citation_value(bindings, else_value, project, stack_size);
+                    if new_cond.is_some() || new_if_value.is_some() || new_else_value.is_some() {
+                        Some(AcornValue::IfThenElse(
+                            Box::new(new_cond.unwrap_or_else(|| cond.as_ref().clone())),
+                            Box::new(new_if_value.unwrap_or_else(|| if_value.as_ref().clone())),
+                            Box::new(new_else_value.unwrap_or_else(|| else_value.as_ref().clone())),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                AcornValue::Match(scrutinee, cases) => {
+                    let new_scrutinee =
+                        expand_citation_value(bindings, scrutinee, project, stack_size);
+                    let mut changed = new_scrutinee.is_some();
+                    let cases = cases
+                        .iter()
+                        .map(|case| {
+                            let case_stack_size = stack_size + case.new_vars.len() as AtomId;
+                            let pattern = expand_citation_value(
+                                bindings,
+                                &case.pattern,
+                                project,
+                                case_stack_size,
+                            );
+                            let result = expand_citation_value(
+                                bindings,
+                                &case.result,
+                                project,
+                                case_stack_size,
+                            );
+                            changed |= pattern.is_some() || result.is_some();
+                            MatchCase {
+                                new_vars: case.new_vars.clone(),
+                                pattern: pattern.unwrap_or_else(|| case.pattern.clone()),
+                                result: result.unwrap_or_else(|| case.result.clone()),
+                                constructor_index: case.constructor_index,
+                                constructor_total: case.constructor_total,
+                            }
+                        })
+                        .collect();
+                    changed.then(|| {
+                        AcornValue::Match(
+                            Box::new(new_scrutinee.unwrap_or_else(|| scrutinee.as_ref().clone())),
+                            cases,
+                        )
+                    })
                 }
                 _ => None,
             }
         }
 
-        let value = expand_citation_value(self, &proposition.value, project)
+        let stack_size = proposition.arg_count as AtomId;
+        let value = expand_citation_value(self, &proposition.value, project, stack_size)
             .unwrap_or_else(|| proposition.value.clone());
         self.canonicalize_proposition(proposition.with_value(value))
     }

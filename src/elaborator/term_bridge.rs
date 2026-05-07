@@ -28,6 +28,23 @@ impl<'a> TermBridge<'a> {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> Option<AcornType> {
+        self.quote_dependent_type_application_with_remapping(
+            type_term,
+            local_context,
+            None,
+            None,
+            instantiate_type_vars,
+        )
+    }
+
+    fn quote_dependent_type_application_with_remapping(
+        &self,
+        type_term: &Term,
+        local_context: &LocalContext,
+        var_remapping: Option<&[Option<u16>]>,
+        type_var_id_to_name: Option<&HashMap<AtomId, String>>,
+        instantiate_type_vars: bool,
+    ) -> Option<AcornType> {
         if let Some((head, args)) = type_term.as_ref().split_application_multi() {
             if let Some(ground_id) = head.as_ref().as_type_atom() {
                 let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
@@ -53,18 +70,25 @@ impl<'a> TermBridge<'a> {
                         .map(|(arg, kind)| {
                             if kind.as_ref().is_type_param_kind() {
                                 crate::elaborator::acorn_type::DependentTypeArg::Type(
-                                    self.quote_type_with_context(
+                                    self.quote_type_with_context_remapped(
                                         arg.to_owned(),
                                         local_context,
+                                        var_remapping,
+                                        type_var_id_to_name,
                                         instantiate_type_vars,
                                     ),
                                 )
                             } else {
                                 crate::elaborator::acorn_type::DependentTypeArg::Value(
-                                    self.quote_term_with_context(
+                                    self.quote_term(
                                         arg,
                                         local_context,
+                                        None,
+                                        var_remapping,
+                                        None,
+                                        type_var_id_to_name,
                                         instantiate_type_vars,
+                                        true,
                                     ),
                                 )
                             }
@@ -171,33 +195,60 @@ impl<'a> TermBridge<'a> {
     ) -> AcornValue {
         let acorn_type = if atom_type.as_ref().is_atomic() {
             if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
-                let typeclass = local_context
-                    .get_var_type(*var_id as usize)
-                    .and_then(|t| t.as_ref().as_typeclass())
-                    .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
-                    .cloned();
-                let name = type_var_id_to_name
-                    .and_then(|m| m.get(var_id))
-                    .cloned()
-                    .unwrap_or_else(|| format!("T{}", var_id));
-                AcornType::Variable(TypeParam { name, typeclass })
+                if let Some(name) = type_var_id_to_name.and_then(|m| m.get(var_id)) {
+                    let typeclass = local_context
+                        .get_var_type(*var_id as usize)
+                        .and_then(|t| t.as_ref().as_typeclass())
+                        .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                        .cloned();
+                    AcornType::Variable(TypeParam {
+                        name: name.clone(),
+                        typeclass,
+                    })
+                } else {
+                    let typeclass = local_context
+                        .get_var_type(*var_id as usize)
+                        .and_then(|t| t.as_ref().as_typeclass())
+                        .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                        .cloned();
+                    AcornType::Variable(TypeParam {
+                        name: format!("T{}", var_id),
+                        typeclass,
+                    })
+                }
             } else if let Some(name_map) = type_var_id_to_name {
-                self.kernel_context
-                    .type_store
-                    .type_term_to_acorn_type_with_var_names(atom_type, name_map)
-            } else {
-                self.quote_type_with_context(
+                self.quote_type_with_context_remapped(
                     atom_type.clone(),
                     local_context,
+                    var_remapping,
+                    Some(name_map),
+                    instantiate_type_vars,
+                )
+            } else {
+                self.quote_type_with_context_remapped(
+                    atom_type.clone(),
+                    local_context,
+                    var_remapping,
+                    None,
                     instantiate_type_vars,
                 )
             }
         } else if let Some(name_map) = type_var_id_to_name {
-            self.kernel_context
-                .type_store
-                .type_term_to_acorn_type_with_var_names(atom_type, name_map)
+            self.quote_type_with_context_remapped(
+                atom_type.clone(),
+                local_context,
+                var_remapping,
+                Some(name_map),
+                instantiate_type_vars,
+            )
         } else {
-            self.quote_type_with_context(atom_type.clone(), local_context, instantiate_type_vars)
+            self.quote_type_with_context_remapped(
+                atom_type.clone(),
+                local_context,
+                var_remapping,
+                None,
+                instantiate_type_vars,
+            )
         };
         match atom {
             Atom::Symbol(Symbol::True) => AcornValue::Bool(true),
@@ -870,28 +921,43 @@ impl<'a> TermBridge<'a> {
                 && self.is_syntactic_type_term(arg, local_context);
 
             if is_type_arg {
-                let typeclass = expected_input_type
-                    .as_ref()
-                    .and_then(|input| input.as_ref().as_typeclass())
-                    .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
-                    .cloned();
                 let acorn_type = if let Some(var_id) = arg.as_ref().atomic_variable() {
                     if let Some(name) = type_var_id_to_name.and_then(|m| m.get(&var_id)) {
+                        let typeclass = local_context
+                            .get_var_type(var_id as usize)
+                            .and_then(|t| t.as_ref().as_typeclass())
+                            .and_then(|tc_id| {
+                                self.kernel_context.type_store.get_typeclass_by_id(tc_id)
+                            })
+                            .cloned()
+                            .or_else(|| {
+                                expected_input_type
+                                    .as_ref()
+                                    .and_then(|input| input.as_ref().as_typeclass())
+                                    .and_then(|tc_id| {
+                                        self.kernel_context.type_store.get_typeclass_by_id(tc_id)
+                                    })
+                                    .cloned()
+                            });
                         AcornType::Variable(TypeParam {
                             name: name.clone(),
                             typeclass,
                         })
                     } else {
-                        self.quote_type_with_context(
+                        self.quote_type_with_context_remapped(
                             arg.to_owned(),
                             local_context,
+                            var_remapping,
+                            type_var_id_to_name,
                             instantiate_type_vars,
                         )
                     }
                 } else {
-                    self.quote_type_with_context(
+                    self.quote_type_with_context_remapped(
                         arg.to_owned(),
                         local_context,
+                        var_remapping,
+                        type_var_id_to_name,
                         instantiate_type_vars,
                     )
                 };
@@ -1238,13 +1304,19 @@ impl<'a> TermBridge<'a> {
             .filter_map(|(_, type_term)| type_term.as_ref())
             .map(|type_term| {
                 if let Some(name_map) = type_var_id_to_name {
-                    self.kernel_context
-                        .type_store
-                        .type_term_to_acorn_type_with_var_names(type_term, name_map)
-                } else {
-                    self.quote_type_with_context(
+                    self.quote_type_with_context_remapped(
                         type_term.clone(),
                         local_context,
+                        var_remapping_ref,
+                        Some(name_map),
+                        instantiate_type_vars,
+                    )
+                } else {
+                    self.quote_type_with_context_remapped(
+                        type_term.clone(),
+                        local_context,
+                        var_remapping_ref,
+                        None,
                         instantiate_type_vars,
                     )
                 }
@@ -1260,9 +1332,41 @@ impl<'a> TermBridge<'a> {
         local_context: &LocalContext,
         instantiate_type_vars: bool,
     ) -> AcornType {
-        if let Some(family_type) = self.quote_dependent_type_application_with_context(
+        self.quote_type_with_context_remapped(
+            type_term,
+            local_context,
+            None,
+            None,
+            instantiate_type_vars,
+        )
+    }
+
+    pub(crate) fn quote_type_with_context_remapped(
+        &self,
+        type_term: Term,
+        local_context: &LocalContext,
+        var_remapping: Option<&[Option<u16>]>,
+        type_var_id_to_name: Option<&HashMap<AtomId, String>>,
+        instantiate_type_vars: bool,
+    ) -> AcornType {
+        if let Some(var_id) = type_term.as_ref().atomic_variable() {
+            if let Some(name) = type_var_id_to_name.and_then(|names| names.get(&var_id)) {
+                let typeclass = local_context
+                    .get_var_type(var_id as usize)
+                    .and_then(|t| t.as_ref().as_typeclass())
+                    .and_then(|tc_id| self.kernel_context.type_store.get_typeclass_by_id(tc_id))
+                    .cloned();
+                return AcornType::Variable(TypeParam {
+                    name: name.clone(),
+                    typeclass,
+                });
+            }
+        }
+        if let Some(family_type) = self.quote_dependent_type_application_with_remapping(
             &type_term,
             local_context,
+            var_remapping,
+            type_var_id_to_name,
             instantiate_type_vars,
         ) {
             return family_type;
@@ -1271,26 +1375,41 @@ impl<'a> TermBridge<'a> {
             let mut arg_types = vec![];
             let mut current_context = local_context.clone();
             let mut current_term = type_term;
+            let mut current_var_remapping = var_remapping.map(|mapping| mapping.to_vec());
 
             while let Some((input, output)) = current_term.as_ref().split_pi() {
                 let input_owned = input.to_owned();
                 if !input_owned.as_ref().is_type_param_kind() {
-                    arg_types.push(self.quote_type_with_context(
+                    arg_types.push(self.quote_type_with_context_remapped(
                         input_owned.clone(),
                         &current_context,
+                        current_var_remapping.as_deref(),
+                        type_var_id_to_name,
                         instantiate_type_vars,
                     ));
                 }
 
                 let fresh_var = current_context.push_type(input_owned) as AtomId;
+                if let Some(mapping) = &mut current_var_remapping {
+                    if mapping.len() <= fresh_var as usize {
+                        mapping.resize(fresh_var as usize + 1, None);
+                    }
+                    let next_index = mapping.iter().filter_map(|x| *x).max().map_or(0, |m| m + 1);
+                    mapping[fresh_var as usize] = Some(next_index);
+                }
                 current_term = output
                     .to_owned()
                     .substitute_bound(0, &Term::new_variable(fresh_var))
                     .shift_bound(0, -1);
             }
 
-            let return_type =
-                self.quote_type_with_context(current_term, &current_context, instantiate_type_vars);
+            let return_type = self.quote_type_with_context_remapped(
+                current_term,
+                &current_context,
+                current_var_remapping.as_deref(),
+                type_var_id_to_name,
+                instantiate_type_vars,
+            );
             if arg_types.is_empty() {
                 return return_type;
             }
@@ -1298,6 +1417,18 @@ impl<'a> TermBridge<'a> {
                 arg_types,
                 return_type: Box::new(return_type),
             });
+        }
+        if let Some(name_map) = type_var_id_to_name {
+            let only_named_type_vars = type_term.iter_atoms().all(|atom| match atom {
+                Atom::FreeVariable(i) => name_map.contains_key(i),
+                _ => true,
+            });
+            if only_named_type_vars {
+                return self
+                    .kernel_context
+                    .type_store
+                    .type_term_to_acorn_type_with_var_names(&type_term, name_map);
+            }
         }
         self.kernel_context
             .type_store
@@ -1317,6 +1448,26 @@ impl<'a> TermBridge<'a> {
             None,
             None,
             None,
+            instantiate_type_vars,
+            true,
+        )
+    }
+
+    pub(crate) fn quote_term_with_context_remapped(
+        &self,
+        term: &Term,
+        local_context: &LocalContext,
+        var_remapping: Option<&[Option<u16>]>,
+        type_var_id_to_name: Option<&HashMap<AtomId, String>>,
+        instantiate_type_vars: bool,
+    ) -> AcornValue {
+        self.quote_term(
+            term,
+            local_context,
+            None,
+            var_remapping,
+            None,
+            type_var_id_to_name,
             instantiate_type_vars,
             true,
         )
@@ -1349,7 +1500,7 @@ impl<'a> TermBridge<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elaborator::acorn_type::{AcornType, TypeParam};
+    use crate::elaborator::acorn_type::{AcornType, TypeParam, Typeclass};
     use crate::elaborator::names::ConstantName;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
@@ -1436,6 +1587,10 @@ mod tests {
     fn test_quote_clause_uses_explicit_type_param_names() {
         let mut kernel_context = KernelContext::new();
         kernel_context.parse_typeclass("Group");
+        let group = Typeclass {
+            module_id: ModuleId(0),
+            name: "Group".to_string(),
+        };
         let clause = kernel_context.parse_clause("x1(x2)", &["Group", "x0 -> Bool", "x0"]);
         let type_param_names = ["G".to_string()];
 
@@ -1449,7 +1604,7 @@ mod tests {
             AcornType::functional(
                 vec![AcornType::Variable(TypeParam {
                     name: "G".to_string(),
-                    typeclass: None,
+                    typeclass: Some(group.clone()),
                 })],
                 AcornType::Bool,
             )
@@ -1458,7 +1613,7 @@ mod tests {
             arg_types[1],
             AcornType::Variable(TypeParam {
                 name: "G".to_string(),
-                typeclass: None,
+                typeclass: Some(group),
             })
         );
     }

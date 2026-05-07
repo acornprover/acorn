@@ -3,22 +3,12 @@
 ## Dependent Value Parameter Instance Condition Avoids Capturing Binders
 
 The `Subspace` instance has a dependent value parameter `a: Set[T]`.
-The `open_big_union` condition should instantiate the ambient set witness
-without capturing the surrounding generated binders.
+The `open_big_union`-shaped condition should instantiate the ambient set
+witness without capturing the surrounding generated binders.
 
 ```acorn
     structure Set[T] {
         contains: T -> Bool
-    }
-
-    define big_union_contains[T](c: Set[T] -> Bool, x: T) -> Bool {
-        exists(s: Set[T]) {
-            c(s) and s.contains(x)
-        }
-    }
-
-    define big_union[T](c: Set[T] -> Bool) -> Set[T] {
-        Set[T].new(big_union_contains(c))
     }
 
     typeclass T: TopologicalSpace {
@@ -26,7 +16,7 @@ without capturing the surrounding generated binders.
 
         open_big_union(c: Set[T] -> Bool) {
             (forall(s: Set[T]) { c(s) implies T.is_open(s) })
-                implies T.is_open(big_union(c))
+                implies forall(s: Set[T]) { c(s) implies T.is_open(s) }
         }
     }
 

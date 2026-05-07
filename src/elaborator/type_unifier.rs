@@ -5,6 +5,7 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
+use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
 
 /// Utility for matching types during unification.
@@ -17,6 +18,9 @@ pub struct TypeUnifier<'a> {
     /// in order to make it match.
     /// Every parameter used in self will get a mapping entry.
     pub mapping: HashMap<String, AcornType>,
+
+    /// Dependent value argument unification fills this in for hidden family/value parameters.
+    pub value_mapping: HashMap<AtomId, AcornValue>,
 }
 
 /// The different errors we can get from unification.
@@ -91,6 +95,7 @@ impl<'a> TypeUnifier<'a> {
         TypeUnifier {
             registry,
             mapping: HashMap::new(),
+            value_mapping: HashMap::new(),
         }
     }
 
@@ -270,17 +275,23 @@ impl<'a> TypeUnifier<'a> {
             (
                 crate::elaborator::acorn_type::DependentTypeArg::Value(generic_value),
                 crate::elaborator::acorn_type::DependentTypeArg::Value(instance_value),
-            ) => {
-                if generic_value == instance_value {
-                    return Ok(());
-                }
-                match generic_value {
-                    AcornValue::Variable(_, generic_type) => {
-                        self.match_instance(generic_type, &instance_value.get_type())
+            ) => match generic_value {
+                AcornValue::Variable(index, generic_type) => {
+                    self.match_instance(generic_type, &instance_value.get_type())?;
+                    if let Some(existing) = self.value_mapping.get(index) {
+                        if existing == instance_value {
+                            Ok(())
+                        } else {
+                            Err(Error::Other)
+                        }
+                    } else {
+                        self.value_mapping.insert(*index, instance_value.clone());
+                        Ok(())
                     }
-                    _ => Err(Error::Other),
                 }
-            }
+                _ if generic_value == instance_value => Ok(()),
+                _ => Err(Error::Other),
+            },
             _ => Err(Error::Other),
         }
     }
@@ -372,11 +383,106 @@ impl<'a> TypeUnifier<'a> {
         expected_return_type: Option<&AcornType>,
         source: &dyn ErrorContext,
     ) -> error::Result<PotentialValue> {
+        let original_mapping = self.mapping.clone();
+        let original_value_mapping = self.value_mapping.clone();
+        let explicit_result = self.try_resolve_with_inference_inner(
+            unresolved.clone(),
+            args.clone(),
+            expected_return_type,
+            source,
+            false,
+        );
+        match explicit_result {
+            Ok(result) => return Ok(result),
+            Err(explicit_error) => {
+                if unresolved.value_param_types.is_empty() {
+                    return Err(explicit_error);
+                }
+                self.mapping = original_mapping;
+                self.value_mapping = original_value_mapping;
+                match self.try_resolve_with_inference_inner(
+                    unresolved,
+                    args,
+                    expected_return_type,
+                    source,
+                    true,
+                ) {
+                    Ok(result) => Ok(result),
+                    Err(_) => Err(explicit_error),
+                }
+            }
+        }
+    }
+
+    fn visible_value_param_prefix_len(unresolved: &UnresolvedConstant) -> usize {
+        let AcornType::Function(function_type) = &unresolved.generic_type else {
+            return 0;
+        };
+        let value_param_count = unresolved.value_param_types.len();
+        if function_type.arg_types.len() < value_param_count {
+            return 0;
+        }
+        let generic_value_param_types = unresolved
+            .value_param_types
+            .iter()
+            .map(|value_type| value_type.genericize(&unresolved.params))
+            .collect::<Vec<_>>();
+        if function_type.arg_types[..value_param_count] != *generic_value_param_types {
+            return 0;
+        }
+        value_param_count
+    }
+
+    fn inferred_value_args(
+        &self,
+        unresolved: &UnresolvedConstant,
+        type_args: &[AcornType],
+        source: &dyn ErrorContext,
+    ) -> error::Result<Option<Vec<AcornValue>>> {
+        if !unresolved.bound_value_args.is_empty() || unresolved.value_param_types.is_empty() {
+            return Ok(None);
+        }
+
+        let type_replacements = unresolved
+            .params
+            .iter()
+            .zip(type_args.iter())
+            .map(|(param, arg)| (param.name.clone(), arg.clone()))
+            .collect::<Vec<_>>();
+        let mut value_args = Vec::with_capacity(unresolved.value_param_types.len());
+        for (i, value_type) in unresolved.value_param_types.iter().enumerate() {
+            let Some(value_arg) = self.value_mapping.get(&(i as AtomId)).cloned() else {
+                return Err(source.error(
+                    "The arguments are insufficient to infer the dependent value parameters",
+                ));
+            };
+            let expected_type = value_type
+                .instantiate(&type_replacements)
+                .bind_value_params(&value_args);
+            value_arg.check_type(Some(&expected_type), source)?;
+            value_args.push(value_arg);
+        }
+        Ok(Some(value_args))
+    }
+
+    fn try_resolve_with_inference_inner(
+        &mut self,
+        unresolved: UnresolvedConstant,
+        args: Vec<AcornValue>,
+        expected_return_type: Option<&AcornType>,
+        source: &dyn ErrorContext,
+        infer_hidden_value_args: bool,
+    ) -> error::Result<PotentialValue> {
         // Combine stored args with new args for type inference
         let combined_args = [unresolved.args.clone(), args].concat();
+        let hidden_arg_prefix = if infer_hidden_value_args {
+            Self::visible_value_param_prefix_len(&unresolved)
+        } else {
+            0
+        };
 
         // Use the arguments to infer types
-        let unresolved_return_type = if combined_args.is_empty() {
+        let unresolved_return_type = if combined_args.is_empty() && hidden_arg_prefix == 0 {
             unresolved.generic_type.clone()
         } else if let AcornType::Function(unresolved_function_type) = &unresolved.generic_type {
             for (i, arg) in combined_args.iter().enumerate() {
@@ -390,6 +496,23 @@ impl<'a> TypeUnifier<'a> {
                         )));
                     }
                 };
+                let arg_type = if hidden_arg_prefix > 0 {
+                    match unresolved_function_type
+                        .arg_types
+                        .get(hidden_arg_prefix + i)
+                    {
+                        Some(t) => t,
+                        None => {
+                            return Err(source.error(&format!(
+                                "expected {} arguments but got {}",
+                                unresolved_function_type.arg_types.len() - hidden_arg_prefix,
+                                combined_args.len()
+                            )));
+                        }
+                    }
+                } else {
+                    arg_type
+                };
                 self.user_match_instance(
                     arg_type,
                     &arg.get_type(),
@@ -398,7 +521,7 @@ impl<'a> TypeUnifier<'a> {
                 )?;
             }
 
-            unresolved_function_type.applied_type(combined_args.len())
+            unresolved_function_type.applied_type(hidden_arg_prefix + combined_args.len())
         } else {
             return Err(source.error("expected a function type"));
         };
@@ -437,6 +560,11 @@ impl<'a> TypeUnifier<'a> {
         }
 
         self.check_type_param_constraints(&unresolved.params, &all_params, source)?;
+        let inferred_value_args = if infer_hidden_value_args {
+            self.inferred_value_args(&unresolved, &all_params, source)?
+        } else {
+            None
+        };
 
         if uninferred_params.is_empty() {
             // All parameters inferred - fully resolve
@@ -449,7 +577,10 @@ impl<'a> TypeUnifier<'a> {
                 bound_value_args: unresolved.bound_value_args,
                 args: vec![], // Don't apply args in resolve(), we'll apply combined_args here
             };
-            let instance_fn = unresolved_without_args.resolve(source, all_params)?;
+            let mut instance_fn = unresolved_without_args.resolve(source, all_params)?;
+            if let Some(value_args) = inferred_value_args {
+                instance_fn = instance_fn.bind_value_params(&value_args, source)?;
+            }
             let value = AcornValue::apply(instance_fn, combined_args);
             value.check_type(expected_return_type, source)?;
             Ok(PotentialValue::Resolved(value))
@@ -462,7 +593,7 @@ impl<'a> TypeUnifier<'a> {
                 params: unresolved.params.clone(),
                 generic_type: unresolved.generic_type.clone(),
                 value_param_types: unresolved.value_param_types.clone(),
-                bound_value_args: unresolved.bound_value_args.clone(),
+                bound_value_args: inferred_value_args.unwrap_or(unresolved.bound_value_args),
                 args: combined_args,
             };
 

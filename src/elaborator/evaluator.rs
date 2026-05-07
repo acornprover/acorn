@@ -1819,15 +1819,55 @@ impl<'a> Evaluator<'a> {
                         {
                             // This is a type parameter list
                             if let PotentialValue::Unresolved(unresolved) = function {
-                                let mut type_params = vec![];
-                                for expr in exprs {
-                                    type_params.push(self.evaluate_type(expr)?);
+                                let type_param_count = unresolved.params.len();
+                                let value_param_count = unresolved.value_param_types.len();
+                                if exprs.len() != type_param_count
+                                    && exprs.len() != type_param_count + value_param_count
+                                {
+                                    return Err(args_expr.error(&format!(
+                                        "expected {} type parameters or {} type/value parameters, but got {}",
+                                        type_param_count,
+                                        type_param_count + value_param_count,
+                                        exprs.len()
+                                    )));
                                 }
-                                let resolved = self.resolve_unresolved_with_type_params(
+                                let mut type_params = vec![];
+                                let mut type_replacements = vec![];
+                                for (expr, param) in exprs
+                                    .iter()
+                                    .take(type_param_count)
+                                    .zip(unresolved.params.iter())
+                                {
+                                    let type_param = self.evaluate_type(expr)?;
+                                    type_replacements
+                                        .push((param.name.clone(), type_param.clone()));
+                                    type_params.push(type_param);
+                                }
+                                let mut value_args = vec![];
+                                for (expr, value_type) in exprs
+                                    .iter()
+                                    .skip(type_param_count)
+                                    .zip(unresolved.value_param_types.iter())
+                                {
+                                    let expected_type = value_type
+                                        .instantiate(&type_replacements)
+                                        .bind_value_params(&value_args);
+                                    let value_arg = self.evaluate_value_with_stack(
+                                        stack,
+                                        expr,
+                                        Some(&expected_type),
+                                    )?;
+                                    value_args.push(value_arg);
+                                }
+                                let mut resolved = self.resolve_unresolved_with_type_params(
                                     unresolved,
                                     type_params,
                                     left_delimiter,
                                 )?;
+                                if !value_args.is_empty() {
+                                    resolved =
+                                        resolved.bind_value_params(&value_args, left_delimiter)?;
+                                }
                                 resolved.check_type(expected_type, expression)?;
                                 return Ok(PotentialValue::Resolved(resolved));
                             }

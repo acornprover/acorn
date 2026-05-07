@@ -6,6 +6,7 @@ use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::stack::Stack;
+use crate::elaborator::term_bridge::TermBridge;
 use crate::elaborator::to_term::lower_type_to_term;
 use crate::kernel::atom::AtomId;
 use crate::kernel::certificate_step::Claim;
@@ -93,7 +94,16 @@ impl ClaimCodec {
 
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let local_type_params = Self::local_type_param_infos(local_context, kernel_context);
-        let generic_value = kernel_context.quote_clause(claim.clause(), None, None, false);
+        let local_type_param_names: Vec<String> = local_type_params
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let generic_value = kernel_context.quote_clause(
+            claim.clause(),
+            None,
+            Some(local_type_param_names.as_slice()),
+            false,
+        );
         let generic_code = generator.value_to_code(&generic_value)?;
         if claim.var_map().iter().next().is_none() {
             let mut arbitrary_params = vec![];
@@ -109,10 +119,6 @@ impl ClaimCodec {
 
             if arbitrary_params.is_empty() {
                 if !local_type_params.is_empty() {
-                    let local_type_param_names: Vec<String> = local_type_params
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .collect();
                     let named_generic_code =
                         generator.value_to_code(&kernel_context.quote_clause(
                             claim.clause(),
@@ -248,6 +254,31 @@ impl ClaimCodec {
             .iter()
             .filter_map(|name| name.clone())
             .collect();
+        let mut next_visible_value_id = 0u16;
+        let value_var_remapping: Vec<Option<u16>> = value_decl_name_by_var
+            .iter()
+            .map(|name| {
+                if name.is_some() {
+                    let id = next_visible_value_id;
+                    next_visible_value_id += 1;
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let type_var_id_to_name: HashMap<AtomId, String> = local_context
+            .get_var_types()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, var_type)| {
+                var_type
+                    .as_ref()
+                    .filter(|term| term.as_ref().is_type_param_kind())
+                    .map(|_| (i as AtomId, format!("T{}", i)))
+            })
+            .collect();
+        let type_var_id_to_name = (!type_var_id_to_name.is_empty()).then_some(type_var_id_to_name);
 
         for var_id in 0..local_context.len() {
             let var_type = local_context
@@ -284,12 +315,22 @@ impl ClaimCodec {
                 let mapped_type = arg_term.map(|term| {
                     kernel_context.quote_type_with_context(term.clone(), local_context, false)
                 });
-                let (selected_type, type_arg_code) = match mapped_type {
-                    Some(mapped) if !matches!(mapped, AcornType::Variable(_)) => (
-                        Some(mapped.clone()),
-                        generator.type_to_expr(&mapped)?.to_string(),
-                    ),
-                    Some(_) | None => {
+                let (selected_type, type_arg_code) = match &mapped_type {
+                    Some(mapped)
+                        if !matches!(
+                            mapped,
+                            AcornType::Variable(_)
+                                | AcornType::Type0
+                                | AcornType::TypeclassConstraint(_)
+                        ) =>
+                    {
+                        (
+                            Some(mapped.clone()),
+                            generator.type_to_expr(&mapped)?.to_string(),
+                        )
+                    }
+                    Some(_) => (None, type_param_name.clone()),
+                    None => {
                         if let Some(in_scope_type) = Self::infer_in_scope_type_arg(&kind, bindings)
                         {
                             (
@@ -329,7 +370,13 @@ impl ClaimCodec {
                 .as_ref()
                 .expect("value variable names should be precomputed")
                 .clone();
-            let acorn_type = kernel_context.quote_type_with_context(var_type, local_context, false);
+            let acorn_type = TermBridge::new(kernel_context).quote_type_with_context_remapped(
+                var_type,
+                local_context,
+                Some(&value_var_remapping),
+                type_var_id_to_name.as_ref(),
+                false,
+            );
             value_lambda_arg_types.push(acorn_type.clone());
             value_decl_codes.push(format!(
                 "{}: {}",
@@ -341,9 +388,11 @@ impl ClaimCodec {
 
             let substituted_arg_term = apply_to_term(arg_term.as_ref(), &resolved_type_var_map);
             let arg_value = if substituted_arg_term.max_variable().is_some() {
-                let quoted = kernel_context.quote_term_with_context(
+                let quoted = TermBridge::new(kernel_context).quote_term_with_context_remapped(
                     &substituted_arg_term,
                     local_context,
+                    None,
+                    type_var_id_to_name.as_ref(),
                     true,
                 );
                 Self::rebase_value_to_standalone(&quoted, num_type_params as AtomId).map_err(
@@ -545,7 +594,8 @@ impl ClaimCodec {
         args: &[AcornValue],
         kernel_context: &mut KernelContext,
     ) -> Result<Claim, CodeGenError> {
-        let quoted_clause = kernel_context.quote_clause(claim.clause(), None, None, false);
+        let quoted_clause =
+            kernel_context.quote_clause(claim.clause(), None, Some(type_param_names), false);
         let type_var_map = Self::build_claim_type_var_map(
             type_param_names,
             type_param_constraints,

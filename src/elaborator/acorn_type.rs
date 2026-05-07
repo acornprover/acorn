@@ -1049,16 +1049,34 @@ impl AcornType {
         stack_size: AtomId,
         replacer: &impl Fn(&crate::elaborator::acorn_value::ConstantInstance) -> Option<AcornValue>,
     ) -> AcornType {
+        self.replace_constants_with_base_stack(stack_size, 0, replacer)
+    }
+
+    pub(crate) fn replace_constants_with_base_stack(
+        &self,
+        stack_size: AtomId,
+        base_stack_size: AtomId,
+        replacer: &impl Fn(&crate::elaborator::acorn_value::ConstantInstance) -> Option<AcornValue>,
+    ) -> AcornType {
+        assert!(stack_size >= base_stack_size);
         match self {
             AcornType::Family(datatype, args) => AcornType::new_datatype_application(
                 datatype.clone(),
                 args.iter()
                     .map(|arg| match arg {
-                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
-                            acorn_type.replace_constants(stack_size, replacer),
-                        ),
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.replace_constants_with_base_stack(
+                                stack_size,
+                                base_stack_size,
+                                replacer,
+                            ))
+                        }
                         DependentTypeArg::Value(value) => {
-                            DependentTypeArg::Value(value.replace_constants(stack_size, replacer))
+                            DependentTypeArg::Value(value.replace_constants_with_base_stack(
+                                stack_size,
+                                base_stack_size,
+                                replacer,
+                            ))
                         }
                     })
                     .collect(),
@@ -1069,23 +1087,31 @@ impl AcornType {
                     .arg_types
                     .iter()
                     .map(|t| {
-                        let replaced = t.replace_constants(current_stack_size, replacer);
+                        let replaced = t.replace_constants_with_base_stack(
+                            current_stack_size,
+                            base_stack_size,
+                            replacer,
+                        );
                         current_stack_size += 1;
                         replaced
                     })
                     .collect();
                 AcornType::functional(
                     arg_types,
-                    function_type
-                        .return_type
-                        .replace_constants(current_stack_size, replacer),
+                    function_type.return_type.replace_constants_with_base_stack(
+                        current_stack_size,
+                        base_stack_size,
+                        replacer,
+                    ),
                 )
             }
             AcornType::Data(datatype, types) => AcornType::Data(
                 datatype.clone(),
                 types
                     .iter()
-                    .map(|t| t.replace_constants(stack_size, replacer))
+                    .map(|t| {
+                        t.replace_constants_with_base_stack(stack_size, base_stack_size, replacer)
+                    })
                     .collect(),
             ),
             _ => self.clone(),

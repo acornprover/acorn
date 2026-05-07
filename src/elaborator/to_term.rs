@@ -2404,4 +2404,83 @@ mod tests {
                 .expect("re-lowering eta-reduced quoted match should succeed");
         assert_eq!(roundtripped, canonical);
     }
+
+    #[test]
+    fn test_lower_dependent_forall_binder_type_refers_to_outer_value_binder() {
+        let mut kernel_context = KernelContext::new();
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let set_t = AcornType::Data(
+            set_datatype.clone(),
+            vec![AcornType::Variable(t_param.clone())],
+        );
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(AcornType::Variable(t_param.clone())),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let u_type = AcornType::Data(set_datatype.clone(), vec![subspace_t_a]);
+        let predicate_type =
+            AcornType::functional(vec![set_t.clone(), u_type.clone()], AcornType::Bool);
+        let predicate = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "p"),
+            vec![AcornType::Variable(t_param.clone())],
+            predicate_type.clone(),
+            predicate_type,
+            vec!["T".to_string()],
+            vec![set_t.clone()],
+        );
+        let value = AcornValue::forall(
+            vec![set_t.clone(), u_type],
+            AcornValue::apply(
+                predicate,
+                vec![
+                    AcornValue::Variable(0, set_t.clone()),
+                    AcornValue::Variable(
+                        1,
+                        AcornType::Data(
+                            set_datatype,
+                            vec![AcornType::Family(
+                                subspace_datatype,
+                                vec![
+                                    DependentTypeArg::Type(AcornType::Variable(t_param.clone())),
+                                    DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+                                ],
+                            )],
+                        ),
+                    ),
+                ],
+            ),
+        );
+        let type_var_map = build_type_var_map(&mut kernel_context, &[t_param]);
+
+        let term = lower_value_to_term(
+            &mut kernel_context,
+            &value,
+            NewConstantType::Local,
+            Some(&type_var_map),
+        )
+        .expect("lower dependent forall");
+
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(&term, Some(type_var_map))
+            .expect("lower dependent forall clause");
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        assert_eq!(
+            quoted.to_string(),
+            "forall(x0: Set[T0*], x1: Set[Subspace[T0*, x0]]) { p[T0*](x0, x1) }"
+        );
+    }
 }

@@ -320,20 +320,65 @@ impl fmt::Display for ConstantInstance {
 }
 
 impl ConstantInstance {
-    fn visible_value_param_prefix_count(&self) -> usize {
-        if !matches!(self.name, ConstantName::Unqualified(..)) {
+    fn visible_value_param_prefix_count_for(
+        name: &ConstantName,
+        instance_type: &AcornType,
+        value_param_types: &[AcornType],
+    ) -> usize {
+        if !matches!(name, ConstantName::Unqualified(..)) {
             return 0;
         }
-        let AcornType::Function(function_type) = &self.instance_type else {
+        let AcornType::Function(function_type) = instance_type else {
             return 0;
         };
-        if function_type.arg_types.len() < self.value_param_types.len() {
+        if function_type.arg_types.len() < value_param_types.len() {
             return 0;
         }
-        if function_type.arg_types[..self.value_param_types.len()] != *self.value_param_types {
+        if function_type.arg_types[..value_param_types.len()] != *value_param_types {
             return 0;
         }
-        self.value_param_types.len()
+        value_param_types.len()
+    }
+
+    fn visible_value_param_prefix_count(&self) -> usize {
+        Self::visible_value_param_prefix_count_for(
+            &self.name,
+            &self.instance_type,
+            &self.value_param_types,
+        )
+    }
+
+    fn instance_type_with_bound_value_params_for(
+        name: &ConstantName,
+        instance_type: &AcornType,
+        value_param_types: &[AcornType],
+        values: &[AcornValue],
+    ) -> AcornType {
+        let visible_prefix_count =
+            Self::visible_value_param_prefix_count_for(name, instance_type, value_param_types)
+                .min(values.len());
+        let mut instance_type = instance_type.bind_value_params(values);
+        if visible_prefix_count > 0 {
+            let binding_offset = values.len() as AtomId;
+            for value in &values[..visible_prefix_count] {
+                instance_type = match instance_type {
+                    AcornType::Function(function_type) => function_type
+                        .applied_type(1)
+                        .bind_values(binding_offset, binding_offset, std::slice::from_ref(value)),
+                    _ => instance_type,
+                };
+            }
+        }
+        instance_type
+    }
+
+    fn instance_type_with_bound_value_params(&self, values: &[AcornValue]) -> AcornType {
+        Self::instance_type_with_bound_value_params_for(
+            &self.name,
+            &self.instance_type,
+            &self.value_param_types,
+            values,
+        )
     }
 
     fn pending_value_specialization_arg_count(&self, supplied_arg_count: usize) -> usize {
@@ -420,7 +465,7 @@ impl ConstantInstance {
         Ok(ConstantInstance {
             name: self.name.clone(),
             params: self.params.clone(),
-            instance_type: self.instance_type.bind_value_params(values),
+            instance_type: self.instance_type_with_bound_value_params(values),
             generic_type: self.generic_type.clone(),
             type_param_names: self.type_param_names.clone(),
             value_param_types: self.value_param_types.clone(),
@@ -1155,13 +1200,18 @@ impl AcornValue {
     fn replace_constants_in_binder_types(
         binder_types: &[AcornType],
         stack_size: AtomId,
+        base_stack_size: AtomId,
         replacer: &impl Fn(&ConstantInstance) -> Option<AcornValue>,
     ) -> Vec<AcornType> {
         let mut current_stack_size = stack_size;
         binder_types
             .iter()
             .map(|binder_type| {
-                let replaced = binder_type.replace_constants(current_stack_size, replacer);
+                let replaced = binder_type.replace_constants_with_base_stack(
+                    current_stack_size,
+                    base_stack_size,
+                    replacer,
+                );
                 current_stack_size += 1;
                 replaced
             })
@@ -1583,17 +1633,34 @@ impl AcornValue {
         stack_size: AtomId,
         replacer: &impl Fn(&ConstantInstance) -> Option<AcornValue>,
     ) -> AcornValue {
+        self.replace_constants_with_base_stack(stack_size, 0, replacer)
+    }
+
+    pub(crate) fn replace_constants_with_base_stack(
+        &self,
+        stack_size: AtomId,
+        base_stack_size: AtomId,
+        replacer: &impl Fn(&ConstantInstance) -> Option<AcornValue>,
+    ) -> AcornValue {
+        assert!(stack_size >= base_stack_size);
         match self {
-            AcornValue::Variable(i, var_type) => {
-                AcornValue::Variable(*i, var_type.replace_constants(stack_size, replacer))
-            }
+            AcornValue::Variable(i, var_type) => AcornValue::Variable(
+                *i,
+                var_type.replace_constants_with_base_stack(stack_size, base_stack_size, replacer),
+            ),
             AcornValue::Bool(_) => self.clone(),
             AcornValue::Application(fa) => {
-                let new_function = fa.function.replace_constants(stack_size, replacer);
+                let new_function = fa.function.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                );
                 let new_args = fa
                     .args
                     .iter()
-                    .map(|x| x.replace_constants(stack_size, replacer))
+                    .map(|x| {
+                        x.replace_constants_with_base_stack(stack_size, base_stack_size, replacer)
+                    })
                     .collect();
                 AcornValue::Application(FunctionApplication {
                     function: Box::new(new_function),
@@ -1601,81 +1668,167 @@ impl AcornValue {
                 })
             }
             AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
-                function: Box::new(app.function.replace_constants(stack_size, replacer)),
+                function: Box::new(app.function.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                )),
                 type_param_names: app.type_param_names.clone(),
                 type_param_constraints: app.type_param_constraints.clone(),
                 type_args: app
                     .type_args
                     .iter()
-                    .map(|t| t.replace_constants(stack_size, replacer))
+                    .map(|t| {
+                        t.replace_constants_with_base_stack(stack_size, base_stack_size, replacer)
+                    })
                     .collect(),
             }),
             AcornValue::Lambda(arg_types, value) => {
-                let new_arg_types =
-                    Self::replace_constants_in_binder_types(arg_types, stack_size, replacer);
-                let new_value =
-                    value.replace_constants(stack_size + arg_types.len() as AtomId, replacer);
+                let new_arg_types = Self::replace_constants_in_binder_types(
+                    arg_types,
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                );
+                let new_value = value.replace_constants_with_base_stack(
+                    stack_size + arg_types.len() as AtomId,
+                    base_stack_size,
+                    replacer,
+                );
                 AcornValue::Lambda(new_arg_types, Box::new(new_value))
             }
             AcornValue::Binary(op, left, right) => {
-                let new_left = left.replace_constants(stack_size, replacer);
-                let new_right = right.replace_constants(stack_size, replacer);
+                let new_left =
+                    left.replace_constants_with_base_stack(stack_size, base_stack_size, replacer);
+                let new_right =
+                    right.replace_constants_with_base_stack(stack_size, base_stack_size, replacer);
                 AcornValue::Binary(*op, Box::new(new_left), Box::new(new_right))
             }
-            AcornValue::Not(x) => {
-                AcornValue::Not(Box::new(x.replace_constants(stack_size, replacer)))
-            }
+            AcornValue::Not(x) => AcornValue::Not(Box::new(x.replace_constants_with_base_stack(
+                stack_size,
+                base_stack_size,
+                replacer,
+            ))),
             AcornValue::Try(x, t) => AcornValue::Try(
-                Box::new(x.replace_constants(stack_size, replacer)),
-                t.replace_constants(stack_size, replacer),
+                Box::new(x.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                )),
+                t.replace_constants_with_base_stack(stack_size, base_stack_size, replacer),
             ),
             AcornValue::ForAll(quants, value) => {
-                let new_quants =
-                    Self::replace_constants_in_binder_types(quants, stack_size, replacer);
-                let new_value =
-                    value.replace_constants(stack_size + quants.len() as AtomId, replacer);
+                let new_quants = Self::replace_constants_in_binder_types(
+                    quants,
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                );
+                let new_value = value.replace_constants_with_base_stack(
+                    stack_size + quants.len() as AtomId,
+                    base_stack_size,
+                    replacer,
+                );
                 AcornValue::ForAll(new_quants, Box::new(new_value))
             }
             AcornValue::Exists(quants, value) => {
-                let new_quants =
-                    Self::replace_constants_in_binder_types(quants, stack_size, replacer);
-                let new_value =
-                    value.replace_constants(stack_size + quants.len() as AtomId, replacer);
+                let new_quants = Self::replace_constants_in_binder_types(
+                    quants,
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                );
+                let new_value = value.replace_constants_with_base_stack(
+                    stack_size + quants.len() as AtomId,
+                    base_stack_size,
+                    replacer,
+                );
                 AcornValue::Exists(new_quants, Box::new(new_value))
             }
-            AcornValue::Grouping(value) => {
-                AcornValue::Grouping(Box::new(value.replace_constants(stack_size, replacer)))
-            }
-            AcornValue::Constant(c) => replacer(c).unwrap_or_else(|| {
-                AcornValue::Constant(ConstantInstance {
-                    name: c.name.clone(),
-                    params: c
-                        .params
-                        .iter()
-                        .map(|t| t.replace_constants(stack_size, replacer))
-                        .collect(),
-                    instance_type: c.instance_type.replace_constants(stack_size, replacer),
-                    generic_type: c.generic_type.replace_constants(stack_size, replacer),
-                    type_param_names: c.type_param_names.clone(),
-                    value_param_types: c
-                        .value_param_types
-                        .iter()
-                        .map(|t| t.replace_constants(stack_size, replacer))
-                        .collect(),
-                    bound_value_args: c
-                        .bound_value_args
-                        .iter()
-                        .map(|value| value.replace_constants(stack_size, replacer))
-                        .collect(),
-                })
-            }),
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(
+                value.replace_constants_with_base_stack(stack_size, base_stack_size, replacer),
+            )),
+            AcornValue::Constant(c) => replacer(c).map_or_else(
+                || {
+                    AcornValue::Constant(ConstantInstance {
+                        name: c.name.clone(),
+                        params: c
+                            .params
+                            .iter()
+                            .map(|t| {
+                                t.replace_constants_with_base_stack(
+                                    stack_size,
+                                    base_stack_size,
+                                    replacer,
+                                )
+                            })
+                            .collect(),
+                        instance_type: c.instance_type.replace_constants_with_base_stack(
+                            stack_size,
+                            base_stack_size,
+                            replacer,
+                        ),
+                        generic_type: c.generic_type.replace_constants_with_base_stack(
+                            stack_size,
+                            base_stack_size,
+                            replacer,
+                        ),
+                        type_param_names: c.type_param_names.clone(),
+                        value_param_types: c
+                            .value_param_types
+                            .iter()
+                            .map(|t| {
+                                t.replace_constants_with_base_stack(
+                                    stack_size,
+                                    base_stack_size,
+                                    replacer,
+                                )
+                            })
+                            .collect(),
+                        bound_value_args: c
+                            .bound_value_args
+                            .iter()
+                            .map(|value| {
+                                value.replace_constants_with_base_stack(
+                                    stack_size,
+                                    base_stack_size,
+                                    replacer,
+                                )
+                            })
+                            .collect(),
+                    })
+                },
+                |replacement| {
+                    if base_stack_size == 0 {
+                        replacement
+                    } else {
+                        replacement.insert_stack(base_stack_size, stack_size - base_stack_size)
+                    }
+                },
+            ),
             AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
-                Box::new(cond.replace_constants(stack_size, replacer)),
-                Box::new(if_value.replace_constants(stack_size, replacer)),
-                Box::new(else_value.replace_constants(stack_size, replacer)),
+                Box::new(cond.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                )),
+                Box::new(if_value.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                )),
+                Box::new(else_value.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                )),
             ),
             AcornValue::Match(scrutinee, cases) => {
-                let new_scrutinee = scrutinee.replace_constants(stack_size, replacer);
+                let new_scrutinee = scrutinee.replace_constants_with_base_stack(
+                    stack_size,
+                    base_stack_size,
+                    replacer,
+                );
                 let new_cases = cases
                     .iter()
                     .map(|case| {
@@ -1683,12 +1836,21 @@ impl AcornValue {
                         let new_vars = Self::replace_constants_in_binder_types(
                             &case.new_vars,
                             stack_size,
+                            base_stack_size,
                             replacer,
                         );
                         MatchCase {
                             new_vars,
-                            pattern: case.pattern.replace_constants(new_stack_size, replacer),
-                            result: case.result.replace_constants(new_stack_size, replacer),
+                            pattern: case.pattern.replace_constants_with_base_stack(
+                                new_stack_size,
+                                base_stack_size,
+                                replacer,
+                            ),
+                            result: case.result.replace_constants_with_base_stack(
+                                new_stack_size,
+                                base_stack_size,
+                                replacer,
+                            ),
                             constructor_index: case.constructor_index,
                             constructor_total: case.constructor_total,
                         }
@@ -1817,7 +1979,9 @@ impl AcornValue {
             if error.is_some() {
                 return; // Already found an error
             }
-            if let Some((def, def_params)) = bindings.get_definition_and_params(&ci.name) {
+            if let Some((_def, def_params, def_type)) =
+                bindings.get_definition_params_and_type(&ci.name)
+            {
                 // Check param count
                 if ci.params.len() != def_params.len() {
                     error = Some(format!(
@@ -1830,12 +1994,24 @@ impl AcornValue {
                 }
 
                 // Check that instance_type matches what we'd get by substituting params
-                if !ci.params.is_empty() {
-                    let substitution: Vec<_> = def_params.iter()
+                // and then applying any hidden dependent value specialization.
+                if !ci.params.is_empty() || !ci.bound_value_args.is_empty() {
+                    let substitution: Vec<_> = def_params
+                        .iter()
                         .zip(ci.params.iter())
-                        .map(|(def_param, actual_param)| (def_param.name.clone(), actual_param.clone()))
+                        .map(|(def_param, actual_param)| {
+                            (def_param.name.clone(), actual_param.clone())
+                        })
                         .collect();
-                    let expected_type = def.get_type().instantiate(&substitution);
+                    let mut expected_type = def_type.instantiate(&substitution);
+                    if !ci.bound_value_args.is_empty() {
+                        expected_type = ConstantInstance::instance_type_with_bound_value_params_for(
+                            &ci.name,
+                            &expected_type,
+                            &ci.value_param_types,
+                            &ci.bound_value_args,
+                        );
+                    }
                     if ci.instance_type != expected_type {
                         error = Some(format!(
                             "Constant {} has inconsistent instance_type.\nParams: {:?}\nExpected type: {}\nActual type: {}",
@@ -3244,8 +3420,14 @@ mod tests {
         let new_constant = ConstantInstance {
             name: ConstantName::unqualified(ModuleId(0), "new"),
             params: vec![],
-            instance_type: AcornType::functional(vec![nat_type.clone()], option_fin_of_n.clone()),
-            generic_type: AcornType::functional(vec![nat_type.clone()], option_fin_of_n.clone()),
+            instance_type: AcornType::functional(
+                vec![nat_type.clone(), nat_type.clone()],
+                option_fin_of_n.clone(),
+            ),
+            generic_type: AcornType::functional(
+                vec![nat_type.clone(), nat_type.clone()],
+                option_fin_of_n.clone(),
+            ),
             type_param_names: vec![],
             value_param_types: vec![nat_type.clone()],
             bound_value_args: vec![],
