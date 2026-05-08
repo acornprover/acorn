@@ -521,6 +521,44 @@ fn test_importing_generic_function() {
 }
 
 #[test]
+fn test_codegen_preserves_generic_args_for_partial_application() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/main.ac",
+        r#"
+            inductive Point {
+                point
+            }
+
+            define constant[T, U](u: U, t: T) -> U {
+                u
+            }
+
+            define apply_fn[T, U](f: T -> U, x: T) -> U {
+                f(x)
+            }
+
+            theorem goal(a: Point, x: Point) {
+                apply_fn(constant[Point, Point](a), x) = a
+            }
+            "#,
+    );
+    p.check_goal_code("main", "goal", "apply_fn(constant(a), x) = a");
+
+    let module_id = p.expect_ok("main");
+    let env = p.get_env_by_id(module_id).expect("no env");
+    let node = env.get_node_by_goal_name("goal");
+    let goal_context = node.goal().unwrap();
+    let mut generator = CodeGenerator::new_for_certificate(&node.env().bindings);
+    assert_eq!(
+        generator
+            .value_to_code(&goal_context.proposition.value)
+            .expect("certificate codegen should render the goal"),
+        "apply_fn(constant[Point, Point](a), x) = a"
+    );
+}
+
+#[test]
 fn test_codegen_preserves_generic_lambda_application() {
     let mut p = Project::new_mock();
     p.mock(

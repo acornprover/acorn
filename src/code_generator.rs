@@ -36,6 +36,10 @@ pub struct CodeGenerator<'a> {
     /// When true, always emit `Type.0` instead of shortcutting to `0` for numeric literals.
     explicit_numerals: bool,
 
+    /// Certificate serialization should not rely on context to infer type arguments for
+    /// partially applied generic functions, because replay checks those proof lines in isolation.
+    explicit_type_args_for_partial_applications: bool,
+
     /// We use variables named x0, x1, x2, etc for universal variables.
     next_x: u32,
 
@@ -313,6 +317,7 @@ impl CodeGenerator<'_> {
             bindings,
             allow_out_of_scope_typeclass_calls: false,
             explicit_numerals: false,
+            explicit_type_args_for_partial_applications: false,
             next_x: 0,
             next_k: 0,
             var_names: vec![],
@@ -326,6 +331,7 @@ impl CodeGenerator<'_> {
     pub fn new_for_certificate(bindings: &BindingMap) -> CodeGenerator<'_> {
         CodeGenerator {
             allow_out_of_scope_typeclass_calls: true,
+            explicit_type_args_for_partial_applications: true,
             ..Self::new(bindings)
         }
     }
@@ -668,6 +674,8 @@ impl CodeGenerator<'_> {
                     bindings: self.bindings,
                     allow_out_of_scope_typeclass_calls: self.allow_out_of_scope_typeclass_calls,
                     explicit_numerals: self.explicit_numerals,
+                    explicit_type_args_for_partial_applications: self
+                        .explicit_type_args_for_partial_applications,
                     next_x: self.next_x,
                     next_k: self.next_k,
                     var_names: self.var_names.clone(),
@@ -1340,22 +1348,48 @@ impl CodeGenerator<'_> {
             return false;
         }
 
-        // For each type parameter, check if it appears in the argument types
-        // in a way that would allow inference
+        if self.explicit_type_args_for_partial_applications
+            && args.len() < fn_type.arg_types.len()
+            && constant.type_param_names.len() == constant.params.len()
+        {
+            let generic_fn_type = match &constant.generic_type {
+                AcornType::Function(ft) => ft,
+                _ => return false,
+            };
+
+            // For partial applications in certificates, do not let one concrete
+            // argument infer two generic parameters that happened to instantiate
+            // to the same type.
+            for (param_type, param_name) in constant.params.iter().zip(&constant.type_param_names) {
+                let found_in_args = args.iter().enumerate().any(|(i, arg)| {
+                    let Some(expected_arg_type) = fn_type.arg_types.get(i) else {
+                        return false;
+                    };
+                    let Some(generic_arg_type) = generic_fn_type.arg_types.get(i) else {
+                        return false;
+                    };
+                    generic_arg_type.has_type_variable(param_name)
+                        && param_type == expected_arg_type
+                        && !arg.get_type().has_generic()
+                        && arg.get_type() == *param_type
+                });
+
+                if !found_in_args {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Preserve the historical printer behavior for ordinary code and goal names
+        // so existing certificate caches continue to match.
         for param_type in &constant.params {
             let mut found_in_args = false;
 
-            // Check each argument type to see if this parameter appears
             for (i, arg) in args.iter().enumerate() {
                 if let Some(expected_arg_type) = fn_type.arg_types.get(i) {
-                    // Check if the parameter appears in this argument position
-                    // For simplicity, we just check direct equality
                     if param_type == expected_arg_type {
-                        // Also check that the actual argument's type is concrete.
-                        // If the arg type contains type variables (has_generic), then
-                        // those variables would also need resolution, so we can't infer.
-                        // E.g., has_finite_order(s0) where s0 has type Variable(T0)
-                        // can't infer T from s0's type because T0 is not concrete.
                         let arg_type = arg.get_type();
                         if !arg_type.has_generic() && arg_type == *param_type {
                             found_in_args = true;
@@ -1366,7 +1400,6 @@ impl CodeGenerator<'_> {
             }
 
             if !found_in_args {
-                // This parameter doesn't appear in arguments, can't infer
                 return false;
             }
         }

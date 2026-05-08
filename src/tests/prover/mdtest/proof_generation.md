@@ -60,6 +60,26 @@ Proof generation and condensed-certificate regressions.
     
 ```
 
+## Replay Of Generic Partial Application Cert Line
+
+```acorn
+inductive Point {
+    point
+}
+
+define constant[T, U](u: U, t: T) -> U {
+    u
+}
+
+define apply_fn[T, U](f: T -> U, x: T) -> U {
+    f(x)
+}
+
+theorem partial_constant_replay(a: Point, x: Point) {
+    apply_fn(constant[Point, Point](a), x) = a
+}
+```
+
 ## Assuming Lhs Of Implication
 
 ```acorn
