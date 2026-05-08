@@ -414,11 +414,14 @@ impl ConstantInstance {
             .iter()
             .map(|t| t.bind_values(first_binding_index, stack_size, values))
             .collect();
-        let value_param_types: Vec<_> = self
-            .value_param_types
-            .iter()
-            .map(|t| t.bind_values(first_binding_index, stack_size, values))
-            .collect();
+        let value_param_types: Vec<_> = if self.bound_value_args.is_empty() {
+            self.value_param_types
+                .iter()
+                .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                .collect()
+        } else {
+            self.value_param_types.clone()
+        };
         let bound_value_args: Vec<_> = self
             .bound_value_args
             .iter()
@@ -430,9 +433,12 @@ impl ConstantInstance {
             .collect();
         if !self.type_param_names.is_empty() && self.type_param_names.len() == params.len() {
             let named_params: Vec<_> = self.type_param_names.iter().cloned().zip(params).collect();
-            let generic_type =
+            let generic_type = if self.bound_value_args.is_empty() {
                 self.generic_type
-                    .bind_values(first_binding_index, stack_size, values);
+                    .bind_values(first_binding_index, stack_size, values)
+            } else {
+                self.generic_type.clone()
+            };
             let instance_type = generic_type.instantiate(&named_params);
             ConstantInstance::instance_type_with_bound_value_params_for(
                 &self.name,
@@ -1420,15 +1426,21 @@ impl AcornValue {
                     stack_size,
                     values,
                 ),
-                generic_type: c
-                    .generic_type
-                    .bind_values(first_binding_index, stack_size, values),
+                generic_type: if c.bound_value_args.is_empty() {
+                    c.generic_type
+                        .bind_values(first_binding_index, stack_size, values)
+                } else {
+                    c.generic_type.clone()
+                },
                 type_param_names: c.type_param_names.clone(),
-                value_param_types: c
-                    .value_param_types
-                    .iter()
-                    .map(|t| t.bind_values(first_binding_index, stack_size, values))
-                    .collect(),
+                value_param_types: if c.bound_value_args.is_empty() {
+                    c.value_param_types
+                        .iter()
+                        .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                        .collect()
+                } else {
+                    c.value_param_types.clone()
+                },
                 bound_value_args: c
                     .bound_value_args
                     .into_iter()
@@ -1545,13 +1557,20 @@ impl AcornValue {
                     .map(|t| t.insert_stack(index, increment))
                     .collect(),
                 instance_type: c.instance_type.insert_stack(index, increment),
-                generic_type: c.generic_type.insert_stack(index, increment),
+                generic_type: if c.bound_value_args.is_empty() {
+                    c.generic_type.insert_stack(index, increment)
+                } else {
+                    c.generic_type
+                },
                 type_param_names: c.type_param_names,
-                value_param_types: c
-                    .value_param_types
-                    .into_iter()
-                    .map(|t| t.insert_stack(index, increment))
-                    .collect(),
+                value_param_types: if c.bound_value_args.is_empty() {
+                    c.value_param_types
+                        .into_iter()
+                        .map(|t| t.insert_stack(index, increment))
+                        .collect()
+                } else {
+                    c.value_param_types
+                },
                 bound_value_args: c
                     .bound_value_args
                     .into_iter()
@@ -3591,5 +3610,126 @@ mod tests {
             panic!("expected function type");
         };
         assert_eq!(function_type.arg_types[1], subspace_t_a_const);
+    }
+
+    #[test]
+    fn test_binding_values_does_not_capture_hidden_value_param_placeholders() {
+        struct TestContext;
+        impl crate::elaborator::error::ErrorContext for TestContext {
+            fn error(&self, msg: &str) -> crate::elaborator::error::Error {
+                let token = crate::syntax::token::Token::empty();
+                crate::elaborator::error::Error::new(&token, &token, msg)
+            }
+        }
+
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let generic_t_type = AcornType::Variable(t_param.clone());
+        let concrete_t_type = AcornType::Arbitrary(t_param.clone());
+        let generic_set_t = AcornType::Data(set_datatype.clone(), vec![generic_t_type.clone()]);
+        let concrete_set_t = AcornType::Data(set_datatype.clone(), vec![concrete_t_type.clone()]);
+        let hidden_a = AcornValue::Variable(0, generic_set_t.clone());
+        let subspace_t_hidden = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(generic_t_type.clone()),
+                DependentTypeArg::Value(hidden_a),
+            ],
+        );
+        let generic_type = AcornType::functional(
+            vec![
+                generic_set_t.clone(),
+                AcornType::Data(set_datatype.clone(), vec![subspace_t_hidden]),
+                generic_set_t.clone(),
+            ],
+            AcornType::Bool,
+        );
+        let instance_type = generic_type.instantiate(&[("T".to_string(), concrete_t_type.clone())]);
+        let generic_constant = ConstantInstance {
+            name: ConstantName::unqualified(ModuleId(0), "has_subspace_witness"),
+            params: vec![concrete_t_type.clone()],
+            instance_type,
+            generic_type,
+            type_param_names: vec!["T".to_string()],
+            value_param_types: vec![concrete_set_t.clone()],
+            bound_value_args: vec![],
+        };
+        let a_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "a"),
+            vec![],
+            concrete_set_t.clone(),
+            concrete_set_t.clone(),
+            vec![],
+            vec![],
+        );
+        let v_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "v"),
+            vec![],
+            concrete_set_t.clone(),
+            concrete_set_t.clone(),
+            vec![],
+            vec![],
+        );
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(concrete_t_type),
+                DependentTypeArg::Value(a_const.clone()),
+            ],
+        );
+        let set_subspace_t_a = AcornType::Data(set_datatype, vec![subspace_t_a.clone()]);
+        let u_const = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "u"),
+            vec![],
+            set_subspace_t_a.clone(),
+            set_subspace_t_a.clone(),
+            vec![],
+            vec![],
+        );
+
+        let specialized = generic_constant
+            .bind_value_params(std::slice::from_ref(&a_const), &TestContext)
+            .expect("specialize hidden value parameter");
+        let application = AcornValue::apply(
+            AcornValue::Constant(specialized.clone()),
+            vec![u_const, AcornValue::Variable(0, concrete_set_t)],
+        );
+        let rebound = application.bind_values(0, 1, std::slice::from_ref(&v_const));
+        rebound
+            .validate()
+            .expect("rebound application should typecheck");
+
+        let AcornValue::Application(app) = rebound else {
+            panic!("expected application");
+        };
+        let AcornValue::Constant(rebound_constant) = app.function.as_ref() else {
+            panic!("expected constant function");
+        };
+        assert_eq!(rebound_constant.bound_value_args, vec![a_const.clone()]);
+        let AcornType::Function(function_type) = &rebound_constant.instance_type else {
+            panic!("expected function type");
+        };
+        assert_eq!(function_type.arg_types[0], set_subspace_t_a);
+
+        let inserted = AcornValue::Constant(specialized).insert_stack(0, 2);
+        let rebound_after_insert = inserted.bind_values(0, 2, &[]);
+        let AcornValue::Constant(inserted_constant) = rebound_after_insert else {
+            panic!("expected constant");
+        };
+        assert_eq!(inserted_constant.bound_value_args, vec![a_const]);
+        let AcornType::Function(function_type) = &inserted_constant.instance_type else {
+            panic!("expected function type");
+        };
+        assert_eq!(function_type.arg_types[0], set_subspace_t_a);
     }
 }
