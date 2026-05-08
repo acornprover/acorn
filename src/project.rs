@@ -16,7 +16,7 @@ use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
-use crate::elaborator::error;
+use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::named_entity::NamedEntity;
@@ -30,6 +30,8 @@ use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::statement::{Body, Statement, StatementInfo};
 use crate::syntax::token::{Token, TokenIter, TokenType};
 use crate::syntax::token_map::TokenInfo;
+
+const MAX_EXPORTED_DECLARATIONS_PER_MODULE: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryCitation {
@@ -116,6 +118,36 @@ impl UsageMode {
 
     pub fn is_batch(self) -> bool {
         matches!(self, UsageMode::Check | UsageMode::Verify)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theorem_module(count: usize) -> String {
+        let mut text = String::new();
+        for i in 0..count {
+            text.push_str(&format!("theorem t{} {{ true }}\n", i));
+        }
+        text
+    }
+
+    #[test]
+    fn exported_declaration_limit_allows_500() {
+        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE);
+        let statements = Project::parse_module_statements(&text, false).unwrap();
+        Project::check_exported_declaration_limit(&statements).unwrap();
+    }
+
+    #[test]
+    fn exported_declaration_limit_rejects_501() {
+        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE + 1);
+        let statements = Project::parse_module_statements(&text, false).unwrap();
+        let error = Project::check_exported_declaration_limit(&statements).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("module has more than 500 exported declarations"));
     }
 }
 
@@ -775,6 +807,37 @@ impl Project {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn is_exported_declaration_statement(statement: &Statement) -> bool {
+        matches!(
+            statement.statement,
+            StatementInfo::Let(_)
+                | StatementInfo::Define(_)
+                | StatementInfo::Theorem(_)
+                | StatementInfo::Type(_)
+                | StatementInfo::Structure(_)
+                | StatementInfo::Inductive(_)
+                | StatementInfo::Typeclass(_)
+                | StatementInfo::Instance(_)
+        )
+    }
+
+    fn check_exported_declaration_limit(statements: &[Statement]) -> error::Result<()> {
+        let mut exported_declarations = 0;
+        for statement in statements {
+            if !Self::is_exported_declaration_statement(statement) {
+                continue;
+            }
+            exported_declarations += 1;
+            if exported_declarations > MAX_EXPORTED_DECLARATIONS_PER_MODULE {
+                return Err(statement.error(&format!(
+                    "module has more than {} exported declarations",
+                    MAX_EXPORTED_DECLARATIONS_PER_MODULE
+                )));
+            }
+        }
+        Ok(())
     }
 
     // Adds a target for all files in the 'src' directory.
@@ -1748,6 +1811,10 @@ impl Project {
                 return Ok(module_id);
             }
         };
+        if let Err(error) = Self::check_exported_declaration_limit(&statements) {
+            self.modules[module_id.get() as usize].load_error(error);
+            return Ok(module_id);
+        }
 
         let current_module_name = match descriptor {
             ModuleDescriptor::Name(parts) => Some(parts.join(".")),
