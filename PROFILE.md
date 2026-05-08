@@ -14,16 +14,27 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-05-07 for retained heap diagnostic; full check timing/page-fault profile still from 2026-05-05
-- Git hash: `14ea47e5` plus local uncommitted changes for the retained heap diagnostic; full timing/page-fault profile was `4e6f69fc` plus local uncommitted changes
-- Command: retained heap diagnostic with `cargo run --profile release --bin profile_memory`; older full timing/page-fault profile used `RUSTFLAGS='-C force-frame-pointers=yes' cargo build --bin acorn --profile=fastdev`, `/usr/bin/time -v target/release/acorn check --jobs 1`, `MIMALLOC_SHOW_STATS=1 target/release/acorn check --jobs 1`, and `perf record -g --call-graph fp -e page-faults -o perf.data target/fastdev/acorn check --jobs 1`
+- Date: 2026-05-08
+- Git hash: `b0cacb09` with a clean worktree
+- Command: `cargo build --profile release`, then `/usr/bin/time -v target/release/acorn check`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: retained heap diagnostic reached `8.24 GiB` RSS / HWM after `15.203s` of target/dependency load and `17.058s` total measured time. A same-tree single-worker release check completed successfully in `2:19.86` wall, `138.88s` user, `0.97s` sys; maximum RSS was `8,745,000 KB` (`8.34 GiB`). The older page-fault profile used a previous tree where single-worker release check completed in `49.20s` wall, `48.47s` user, `0.72s` sys; maximum RSS was `7,455,696 KB` (`7.1 GiB`); mimalloc reported `8.0 GiB` reserved, `7.9 GiB` committed, and `7.1 GiB` process RSS; page-fault profile captured `3,233` samples / about `123,270` events.
-- Summary: The retained heap diagnostic now runs with `UsageMode::Check` and check-only IDE metadata discard, so token and line metadata are gone from the retained heap (`0` token infos, `0` line entries, and clearing token/line maps releases `0 B`). RSS is still high, and higher than the older diagnostic, because the current library has grown to `272` modules, `23,855` environments, `116,306` nodes, `140,161` binding snapshots, and `178,522` lowered `KernelContext` snapshots. The earlier page-fault profile still indicates high RSS is primarily established during verifier setup and target/module loading, before certificate checking.
+- Timing: full acornlib check completed successfully in `0:59.97` wall, `182.57s` user, `1.46s` sys, `306%` CPU. Maximum RSS was `9,721,212 KB` (`9.27 GiB`). The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules.
+- Summary: This is the baseline to compare against the proposed `LoweredModule` refactor. The command is the real release CLI path with default check parallelism, after the release binary was already built. The run succeeded, so the timing and maximum RSS are valid regression/comparison numbers. Previous retained-heap diagnostics still indicate that peak memory is dominated by the retained `Environment` tree, node payloads, lowered node/module facts, and kernel-context snapshots built during load/lowering before certificate checking.
 - Breakdown:
 
 ```text
-Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
+Current Full Check Baseline (2026-05-08)
+============================================================
+
+command: /usr/bin/time -v target/release/acorn check
+result: 302 modules, 54,155/54,155 certificates OK, 0 searches
+elapsed: 0:59.97 wall
+cpu: 182.57s user, 1.46s sys, 306%
+max rss: 9,721,212 KB = 9.27 GiB
+minor faults: 70,424
+major faults: 0
+
+Historical Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
 ============================================================
 
 99.1%  acorn main
