@@ -364,6 +364,12 @@ impl Certificate {
             false,
         );
         let type_param_placeholders = vec![AcornValue::Bool(true); type_params.len()];
+        let type_param_names = type_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
+        let type_param_names = (!type_param_names.is_empty()).then_some(type_param_names);
+        let type_param_names_ref = type_param_names.as_deref();
 
         let mut local_context = witness.ambient_context.clone();
         local_context.push_type(witness.return_type.clone());
@@ -395,25 +401,32 @@ impl Certificate {
 
         let (condition, return_name, specialized_clause, witness_clauses) = if arguments.is_empty()
         {
-            let specialized_clause = Self::maybe_specialized_clause_for_proposition(
-                &mut checker_kernel_context,
-                &specialized_condition,
+            let specialized_clause = witness.specialized_clause.normalized();
+            let exact_condition =
+                kernel_context.quote_clause(&specialized_clause, None, type_param_names_ref, false);
+            let condition = if Self::condition_recreates_witness_justification(
+                kernel_context,
+                &exact_condition,
+                &witness.name,
+                &return_type,
                 &type_params,
-            )?;
+                &justification,
+            )
+            .unwrap_or(false)
+            {
+                exact_condition
+            } else {
+                specialized_condition
+            };
             let witness_clauses = Self::exact_witness_clauses_for_proposition(
                 &mut checker_kernel_context,
-                &specialized_condition,
+                &condition,
                 &type_params,
             )?
             .into_iter()
-            .filter(|clause| specialized_clause.as_ref() != Some(clause))
+            .filter(|clause| *clause != specialized_clause)
             .collect();
-            (
-                specialized_condition,
-                None,
-                specialized_clause,
-                witness_clauses,
-            )
+            (condition, None, Some(specialized_clause), witness_clauses)
         } else {
             let arg_types: Vec<AcornType> = arguments
                 .iter()
@@ -722,6 +735,41 @@ impl Certificate {
             )
             .normalized(),
         ))
+    }
+
+    /// Check whether a displayed witness condition will parse back to the intended
+    /// implicit existential claim for a `let ... satisfy` line.
+    fn condition_recreates_witness_justification(
+        kernel_context: &KernelContext,
+        condition: &AcornValue,
+        witness_name: &ConstantName,
+        return_type: &AcornType,
+        type_params: &[TypeParam],
+        justification: &Claim,
+    ) -> Result<bool, CodeGenError> {
+        let witness_var = AcornValue::Variable(0, return_type.clone());
+        let general_condition = condition.replace_constants(0, &|constant| {
+            (constant.name == *witness_name && constant.generic_type == *return_type)
+                .then(|| witness_var.clone())
+        });
+        let general_claim =
+            AcornValue::Exists(vec![return_type.clone()], Box::new(general_condition));
+        let mut checker_kernel_context = kernel_context.clone();
+        let parsed =
+            Self::claim_for_proposition(&mut checker_kernel_context, &general_claim, type_params)?;
+        let parsed_generic = parsed.normalized_generic_clause();
+        let parsed_specialized = parsed
+            .normalized_specialized_clause(&checker_kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        let expected_generic = justification.normalized_generic_clause();
+        let expected_specialized = justification
+            .normalized_specialized_clause(kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+
+        Ok(parsed_generic == expected_generic
+            || parsed_generic == expected_specialized
+            || parsed_specialized == expected_generic
+            || parsed_specialized == expected_specialized)
     }
 
     /// Register a local constant introduced by a certificate `let ... satisfy` declaration.

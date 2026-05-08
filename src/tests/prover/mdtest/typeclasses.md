@@ -1,5 +1,51 @@
 # Typeclasses
 
+## Instance Condition With Operator Witnesses
+
+The generated certificate for an instance condition should replay the nested
+existential witnesses introduced while refuting a universally quantified
+operator expression.
+
+```acorn
+    typeclass A: Add {
+        add: (A, A) -> A
+    }
+
+    typeclass A: LTE {
+        lte: (A, A) -> Bool
+    }
+
+    type Real: axiom
+
+    let real_add: (Real, Real) -> Real = axiom
+    let real_lte: (Real, Real) -> Bool = axiom
+    let d: (Real, Real) -> Real = axiom
+
+    instance Real: Add {
+        let add: (Real, Real) -> Real = real_add
+    }
+
+    instance Real: LTE {
+        let lte: (Real, Real) -> Bool = real_lte
+    }
+
+    axiom d_triangle(x: Real, y: Real, z: Real) {
+        d(x, z) <= d(x, y) + d(y, z)
+    }
+
+    typeclass M: Metric {
+        distance: (M, M) -> Real
+
+        triangle(x: M, y: M, z: M) {
+            x.distance(z) <= x.distance(y) + y.distance(z)
+        }
+    }
+
+    instance Real: Metric {
+        let distance: (Real, Real) -> Real = d
+    }
+```
+
 ## Dependent Value Parameter Instance Condition Avoids Capturing Binders
 
 The `Subspace` instance has a dependent value parameter `a: Set[T]`.
