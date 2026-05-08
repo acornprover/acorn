@@ -72,10 +72,6 @@ pub struct Environment {
     pub first_line: u32,
     pub line_types: Vec<LineType>,
 
-    /// Implicit blocks aren't written in the code; they are created for theorems that
-    /// the user has asserted without proof.
-    pub implicit: bool,
-
     /// The depth if you think of the environments in a module like a tree structure.
     /// The root environment for a module has depth zero.
     /// Each child node has a depth of one plus its parent.
@@ -119,7 +115,6 @@ impl Environment {
             will_include_explicit_false: false,
             first_line: 0,
             line_types: Vec::new(),
-            implicit: false,
             depth: 0,
             token_map: TokenMap::new(),
             doc_comments: Vec::new(),
@@ -133,7 +128,7 @@ impl Environment {
     }
 
     /// Create a child environment.
-    pub fn create_child(&self, first_line: u32, implicit: bool) -> Self {
+    pub fn create_child(&self, first_line: u32) -> Self {
         Environment {
             module_id: self.module_id,
             bindings: self.bindings.clone(),
@@ -143,7 +138,6 @@ impl Environment {
             will_include_explicit_false: false,
             first_line,
             line_types: Vec::new(),
-            implicit,
             depth: self.depth + 1,
             token_map: TokenMap::new(),
             doc_comments: Vec::new(),

@@ -153,7 +153,7 @@ impl Block {
         last_token: &Token,
         body: Option<&Body>,
     ) -> error::Result<Block> {
-        let mut subenv = env.create_child(first_token.line_number, body.is_none());
+        let mut subenv = env.create_child(first_token.line_number);
 
         // Inside the block, the type parameters are arbitrary types.
         let param_pairs: Vec<(String, AcornType)> = type_params
