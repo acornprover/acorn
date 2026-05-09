@@ -1,9 +1,11 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, ops::Deref, ops::DerefMut, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::error;
+use crate::elaborator::lowered_module::LoweredModule;
 
 // The code in one file is exposed to other Acorn code as a "module".
 // You could have two different types both named "MyStruct" but defined in different places.
@@ -75,8 +77,18 @@ impl Module {
     }
 
     // Called when a module load succeeds.
-    pub fn load_ok(&mut self, env: Environment, content_hash: blake3::Hash) {
-        self.state = LoadState::Ok(env);
+    pub fn load_ok(
+        &mut self,
+        bindings: BindingMap,
+        lowered: LoweredModule,
+        env: Option<Environment>,
+        content_hash: blake3::Hash,
+    ) {
+        self.state = LoadState::Ok(LoadedModule {
+            bindings,
+            lowered,
+            env,
+        });
         self.hash = Some(content_hash);
     }
 
@@ -85,6 +97,42 @@ impl Module {
             ModuleDescriptor::Name(parts) => Some(parts.join(".")),
             _ => None,
         }
+    }
+}
+
+// The loaded representation of a module. Batch checking/proving uses `lowered`;
+// IDE features use `env` when it is retained.
+pub struct LoadedModule {
+    pub bindings: BindingMap,
+    pub lowered: LoweredModule,
+    pub env: Option<Environment>,
+}
+
+impl LoadedModule {
+    pub fn env(&self) -> Option<&Environment> {
+        self.env.as_ref()
+    }
+
+    pub fn env_mut(&mut self) -> Option<&mut Environment> {
+        self.env.as_mut()
+    }
+}
+
+impl Deref for LoadedModule {
+    type Target = Environment;
+
+    fn deref(&self) -> &Self::Target {
+        self.env
+            .as_ref()
+            .expect("environment was not retained for this loaded module")
+    }
+}
+
+impl DerefMut for LoadedModule {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.env
+            .as_mut()
+            .expect("environment was not retained for this loaded module")
     }
 }
 
@@ -103,8 +151,8 @@ pub enum LoadState {
     // The module has been loaded, but there is an error in its code
     Error(error::Error),
 
-    // The module has been loaded successfully and we have its environment
-    Ok(Environment),
+    // The module has been loaded successfully.
+    Ok(LoadedModule),
 }
 
 // A Descriptor expresses the different ways that a module user can specify a module.

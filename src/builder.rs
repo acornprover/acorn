@@ -15,6 +15,7 @@ use crate::elaborator::environment::Environment;
 use crate::elaborator::error::Error as ElaborationError;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
+use crate::elaborator::lowered_module::{LoweredItem, LoweredModule};
 use crate::elaborator::lowering::LoweredGoal;
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::source::SourceType;
@@ -324,7 +325,7 @@ struct ModuleBuildResult {
 struct ScheduledModule<'a> {
     index: usize,
     target: ModuleDescriptor,
-    env: &'a Environment,
+    lowered: &'a LoweredModule,
     work_estimate: usize,
 }
 
@@ -1225,6 +1226,16 @@ impl<'a> Builder<'a> {
     pub fn module_loaded(&mut self, env: &Environment) {
         let goal_count = env.iter_goals().count() as i32;
         if self.project.is_surface_check_module(env.module_id) {
+            self.metrics.pending_modules_total += 1;
+            self.metrics.pending_goals_total += goal_count;
+        } else {
+            self.metrics.goals_total += goal_count;
+        }
+    }
+
+    pub fn lowered_module_loaded(&mut self, lowered: &LoweredModule) {
+        let goal_count = lowered.goal_count() as i32;
+        if self.project.is_surface_check_module(lowered.module_id) {
             self.metrics.pending_modules_total += 1;
             self.metrics.pending_goals_total += goal_count;
         } else {
@@ -2141,6 +2152,307 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    fn is_plain_anonymous_lowered_goal(goal: &Goal) -> bool {
+        matches!(goal.proposition.source.source_type, SourceType::Anonymous)
+    }
+
+    fn update_eval_skip_tail_for_lowered_goal(
+        &self,
+        tail: &mut EvalSkipTail<Rc<Processor>>,
+        goal: &Goal,
+        checkpoint_before_node: Rc<Processor>,
+    ) {
+        if !self.eval_mode || self.eval_max_skip() == 0 {
+            return;
+        }
+        if Self::is_plain_anonymous_lowered_goal(goal) {
+            tail.record_plain(checkpoint_before_node);
+        } else {
+            tail.record_barrier();
+        }
+    }
+
+    fn record_lowered_barrier(&self, tail: &mut EvalSkipTail<Rc<Processor>>) {
+        if self.eval_mode && self.eval_max_skip() > 0 {
+            tail.record_barrier();
+        }
+    }
+
+    fn verify_lowered_claim(
+        &mut self,
+        processor: Rc<Processor>,
+        lowered: &LoweredModule,
+        item: &LoweredItem,
+        new_certs: &mut Vec<Certificate>,
+        worklist: &mut CertificateWorklist,
+        eval_goal_counts: &mut Option<HashMap<String, EvalGoalCounts>>,
+        eval_skip_tail: &EvalSkipTail<Rc<Processor>>,
+    ) -> Result<(), BuildError> {
+        let LoweredItem::Claim { goal, .. } = item else {
+            return Ok(());
+        };
+        let entry = lowered.goal(*goal);
+        let normalized_goal = &entry.lowered_goal;
+        let goal = &normalized_goal.goal;
+        if let Some(ref filter) = self.goal_filter {
+            let matches = match filter {
+                GoalFilter::SingleLine {
+                    line, goal_index, ..
+                } => {
+                    if goal.first_line != *line {
+                        false
+                    } else {
+                        self.single_line_goal_count += 1;
+                        match goal_index {
+                            Some(index) => self.single_line_goal_count == *index,
+                            None => true,
+                        }
+                    }
+                }
+                GoalFilter::LineRange { start, end, .. } => {
+                    goal.first_line >= *start && goal.first_line <= *end
+                }
+            };
+            if !matches {
+                return Ok(());
+            }
+        }
+        let eval_proof_kind = if let Some(counts) = eval_goal_counts.as_mut() {
+            let Some(counts) = counts.get_mut(&goal.name) else {
+                self.metrics.eval_goals_skipped_uncertified += 1;
+                return Ok(());
+            };
+            match counts.take() {
+                Some(kind) => {
+                    self.metrics.eval_corpus_matched += 1;
+                    Some(kind)
+                }
+                None => {
+                    self.metrics.eval_goals_skipped_uncertified += 1;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        let processor = self.processor_with_imports(processor, &entry.bindings)?;
+        if self.eval_mode {
+            self.verify_eval_goal(
+                processor,
+                goal,
+                &entry.bindings,
+                new_certs,
+                worklist,
+                Some(normalized_goal),
+                eval_skip_tail,
+                eval_proof_kind.expect("eval mode has proof kind"),
+            )?;
+        } else {
+            self.verify_goal(
+                processor,
+                goal,
+                &entry.bindings,
+                new_certs,
+                worklist,
+                Some(normalized_goal),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_lowered_items(
+        &mut self,
+        processor: &mut Rc<Processor>,
+        lowered: &LoweredModule,
+        items: &[LoweredItem],
+        top_level: bool,
+        new_certs: &mut Vec<Certificate>,
+        worklist: &mut CertificateWorklist,
+        eval_goal_counts: &mut Option<HashMap<String, EvalGoalCounts>>,
+        eval_skip_tail: &mut EvalSkipTail<Rc<Processor>>,
+    ) -> Result<(), BuildError> {
+        for item in items {
+            match item {
+                LoweredItem::Fact {
+                    fact,
+                    first_line,
+                    last_line,
+                } => {
+                    let checkpoint_before_node = Rc::clone(processor);
+                    if top_level {
+                        self.log_verified(*first_line, *last_line);
+                    }
+                    Rc::make_mut(processor).add_lowered_fact(lowered.fact(*fact))?;
+                    self.record_lowered_barrier(eval_skip_tail);
+                    drop(checkpoint_before_node);
+                }
+                LoweredItem::Claim { post_fact, .. } => {
+                    let checkpoint_before_node = Rc::clone(processor);
+                    self.verify_lowered_claim(
+                        Rc::clone(processor),
+                        lowered,
+                        item,
+                        new_certs,
+                        worklist,
+                        eval_goal_counts,
+                        eval_skip_tail,
+                    )?;
+                    Rc::make_mut(processor).add_lowered_fact(lowered.fact(*post_fact))?;
+                    let LoweredItem::Claim { goal, .. } = item else {
+                        unreachable!();
+                    };
+                    let goal = &lowered.goal(*goal).lowered_goal.goal;
+                    self.update_eval_skip_tail_for_lowered_goal(
+                        eval_skip_tail,
+                        goal,
+                        checkpoint_before_node,
+                    );
+                }
+                LoweredItem::Block {
+                    items,
+                    external_fact,
+                    first_line,
+                    last_line,
+                } => {
+                    let checkpoint_before_node = Rc::clone(processor);
+                    if items.is_empty() && top_level {
+                        self.log_verified(*first_line, *last_line);
+                    } else {
+                        let mut child_processor = Rc::clone(processor);
+                        let mut child_eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
+                        self.verify_lowered_items(
+                            &mut child_processor,
+                            lowered,
+                            items,
+                            false,
+                            new_certs,
+                            worklist,
+                            eval_goal_counts,
+                            &mut child_eval_skip_tail,
+                        )?;
+                    }
+                    if let Some(fact) = external_fact {
+                        Rc::make_mut(processor).add_lowered_fact(lowered.fact(*fact))?;
+                    }
+                    self.record_lowered_barrier(eval_skip_tail);
+                    drop(checkpoint_before_node);
+                }
+            }
+
+            if self.exit_on_warning && !self.status.is_good() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn verify_lowered_module(
+        &mut self,
+        target: &ModuleDescriptor,
+        lowered: &LoweredModule,
+    ) -> Result<(), BuildError> {
+        if self.strict {
+            for range in &lowered.top_level_axiom_ranges {
+                let event = self.make_event(
+                    *range,
+                    "axiom keyword is not allowed in strict mode",
+                    Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR),
+                );
+                (self.event_handler)(event);
+                self.status = BuildStatus::Error;
+                return Err(BuildError::new(
+                    *range,
+                    "axiom keyword is not allowed in strict mode",
+                ));
+            }
+        }
+
+        let mut worklist = if self.project.config.read_cache {
+            self.project.build_cache.make_worklist(target)
+        } else {
+            CertificateWorklist::new(CertificateStore { certs: vec![] })
+        };
+        let mut eval_goal_counts = self.eval_goal_counts(target);
+        if let Some(counts) = &eval_goal_counts {
+            self.metrics.eval_corpus_total +=
+                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
+            self.metrics.eval_corpus_empty +=
+                counts.values().map(|counts| counts.empty).sum::<usize>() as i32;
+        }
+        let mut new_certs = vec![];
+
+        if self.project.is_surface_check_target(target) {
+            return Ok(());
+        }
+
+        if !lowered.is_empty() {
+            self.module_proving_started(target.clone());
+            let processor = if self.check_mode {
+                Processor::with_imports_for_checking(
+                    Some(self.cancellation_token.clone()),
+                    &lowered.initial_bindings,
+                    self.project,
+                )?
+            } else {
+                Processor::with_imports(
+                    Some(self.cancellation_token.clone()),
+                    &lowered.initial_bindings,
+                    self.project,
+                )?
+            };
+            let mut processor = Rc::new(processor);
+            let mut eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
+            self.verify_lowered_items(
+                &mut processor,
+                lowered,
+                &lowered.items,
+                true,
+                &mut new_certs,
+                &mut worklist,
+                &mut eval_goal_counts,
+                &mut eval_skip_tail,
+            )?;
+        }
+
+        if let Some(counts) = &eval_goal_counts {
+            self.metrics.eval_corpus_unmatched +=
+                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
+        }
+
+        let module_good = if lowered.is_empty() {
+            true
+        } else {
+            self.module_proving_good(target)
+        };
+
+        if self.goal_filter.is_some() {
+            return Ok(());
+        }
+
+        self.metrics.certs_unused += worklist.unused() as i32;
+
+        let used_cert_count = new_certs.len();
+        let mut cert_store = CertificateStore { certs: new_certs };
+        cert_store.append(&worklist);
+        self.used_cert_counts
+            .insert(target.clone(), used_cert_count);
+
+        let content_hash = if module_good {
+            self.project.get_module_content_hash(lowered.module_id)
+        } else {
+            None
+        };
+
+        self.build_cache
+            .as_mut()
+            .unwrap()
+            .insert(target.clone(), cert_store, content_hash);
+
+        Ok(())
+    }
+
     /// Verifies all goals within this module.
     pub fn verify_module(
         &mut self,
@@ -2327,11 +2639,11 @@ impl<'a> Builder<'a> {
             .sum()
     }
 
-    fn module_work_estimate(&self, target: &ModuleDescriptor, env: &Environment) -> usize {
+    fn module_work_estimate(&self, target: &ModuleDescriptor, lowered: &LoweredModule) -> usize {
         if self.eval_mode {
             self.eval_module_search_estimate(target)
         } else {
-            env.iter_goals().count()
+            lowered.goal_count()
         }
     }
 
@@ -2340,21 +2652,21 @@ impl<'a> Builder<'a> {
         cancellation_token: CancellationToken,
         index: usize,
         target: ModuleDescriptor,
-        env: &Environment,
+        lowered: &LoweredModule,
         config: &ModuleWorkerConfig,
     ) -> ModuleBuildResult {
         let mut events = Vec::new();
         let mut builder = Builder::new(project, cancellation_token, |event| events.push(event));
         config.apply_to(&mut builder);
         builder.metrics.modules_total = 1;
-        let goal_count = env.iter_goals().count() as i32;
+        let goal_count = lowered.goal_count() as i32;
         builder.metrics.goals_total = goal_count;
         builder.build_cache = Some(BuildCache::new(project.build_dir.clone()));
         builder.prepare_eval_mode();
 
         let module_metrics_before = builder.metrics.clone();
         let module_start = std::time::Instant::now();
-        let result = builder.verify_module(&target, env);
+        let result = builder.verify_lowered_module(&target, lowered);
         builder.record_module_timing(
             target.clone(),
             goal_count,
@@ -2380,15 +2692,15 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn build_modules_parallel(&mut self, modules: Vec<(usize, ModuleDescriptor, &Environment)>) {
+    fn build_modules_parallel(&mut self, modules: Vec<(usize, ModuleDescriptor, &LoweredModule)>) {
         let worker_count = self.check_jobs.min(modules.len()).max(1);
         let mut modules = modules
             .into_iter()
-            .map(|(index, target, env)| ScheduledModule {
-                work_estimate: self.module_work_estimate(&target, env),
+            .map(|(index, target, lowered)| ScheduledModule {
+                work_estimate: self.module_work_estimate(&target, lowered),
                 index,
                 target,
-                env,
+                lowered,
             })
             .collect::<Vec<_>>();
         modules.sort_by(|a, b| {
@@ -2422,7 +2734,7 @@ impl<'a> Builder<'a> {
                             token.clone(),
                             module.index,
                             module.target.clone(),
-                            module.env,
+                            module.lowered,
                             &config,
                         ));
                     }
@@ -2508,13 +2820,13 @@ impl<'a> Builder<'a> {
         // The first phase is the "loading phase". We load modules and look for errors.
         // If there are errors, we won't try to do proving.
         let loading_start = std::time::Instant::now();
-        let mut envs = vec![];
+        let mut lowered_modules = vec![];
         for target in &targets {
             let module = self.project.get_module(target);
             match module {
-                LoadState::Ok(env) => {
-                    self.module_loaded(&env);
-                    envs.push(env);
+                LoadState::Ok(module) => {
+                    self.lowered_module_loaded(&module.lowered);
+                    lowered_modules.push(&module.lowered);
                 }
                 LoadState::Error(e) => {
                     if e.indirect {
@@ -2547,14 +2859,14 @@ impl<'a> Builder<'a> {
         self.loading_phase_complete();
 
         // Track the total number of modules to build
-        self.metrics.modules_total = envs.len() as i32;
+        self.metrics.modules_total = lowered_modules.len() as i32;
 
         if self.can_build_modules_in_parallel(targets.len()) {
             let modules = targets
                 .into_iter()
-                .zip(envs)
+                .zip(lowered_modules)
                 .enumerate()
-                .map(|(index, (target, env))| (index, target.clone(), env))
+                .map(|(index, (target, lowered))| (index, target.clone(), lowered))
                 .collect();
             let verification_start = std::time::Instant::now();
             self.build_modules_parallel(modules);
@@ -2564,8 +2876,8 @@ impl<'a> Builder<'a> {
 
         // The second pass is the "proving phase".
         let verification_start = std::time::Instant::now();
-        for (target, env) in targets.into_iter().zip(envs) {
-            let goal_count = env.iter_goals().count() as i32;
+        for (target, lowered) in targets.into_iter().zip(lowered_modules) {
+            let goal_count = lowered.goal_count() as i32;
 
             // Skip modules that don't match the goal filter
             if let Some(ref filter) = self.goal_filter {
@@ -2580,7 +2892,7 @@ impl<'a> Builder<'a> {
 
             let skip_metrics_before = self.metrics.clone();
             let skip_start = std::time::Instant::now();
-            if self.try_skip_unchanged_module(env.module_id, &target) {
+            if self.try_skip_unchanged_module(lowered.module_id, &target) {
                 // Update metrics to count the goals in this module as a success
                 self.metrics.goals_done += goal_count;
                 self.metrics.goals_success += goal_count;
@@ -2610,7 +2922,7 @@ impl<'a> Builder<'a> {
 
             let module_metrics_before = self.metrics.clone();
             let module_start = std::time::Instant::now();
-            if let Err(e) = self.verify_module(&target, env) {
+            if let Err(e) = self.verify_lowered_module(&target, lowered) {
                 self.record_module_timing(
                     target.clone(),
                     goal_count,

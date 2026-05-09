@@ -19,11 +19,12 @@ use crate::elaborator::environment::Environment;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
+use crate::elaborator::lowered_module::LoweredModule;
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
-use crate::module::{LoadState, Module, ModuleDescriptor, ModuleId};
+use crate::module::{LoadState, LoadedModule, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
@@ -1031,11 +1032,23 @@ impl Project {
     }
 
     pub fn get_env_by_id(&self, module_id: ModuleId) -> Option<&Environment> {
-        if let LoadState::Ok(env) = self.get_module_by_id(module_id) {
-            Some(env)
+        if let LoadState::Ok(module) = self.get_module_by_id(module_id) {
+            module.env()
         } else {
             None
         }
+    }
+
+    pub fn get_loaded_module_by_id(&self, module_id: ModuleId) -> Option<&LoadedModule> {
+        if let LoadState::Ok(module) = self.get_module_by_id(module_id) {
+            Some(module)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_lowered_module(&self, module_id: ModuleId) -> Option<&LoweredModule> {
+        Some(&self.get_loaded_module_by_id(module_id)?.lowered)
     }
 
     #[doc(hidden)]
@@ -1044,7 +1057,10 @@ impl Project {
         F: FnMut(ModuleId, &mut Environment),
     {
         for (index, module) in self.modules.iter_mut().enumerate() {
-            let LoadState::Ok(env) = &mut module.state else {
+            let LoadState::Ok(loaded) = &mut module.state else {
+                continue;
+            };
+            let Some(env) = loaded.env_mut() else {
                 continue;
             };
             visitor(ModuleId(index as u16), env);
@@ -1460,7 +1476,10 @@ impl Project {
         };
 
         for (index, module) in self.modules.iter().enumerate() {
-            let LoadState::Ok(env) = &module.state else {
+            let LoadState::Ok(loaded) = &module.state else {
+                continue;
+            };
+            let Some(env) = loaded.env() else {
                 continue;
             };
 
@@ -1873,7 +1892,7 @@ impl Project {
         // Normalize all facts after elaboration.
         // We ignore errors here since some facts may intentionally fail to normalize
         // (e.g., exists over uninhabited types in test cases).
-        let _ = env.run_lowering_pass(self);
+        let lowering = env.run_lowering_pass(self);
         if self.config.usage_mode == UsageMode::Check {
             env.discard_ide_metadata();
         }
@@ -1881,7 +1900,18 @@ impl Project {
         let mut content_hasher = blake3::Hasher::new();
         content_hasher.update(text.as_bytes());
         let content_hash = content_hasher.finalize();
-        self.modules[module_id.get() as usize].load_ok(env, content_hash);
+        let bindings = env.bindings.clone();
+        let retained_env = if self.config.usage_mode == UsageMode::Check {
+            None
+        } else {
+            Some(env)
+        };
+        self.modules[module_id.get() as usize].load_ok(
+            bindings,
+            lowering.module,
+            retained_env,
+            content_hash,
+        );
         Ok(module_id)
     }
 
@@ -1923,8 +1953,8 @@ impl Project {
         if !seen.insert(module_id) {
             return false;
         }
-        if let LoadState::Ok(env) = self.get_module_by_id(module_id) {
-            for dep in env.bindings.direct_dependencies() {
+        if let Some(bindings) = self.get_bindings(module_id) {
+            for dep in bindings.direct_dependencies() {
                 if self.append_dependencies(seen, output, dep) {
                     output.push(dep);
                 }
@@ -1934,8 +1964,8 @@ impl Project {
     }
 
     pub fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap> {
-        if let LoadState::Ok(env) = self.get_module_by_id(module_id) {
-            Some(&env.bindings)
+        if let LoadState::Ok(module) = self.get_module_by_id(module_id) {
+            Some(&module.bindings)
         } else {
             None
         }
@@ -2008,7 +2038,9 @@ impl Project {
             .map_err(|e| format!("descriptor_from_path failed: {:?}", e))?;
 
         let env = match self.get_module(&descriptor) {
-            LoadState::Ok(env) => env,
+            LoadState::Ok(module) => module
+                .env()
+                .ok_or_else(|| format!("environment not retained for {:?}", descriptor))?,
             _ => return Err(format!("could not load module from {:?}", descriptor)),
         };
 

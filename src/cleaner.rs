@@ -83,7 +83,7 @@ impl ModuleCleaner {
 
         // Get the environment from the loaded module
         let env = match module_state {
-            LoadState::Ok(env) => env,
+            LoadState::Ok(module) => module.env().ok_or(CleanerError::ModuleNotLoaded)?,
             LoadState::Error(_) => {
                 // If there's an elaboration error, we still want to extract what we can
                 // Return empty ranges for now

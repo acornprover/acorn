@@ -15,24 +15,30 @@ Keep this file updated with the most recent profiling result for each profiling 
 ## profile_check
 
 - Date: 2026-05-08
-- Git hash: `b0cacb09` with a clean worktree
+- Git hash: `b0cacb09` plus local `LoweredModule` refactor changes
 - Command: `cargo build --profile release`, then `/usr/bin/time -v target/release/acorn check`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: full acornlib check completed successfully in `0:59.97` wall, `182.57s` user, `1.46s` sys, `306%` CPU. Maximum RSS was `9,721,212 KB` (`9.27 GiB`). The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules.
-- Summary: This is the baseline to compare against the proposed `LoweredModule` refactor. The command is the real release CLI path with default check parallelism, after the release binary was already built. The run succeeded, so the timing and maximum RSS are valid regression/comparison numbers. Previous retained-heap diagnostics still indicate that peak memory is dominated by the retained `Environment` tree, node payloads, lowered node/module facts, and kernel-context snapshots built during load/lowering before certificate checking.
+- Timing: after the initial `LoweredModule` refactor, full acornlib check completed successfully in `1:01.41` wall, `220.79s` user, `1.21s` sys, `361%` CPU. Maximum RSS was `7,533,992 KB` (`7.19 GiB`). The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules.
+- Summary: The first `LoweredModule` cut made check-mode module loading retain `BindingMap + LoweredModule` and drop the full `Environment` tree. Compared with the pre-refactor baseline from the same day (`0:59.97` wall, `9,721,212 KB` / `9.27 GiB` max RSS), peak RSS dropped by `2,187,220 KB` (`2.09 GiB`, about `22.5%`) while wall time was roughly flat/slightly slower (`+1.44s`, about `2.4%`). Previous retained-heap diagnostics still indicate that remaining peak memory is dominated by lowered facts/goals, kernel-context snapshots, and binding contexts retained for certificate checking.
 - Breakdown:
 
 ```text
-Current Full Check Baseline (2026-05-08)
+Current Full Check Baseline (2026-05-08, after LoweredModule refactor)
 ============================================================
 
 command: /usr/bin/time -v target/release/acorn check
 result: 302 modules, 54,155/54,155 certificates OK, 0 searches
-elapsed: 0:59.97 wall
-cpu: 182.57s user, 1.46s sys, 306%
-max rss: 9,721,212 KB = 9.27 GiB
-minor faults: 70,424
+elapsed: 1:01.41 wall
+cpu: 220.79s user, 1.21s sys, 361%
+max rss: 7,533,992 KB = 7.19 GiB
+minor faults: 167,168
 major faults: 0
+
+Comparison to pre-refactor baseline from same day:
+├── previous elapsed: 0:59.97 wall
+├── previous max rss: 9,721,212 KB = 9.27 GiB
+├── RSS delta: -2,187,220 KB = -2.09 GiB (-22.5%)
+└── wall delta: +1.44s (+2.4%)
 
 Historical Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
 ============================================================

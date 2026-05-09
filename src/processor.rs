@@ -129,13 +129,13 @@ impl Processor {
         if !self.imported_modules.insert(module_id) {
             return Ok(());
         }
-        let dep_env = project.get_env_by_id(module_id).ok_or_else(|| {
+        let lowered = project.get_lowered_module(module_id).ok_or_else(|| {
             BuildError::new(
                 Default::default(),
                 format!("missing dependency {}", module_id.0),
             )
         })?;
-        for normalized in &dep_env.lowered_module_facts {
+        for normalized in lowered.module_facts() {
             self.add_lowered_fact(normalized)?;
         }
         Ok(())
