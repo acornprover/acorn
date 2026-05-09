@@ -330,17 +330,37 @@ impl Environment {
         }
 
         let mut pairs = vec![];
+        let public_definition_for_instance =
+            |bindings: &crate::elaborator::binding_map::BindingMap,
+             attr_name: &str|
+             -> Option<AcornValue> {
+                let name =
+                    DefinedName::instance(typeclass.clone(), attr_name, instance_datatype.clone());
+                let definition = bindings.get_definition(&name)?.clone();
+                if family_value_args.is_empty() {
+                    return Some(definition);
+                }
+                let generic_family_value_args: Vec<_> = family_value_args
+                    .iter()
+                    .map(|value| value.genericize(family_scope.type_params()))
+                    .collect();
+                Some(
+                    AcornValue::apply(definition, generic_family_value_args)
+                        .expand_lambdas(family_scope.value_params().len() as AtomId),
+                )
+            };
 
         if let Some(definitions) = &is.definitions {
             for substatement in &definitions.statements {
                 match &substatement.statement {
                     StatementInfo::Let(ls) => {
+                        let attr_name = ls.name_token.text().to_string();
                         self.add_let_statement(
                             project,
                             substatement,
                             DefinedName::instance(
                                 typeclass.clone(),
-                                ls.name_token.text(),
+                                &attr_name,
                                 instance_datatype.clone(),
                             ),
                             ls,
@@ -352,26 +372,30 @@ impl Environment {
                             },
                         )?;
 
-                        pairs.push(self.bindings.check_instance_attribute(
+                        let (public_attr, instance_impl) = self.bindings.check_instance_attribute(
                             &instance_type,
                             &typeclass,
-                            ls.name_token.text(),
+                            &attr_name,
                             family_scope.type_params(),
                             &family_value_args,
                             &project,
                             substatement,
-                        )?);
+                        )?;
+                        let public_definition =
+                            public_definition_for_instance(&self.bindings, &attr_name);
+                        pairs.push((public_attr, instance_impl, public_definition));
                     }
                     StatementInfo::Define(ds) => {
                         if !ds.type_params.is_empty() {
                             return Err(substatement.error("type parameters are not allowed here"));
                         }
+                        let attr_name = ds.name_token.text().to_string();
                         self.add_define_statement(
                             project,
                             substatement,
                             DefinedName::instance(
                                 typeclass.clone(),
-                                ds.name_token.text(),
+                                &attr_name,
                                 instance_datatype.clone(),
                             ),
                             Some(&instance_type),
@@ -384,15 +408,18 @@ impl Environment {
                             ds.name_token.range(),
                         )?;
 
-                        pairs.push(self.bindings.check_instance_attribute(
+                        let (public_attr, instance_impl) = self.bindings.check_instance_attribute(
                             &instance_type,
                             &typeclass,
-                            ds.name_token.text(),
+                            &attr_name,
                             family_scope.type_params(),
                             &family_value_args,
                             &project,
                             substatement,
-                        )?);
+                        )?;
+                        let public_definition =
+                            public_definition_for_instance(&self.bindings, &attr_name);
+                        pairs.push((public_attr, instance_impl, public_definition));
                     }
                     _ => {
                         return Err(substatement.error(
@@ -517,6 +544,7 @@ impl Environment {
         }
 
         for (name, tc_type, dt_value, tc_resolved) in defaults_to_add {
+            let public_definition = dt_value.clone();
             let definition = if family_value_args.is_empty() {
                 dt_value
             } else {
@@ -552,7 +580,7 @@ impl Environment {
                     statement,
                 )?
                 .genericize(family_scope.type_params());
-            pairs.push((tc_resolved, instance_impl));
+            pairs.push((tc_resolved, instance_impl, Some(public_definition)));
         }
 
         let instance_source = Source::instance(
@@ -602,7 +630,7 @@ impl Environment {
         self.add_node_lines(index, &statement.range());
         self.bindings.add_typeclass_instance(typeclass_instance);
 
-        for (public_attr, instance_impl) in pairs {
+        for (public_attr, instance_impl, public_definition) in pairs {
             let bridge = if family_scope.is_empty() {
                 Node::definition(
                     PotentialValue::Resolved(public_attr),
@@ -610,7 +638,8 @@ impl Environment {
                     instance_source.clone(),
                 )
             } else {
-                let mut claim = public_attr.inflate_function_definition(instance_impl);
+                let definition = public_definition.unwrap_or(instance_impl);
+                let mut claim = public_attr.inflate_function_definition(definition);
                 let value_param_types: Vec<_> = family_scope
                     .value_params()
                     .iter()

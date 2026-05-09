@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_type::{AcornType, DependentTypeArg, TypeParam};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, ConstantInstance, MatchCase};
 use crate::elaborator::names::ConstantName;
 use crate::kernel::atom::{Atom, AtomId};
@@ -627,6 +627,80 @@ impl<'a> TermBridge<'a> {
         Some(AcornValue::Match(Box::new(scrutinee), cases))
     }
 
+    fn receiver_type_from_family_args(
+        &self,
+        datatype: &crate::elaborator::acorn_type::Datatype,
+        type_args: &[AcornType],
+        value_args: &[AcornValue],
+    ) -> Option<AcornType> {
+        let ground_id = self.kernel_context.type_store.get_datatype_id(datatype)?;
+        let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
+        if param_kinds.is_empty() {
+            return value_args
+                .is_empty()
+                .then(|| AcornType::Data(datatype.clone(), type_args.to_vec()));
+        }
+
+        let mut next_type_arg = 0usize;
+        let mut next_value_arg = 0usize;
+        let mut family_args = Vec::with_capacity(param_kinds.len());
+        for kind in param_kinds {
+            if kind.as_ref().is_type_param_kind() {
+                family_args.push(DependentTypeArg::Type(
+                    type_args.get(next_type_arg)?.clone(),
+                ));
+                next_type_arg += 1;
+            } else {
+                family_args.push(DependentTypeArg::Value(
+                    value_args.get(next_value_arg)?.clone(),
+                ));
+                next_value_arg += 1;
+            }
+        }
+        if next_type_arg != type_args.len() || next_value_arg != value_args.len() {
+            return None;
+        }
+        Some(AcornType::new_datatype_application(
+            datatype.clone(),
+            family_args,
+        ))
+    }
+
+    fn maybe_reconstruct_instance_attribute(
+        &self,
+        head: &AcornValue,
+        value_args: &[AcornValue],
+    ) -> Option<AcornValue> {
+        let AcornValue::Constant(constant) = head else {
+            return None;
+        };
+        let ConstantName::InstanceAttribute(_, instance_name) = &constant.name else {
+            return None;
+        };
+        let hidden_value_arg_count = constant.value_param_types.len();
+        if hidden_value_arg_count == 0 || value_args.len() < hidden_value_arg_count {
+            return None;
+        }
+
+        let hidden_value_args = &value_args[..hidden_value_arg_count];
+        let visible_args = &value_args[hidden_value_arg_count..];
+        let receiver_type = self.receiver_type_from_family_args(
+            &instance_name.datatype,
+            &constant.params,
+            hidden_value_args,
+        )?;
+        let attr_type = constant.instance_type.bind_value_params(hidden_value_args);
+        let public_attr = AcornValue::constant(
+            instance_name.to_typeclass_attribute(),
+            vec![receiver_type],
+            attr_type.clone(),
+            attr_type,
+            vec![],
+            vec![],
+        );
+        Some(AcornValue::apply(public_attr, visible_args.to_vec()))
+    }
+
     fn quote_term(
         &self,
         term: &Term,
@@ -1140,6 +1214,10 @@ impl<'a> TermBridge<'a> {
             AcornValue::Constant(c) => Self::apply_type_args_to_constant(&c, &type_args),
             other => other,
         };
+
+        if let Some(value) = self.maybe_reconstruct_instance_attribute(&head, &value_args) {
+            return value;
+        }
 
         if let AcornValue::Constant(constant) = &head {
             let missing_hidden_value_args = if constant.bound_value_args.is_empty() {

@@ -2192,28 +2192,16 @@ impl<'a> Evaluator<'a> {
             return Ok(AttributesTypeArgs::Generic(Telescope::empty()));
         }
 
-        // Check if each identifier refers to an existing type
+        // Classify the list before evaluating it. An annotation means this is a
+        // generic binder; value-parameter annotations may depend on earlier
+        // binders, so evaluating them here would happen before their telescope
+        // scope exists.
         let mut concrete_count = 0;
         let mut generic_count = 0;
 
         for expr in exprs {
             if expr.typeclass.is_some() {
-                let annotation = expr.typeclass.as_ref().unwrap();
-                if self
-                    .fork(self.bindings, None)
-                    .evaluate_typeclass(annotation)
-                    .is_ok()
-                {
-                    generic_count += 1;
-                } else if self
-                    .fork(self.bindings, None)
-                    .evaluate_type(annotation)
-                    .is_ok()
-                {
-                    generic_count += 1;
-                } else {
-                    return Err(annotation.error("expected a typeclass constraint or a value type"));
-                }
+                generic_count += 1;
             } else if expr.type_expr.is_some() {
                 // Complex type expression like List[Color] - definitely concrete
                 concrete_count += 1;
