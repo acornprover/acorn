@@ -364,40 +364,6 @@ impl Processor {
         )
     }
 
-    /// Cleans a certificate by removing unnecessary steps.
-    /// Similar to check_cert but returns the cleaned certificate along with the steps.
-    pub fn clean_cert(
-        &self,
-        cert: Certificate,
-        normalized_goal: Option<&LoweredGoal>,
-        kernel_context: &KernelContext,
-        project: &Project,
-        bindings: &BindingMap,
-    ) -> Result<(Certificate, Vec<CertificateLine>), Error> {
-        let mut checker = self.checker.clone();
-        let mut cert_bindings = Cow::Borrowed(bindings);
-        let effective_kernel_context: &KernelContext;
-
-        if let Some(normalized_goal) = normalized_goal {
-            checker.insert_lowered_goal(normalized_goal)?;
-            cert_bindings =
-                Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
-            effective_kernel_context = &normalized_goal.kernel_context;
-        } else if let Some(type_params) = self
-            .prover
-            .as_ref()
-            .and_then(|prover| prover.goal_type_params())
-        {
-            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
-            effective_kernel_context = kernel_context;
-        } else {
-            effective_kernel_context = kernel_context;
-        }
-
-        let kernel_context = Cow::Owned(effective_kernel_context.clone());
-        cert.clean(checker, project, cert_bindings, kernel_context)
-    }
-
     /// Creates a test Processor from code containing a theorem named "goal".
     /// Loads facts and sets up the goal, which triggers normalization.
     /// Returns the Processor and the goal-level BindingMap.

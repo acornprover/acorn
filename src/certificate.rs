@@ -1150,48 +1150,6 @@ impl Certificate {
     ) -> Result<CheckedCertificate, CodeGenError> {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, true)
     }
-
-    /// Remove unneeded steps from this certificate.
-    pub fn clean(
-        self,
-        checker: Checker,
-        project: &Project,
-        bindings: Cow<BindingMap>,
-        kernel_context: Cow<KernelContext>,
-    ) -> Result<(Certificate, Vec<CertificateLine>), CodeGenError> {
-        let mut good_cert = self;
-        let mut keep_count = 0;
-
-        loop {
-            let Some(proof) = &good_cert.proof else {
-                return Err(CodeGenError::NoProof);
-            };
-
-            if keep_count >= proof.len() {
-                let steps = good_cert.check(checker, project, bindings, kernel_context)?;
-                return Ok((good_cert, steps));
-            }
-
-            let mut test_cert = good_cert.clone();
-            if let Some(test_proof) = &mut test_cert.proof {
-                test_proof.remove(keep_count);
-            }
-
-            match test_cert.check(
-                checker.clone(),
-                project,
-                bindings.clone(),
-                kernel_context.clone(),
-            ) {
-                Ok(_) => {
-                    good_cert = test_cert;
-                }
-                Err(_) => {
-                    keep_count += 1;
-                }
-            }
-        }
-    }
 }
 
 /// A collection of certificates that can be saved to a file

@@ -234,10 +234,6 @@ pub struct Builder<'a> {
     /// Whether we skip goals that match hashes in the cache.
     pub check_hashes: bool,
 
-    /// When this flag is set, clean certificates by removing unnecessary steps.
-    /// This implies check_hashes = false.
-    pub clean_certs: bool,
-
     /// In strict mode, reject any use of the axiom keyword.
     pub strict: bool,
 
@@ -1124,7 +1120,6 @@ impl<'a> Builder<'a> {
             log_secondary_errors: true,
             check_mode: false,
             check_hashes: true,
-            clean_certs: false,
             strict: false,
             exit_on_warning: false,
             force_search: false,
@@ -1663,51 +1658,26 @@ impl<'a> Builder<'a> {
             for i in indexes {
                 let cert = worklist.get_cert(*i).unwrap().clone();
 
-                // If clean_certs is enabled, clean the certificate
                 let normalized_goal =
                     lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
                 let goal_kernel_context = &normalized_goal.kernel_context;
-                let (cert_to_use, check_result) = if self.clean_certs {
-                    let check_start = std::time::Instant::now();
-                    let result = processor.clean_cert(
-                        cert,
-                        Some(normalized_goal),
-                        goal_kernel_context,
-                        self.project,
-                        bindings,
-                    );
-                    let check_elapsed = check_start.elapsed();
-                    let check_succeeded = result.is_ok();
-                    self.record_cert_check(check_elapsed, check_succeeded);
-                    match result {
-                        Ok((cleaned_cert, steps)) => (cleaned_cert, Ok(steps)),
-                        Err(e) => {
-                            return Err(BuildError::goal(
-                                goal,
-                                format!("failed to clean certificate: {}", e),
-                            ))
-                        }
-                    }
-                } else {
-                    // Normal path: just check the certificate
-                    let check_start = std::time::Instant::now();
-                    let result = processor.check_cert_with_usage(
-                        &cert,
-                        Some(normalized_goal),
-                        goal_kernel_context,
-                        self.project,
-                        bindings,
-                    );
-                    let check_elapsed = check_start.elapsed();
-                    let check_succeeded = result.is_ok();
-                    self.record_cert_check(check_elapsed, check_succeeded);
-                    match result {
-                        Ok(checked_cert) => (
-                            cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
-                            Ok(checked_cert.lines),
-                        ),
-                        Err(e) => (cert, Err(e)),
-                    }
+                let check_start = std::time::Instant::now();
+                let result = processor.check_cert_with_usage(
+                    &cert,
+                    Some(normalized_goal),
+                    goal_kernel_context,
+                    self.project,
+                    bindings,
+                );
+                let check_elapsed = check_start.elapsed();
+                let check_succeeded = result.is_ok();
+                self.record_cert_check(check_elapsed, check_succeeded);
+                let (cert_to_use, check_result) = match result {
+                    Ok(checked_cert) => (
+                        cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
+                        Ok(checked_cert.lines),
+                    ),
+                    Err(e) => (cert, Err(e)),
                 };
 
                 match check_result {
@@ -2287,7 +2257,6 @@ impl<'a> Builder<'a> {
             && target_count > 1
             && self.goal_filter.is_none()
             && self.cert_override.is_none()
-            && !self.clean_certs
             && !self.print_proof
             && !self.print_found_proof
             && !self.exit_on_warning
@@ -2468,10 +2437,6 @@ impl<'a> Builder<'a> {
 
     /// Builds all open modules, logging build events.
     pub fn build(&mut self) {
-        // If clean_certs is enabled, disable check_hashes
-        if self.clean_certs {
-            self.check_hashes = false;
-        }
         self.prepare_eval_mode();
 
         // Initialize the build cache
