@@ -1,23 +1,23 @@
 # Telescope Probe
 
-## Interleaved Family Parameters In Structure Constraint
+## Split Family Parameters In Structure Constraint
 
 This green control shows that the core ordered telescope survives a structure
-constraint even when a value parameter appears between two type parameters.
+constraint when type parameters are listed before value parameters.
 
 ```acorn
     structure Set[T] {
         contains: T -> Bool
     }
 
-    structure Tagged[T, a: Set[T], U] {
+    structure Tagged[T, U, a: Set[T]] {
         left: T
         right: U
     } constraint {
         a.contains(left)
     }
 
-    theorem tagged_value_type[T, a: Set[T], U](x: Tagged[T, a, U]) {
+    theorem tagged_value_type[T, U, a: Set[T]](x: Tagged[T, U, a]) {
         a.contains(x.left)
     }
 ```
@@ -104,4 +104,3 @@ dependent datatype family.
         x.carrier = x.value
     }
 ```
-

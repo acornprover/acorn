@@ -2089,6 +2089,7 @@ impl<'a> Evaluator<'a> {
         let mut scoped_stack = Stack::new();
         let project = self.project;
         let current_instance_context = self.current_instance_context.clone();
+        let mut saw_value_param = false;
         for expr in exprs {
             if expr.type_expr.is_some() {
                 return Err(expr.name.error(
@@ -2146,10 +2147,16 @@ impl<'a> Evaluator<'a> {
             }
             match &param {
                 FamilyParam::Type(type_param) => {
+                    if saw_value_param {
+                        return Err(expr
+                            .name
+                            .error("type parameters must come before value parameters"));
+                    }
                     scoped_bindings.check_typename_available(&type_param.name, &expr.name)?;
                     scoped_bindings.add_arbitrary_type(type_param.clone());
                 }
                 FamilyParam::Value(value_param) => {
+                    saw_value_param = true;
                     scoped_stack.insert(value_param.name.clone(), value_param.value_type.clone());
                 }
             }
@@ -2343,20 +2350,45 @@ mod tests {
             .unwrap();
         let mut evaluator = Evaluator::new(&project, &bindings, None);
         let family_params = evaluator
-            .evaluate_family_params(&Evaluator::parse_type_params("[T, n: Bool, R: Ring]"))
+            .evaluate_family_params(&Evaluator::parse_type_params("[T, R: Ring, n: Bool]"))
             .unwrap();
         let kinds: Vec<_> = family_params.iter().map(|param| param.kind()).collect();
         assert_eq!(
             kinds,
             vec![
                 FamilyParamKind::Type(None),
-                FamilyParamKind::Value(AcornType::Bool),
                 FamilyParamKind::Type(Some(Typeclass {
                     module_id: ModuleId(0),
                     name: "Ring".to_string(),
                 })),
+                FamilyParamKind::Value(AcornType::Bool),
             ]
         );
+    }
+
+    #[test]
+    fn test_evaluate_family_params_rejects_type_after_value_param() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        bindings
+            .add_typeclass(
+                "Ring",
+                vec![],
+                vec![],
+                None,
+                None,
+                &project,
+                &Token::empty(),
+            )
+            .unwrap();
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+        let error = evaluator
+            .evaluate_family_params(&Evaluator::parse_type_params("[T, n: Bool, R: Ring]"))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("type parameters must come before value parameters"));
     }
 
     #[test]

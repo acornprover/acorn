@@ -28,11 +28,11 @@ parameter before the satisfy claim is exported.
     }
 ```
 
-## Interleaved Dependent Receiver Typeclass Instance
+## Split Dependent Receiver Typeclass Instance
 
-The value parameters `a` and `b` have different dependent types. Kernel datatype
-kinds must keep their source-order telescope without colliding later type
-parameters with earlier value parameters.
+The value parameters `a` and `b` have different dependent types. The declaration
+keeps all type parameters before value parameters while still checking that
+distinct value parameters do not collide.
 
 ```acorn
     structure Set[T] {
@@ -43,19 +43,19 @@ parameters with earlier value parameters.
         flag: Bool
     }
 
-    structure BiSubspace[T, a: Set[T], U, b: Set[U]] {
+    structure BiSubspace[T, U, a: Set[T], b: Set[U]] {
         left: T
         right: U
     } constraint {
         a.contains(left) and b.contains(right)
     }
 
-    instance BiSubspace[T, a: Set[T], U, b: Set[U]]: HasFlag {
+    instance BiSubspace[T, U, a: Set[T], b: Set[U]]: HasFlag {
         let flag: Bool = true
     }
 
-    theorem interleaved_receiver_typeclass[T, a: Set[T], U, b: Set[U]] {
-        BiSubspace[T, a, U, b].flag
+    theorem split_receiver_typeclass[T, U, a: Set[T], b: Set[U]] {
+        BiSubspace[T, U, a, b].flag
     }
 ```
 
