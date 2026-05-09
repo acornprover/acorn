@@ -125,7 +125,7 @@ fn test_basic_import() {
 
 #[test]
 fn test_citation_statements_collect_nested_citations() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock("/mock/base.ac", "theorem helper { true }\n");
     p.mock(
         "/mock/main.ac",
@@ -397,7 +397,7 @@ fn test_target_outside_library() {
 
 #[test]
 fn test_completions() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/nat.ac",
         r#"

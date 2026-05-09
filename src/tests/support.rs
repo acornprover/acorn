@@ -1,8 +1,8 @@
 use crate::certificate::Certificate;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::lowered_module::LoweredGoalId;
 use crate::elaborator::lowering::LoweredGoal;
-use crate::elaborator::node::NodeCursor;
-use crate::module::LoadState;
+use crate::module::{LoadState, ModuleId};
 use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
@@ -39,19 +39,15 @@ fn init_test_tracing() {
     });
 }
 
-pub fn processor_for_cursor<'a>(
+pub fn processor_for_lowered_goal<'a>(
     project: &'a Project,
-    cursor: &NodeCursor<'_>,
+    module_id: ModuleId,
+    goal_id: LoweredGoalId,
 ) -> Result<(Processor, &'a BindingMap, &'a LoweredGoal), String> {
-    let goal = cursor
-        .goal()
-        .ok_or_else(|| "cursor does not point at a goal".to_string())?;
     let lowered = project
-        .get_lowered_module(goal.module_id)
-        .ok_or_else(|| format!("missing lowered module {}", goal.module_id))?;
-    let (goal_id, entry) = project
-        .lowered_goal_for_goal(goal)
-        .ok_or_else(|| format!("missing lowered goal for {}", goal.name))?;
+        .get_lowered_module(module_id)
+        .ok_or_else(|| format!("missing lowered module {}", module_id))?;
+    let entry = lowered.goal(goal_id);
     let mut processor =
         Processor::with_imports(None, &entry.bindings, project).map_err(|err| err.message)?;
     processor
@@ -61,21 +57,33 @@ pub fn processor_for_cursor<'a>(
     Ok((processor, &entry.bindings, &entry.lowered_goal))
 }
 
+pub fn processor_for_goal_name<'a>(
+    project: &'a Project,
+    module_id: ModuleId,
+    goal_name: &str,
+) -> Result<(Processor, &'a BindingMap, &'a LoweredGoal), String> {
+    let lowered = project
+        .get_lowered_module(module_id)
+        .ok_or_else(|| format!("missing lowered module {}", module_id))?;
+    let (goal_id, _) = lowered
+        .goal_by_name(goal_name)
+        .ok_or_else(|| format!("goal '{}' not found", goal_name))?;
+    processor_for_lowered_goal(project, module_id, goal_id)
+}
+
 /// Expects the proof to succeed, and a valid concrete proof to be generated.
 pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certificate {
     init_test_tracing();
     let module_id = project
         .load_module_by_name(module_name)
         .expect("load failed");
-    let load_state = project.get_module_by_id(module_id);
-    let base_env = match load_state {
-        LoadState::Ok(env) => env,
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
         LoadState::Error(e) => panic!("module loading error: {}", e),
         _ => panic!("no module"),
-    };
-    let node = base_env.get_node_by_goal_name(goal_name);
+    }
     let (mut processor, bindings, normalized_goal) =
-        processor_for_cursor(project, &node).expect("processor setup failed");
+        processor_for_goal_name(project, module_id, goal_name).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
 
@@ -101,24 +109,23 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
-    };
+    }
 
-    // Find the specific goal by name
-    for cursor in env.iter_goals() {
-        let goal = cursor.goal().unwrap();
-        if goal.name == goal_name {
-            let (mut processor, _bindings, normalized_goal) =
-                match processor_for_cursor(&project, &cursor) {
-                    Ok(result) => result,
-                    Err(_) => return Outcome::Inconsistent,
-                };
-            let goal_kernel_context = &normalized_goal.kernel_context;
-            return processor.search(ProverMode::Test, goal_kernel_context);
-        }
+    let lowered = project
+        .get_lowered_module(module_id)
+        .expect("missing lowered module");
+    if let Some((goal_id, _)) = lowered.goal_by_name(goal_name) {
+        let (mut processor, _bindings, normalized_goal) =
+            match processor_for_lowered_goal(&project, module_id, goal_id) {
+                Ok(result) => result,
+                Err(_) => return Outcome::Inconsistent,
+            };
+        let goal_kernel_context = &normalized_goal.kernel_context;
+        return processor.search(ProverMode::Test, goal_kernel_context);
     }
     panic!("goal '{}' not found in text", goal_name);
 }
@@ -128,16 +135,20 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
-    };
+    }
 
-    for cursor in env.iter_goals() {
-        let goal = cursor.goal().unwrap();
+    let lowered = project
+        .get_lowered_module(module_id)
+        .expect("missing lowered module");
+    for (goal_id, entry) in lowered.goals() {
+        let goal = &entry.lowered_goal.goal;
 
-        let (mut processor, bindings, normalized_goal) = processor_for_cursor(&project, &cursor)?;
+        let (mut processor, bindings, normalized_goal) =
+            processor_for_lowered_goal(&project, module_id, goal_id)?;
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         if options.verbose {

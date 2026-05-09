@@ -71,7 +71,7 @@ fn test_exists_normalization_should_not_demonstrate_inhabitedness() {
 
 #[test]
 fn test_cross_module_eta_bridge_for_partial_application_fact() {
-    let mut project = crate::project::Project::new_mock();
+    let mut project = crate::project::Project::new_mock_ide();
     project.mock(
         "/mock/helper.ac",
         r#"
@@ -140,11 +140,13 @@ fn test_citation_line_expands_to_instantiated_theorem_body() {
         }
         "#;
 
-    let mut project = crate::project::Project::new_mock();
+    let mut project = crate::project::Project::new_mock_ide();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        crate::module::LoadState::Ok(env) => env,
+        crate::module::LoadState::Ok(module) => {
+            module.env().expect("expected retained environment")
+        }
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
@@ -194,11 +196,13 @@ fn test_type_only_theorem_citation_expands() {
         }
         "#;
 
-    let mut project = crate::project::Project::new_mock();
+    let mut project = crate::project::Project::new_mock_ide();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        crate::module::LoadState::Ok(env) => env,
+        crate::module::LoadState::Ok(module) => {
+            module.env().expect("expected retained environment")
+        }
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };

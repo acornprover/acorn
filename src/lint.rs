@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_reports_unused_import() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock(
             "/mock/main.ac",
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_import_used_in_child_block_is_not_reported() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock(
             "/mock/main.ac",
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_dependency_warnings_are_not_reported_for_non_targets() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/base.ac", "let x: Bool = true\n");
         project.mock("/mock/foo.ac", "from base import x\nlet y: Bool = true\n");
         project.mock("/mock/main.ac", "from foo import y\nlet z: Bool = y\n");
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_default_module_allows_unused_top_level_reexport_import() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock("/mock/pkg/default.ac", "from foo import bar\n");
         project.add_target_by_name("pkg").unwrap();
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_non_facade_default_module_still_flags_unused_import() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock(
             "/mock/pkg/default.ac",
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_default_module_still_flags_nested_unused_import() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock(
             "/mock/pkg/default.ac",

@@ -5,7 +5,7 @@ use crate::builder::Builder;
 use crate::elaborator::acorn_type::{AcornType, PotentialType};
 use crate::elaborator::names::ConstantName;
 use crate::module::ModuleDescriptor;
-use crate::project::{localize_mock_filename, Project, ProjectConfig, SelectionInfo};
+use crate::project::{localize_mock_filename, Project, ProjectConfig, SelectionInfo, UsageMode};
 use indoc::indoc;
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,7 @@ use super::support::expect_build_ok;
 
 #[test]
 fn test_hover_basic() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -123,7 +123,7 @@ fn test_hover_basic() {
 
 #[test]
 fn test_hover_with_imports() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/foo.ac",
         indoc! {r"
@@ -169,7 +169,7 @@ fn test_hover_with_imports() {
 
 #[test]
 fn test_theorem_hover_and_definition_omit_proof_body() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -222,7 +222,7 @@ fn test_theorem_hover_and_definition_omit_proof_body() {
 
 #[test]
 fn test_definition_location_basic() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -359,7 +359,7 @@ fn test_definition_location_basic() {
 
 #[test]
 fn test_definition_location_with_imports() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/foo.ac",
         indoc! {r"
@@ -439,7 +439,7 @@ fn test_definition_location_with_imports() {
 
 #[test]
 fn test_import_default_ac() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
 
     // Create a module in foo/default.ac
     p.mock(
@@ -464,7 +464,7 @@ fn test_import_default_ac() {
 
 #[test]
 fn test_import_from_default_ac() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
 
     // Create a module in bar/default.ac
     p.mock(
@@ -493,7 +493,7 @@ fn test_import_from_default_ac() {
 
 #[test]
 fn test_typeclass_attributes_across_files() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     // Define the typeclass
     p.mock(
         "/mock/addable.ac",
@@ -540,7 +540,7 @@ fn test_typeclass_attributes_across_files() {
 
 #[test]
 fn test_import_normalization_handles_conflicting_typeclass_attribute_ids() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
 
     p.mock(
         "/mock/thing/base.ac",
@@ -615,7 +615,7 @@ fn test_import_normalization_handles_conflicting_typeclass_attribute_ids() {
 #[test]
 fn test_diamond_typeclass_attribute_conflict() {
     // Similar to test_diamond_attribute_conflict but for typeclass attributes
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     // Define the typeclass
     p.mock(
         "/mock/addable.ac",
@@ -666,7 +666,7 @@ fn test_diamond_typeclass_attribute_conflict() {
 
 #[test]
 fn test_deep_required_attribute_lookup() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/semigroup.ac",
         r#"
@@ -702,7 +702,7 @@ fn test_deep_required_attribute_lookup() {
 
 #[test]
 fn test_deep_lib() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/foo/bar.ac",
         r#"
@@ -724,7 +724,7 @@ fn test_deep_lib() {
 
 #[test]
 fn test_complex_attribute_reference() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/base.ac",
         r#"
@@ -771,7 +771,7 @@ fn test_complex_attribute_reference() {
 
 #[test]
 fn test_hover_method_call() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -827,7 +827,7 @@ fn test_hover_method_call() {
 
 #[test]
 fn test_hover_typeclass_method_with_doc_comment() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -908,7 +908,7 @@ fn test_hover_typeclass_method_with_doc_comment() {
 
 #[test]
 fn test_hover_preserves_explicit_type_args_on_partial_application() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/main.ac",
         indoc! {r#"
@@ -943,7 +943,7 @@ fn test_hover_preserves_explicit_type_args_on_partial_application() {
 
 #[test]
 fn test_doc_comment_lookup() {
-    let mut p = Project::new_mock();
+    let mut p = Project::new_mock_ide();
     p.mock(
         "/mock/foo.ac",
         r#"
@@ -1098,7 +1098,15 @@ fn test_handle_selection_typeclass_attribute() {
     fs::write(&test_file, content).unwrap();
 
     // Create project and build
-    let mut p = Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    let mut p = Project::new(
+        src_dir.clone(),
+        build_dir.clone(),
+        ProjectConfig {
+            usage_mode: UsageMode::Ide,
+            ..ProjectConfig::default()
+        },
+    )
+    .unwrap();
     p.add_target_by_path(&test_file).unwrap();
     expect_build_ok(&mut p);
 
@@ -1194,8 +1202,15 @@ fn test_handle_selection_citation_returns_expansion() {
     "#};
     std::fs::write(&test_file, content).unwrap();
 
-    let mut project =
-        Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    let mut project = Project::new(
+        src_dir.clone(),
+        build_dir.clone(),
+        ProjectConfig {
+            usage_mode: UsageMode::Ide,
+            ..ProjectConfig::default()
+        },
+    )
+    .unwrap();
     project.add_target_by_path(&test_file).unwrap();
     expect_build_ok(&mut project);
 
@@ -1362,8 +1377,15 @@ fn test_citation_expansion_prefers_operator_syntax_for_imported_instances() {
     let main_path = src_dir.join("main.ac");
     std::fs::write(&main_path, main_content).unwrap();
 
-    let mut project =
-        Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    let mut project = Project::new(
+        src_dir.clone(),
+        build_dir.clone(),
+        ProjectConfig {
+            usage_mode: UsageMode::Ide,
+            ..ProjectConfig::default()
+        },
+    )
+    .unwrap();
     project.add_target_by_path(&main_path).unwrap();
     project.expect_ok("myint.lattice");
     project.expect_ok("myint");

@@ -369,24 +369,14 @@ impl Processor {
     /// Returns the Processor and the goal-level BindingMap.
     #[cfg(test)]
     pub fn test_goal(code: &str) -> (Processor, BindingMap, LoweredGoal) {
-        use crate::module::LoadState;
-
         let mut p = Project::new_mock();
         p.mock("/mock/main.ac", code);
 
         let module_id = p.load_module_by_name("main").expect("load failed");
-        let env = match p.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
-            LoadState::Error(e) => panic!("error: {}", e),
-            _ => panic!("no module"),
-        };
-
-        let cursor = env.get_node_by_goal_name("goal");
-        let goal = cursor.goal().expect("missing goal");
         let lowered = p
-            .get_lowered_module(goal.module_id)
+            .get_lowered_module(module_id)
             .expect("missing lowered module");
-        let (goal_id, entry) = p.lowered_goal_for_goal(goal).expect("missing lowered goal");
+        let (goal_id, entry) = lowered.goal_by_name("goal").expect("missing lowered goal");
         let mut processor = Processor::with_imports(None, &entry.bindings, &p).unwrap();
         processor
             .add_visible_module_facts(lowered, goal_id)
@@ -423,7 +413,6 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::LoadState;
 
     #[test]
     fn check_only_processor_can_verify_a_generated_certificate() {
@@ -438,20 +427,10 @@ mod tests {
         );
 
         let module_id = project.load_module_by_name("main").expect("load failed");
-        let env = match project.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
-            LoadState::Error(e) => panic!("error: {}", e),
-            _ => panic!("no module"),
-        };
-
-        let cursor = env.get_node_by_goal_name("goal");
-        let goal = cursor.goal().expect("missing goal");
         let lowered = project
-            .get_lowered_module(goal.module_id)
+            .get_lowered_module(module_id)
             .expect("missing lowered module");
-        let (goal_id, entry) = project
-            .lowered_goal_for_goal(goal)
-            .expect("missing lowered goal");
+        let (goal_id, entry) = lowered.goal_by_name("goal").expect("missing lowered goal");
         let normalized_goal = &entry.lowered_goal;
         let bindings = &entry.bindings;
         let goal_kernel_context = &normalized_goal.kernel_context;

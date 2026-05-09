@@ -52,7 +52,11 @@ mod tests {
         let mut project = Project::new_mock();
         project.mock("/mock/main.ac", "theorem goal { true }\n");
         let module_id = project.expect_ok("main");
-        let env = project.get_env_by_id(module_id).unwrap();
+        let bindings = project
+            .get_loaded_module_by_id(module_id)
+            .unwrap()
+            .bindings
+            .clone();
 
         let long_statement = "x".repeat(MAX_DISPLAY_STATEMENT_CHARS + 25);
         let lines = vec![CertificateLine {
@@ -61,7 +65,7 @@ mod tests {
             value: AcornValue::Bool(true),
         }];
 
-        let displayed = display_certificate_lines(&env.bindings, &lines);
+        let displayed = display_certificate_lines(&bindings, &lines);
         assert_eq!(displayed.len(), 1);
         assert!(displayed[0].statement.len() < long_statement.len());
         assert!(displayed[0].statement.contains("[45 chars omitted]"));

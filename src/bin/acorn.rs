@@ -4,7 +4,7 @@
 use acorn::doc_generator::DocGenerator;
 use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
-use acorn::module::ModuleDescriptor;
+use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
@@ -176,13 +176,14 @@ fn resolve_print_proof_line_selection(
             .map_err(|e| format!("Error resolving module '{}': {}", target, e))?
     };
 
-    let env = project
-        .get_env(&descriptor)
-        .ok_or_else(|| format!("Error loading target '{}'", target))?;
-    let goal_lines: Vec<u32> = env
-        .iter_goals()
-        .map(|cursor| cursor.goal().unwrap().first_line + 1)
-        .collect();
+    let goal_lines: Vec<u32> = match project.get_module(&descriptor) {
+        LoadState::Ok(module) => module
+            .lowered
+            .goals()
+            .map(|(_, entry)| entry.lowered_goal.goal.first_line + 1)
+            .collect(),
+        _ => return Err(format!("Error loading target '{}'", target)),
+    };
 
     match goal_lines.as_slice() {
         [] => Err(format!(
@@ -745,11 +746,17 @@ async fn main() {
         }
 
         Some(Command::Docs { dir }) => {
-            let mut project = Project::new_local(&current_dir, ProjectConfig::default())
-                .unwrap_or_else(|e| {
-                    println!("Error loading project: {}", e);
-                    std::process::exit(1);
-                });
+            let mut project = Project::new_local(
+                &current_dir,
+                ProjectConfig {
+                    usage_mode: UsageMode::Ide,
+                    ..ProjectConfig::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                println!("Error loading project: {}", e);
+                std::process::exit(1);
+            });
             project.add_src_targets();
             match DocGenerator::new(&project).generate(&dir) {
                 Ok(count) => {
@@ -1196,11 +1203,17 @@ async fn main() {
                 }
             };
 
-            let mut project = Project::new_local(&current_dir, ProjectConfig::default())
-                .unwrap_or_else(|e| {
-                    println!("Error loading project: {}", e);
-                    std::process::exit(1);
-                });
+            let mut project = Project::new_local(
+                &current_dir,
+                ProjectConfig {
+                    usage_mode: UsageMode::Ide,
+                    ..ProjectConfig::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                println!("Error loading project: {}", e);
+                std::process::exit(1);
+            });
 
             // Add target and resolve path, same way as verify does
             let path = if module.ends_with(".ac") {
@@ -1330,7 +1343,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
-                    usage_mode: UsageMode::Verify,
+                    usage_mode: UsageMode::Ide,
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
@@ -1425,7 +1438,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
-                    usage_mode: UsageMode::Verify,
+                    usage_mode: UsageMode::Ide,
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
@@ -1501,7 +1514,7 @@ async fn main() {
             let mut project = Project::new_local(
                 &current_dir,
                 ProjectConfig {
-                    usage_mode: UsageMode::Verify,
+                    usage_mode: UsageMode::Ide,
                     use_filesystem: true,
                     read_cache: true,
                     write_cache: false,

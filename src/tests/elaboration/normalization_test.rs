@@ -129,16 +129,17 @@ fn test_forall_reflexive_goal_keeps_lowered_goal() {
     );
 
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
-    };
+    }
 
-    let cursor = env.get_node_by_goal_name("goal");
-    let goal = cursor.goal().expect("expected goal");
-    let (_, entry) = project
-        .lowered_goal_for_goal(goal)
+    let lowered = project
+        .get_lowered_module(module_id)
+        .expect("missing lowered module");
+    let (_, entry) = lowered
+        .goal_by_name("goal")
         .expect("reflexive forall goal should lower");
     let normalized_goal = &entry.lowered_goal;
     assert!(
@@ -307,7 +308,7 @@ fn test_top_level_dependent_function_satisfy_module_loads() {
 
 #[test]
 fn test_top_level_dependent_function_satisfy_lowering() {
-    let mut project = Project::new_mock();
+    let mut project = Project::new_mock_ide();
     project.mock(
         "/mock/main.ac",
         r#"
@@ -329,7 +330,7 @@ fn test_top_level_dependent_function_satisfy_lowering() {
 
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+        LoadState::Ok(module) => module.env().expect("expected retained environment"),
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
@@ -355,7 +356,7 @@ fn test_top_level_dependent_function_satisfy_lowering() {
 #[cfg(feature = "validate")]
 #[test]
 fn test_validate_roundtrip_top_level_dependent_function_satisfy_clauses() {
-    let mut project = Project::new_mock();
+    let mut project = Project::new_mock_ide();
     project.mock(
         "/mock/main.ac",
         r#"
@@ -377,7 +378,7 @@ fn test_validate_roundtrip_top_level_dependent_function_satisfy_clauses() {
 
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+        LoadState::Ok(module) => module.env().expect("expected retained environment"),
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
@@ -1207,7 +1208,7 @@ fn test_code_generator_omits_type_params_when_arity_changes() {
 fn test_code_generator_preserves_attr_specialization_for_type_only_datatypes() {
     use crate::code_generator::CodeGenerator;
 
-    let mut project = Project::new_mock();
+    let mut project = Project::new_mock_ide();
     project.mock(
         "/mock/list.ac",
         r#"
@@ -1230,13 +1231,13 @@ fn test_code_generator_preserves_attr_specialization_for_type_only_datatypes() {
 
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+        LoadState::Ok(module) => module.env().expect("expected retained environment"),
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
 
     let mut norm = KernelContext::new();
-    let clauses = norm.get_all_clauses(&env);
+    let clauses = norm.get_all_clauses(env);
 
     let mut found_nil_clause = false;
     for clause in &clauses {
@@ -1274,7 +1275,7 @@ fn test_code_generator_preserves_attr_specialization_for_type_only_datatypes() {
 fn test_code_generator_uses_receiver_specialization_for_value_indexed_datatypes() {
     use crate::code_generator::CodeGenerator;
 
-    let mut project = Project::new_mock();
+    let mut project = Project::new_mock_ide();
     project.mock(
         "/mock/main.ac",
         r#"
@@ -1300,13 +1301,13 @@ fn test_code_generator_uses_receiver_specialization_for_value_indexed_datatypes(
 
     let module_id = project.load_module_by_name("main").expect("load failed");
     let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+        LoadState::Ok(module) => module.env().expect("expected retained environment"),
         LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
 
     let mut norm = KernelContext::new();
-    let clauses = norm.get_all_clauses(&env);
+    let clauses = norm.get_all_clauses(env);
 
     let mut found_new_clause = false;
     for clause in &clauses {

@@ -1,4 +1,4 @@
-use std::{fmt, ops::Deref, ops::DerefMut, path::PathBuf};
+use std::{fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -115,24 +115,6 @@ impl LoadedModule {
 
     pub fn env_mut(&mut self) -> Option<&mut Environment> {
         self.env.as_mut()
-    }
-}
-
-impl Deref for LoadedModule {
-    type Target = Environment;
-
-    fn deref(&self) -> &Self::Target {
-        self.env
-            .as_ref()
-            .expect("environment was not retained for this loaded module")
-    }
-}
-
-impl DerefMut for LoadedModule {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.env
-            .as_mut()
-            .expect("environment was not retained for this loaded module")
     }
 }
 
