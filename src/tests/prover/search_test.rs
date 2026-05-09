@@ -1,5 +1,4 @@
 use crate::module::LoadState;
-use crate::processor::Processor;
 use crate::project::Project;
 use crate::prover::{Outcome, ProverMode};
 use crate::tests::support::*;
@@ -154,14 +153,8 @@ fn test_later_import_does_not_help_earlier_goal() {
         _ => panic!("no module"),
     };
     let cursor = env.get_node_by_goal_name("goal");
-    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-
-    let mut processor =
-        Processor::with_imports(None, cursor.bindings(), &p).expect("processor creation failed");
-    processor
-        .add_module_facts(&cursor)
-        .expect("adding module facts failed");
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, _bindings, normalized_goal) =
+        processor_for_cursor(&p, &cursor).expect("processor setup failed");
 
     let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
     assert_eq!(outcome, Outcome::ShallowExhausted);

@@ -136,9 +136,11 @@ fn test_forall_reflexive_goal_keeps_lowered_goal() {
     };
 
     let cursor = env.get_node_by_goal_name("goal");
-    let normalized_goal = cursor
-        .lowered_goal()
+    let goal = cursor.goal().expect("expected goal");
+    let (_, entry) = project
+        .lowered_goal_for_goal(goal)
         .expect("reflexive forall goal should lower");
+    let normalized_goal = &entry.lowered_goal;
     assert!(
         normalized_goal
             .steps
@@ -335,7 +337,8 @@ fn test_top_level_dependent_function_satisfy_lowering() {
     let missing_goals: Vec<_> = env
         .iter_goals()
         .filter_map(|cursor| {
-            if cursor.lowered_goal().is_none() {
+            let goal = cursor.goal().unwrap();
+            if project.lowered_goal_for_goal(goal).is_none() {
                 Some(cursor.goal().unwrap().name.clone())
             } else {
                 None

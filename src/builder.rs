@@ -11,13 +11,11 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 
 use crate::build_cache::BuildCache;
 use crate::certificate::{Certificate, CertificateStore, CertificateWorklist};
-use crate::elaborator::environment::Environment;
 use crate::elaborator::error::Error as ElaborationError;
-use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::lowered_module::{LoweredItem, LoweredModule};
 use crate::elaborator::lowering::LoweredGoal;
-use crate::elaborator::node::{Node, NodeCursor};
+use crate::elaborator::node::NodeCursor;
 use crate::elaborator::source::SourceType;
 use crate::module::{LoadState, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
@@ -1222,17 +1220,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Called when a single module is loaded successfully.
-    pub fn module_loaded(&mut self, env: &Environment) {
-        let goal_count = env.iter_goals().count() as i32;
-        if self.project.is_surface_check_module(env.module_id) {
-            self.metrics.pending_modules_total += 1;
-            self.metrics.pending_goals_total += goal_count;
-        } else {
-            self.metrics.goals_total += goal_count;
-        }
-    }
-
     pub fn lowered_module_loaded(&mut self, lowered: &LoweredModule) {
         let goal_count = lowered.goal_count() as i32;
         if self.project.is_surface_check_module(lowered.module_id) {
@@ -1949,31 +1936,6 @@ impl<'a> Builder<'a> {
         Ok(processor)
     }
 
-    fn is_plain_anonymous_claim(node: &Node) -> bool {
-        match node {
-            Node::Claim(_, Fact::Proposition(prop), _, _) => {
-                matches!(prop.source.source_type, SourceType::Anonymous)
-            }
-            _ => false,
-        }
-    }
-
-    fn update_eval_skip_tail(
-        &self,
-        tail: &mut EvalSkipTail<Rc<Processor>>,
-        node: &Node,
-        checkpoint_before_node: Rc<Processor>,
-    ) {
-        if !self.eval_mode || self.eval_max_skip() == 0 {
-            return;
-        }
-        if Self::is_plain_anonymous_claim(node) {
-            tail.record_plain(checkpoint_before_node);
-        } else {
-            tail.record_barrier();
-        }
-    }
-
     fn verify_eval_goal(
         &mut self,
         processor: Rc<Processor>,
@@ -2015,140 +1977,6 @@ impl<'a> Builder<'a> {
                 break;
             }
         }
-        Ok(())
-    }
-
-    /// Verifies a node and all its children recursively.
-    /// builder tracks statistics and results for the build.
-    /// If verify_node encounters an error, it stops, leaving node in a borked state.
-    fn verify_node(
-        &mut self,
-        mut processor: Rc<Processor>,
-        cursor: &mut NodeCursor,
-        new_certs: &mut Vec<Certificate>,
-        worklist: &mut CertificateWorklist,
-        eval_goal_counts: &mut Option<HashMap<String, EvalGoalCounts>>,
-        eval_skip_tail: &EvalSkipTail<Rc<Processor>>,
-    ) -> Result<(), BuildError> {
-        if !cursor.requires_verification() {
-            return Ok(());
-        }
-
-        if !processor.has_imports_for_bindings(cursor.bindings()) {
-            Rc::make_mut(&mut processor)
-                .add_imports_from_bindings(cursor.bindings(), self.project)?;
-        }
-
-        if cursor.num_children() > 0 {
-            // We need to recurse into children
-            let mut child_eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
-            cursor.descend(0);
-            loop {
-                self.verify_node(
-                    Rc::clone(&processor),
-                    cursor,
-                    new_certs,
-                    worklist,
-                    eval_goal_counts,
-                    &child_eval_skip_tail,
-                )?;
-
-                // Early exit if we have a warning and exit_on_warning is enabled
-                if self.exit_on_warning && !self.status.is_good() {
-                    break;
-                }
-
-                let checkpoint_before_node = Rc::clone(&processor);
-                if cursor.node().get_fact().is_some() {
-                    let normalized = cursor.node().lowered_fact().ok_or_else(|| {
-                        BuildError::new(Default::default(), "missing lowered fact".to_string())
-                    })?;
-                    Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
-                }
-                self.update_eval_skip_tail(
-                    &mut child_eval_skip_tail,
-                    cursor.node(),
-                    checkpoint_before_node,
-                );
-
-                if cursor.has_next() {
-                    cursor.next();
-                } else {
-                    break;
-                }
-            }
-            cursor.ascend();
-            return Ok(());
-        }
-
-        assert!(cursor.node().has_goal());
-        let goal = cursor.goal().unwrap();
-        let normalized_goal = cursor.lowered_goal();
-        if let Some(ref filter) = self.goal_filter {
-            let matches = match filter {
-                GoalFilter::SingleLine {
-                    line, goal_index, ..
-                } => {
-                    if goal.first_line != *line {
-                        false
-                    } else {
-                        self.single_line_goal_count += 1;
-                        match goal_index {
-                            Some(index) => self.single_line_goal_count == *index,
-                            None => true,
-                        }
-                    }
-                }
-                GoalFilter::LineRange { start, end, .. } => {
-                    goal.first_line >= *start && goal.first_line <= *end
-                }
-            };
-            if !matches {
-                // This isn't the goal we're looking for.
-                return Ok(());
-            }
-        }
-        let eval_proof_kind = if let Some(counts) = eval_goal_counts.as_mut() {
-            let Some(counts) = counts.get_mut(&goal.name) else {
-                self.metrics.eval_goals_skipped_uncertified += 1;
-                return Ok(());
-            };
-            match counts.take() {
-                Some(kind) => {
-                    self.metrics.eval_corpus_matched += 1;
-                    Some(kind)
-                }
-                None => {
-                    self.metrics.eval_goals_skipped_uncertified += 1;
-                    return Ok(());
-                }
-            }
-        } else {
-            None
-        };
-        if self.eval_mode {
-            self.verify_eval_goal(
-                processor,
-                &goal,
-                cursor.bindings(),
-                new_certs,
-                worklist,
-                normalized_goal,
-                eval_skip_tail,
-                eval_proof_kind.expect("eval mode has proof kind"),
-            )?;
-        } else {
-            self.verify_goal(
-                processor,
-                &goal,
-                cursor.bindings(),
-                new_certs,
-                worklist,
-                normalized_goal,
-                None,
-            )?;
-        }
-
         Ok(())
     }
 
@@ -2442,156 +2270,6 @@ impl<'a> Builder<'a> {
         let content_hash = if module_good {
             self.project.get_module_content_hash(lowered.module_id)
         } else {
-            None
-        };
-
-        self.build_cache
-            .as_mut()
-            .unwrap()
-            .insert(target.clone(), cert_store, content_hash);
-
-        Ok(())
-    }
-
-    /// Verifies all goals within this module.
-    pub fn verify_module(
-        &mut self,
-        target: &ModuleDescriptor,
-        env: &Environment,
-    ) -> Result<(), BuildError> {
-        // In strict mode, reject any use of the axiom keyword
-        if self.strict {
-            for node in &env.nodes {
-                if let Node::Structural(Fact::Proposition(prop), _) = node {
-                    if matches!(prop.source.source_type, SourceType::Axiom(_)) {
-                        let range = prop.source.range;
-                        let event = self.make_event(
-                            range,
-                            "axiom keyword is not allowed in strict mode",
-                            Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR),
-                        );
-                        (self.event_handler)(event);
-                        self.status = BuildStatus::Error;
-                        return Err(BuildError::new(
-                            range,
-                            "axiom keyword is not allowed in strict mode",
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut worklist = if self.project.config.read_cache {
-            self.project.build_cache.make_worklist(target)
-        } else {
-            CertificateWorklist::new(CertificateStore { certs: vec![] })
-        };
-        let mut eval_goal_counts = self.eval_goal_counts(target);
-        if let Some(counts) = &eval_goal_counts {
-            self.metrics.eval_corpus_total +=
-                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
-            self.metrics.eval_corpus_empty +=
-                counts.values().map(|counts| counts.empty).sum::<usize>() as i32;
-        }
-        let mut new_certs = vec![];
-
-        if self.project.is_surface_check_target(target) {
-            return Ok(());
-        }
-
-        if !env.nodes.is_empty() {
-            self.module_proving_started(target.clone());
-            let mut cursor = NodeCursor::new(env, 0);
-            let processor = if self.check_mode {
-                Processor::with_imports_for_checking(
-                    Some(self.cancellation_token.clone()),
-                    cursor.bindings(),
-                    self.project,
-                )?
-            } else {
-                Processor::with_imports(
-                    Some(self.cancellation_token.clone()),
-                    cursor.bindings(),
-                    self.project,
-                )?
-            };
-            let mut processor = Rc::new(processor);
-            let mut eval_skip_tail = EvalSkipTail::new(self.eval_max_skip());
-
-            // Loop over all the nodes that are right below the top level.
-            loop {
-                if cursor.requires_verification() {
-                    // We do need to verify this.
-
-                    // This call will recurse and verify everything within this top-level block.
-                    self.verify_node(
-                        Rc::clone(&processor),
-                        &mut cursor,
-                        &mut new_certs,
-                        &mut worklist,
-                        &mut eval_goal_counts,
-                        &eval_skip_tail,
-                    )?;
-
-                    // Early exit if we have a warning and exit_on_warning is enabled
-                    if self.exit_on_warning && !self.status.is_good() {
-                        break;
-                    }
-                } else {
-                    self.log_verified(cursor.node().first_line(), cursor.node().last_line());
-                }
-                if !cursor.has_next() {
-                    break;
-                }
-                let checkpoint_before_node = Rc::clone(&processor);
-                if cursor.node().get_fact().is_some() {
-                    let normalized = cursor.node().lowered_fact().ok_or_else(|| {
-                        BuildError::new(Default::default(), "missing lowered fact".to_string())
-                    })?;
-                    Rc::make_mut(&mut processor).add_lowered_fact(normalized)?;
-                }
-                self.update_eval_skip_tail(
-                    &mut eval_skip_tail,
-                    cursor.node(),
-                    checkpoint_before_node,
-                );
-                cursor.next();
-            }
-        }
-        if let Some(counts) = &eval_goal_counts {
-            self.metrics.eval_corpus_unmatched +=
-                counts.values().map(EvalGoalCounts::total).sum::<usize>() as i32;
-        }
-
-        let module_good = if env.nodes.is_empty() {
-            // Modules with no goals are always "good"
-            true
-        } else {
-            self.module_proving_good(target)
-        };
-
-        if self.goal_filter.is_some() {
-            return Ok(());
-        }
-
-        self.metrics.certs_unused += worklist.unused() as i32;
-
-        let used_cert_count = new_certs.len();
-        let mut cert_store = CertificateStore { certs: new_certs };
-
-        // Always preserve unused certs during verification.
-        // We'll remove them later if the final build status is Good.
-        cert_store.append(&worklist);
-
-        // Track how many used certs this module has, so we can trim unused certs later
-        self.used_cert_counts
-            .insert(target.clone(), used_cert_count);
-
-        let content_hash = if module_good {
-            // We successfully verified this module, so put its hash in the manifest.
-            self.project.get_module_content_hash(env.module_id)
-        } else {
-            // This module had warnings or errors, so don't put its hash in the manifest.
             None
         };
 

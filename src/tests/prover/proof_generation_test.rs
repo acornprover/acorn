@@ -1,7 +1,6 @@
 use crate::tests::support::*;
 use crate::{
     module::LoadState,
-    processor::Processor,
     project::Project,
     prover::{Outcome, ProverMode},
 };
@@ -45,17 +44,15 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     };
 
     let cursor = env.get_node_by_goal_name("goal");
-    let mut processor = Processor::with_imports(None, cursor.bindings(), &project).unwrap();
-    processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_cursor(&project, &cursor).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
     let cert = processor
         .prover()
-        .make_cert(cursor.bindings(), goal_kernel_context, true)
+        .make_cert(bindings, goal_kernel_context, true)
         .expect("make_cert should succeed");
     let proof = cert.proof.as_ref().expect("proof should exist");
     assert!(
@@ -63,13 +60,7 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
         "expected a non-empty generated cert proof: {proof:?}"
     );
     processor
-        .check_cert(
-            &cert,
-            None,
-            goal_kernel_context,
-            &project,
-            cursor.bindings(),
-        )
+        .check_cert(&cert, None, goal_kernel_context, &project, bindings)
         .expect("generated cert should replay");
 }
 
@@ -190,10 +181,8 @@ fn test_cert_generation_replays_flipped_simplification_match() {
     };
 
     let cursor = env.get_node_by_goal_name("n = Nat.zero");
-    let mut processor = Processor::with_imports(None, cursor.bindings(), &project).unwrap();
-    processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_cursor(&project, &cursor).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(
         ProverMode::Interactive {
@@ -206,15 +195,9 @@ fn test_cert_generation_replays_flipped_simplification_match() {
 
     let cert = processor
         .prover()
-        .make_cert(cursor.bindings(), goal_kernel_context, false)
+        .make_cert(bindings, goal_kernel_context, false)
         .expect("make_cert should succeed");
     processor
-        .check_cert(
-            &cert,
-            None,
-            goal_kernel_context,
-            &project,
-            cursor.bindings(),
-        )
+        .check_cert(&cert, None, goal_kernel_context, &project, bindings)
         .expect("generated cert should replay successfully");
 }

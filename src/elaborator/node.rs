@@ -7,7 +7,6 @@ use crate::elaborator::block::Block;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
@@ -26,32 +25,27 @@ pub enum Node {
     /// The prover doesn't need to prove these.
     /// For example, this could be an axiom, or a definition.
     /// It could also be a form like a citation that has already been proven by the prover.
-    /// The optional LoweredFact is populated during the lowering pass.
-    Structural(Fact, Option<LoweredFact>),
+    Structural(Fact),
 
     /// A claim is something that we need to prove, and then we can subsequently use it.
     /// The Goal represents what needs to be proven; the Fact represents what can be used once proven.
-    /// The optional LoweredGoal is the pre-lowered goal with captured kernel_context state.
-    /// The optional LoweredFact is the pre-lowered fact.
-    /// Both are populated during the lowering pass.
-    Claim(Goal, Fact, Option<LoweredGoal>, Option<LoweredFact>),
+    Claim(Goal, Fact),
 
     /// A block has its own environment inside. We need to validate everything in the block.
     /// The block might not exist in the code, but it at least needs to exist for the prover.
     /// The optional fact is what we can use externally once the block is proven.
     /// It is relative to the outside environment.
     /// Other than the external claim, nothing else in the block is visible outside the block.
-    /// The optional LoweredFact is the external fact lowered during the lowering pass.
-    Block(Block, Option<Fact>, Option<LoweredFact>),
+    Block(Block, Option<Fact>),
 }
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Node::Structural(fact, _) => write!(f, "structural: {}", fact),
-            Node::Claim(goal, _, _, _) => write!(f, "claim: {}", goal),
-            Node::Block(_, Some(fact), _) => write!(f, "block: {}", fact),
-            Node::Block(_, None, _) => write!(f, "block: None"),
+            Node::Structural(fact) => write!(f, "structural: {}", fact),
+            Node::Claim(goal, _) => write!(f, "claim: {}", goal),
+            Node::Block(_, Some(fact)) => write!(f, "block: {}", fact),
+            Node::Block(_, None) => write!(f, "block: None"),
         }
     }
 }
@@ -60,7 +54,7 @@ impl Node {
     pub fn structural(project: &Project, env: &Environment, prop: Proposition) -> Node {
         let _ = project;
         let prop = env.bindings.canonicalize_proposition(prop);
-        Node::Structural(Fact::Proposition(Arc::new(prop)), None)
+        Node::Structural(Fact::Proposition(Arc::new(prop)))
     }
 
     pub fn claim(project: &Project, env: &Environment, prop: Proposition) -> Result<Node, String> {
@@ -69,13 +63,13 @@ impl Node {
         let prop = Arc::new(prop);
         let goal = Goal::interior(env, prop.clone(), None)?;
         let fact = Fact::Proposition(prop);
-        Ok(Node::Claim(goal, fact, None, None))
+        Ok(Node::Claim(goal, fact))
     }
 
     /// This does not expand theorems. I can imagine this coming up, but it would be weird.
     pub fn definition(constant: PotentialValue, definition: AcornValue, source: Source) -> Node {
         let fact = Fact::Definition(constant, definition, source);
-        Node::Structural(fact, None)
+        Node::Structural(fact)
     }
 
     /// The optional proposition is the claim that we can use externally once the block is proven.
@@ -91,13 +85,13 @@ impl Node {
             let prop = env.bindings.canonicalize_proposition(prop);
             Fact::Proposition(Arc::new(prop))
         });
-        Node::Block(block, fact, None)
+        Node::Block(block, fact)
     }
 
     pub fn instance(block: Option<Block>, fact: Fact) -> Node {
         match block {
-            Some(b) => Node::Block(b, Some(fact), None),
-            None => Node::Structural(fact, None),
+            Some(b) => Node::Block(b, Some(fact)),
+            None => Node::Structural(fact),
         }
     }
 
@@ -105,9 +99,9 @@ impl Node {
     /// Block nodes no longer have goals directly - their goals are child nodes.
     pub fn has_goal(&self) -> bool {
         match self {
-            Node::Structural(_, _) => false,
-            Node::Claim(_, _, _, _) => true,
-            Node::Block(_, _, _) => false,
+            Node::Structural(_) => false,
+            Node::Claim(_, _) => true,
+            Node::Block(_, _) => false,
         }
     }
 
@@ -127,23 +121,23 @@ impl Node {
 
     pub fn first_line(&self) -> u32 {
         match self {
-            Node::Structural(f, _) => f.source().range.start.line,
-            Node::Claim(g, _, _, _) => g.proposition.source.range.start.line,
-            Node::Block(block, _, _) => block.env.first_line,
+            Node::Structural(f) => f.source().range.start.line,
+            Node::Claim(g, _) => g.proposition.source.range.start.line,
+            Node::Block(block, _) => block.env.first_line,
         }
     }
 
     pub fn last_line(&self) -> u32 {
         match self {
-            Node::Structural(f, _) => f.source().range.end.line,
-            Node::Claim(g, _, _, _) => g.proposition.source.range.end.line,
-            Node::Block(block, _, _) => block.env.last_line(),
+            Node::Structural(f) => f.source().range.end.line,
+            Node::Claim(g, _) => g.proposition.source.range.end.line,
+            Node::Block(block, _) => block.env.last_line(),
         }
     }
 
     pub fn get_block(&self) -> Option<&Block> {
         match self {
-            Node::Block(block, _, _) => Some(block),
+            Node::Block(block, _) => Some(block),
             _ => None,
         }
     }
@@ -151,19 +145,19 @@ impl Node {
     /// The source of this node, if there is one.
     pub fn source(&self) -> Option<&Source> {
         match self {
-            Node::Structural(f, _) => Some(f.source()),
-            Node::Claim(g, _, _, _) => Some(&g.proposition.source),
-            Node::Block(_, Some(f), _) => Some(f.source()),
-            Node::Block(_, None, _) => None,
+            Node::Structural(f) => Some(f.source()),
+            Node::Claim(g, _) => Some(&g.proposition.source),
+            Node::Block(_, Some(f)) => Some(f.source()),
+            Node::Block(_, None) => None,
         }
     }
 
     /// The proposition at this node, if there is one.
     pub fn proposition(&self) -> Option<&Proposition> {
         match self {
-            Node::Structural(Fact::Proposition(p), _) => Some(p.as_ref()),
-            Node::Claim(g, _, _, _) => Some(g.proposition.as_ref()),
-            Node::Block(_, Some(Fact::Proposition(p)), _) => Some(p.as_ref()),
+            Node::Structural(Fact::Proposition(p)) => Some(p.as_ref()),
+            Node::Claim(g, _) => Some(g.proposition.as_ref()),
+            Node::Block(_, Some(Fact::Proposition(p))) => Some(p.as_ref()),
             _ => None,
         }
     }
@@ -176,19 +170,9 @@ impl Node {
     /// Returns the fact at this node, if there is one.
     pub fn get_fact(&self) -> Option<Fact> {
         match self {
-            Node::Structural(f, _) => Some(f.clone()),
-            Node::Claim(_, f, _, _) => Some(f.clone()),
-            Node::Block(_, Some(f), _) => Some(f.clone()),
-            _ => None,
-        }
-    }
-
-    /// Returns the pre-lowered fact at this node, if there is one.
-    pub fn lowered_fact(&self) -> Option<&LoweredFact> {
-        match self {
-            Node::Structural(_, Some(nf)) => Some(nf),
-            Node::Claim(_, _, _, Some(nf)) => Some(nf),
-            Node::Block(_, _, Some(nf)) => Some(nf),
+            Node::Structural(f) => Some(f.clone()),
+            Node::Claim(_, f) => Some(f.clone()),
+            Node::Block(_, Some(f)) => Some(f.clone()),
             _ => None,
         }
     }
@@ -238,7 +222,7 @@ impl fmt::Debug for NodeCursor<'_> {
         if node.has_goal() {
             write!(f, ", has_goal: true")?;
             match node {
-                Node::Claim(goal, _, _, _) => write!(f, ", claim: {}", goal)?,
+                Node::Claim(goal, _) => write!(f, ", claim: {}", goal)?,
                 _ => {}
             }
         }
@@ -347,50 +331,6 @@ impl<'a> NodeCursor<'a> {
         facts
     }
 
-    /// Pre-lowered facts from this module that are visible at the current node.
-    /// This does not include imported facts.
-    pub fn visible_lowered_facts(&self) -> Result<Vec<&LoweredFact>, String> {
-        let mut facts = vec![];
-        let (env, i) = &self.annotated_path[0];
-        for node in &env.nodes[0..*i] {
-            if node.get_fact().is_some() {
-                match node.lowered_fact() {
-                    Some(nf) => facts.push(nf),
-                    None => {
-                        return Err(format!("missing lowered fact for node {}", node));
-                    }
-                }
-            }
-        }
-
-        for (env, i) in self.annotated_path.iter().skip(1) {
-            for node in &env.nodes[0..*i] {
-                if node.get_fact().is_some() {
-                    match node.lowered_fact() {
-                        Some(nf) => facts.push(nf),
-                        None => {
-                            return Err(format!("missing lowered fact for node {}", node));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(block) = &self.node().get_block() {
-            for node in &block.env.nodes {
-                if node.get_fact().is_some() {
-                    match node.lowered_fact() {
-                        Some(nf) => facts.push(nf),
-                        None => {
-                            return Err(format!("missing lowered fact for node {}", node));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(facts)
-    }
-
     /// Get all facts that are inside the block of this cursor.
     /// This does not include imported facts, and it does not include facts that
     /// are top-level in the module.
@@ -419,16 +359,7 @@ impl<'a> NodeCursor<'a> {
     /// Block nodes don't have goals directly - their goals are child nodes.
     pub fn goal(&self) -> Option<&'a Goal> {
         match self.node() {
-            Node::Claim(goal, _, _, _) => Some(goal),
-            _ => None,
-        }
-    }
-
-    /// Get the pre-lowered goal for the current node, if available.
-    /// Returns None for Structural and Block nodes, or if the goal hasn't been pre-lowered.
-    pub fn lowered_goal(&self) -> Option<&'a LoweredGoal> {
-        match self.node() {
-            Node::Claim(_, _, Some(normalized), _) => Some(normalized),
+            Node::Claim(goal, _) => Some(goal),
             _ => None,
         }
     }
@@ -436,7 +367,7 @@ impl<'a> NodeCursor<'a> {
     /// Gets the environment for the goal at the current node.
     pub fn goal_env(&self) -> Result<&Environment, String> {
         let node = self.node();
-        if let Node::Structural(_, _) = node {
+        if let Node::Structural(_) = node {
             return Err(format!(
                 "node {} does not need a proof, so it has no goal environment",
                 self

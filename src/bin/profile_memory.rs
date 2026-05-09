@@ -2,6 +2,7 @@ use acorn::elaborator::acorn_value::AcornValue;
 use acorn::elaborator::binding_map::{BindingMap, BindingMapProfileCounts};
 use acorn::elaborator::environment::Environment;
 use acorn::elaborator::fact::Fact;
+use acorn::elaborator::lowered_module::LoweredModule;
 use acorn::elaborator::lowering::{LoweredFact, LoweredGoal};
 use acorn::elaborator::node::Node;
 use acorn::elaborator::source::Source;
@@ -14,6 +15,7 @@ use acorn::kernel::symbol_table::SymbolTableProfileCounts;
 use acorn::kernel::term::Term;
 use acorn::kernel::type_store::TypeStoreProfileCounts;
 use acorn::kernel::variable_map::VariableMap;
+use acorn::module::LoadedModule;
 use acorn::project::{Project, ProjectConfig, UsageMode};
 use mimalloc::MiMalloc;
 use std::hint::black_box;
@@ -30,7 +32,7 @@ unsafe extern "C" {
 
 #[derive(Clone, Copy, Debug)]
 enum ClearBucket {
-    NodeAndModuleLowered,
+    LoweredModule,
     KernelContexts,
     BindingSnapshots,
     CurrentBindings,
@@ -42,8 +44,8 @@ enum ClearBucket {
 impl ClearBucket {
     fn label(self) -> &'static str {
         match self {
-            ClearBucket::NodeAndModuleLowered => "clear node/module lowered facts",
-            ClearBucket::KernelContexts => "clear env kernel contexts",
+            ClearBucket::LoweredModule => "clear lowered module",
+            ClearBucket::KernelContexts => "clear module kernel contexts",
             ClearBucket::BindingSnapshots => "clear binding snapshots",
             ClearBucket::CurrentBindings => "clear current bindings",
             ClearBucket::TokenAndLineMaps => "clear token/line maps",
@@ -266,7 +268,7 @@ fn collect_project_stats(project: &Project) -> (ProfileStats, Vec<ModuleProfile>
     let mut total = ProfileStats::default();
     let mut modules = Vec::new();
     for (descriptor, module_id) in project.iter_modules() {
-        let Some(env) = project.get_env_by_id(module_id) else {
+        let Some(loaded) = project.get_loaded_module_by_id(module_id) else {
             continue;
         };
         let mut module = ModuleProfile {
@@ -274,11 +276,42 @@ fn collect_project_stats(project: &Project) -> (ProfileStats, Vec<ModuleProfile>
             stats: ProfileStats::default(),
         };
         module.stats.modules = 1;
-        add_env_stats(env, &mut module.stats);
+        add_loaded_module_stats(loaded, &mut module.stats);
         total.add_assign(&module.stats);
         modules.push(module);
     }
     (total, modules)
+}
+
+fn add_loaded_module_stats(loaded: &LoadedModule, stats: &mut ProfileStats) {
+    add_lowered_module_stats(&loaded.lowered, stats);
+    if let Some(env) = loaded.env() {
+        add_env_stats(env, stats);
+    } else {
+        stats
+            .current_binding_counts
+            .add_counts(loaded.bindings.profile_counts());
+    }
+}
+
+fn add_lowered_module_stats(lowered: &LoweredModule, stats: &mut ProfileStats) {
+    stats
+        .env_kernel_contexts
+        .add_context(&lowered.final_kernel_context);
+    for fact in lowered.facts() {
+        add_lowered_fact(
+            fact,
+            &mut stats.lowered_module_facts,
+            &mut stats.lowered_kernel_contexts,
+        );
+    }
+    for (_, goal) in lowered.goals() {
+        add_lowered_goal(
+            &goal.lowered_goal,
+            &mut stats.lowered_goals,
+            &mut stats.lowered_kernel_contexts,
+        );
+    }
 }
 
 fn add_env_stats(env: &Environment, stats: &mut ProfileStats) {
@@ -295,55 +328,16 @@ fn add_env_stats(env: &Environment, stats: &mut ProfileStats) {
             .snapshot_binding_counts
             .add_counts(bindings.profile_counts());
     }
-    if let Some(context) = &env.kernel_context {
-        stats.env_kernel_contexts.add_context(context);
-    }
-    for lowered in &env.lowered_module_facts {
-        add_lowered_fact(
-            lowered,
-            &mut stats.lowered_module_facts,
-            &mut stats.lowered_kernel_contexts,
-        );
-    }
-
     for node in &env.nodes {
         match node {
-            Node::Structural(_, lowered) => {
+            Node::Structural(_) => {
                 stats.structural_nodes += 1;
-                if let Some(lowered) = lowered {
-                    add_lowered_fact(
-                        lowered,
-                        &mut stats.node_lowered_facts,
-                        &mut stats.lowered_kernel_contexts,
-                    );
-                }
             }
-            Node::Claim(_, _, lowered_goal, lowered_fact) => {
+            Node::Claim(_, _) => {
                 stats.claim_nodes += 1;
-                if let Some(lowered) = lowered_goal {
-                    add_lowered_goal(
-                        lowered,
-                        &mut stats.lowered_goals,
-                        &mut stats.lowered_kernel_contexts,
-                    );
-                }
-                if let Some(lowered) = lowered_fact {
-                    add_lowered_fact(
-                        lowered,
-                        &mut stats.node_lowered_facts,
-                        &mut stats.lowered_kernel_contexts,
-                    );
-                }
             }
-            Node::Block(block, _, lowered) => {
+            Node::Block(block, _) => {
                 stats.block_nodes += 1;
-                if let Some(lowered) = lowered {
-                    add_lowered_fact(
-                        lowered,
-                        &mut stats.node_lowered_facts,
-                        &mut stats.lowered_kernel_contexts,
-                    );
-                }
                 add_env_stats(&block.env, stats);
             }
         }
@@ -681,7 +675,7 @@ fn print_stats(stats: &ProfileStats) {
     print_proof_bucket("module lowered facts", &stats.lowered_module_facts);
     print_proof_bucket("node lowered facts", &stats.node_lowered_facts);
     print_proof_bucket("lowered goals", &stats.lowered_goals);
-    print_context_bucket("env kernel contexts", &stats.env_kernel_contexts);
+    print_context_bucket("module kernel contexts", &stats.env_kernel_contexts);
     print_context_bucket("lowered kernel contexts", &stats.lowered_kernel_contexts);
 }
 
@@ -749,7 +743,7 @@ fn print_clear_sequence(project: &mut Project) {
     let mut previous = read_status_memory().rss_kb;
     println!("  {:>34}: {}", "before clears", format_kb(previous));
     for bucket in [
-        ClearBucket::NodeAndModuleLowered,
+        ClearBucket::LoweredModule,
         ClearBucket::KernelContexts,
         ClearBucket::BindingSnapshots,
         ClearBucket::CurrentBindings,
@@ -757,7 +751,14 @@ fn print_clear_sequence(project: &mut Project) {
         ClearBucket::NodePayloads,
         ClearBucket::Nodes,
     ] {
-        project.profile_visit_envs_mut(|_, env| clear_env_bucket(env, bucket));
+        match bucket {
+            ClearBucket::LoweredModule | ClearBucket::KernelContexts => {
+                project.profile_visit_loaded_modules_mut(|_, module| {
+                    clear_loaded_bucket(module, bucket)
+                });
+            }
+            _ => project.profile_visit_envs_mut(|_, env| clear_env_bucket(env, bucket)),
+        }
         force_mimalloc_collect();
         let current = read_status_memory().rss_kb;
         let delta = previous as isize - current as isize;
@@ -773,13 +774,7 @@ fn print_clear_sequence(project: &mut Project) {
 
 fn clear_env_bucket(env: &mut Environment, bucket: ClearBucket) {
     match bucket {
-        ClearBucket::NodeAndModuleLowered => {
-            env.lowered_module_facts.clear();
-            env.lowered_module_facts.shrink_to_fit();
-        }
-        ClearBucket::KernelContexts => {
-            env.kernel_context = None;
-        }
+        ClearBucket::LoweredModule | ClearBucket::KernelContexts => {}
         ClearBucket::BindingSnapshots => {
             env.binding_states.clear();
             env.binding_states.shrink_to_fit();
@@ -812,38 +807,41 @@ fn clear_env_bucket(env: &mut Environment, bucket: ClearBucket) {
     for node in &mut env.nodes {
         if let Some(dummy) = &dummy {
             match node {
-                Node::Block(block, fact, lowered) => {
+                Node::Block(block, fact) => {
                     block.args.clear();
                     block.args.shrink_to_fit();
                     block.source_range = None;
                     *fact = None;
-                    *lowered = None;
                     clear_env_bucket(&mut block.env, bucket);
                 }
                 _ => {
-                    *node = Node::Structural(dummy.clone(), None);
+                    *node = Node::Structural(dummy.clone());
                 }
             }
             continue;
         }
 
         match node {
-            Node::Structural(_, lowered) => {
-                if matches!(bucket, ClearBucket::NodeAndModuleLowered) {
-                    *lowered = None;
-                }
-            }
-            Node::Claim(_, _, lowered_goal, lowered_fact) => {
-                if matches!(bucket, ClearBucket::NodeAndModuleLowered) {
-                    *lowered_goal = None;
-                    *lowered_fact = None;
-                }
-            }
-            Node::Block(block, _, lowered) => {
-                if matches!(bucket, ClearBucket::NodeAndModuleLowered) {
-                    *lowered = None;
-                }
+            Node::Structural(_) | Node::Claim(_, _) => {}
+            Node::Block(block, _) => {
                 clear_env_bucket(&mut block.env, bucket);
+            }
+        }
+    }
+}
+
+fn clear_loaded_bucket(module: &mut LoadedModule, bucket: ClearBucket) {
+    match bucket {
+        ClearBucket::LoweredModule => module.lowered.profile_clear_lowered(),
+        ClearBucket::KernelContexts => {
+            module.lowered.final_kernel_context = KernelContext::new();
+            if let Some(env) = module.env_mut() {
+                clear_env_bucket(env, bucket);
+            }
+        }
+        _ => {
+            if let Some(env) = module.env_mut() {
+                clear_env_bucket(env, bucket);
             }
         }
     }

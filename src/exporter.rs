@@ -706,7 +706,7 @@ fn export_node(
     theorems: &mut Vec<ExportedTheorem>,
 ) {
     match node {
-        Node::Structural(fact, _) => {
+        Node::Structural(fact) => {
             export_fact(
                 project,
                 env,
@@ -720,7 +720,7 @@ fn export_node(
                 theorems,
             );
         }
-        Node::Claim(goal, _fact, _, _) => {
+        Node::Claim(goal, _fact) => {
             // Claims inside blocks are internal goals with incomplete statements
             // (e.g., missing implies premises). Only create a theorem entry if
             // one doesn't already exist (the Block handler processes the complete
@@ -764,7 +764,7 @@ fn export_node(
                 source_block: None,
             });
         }
-        Node::Block(block, external_fact, _) => {
+        Node::Block(block, external_fact) => {
             // Process external_fact FIRST — it has the complete theorem
             // (including ForAll params and implies premises).
             let mut handled_as_theorem = false;
@@ -1099,15 +1099,15 @@ fn collect_proof_dependencies(
 fn collect_local_definitions(nodes: &[Node], names: &mut BTreeSet<String>) {
     for node in nodes {
         match node {
-            Node::Structural(fact, _) => {
+            Node::Structural(fact) => {
                 if let Fact::Definition(_, _, source) = fact {
                     if let SourceType::ConstantDefinition(_, name) = &source.source_type {
                         names.insert(name.clone());
                     }
                 }
             }
-            Node::Claim(_, _, _, _) => {}
-            Node::Block(block, _, _) => {
+            Node::Claim(_, _) => {}
+            Node::Block(block, _) => {
                 // Sub-block args (forall x, if condition, let d1, etc.)
                 for (arg_name, _) in &block.args {
                     names.insert(arg_name.clone());
@@ -1122,15 +1122,15 @@ fn collect_local_definitions(nodes: &[Node], names: &mut BTreeSet<String>) {
 /// Recursively collect all constant names from a node's values.
 fn collect_node_constants(node: &Node, deps: &mut BTreeSet<ConstantName>) {
     match node {
-        Node::Structural(fact, _) => {
+        Node::Structural(fact) => {
             if let Some(value) = fact_value(fact) {
                 collect_deps_recursive(value, deps);
             }
         }
-        Node::Claim(goal, _fact, _, _) => {
+        Node::Claim(goal, _fact) => {
             collect_deps_recursive(&goal.proposition.value, deps);
         }
-        Node::Block(block, external_fact, _) => {
+        Node::Block(block, external_fact) => {
             if let Some(fact) = external_fact {
                 if let Some(value) = fact_value(fact) {
                     collect_deps_recursive(value, deps);
@@ -1172,7 +1172,7 @@ fn collect_elaborated_from_node(
     lines: &mut Vec<String>,
 ) {
     match node {
-        Node::Structural(fact, _) => {
+        Node::Structural(fact) => {
             if let Fact::Proposition(prop) = fact {
                 let mut codegen = CodeGenerator::new(bindings).with_explicit_numerals();
                 if let Ok(code) = codegen.value_to_code(&prop.value) {
@@ -1180,13 +1180,13 @@ fn collect_elaborated_from_node(
                 }
             }
         }
-        Node::Claim(goal, _, _, _) => {
+        Node::Claim(goal, _) => {
             let mut codegen = CodeGenerator::new(bindings).with_explicit_numerals();
             if let Ok(code) = codegen.value_to_code(&goal.proposition.value) {
                 lines.push(code);
             }
         }
-        Node::Block(block, _, _) => {
+        Node::Block(block, _) => {
             // Recurse into sub-blocks
             for sub_node in &block.env.nodes {
                 collect_elaborated_from_node(sub_node, bindings, lines);
@@ -1333,15 +1333,15 @@ fn collect_node_identifiers(
     seen: &mut BTreeMap<String, IdentifierInfo>,
 ) {
     match node {
-        Node::Structural(fact, _) => {
+        Node::Structural(fact) => {
             if let Fact::Proposition(prop) = fact {
                 collect_identifiers_recursive(&prop.value, bindings, &[], 0, seen);
             }
         }
-        Node::Claim(goal, _, _, _) => {
+        Node::Claim(goal, _) => {
             collect_identifiers_recursive(&goal.proposition.value, bindings, &[], 0, seen);
         }
-        Node::Block(block, _, _) => {
+        Node::Block(block, _) => {
             for sub_node in &block.env.nodes {
                 collect_node_identifiers(sub_node, bindings, seen);
             }

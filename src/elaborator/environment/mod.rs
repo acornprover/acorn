@@ -13,7 +13,7 @@ use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::lowered_module::{LoweredItem, LoweredModule, LoweringResult};
-use crate::elaborator::lowering::{lower_fact, lower_goal, LoweredFact};
+use crate::elaborator::lowering::{lower_fact, lower_goal};
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::proposition::Proposition;
@@ -95,12 +95,6 @@ pub struct Environment {
     /// The line number of the last statement we processed (for detecting blank lines).
     pub last_statement_line: Option<u32>,
 
-    /// Stores the kernel context state after processing all facts.
-    pub kernel_context: Option<KernelContext>,
-
-    /// Stores lowered facts from this module's nodes.
-    pub lowered_module_facts: Vec<LoweredFact>,
-
     /// Statements in this environment that are direct citations of existing theorems.
     citation_statements: Vec<CitationStatement>,
 }
@@ -122,8 +116,6 @@ impl Environment {
             module_doc_comments: Vec::new(),
             at_module_beginning: true,
             last_statement_line: None,
-            kernel_context: None,
-            lowered_module_facts: Vec::new(),
             citation_statements: Vec::new(),
         }
     }
@@ -145,8 +137,6 @@ impl Environment {
             module_doc_comments: Vec::new(), // Child environments don't inherit module doc comments
             at_module_beginning: false,      // Child environments are never at module beginning
             last_statement_line: None,
-            kernel_context: None,
-            lowered_module_facts: Vec::new(),
             citation_statements: Vec::new(),
         }
     }
@@ -345,7 +335,7 @@ impl Environment {
         self.module_doc_comments.shrink_to_fit();
 
         for node in &mut self.nodes {
-            if let Node::Block(block, _, _) = node {
+            if let Node::Block(block, _) = node {
                 block.env.discard_ide_metadata();
             }
         }
@@ -798,7 +788,7 @@ impl Environment {
         }
     }
 
-    /// Populates lowered fields by processing all facts during the lowering pass.
+    /// Produces the lowered representation by processing all facts during the lowering pass.
     /// This should be called after elaboration is complete.
     ///
     /// For dependencies that have already been lowered, we merge their
@@ -806,18 +796,8 @@ impl Environment {
     /// lowering work.
     ///
     /// Returns the lowered module and the first lowering error, if any.
-    /// Even on error, the kernel context states are set to what was achieved before the error.
+    /// Even on error, the final kernel context is set to what was achieved before the error.
     pub fn run_lowering_pass(&mut self, project: &Project) -> LoweringResult {
-        if !self.lowered_module_facts.is_empty() {
-            return LoweringResult {
-                module: LoweredModule::new(self.module_id, self.binding_states[0].clone()),
-                error: Some(
-                    "lowering pass called after lowered_module_facts was already populated"
-                        .to_string(),
-                ),
-            };
-        }
-
         let mut kernel_context = KernelContext::new();
         let mut first_error: Option<String> = None;
         let mut imported_modules = HashSet::new();
@@ -862,22 +842,6 @@ impl Environment {
         );
         lowered_module.items = items;
 
-        // Collect lowered top-level facts for use as module facts in dependents.
-        // Facts should be lowered exactly once during lower_nodes_pass.
-        for node in &self.nodes {
-            if node.get_fact().is_some() {
-                match node.lowered_fact() {
-                    Some(normalized) => self.lowered_module_facts.push(normalized.clone()),
-                    None => {
-                        if first_error.is_none() {
-                            first_error = Some("missing lowered fact".to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        self.kernel_context = Some(lowered_module.final_kernel_context.clone());
         LoweringResult {
             module: lowered_module,
             error: first_error,
@@ -922,11 +886,11 @@ impl Environment {
                 &mut current_kernel_context,
             );
             match node {
-                Node::Structural(fact, normalized_fact_slot) => {
+                Node::Structural(fact) => {
                     // Lower the fact and store it
                     match lower_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
-                            let fact_id = lowered_module.add_fact(normalized.clone());
+                            let fact_id = lowered_module.add_fact(normalized);
                             if top_level {
                                 lowered_module.module_fact_ids.push(fact_id);
                                 if let Fact::Proposition(prop) = fact {
@@ -945,7 +909,6 @@ impl Environment {
                                 first_line: fact.source().range.start.line,
                                 last_line: fact.source().range.end.line,
                             });
-                            *normalized_fact_slot = Some(normalized);
                         }
                         Err(e) => {
                             if first_error.is_none() {
@@ -954,7 +917,7 @@ impl Environment {
                         }
                     }
                 }
-                Node::Claim(goal, fact, normalized_goal_slot, normalized_fact_slot) => {
+                Node::Claim(goal, fact) => {
                     // Runtime order: verify_goal (which calls set_goal) runs BEFORE add_fact.
                     // So we lower the goal FIRST, then add the fact for subsequent nodes.
 
@@ -964,20 +927,20 @@ impl Environment {
                     let mut goal_kernel_context = current_kernel_context.clone();
                     match lower_goal(&mut goal_kernel_context, goal) {
                         Ok(normalized) => {
-                            let goal_id = lowered_module
-                                .add_goal(normalized.clone(), binding_states[index].clone());
-                            *normalized_goal_slot = Some(normalized);
+                            let goal_id =
+                                lowered_module.add_goal(normalized, binding_states[index].clone());
                             match lower_fact(&mut current_kernel_context, fact) {
                                 Ok(normalized_fact) => {
-                                    let fact_id = lowered_module.add_fact(normalized_fact.clone());
+                                    let fact_id = lowered_module.add_fact(normalized_fact);
                                     if top_level {
                                         lowered_module.module_fact_ids.push(fact_id);
                                     }
                                     items.push(LoweredItem::Claim {
                                         goal: goal_id,
                                         post_fact: fact_id,
+                                        first_line: fact.source().range.start.line,
+                                        last_line: fact.source().range.end.line,
                                     });
-                                    *normalized_fact_slot = Some(normalized_fact);
                                 }
                                 Err(e) => {
                                     if first_error.is_none() {
@@ -993,9 +956,7 @@ impl Environment {
                             // Try to lower the post-fact anyway so later nodes see the same
                             // partial state the old pass produced after a lowering error.
                             match lower_fact(&mut current_kernel_context, fact) {
-                                Ok(normalized_fact) => {
-                                    *normalized_fact_slot = Some(normalized_fact);
-                                }
+                                Ok(_) => {}
                                 Err(e) => {
                                     if first_error.is_none() {
                                         *first_error = Some(e.message);
@@ -1005,7 +966,7 @@ impl Environment {
                         }
                     }
                 }
-                Node::Block(block, external_fact, normalized_fact_slot) => {
+                Node::Block(block, external_fact) => {
                     // Recurse into the block's nodes with current kernel_context state.
                     // This mirrors how verify_node clones the processor when entering a block.
                     let block_items = Self::lower_nodes_pass(
@@ -1023,12 +984,11 @@ impl Environment {
                     if let Some(fact) = external_fact {
                         match lower_fact(&mut current_kernel_context, fact) {
                             Ok(normalized) => {
-                                let fact_id = lowered_module.add_fact(normalized.clone());
+                                let fact_id = lowered_module.add_fact(normalized);
                                 if top_level {
                                     lowered_module.module_fact_ids.push(fact_id);
                                 }
                                 external_fact_id = Some(fact_id);
-                                *normalized_fact_slot = Some(normalized);
                             }
                             Err(e) => {
                                 if first_error.is_none() {

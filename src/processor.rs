@@ -6,8 +6,8 @@ use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
 use crate::code_generator::Error;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::lowered_module::{LoweredGoalId, LoweredModule};
 use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
-use crate::elaborator::node::NodeCursor;
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
@@ -141,11 +141,15 @@ impl Processor {
         Ok(())
     }
 
-    /// Adds all module-local facts that are usable at the given cursor position.
-    pub fn add_module_facts(&mut self, cursor: &NodeCursor) -> Result<(), BuildError> {
-        let facts = cursor
-            .visible_lowered_facts()
-            .map_err(|message| BuildError::new(Default::default(), message))?;
+    /// Adds all module-local facts that are usable at the given lowered goal.
+    pub fn add_visible_module_facts(
+        &mut self,
+        lowered: &LoweredModule,
+        goal: LoweredGoalId,
+    ) -> Result<(), BuildError> {
+        let facts = lowered.visible_facts_for_goal(goal).ok_or_else(|| {
+            BuildError::new(Default::default(), "lowered goal not found".to_string())
+        })?;
         for normalized in facts {
             self.add_lowered_fact(normalized)?;
         }
@@ -412,15 +416,21 @@ impl Processor {
         };
 
         let cursor = env.get_node_by_goal_name("goal");
-        let mut processor = Processor::with_imports(None, cursor.bindings(), &p).unwrap();
-        processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-        processor.set_lowered_goal(normalized_goal);
+        let goal = cursor.goal().expect("missing goal");
+        let lowered = p
+            .get_lowered_module(goal.module_id)
+            .expect("missing lowered module");
+        let (goal_id, entry) = p.lowered_goal_for_goal(goal).expect("missing lowered goal");
+        let mut processor = Processor::with_imports(None, &entry.bindings, &p).unwrap();
+        processor
+            .add_visible_module_facts(lowered, goal_id)
+            .unwrap();
+        processor.set_lowered_goal(&entry.lowered_goal);
 
         (
             processor,
-            cursor.bindings().clone(),
-            normalized_goal.clone(),
+            entry.bindings.clone(),
+            entry.lowered_goal.clone(),
         )
     }
 
@@ -469,29 +479,37 @@ mod tests {
         };
 
         let cursor = env.get_node_by_goal_name("goal");
-        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
+        let goal = cursor.goal().expect("missing goal");
+        let lowered = project
+            .get_lowered_module(goal.module_id)
+            .expect("missing lowered module");
+        let (goal_id, entry) = project
+            .lowered_goal_for_goal(goal)
+            .expect("missing lowered goal");
+        let normalized_goal = &entry.lowered_goal;
+        let bindings = &entry.bindings;
         let goal_kernel_context = &normalized_goal.kernel_context;
 
-        let mut proving = Processor::with_imports(None, cursor.bindings(), &project)
+        let mut proving = Processor::with_imports(None, bindings, &project)
             .expect("proving processor creation failed");
-        proving.add_module_facts(&cursor).unwrap();
+        proving.add_visible_module_facts(lowered, goal_id).unwrap();
         proving.set_lowered_goal(normalized_goal);
         let outcome = proving.search(ProverMode::Test, goal_kernel_context);
         assert_eq!(outcome, Outcome::Success);
         let cert = proving
-            .make_cert(cursor.bindings(), goal_kernel_context, false)
+            .make_cert(bindings, goal_kernel_context, false)
             .expect("certificate generation failed");
 
-        let mut checking = Processor::with_imports_for_checking(None, cursor.bindings(), &project)
+        let mut checking = Processor::with_imports_for_checking(None, bindings, &project)
             .expect("checking processor creation failed");
-        checking.add_module_facts(&cursor).unwrap();
+        checking.add_visible_module_facts(lowered, goal_id).unwrap();
         checking
             .check_cert(
                 &cert,
                 Some(normalized_goal),
                 goal_kernel_context,
                 &project,
-                cursor.bindings(),
+                bindings,
             )
             .expect("certificate verification failed");
     }

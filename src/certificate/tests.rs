@@ -76,16 +76,15 @@ fn setup_claim_codec_env(code: &str) -> (Project, BindingMap, KernelContext) {
         .load_module_by_name("main")
         .expect("module should load");
     let (bindings, kernel_context) = {
-        let env = match project.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
+        let module = match project.get_module_by_id(module_id) {
+            LoadState::Ok(module) => module,
             LoadState::Error(e) => panic!("module loading error: {}", e),
             _ => panic!("unexpected module load state"),
         };
-        let kernel_context = env
-            .kernel_context
-            .clone()
-            .expect("environment should have a kernel context");
-        (env.bindings.clone(), kernel_context)
+        (
+            module.bindings.clone(),
+            module.lowered.final_kernel_context.clone(),
+        )
     };
 
     (project, bindings, kernel_context)
@@ -108,12 +107,13 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
             .path_for_line(line - 1)
             .expect("selected line should resolve to a node path");
         let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
-        let normalized_goal = cursor
-            .lowered_goal()
+        let goal = cursor.goal().expect("selected line should have a goal");
+        let (_, entry) = project
+            .lowered_goal_for_goal(goal)
             .expect("selected line should have a lowered goal");
         (
-            cursor.bindings().clone(),
-            normalized_goal.kernel_context.clone(),
+            entry.bindings.clone(),
+            entry.lowered_goal.kernel_context.clone(),
         )
     };
 
@@ -1271,18 +1271,18 @@ fn test_parsed_claim_matches_definition_clause() {
         _ => panic!("unexpected module load state"),
     };
     let cursor = env.get_node_by_goal_name("goal");
-    let normalized_facts = cursor
-        .visible_lowered_facts()
+    let goal = cursor.goal().expect("expected goal");
+    let lowered = project
+        .get_lowered_module(goal.module_id)
+        .expect("lowered module should be available");
+    let (goal_id, entry) = project
+        .lowered_goal_for_goal(goal)
+        .expect("lowered goal should be available");
+    let normalized_facts = lowered
+        .visible_facts_for_goal(goal_id)
         .expect("lowered facts should be available");
-    let bindings = cursor
-        .goal_env()
-        .expect("goal env should be available")
-        .bindings
-        .clone();
-    let kernel_context = env
-        .kernel_context
-        .clone()
-        .expect("environment should have a kernel context");
+    let bindings = entry.bindings.clone();
+    let kernel_context = lowered.final_kernel_context.clone();
 
     let mut checker = Checker::new();
     for normalized in normalized_facts {

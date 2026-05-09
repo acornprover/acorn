@@ -1,4 +1,7 @@
 use crate::certificate::Certificate;
+use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::lowering::LoweredGoal;
+use crate::elaborator::node::NodeCursor;
 use crate::module::LoadState;
 use crate::processor::Processor;
 use crate::project::Project;
@@ -36,6 +39,28 @@ fn init_test_tracing() {
     });
 }
 
+pub fn processor_for_cursor<'a>(
+    project: &'a Project,
+    cursor: &NodeCursor<'_>,
+) -> Result<(Processor, &'a BindingMap, &'a LoweredGoal), String> {
+    let goal = cursor
+        .goal()
+        .ok_or_else(|| "cursor does not point at a goal".to_string())?;
+    let lowered = project
+        .get_lowered_module(goal.module_id)
+        .ok_or_else(|| format!("missing lowered module {}", goal.module_id))?;
+    let (goal_id, entry) = project
+        .lowered_goal_for_goal(goal)
+        .ok_or_else(|| format!("missing lowered goal for {}", goal.name))?;
+    let mut processor =
+        Processor::with_imports(None, &entry.bindings, project).map_err(|err| err.message)?;
+    processor
+        .add_visible_module_facts(lowered, goal_id)
+        .map_err(|err| err.message)?;
+    processor.set_lowered_goal(&entry.lowered_goal);
+    Ok((processor, &entry.bindings, &entry.lowered_goal))
+}
+
 /// Expects the proof to succeed, and a valid concrete proof to be generated.
 pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certificate {
     init_test_tracing();
@@ -49,10 +74,8 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
         _ => panic!("no module"),
     };
     let node = base_env.get_node_by_goal_name(goal_name);
-    let normalized_goal = node.lowered_goal().expect("missing lowered goal");
-    let mut processor = Processor::with_imports(None, node.bindings(), project).unwrap();
-    processor.add_module_facts(&node).unwrap();
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_cursor(project, &node).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
 
@@ -60,14 +83,13 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
 
     let cert = match processor
         .prover()
-        .make_cert(node.bindings(), goal_kernel_context, true)
+        .make_cert(bindings, goal_kernel_context, true)
     {
         Ok(cert) => cert,
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, node.bindings())
-    {
+    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, bindings) {
         panic!("check_cert failed: {}", e);
     }
     cert
@@ -89,18 +111,11 @@ pub fn prove_text(text: &str, goal_name: &str) -> Outcome {
     for cursor in env.iter_goals() {
         let goal = cursor.goal().unwrap();
         if goal.name == goal_name {
-            let mut processor = match Processor::with_imports(None, cursor.bindings(), &project) {
-                Ok(p) => p,
-                Err(_) => return Outcome::Inconsistent,
-            };
-            if processor.add_module_facts(&cursor).is_err() {
-                return Outcome::Inconsistent;
-            }
-            let normalized_goal = match cursor.lowered_goal() {
-                Some(n) => n,
-                None => return Outcome::Inconsistent,
-            };
-            processor.set_lowered_goal(normalized_goal);
+            let (mut processor, _bindings, normalized_goal) =
+                match processor_for_cursor(&project, &cursor) {
+                    Ok(result) => result,
+                    Err(_) => return Outcome::Inconsistent,
+                };
             let goal_kernel_context = &normalized_goal.kernel_context;
             return processor.search(ProverMode::Test, goal_kernel_context);
         }
@@ -119,25 +134,10 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
         _ => panic!("no module"),
     };
 
-    // Track the highest top-level node index that contains a goal
-    let mut last_goal_top_index: Option<usize> = None;
-
     for cursor in env.iter_goals() {
         let goal = cursor.goal().unwrap();
 
-        // Track the top-level index of this goal
-        let path = cursor.path();
-        if !path.is_empty() {
-            let top_index = path[0];
-            last_goal_top_index = Some(last_goal_top_index.map_or(top_index, |i| i.max(top_index)));
-        }
-
-        let mut processor = Processor::with_imports(None, cursor.bindings(), &project)?;
-        processor.add_module_facts(&cursor)?;
-        let normalized_goal = cursor
-            .lowered_goal()
-            .ok_or_else(|| "missing lowered goal".to_string())?;
-        processor.set_lowered_goal(normalized_goal);
+        let (mut processor, bindings, normalized_goal) = processor_for_cursor(&project, &cursor)?;
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         if options.verbose {
@@ -149,11 +149,9 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
         // infinite rabbit hole we could go down.
         let shallow_outcome = processor.search(ProverMode::Test, goal_kernel_context);
         if options.verbose {
-            processor.prover().print_active_steps(
-                shallow_outcome,
-                cursor.bindings(),
-                goal_kernel_context,
-            );
+            processor
+                .prover()
+                .print_active_steps(shallow_outcome, bindings, goal_kernel_context);
         }
 
         if shallow_outcome != Outcome::Success {
@@ -180,7 +178,7 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
                     );
                     processor.prover().print_active_steps(
                         deep_outcome,
-                        cursor.bindings(),
+                        bindings,
                         goal_kernel_context,
                     );
                 }
@@ -191,15 +189,11 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
                     );
                     let cert = processor
                         .prover()
-                        .make_cert(cursor.bindings(), goal_kernel_context, true)
+                        .make_cert(bindings, goal_kernel_context, true)
                         .map_err(|e| e.to_string())?;
-                    if let Err(e) = processor.check_cert(
-                        &cert,
-                        None,
-                        goal_kernel_context,
-                        &project,
-                        cursor.bindings(),
-                    ) {
+                    if let Err(e) =
+                        processor.check_cert(&cert, None, goal_kernel_context, &project, bindings)
+                    {
                         panic!("check_cert failed: {}", e);
                     }
                 }
@@ -216,30 +210,10 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
         }
         let cert = processor
             .prover()
-            .make_cert(cursor.bindings(), goal_kernel_context, true)
+            .make_cert(bindings, goal_kernel_context, true)
             .map_err(|e| e.to_string())?;
-        if let Err(e) = processor.check_cert(
-            &cert,
-            None,
-            goal_kernel_context,
-            &project,
-            cursor.bindings(),
-        ) {
+        if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, &project, bindings) {
             panic!("check_cert failed: {}", e);
-        }
-    }
-
-    // Lower any facts after the last goal (or all facts if there are no goals).
-    // This catches lowering errors in trailing definitions.
-    // Note: the lowering pass already does this during module loading, but we keep
-    // this check for test coverage.
-    let first_unnormalized = last_goal_top_index.map_or(0, |i| i + 1);
-    if first_unnormalized < env.nodes.len() {
-        // Ensure all facts were lowered during the lowering pass.
-        for node in &env.nodes {
-            if node.get_fact().is_some() && node.lowered_fact().is_none() {
-                return Err("missing lowered fact".to_string());
-            }
         }
     }
 

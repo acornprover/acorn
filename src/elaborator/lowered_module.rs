@@ -1,6 +1,7 @@
 use tower_lsp::lsp_types::Range;
 
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::goal::Goal;
 use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
 use crate::kernel::kernel_context::KernelContext;
 use crate::module::ModuleId;
@@ -27,6 +28,8 @@ pub enum LoweredItem {
     Claim {
         goal: LoweredGoalId,
         post_fact: LoweredFactId,
+        first_line: u32,
+        last_line: u32,
     },
     Block {
         items: Vec<LoweredItem>,
@@ -89,12 +92,140 @@ impl LoweredModule {
         self.module_fact_ids.iter().map(|id| self.fact(*id))
     }
 
+    pub fn facts(&self) -> impl Iterator<Item = &LoweredFact> {
+        self.facts.iter()
+    }
+
+    pub fn goals(&self) -> impl Iterator<Item = (LoweredGoalId, &LoweredGoalEntry)> {
+        self.goals
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (LoweredGoalId(i), entry))
+    }
+
+    pub fn goal_by_name(&self, name: &str) -> Option<(LoweredGoalId, &LoweredGoalEntry)> {
+        self.goals()
+            .find(|(_, entry)| entry.lowered_goal.goal.name == name)
+    }
+
+    pub fn goal_for_source_goal(&self, goal: &Goal) -> Option<(LoweredGoalId, &LoweredGoalEntry)> {
+        self.goals().find(|(_, entry)| {
+            let lowered_goal = &entry.lowered_goal.goal;
+            lowered_goal.name == goal.name
+                && lowered_goal.first_line == goal.first_line
+                && lowered_goal.last_line == goal.last_line
+        })
+    }
+
+    pub fn visible_facts_for_goal(&self, goal: LoweredGoalId) -> Option<Vec<&LoweredFact>> {
+        let mut visible = Vec::new();
+        let fact_ids = self.visible_fact_ids_for_goal(goal, &self.items, &mut visible)?;
+        Some(fact_ids.into_iter().map(|id| self.fact(id)).collect())
+    }
+
+    pub fn fact_for_source_range(&self, range: Range) -> Option<&LoweredFact> {
+        self.fact_id_for_source_range(range, &self.items)
+            .map(|id| self.fact(id))
+    }
+
     pub fn goal_count(&self) -> usize {
         self.goals.len()
     }
 
+    pub fn fact_count(&self) -> usize {
+        self.facts.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_clear_lowered(&mut self) {
+        self.facts.clear();
+        self.facts.shrink_to_fit();
+        self.goals.clear();
+        self.goals.shrink_to_fit();
+        self.module_fact_ids.clear();
+        self.module_fact_ids.shrink_to_fit();
+        self.items.clear();
+        self.items.shrink_to_fit();
+        self.top_level_axiom_ranges.clear();
+        self.top_level_axiom_ranges.shrink_to_fit();
+        self.final_kernel_context = KernelContext::new();
+    }
+
+    fn visible_fact_ids_for_goal(
+        &self,
+        goal: LoweredGoalId,
+        items: &[LoweredItem],
+        visible: &mut Vec<LoweredFactId>,
+    ) -> Option<Vec<LoweredFactId>> {
+        for item in items {
+            match item {
+                LoweredItem::Fact { fact, .. } => {
+                    visible.push(*fact);
+                }
+                LoweredItem::Claim {
+                    goal: item_goal,
+                    post_fact,
+                    ..
+                } => {
+                    if *item_goal == goal {
+                        return Some(visible.clone());
+                    }
+                    visible.push(*post_fact);
+                }
+                LoweredItem::Block {
+                    items,
+                    external_fact,
+                    ..
+                } => {
+                    let mut child_visible = visible.clone();
+                    if let Some(facts) =
+                        self.visible_fact_ids_for_goal(goal, items, &mut child_visible)
+                    {
+                        return Some(facts);
+                    }
+                    if let Some(fact) = external_fact {
+                        visible.push(*fact);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn fact_id_for_source_range(
+        &self,
+        range: Range,
+        items: &[LoweredItem],
+    ) -> Option<LoweredFactId> {
+        for item in items {
+            match item {
+                LoweredItem::Fact {
+                    fact,
+                    first_line,
+                    last_line,
+                }
+                | LoweredItem::Claim {
+                    post_fact: fact,
+                    first_line,
+                    last_line,
+                    ..
+                } => {
+                    if *first_line == range.start.line && *last_line == range.end.line {
+                        return Some(*fact);
+                    }
+                }
+                LoweredItem::Block { items, .. } => {
+                    if let Some(fact) = self.fact_id_for_source_range(range, items) {
+                        return Some(fact);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

@@ -19,7 +19,7 @@ use crate::elaborator::environment::Environment;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::lowered_module::LoweredModule;
+use crate::elaborator::lowered_module::{LoweredGoalEntry, LoweredGoalId, LoweredModule};
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
@@ -1051,6 +1051,11 @@ impl Project {
         Some(&self.get_loaded_module_by_id(module_id)?.lowered)
     }
 
+    pub fn lowered_goal_for_goal(&self, goal: &Goal) -> Option<(LoweredGoalId, &LoweredGoalEntry)> {
+        self.get_lowered_module(goal.module_id)?
+            .goal_for_source_goal(goal)
+    }
+
     #[doc(hidden)]
     pub fn profile_visit_envs_mut<F>(&mut self, mut visitor: F)
     where
@@ -1064,6 +1069,19 @@ impl Project {
                 continue;
             };
             visitor(ModuleId(index as u16), env);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn profile_visit_loaded_modules_mut<F>(&mut self, mut visitor: F)
+    where
+        F: FnMut(ModuleId, &mut LoadedModule),
+    {
+        for (index, module) in self.modules.iter_mut().enumerate() {
+            let LoadState::Ok(loaded) = &mut module.state else {
+                continue;
+            };
+            visitor(ModuleId(index as u16), loaded);
         }
     }
 
@@ -1989,20 +2007,21 @@ impl Project {
     /// Find a verified certificate for the given goal.
     /// Returns the first certificate that successfully verifies against the current code.
     /// Returns None if no valid certificate exists in the build cache.
-    pub fn find_cert(
-        &self,
-        goal: &Goal,
-        cursor: &crate::elaborator::node::NodeCursor,
-    ) -> Option<(&Certificate, Vec<CertificateLine>)> {
+    pub fn find_cert(&self, goal: &Goal) -> Option<(&Certificate, Vec<CertificateLine>)> {
         let descriptor = self.get_module_descriptor(goal.module_id)?;
         let cert_store = self.build_cache.get_certificates(descriptor)?;
+        let lowered = self.get_lowered_module(goal.module_id)?;
+        let (goal_id, entry) = lowered.goal_for_source_goal(goal)?;
 
-        let mut processor =
-            match Processor::with_imports_for_checking(None, cursor.bindings(), self) {
-                Ok(p) => p,
-                Err(_) => return None,
-            };
-        if processor.add_module_facts(cursor).is_err() {
+        let mut processor = match Processor::with_imports_for_checking(None, &entry.bindings, self)
+        {
+            Ok(p) => p,
+            Err(_) => return None,
+        };
+        if processor
+            .add_visible_module_facts(lowered, goal_id)
+            .is_err()
+        {
             return None;
         }
 
@@ -2010,13 +2029,13 @@ impl Project {
         for cert in &cert_store.certs {
             if cert.goal == goal.name {
                 // Try to verify this certificate
-                let normalized_goal = cursor.lowered_goal()?;
+                let normalized_goal = &entry.lowered_goal;
                 if let Ok(steps) = processor.check_cert(
                     cert,
                     Some(normalized_goal),
                     &normalized_goal.kernel_context,
                     self,
-                    cursor.bindings(),
+                    &entry.bindings,
                 ) {
                     return Some((cert, steps));
                 }
@@ -2125,7 +2144,7 @@ impl Project {
 
         // Check if there's a verified certificate for this goal
         let (has_cached_proof, steps) = if let Some((_cert, certificate_steps)) =
-            self.find_cert(goal, cursor)
+            self.find_cert(goal)
         {
             let displayed_steps = display_certificate_lines(cursor.bindings(), &certificate_steps);
             let steps: Vec<Step> = displayed_steps
@@ -2173,7 +2192,10 @@ impl Project {
 
         let mut generator = CodeGenerator::new(cursor.bindings());
         let mut rendered_clauses = Vec::new();
-        if let Some(lowered_fact) = cursor.node().lowered_fact() {
+        let lowered_fact = self
+            .get_lowered_module(cursor.env().module_id)
+            .and_then(|lowered| lowered.fact_for_source_range(proposition.source.range));
+        if let Some(lowered_fact) = lowered_fact {
             for step in &lowered_fact.steps {
                 let quoted =
                     lowered_fact

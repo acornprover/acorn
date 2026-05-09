@@ -107,7 +107,7 @@ impl Environment {
                 inhabitant_provider,
                 source,
             );
-            self.add_node(Node::Structural(extends_fact, None));
+            self.add_node(Node::Structural(extends_fact));
         }
 
         if !type_params.is_empty() {
@@ -571,7 +571,7 @@ impl Environment {
         let instance_fact = Fact::Instance(typeclass_instance.clone(), instance_source.clone());
 
         let node = if conditions.is_empty() {
-            Node::Structural(instance_fact, None)
+            Node::Structural(instance_fact)
         } else {
             let range = Range {
                 start: statement.first_token.start_pos(),
@@ -592,7 +592,7 @@ impl Environment {
                 &statement.last_token,
                 is.body.as_ref(),
             )?;
-            Node::Block(block, Some(instance_fact), None)
+            Node::Block(block, Some(instance_fact))
         };
 
         for type_param in family_scope.type_params() {
@@ -624,7 +624,7 @@ impl Environment {
                     family_scope.type_params().to_vec(),
                     instance_source.clone(),
                 );
-                Node::Structural(Fact::Proposition(Arc::new(prop)), None)
+                Node::Structural(Fact::Proposition(Arc::new(prop)))
             };
             let index = self.add_node(bridge);
             self.add_node_lines(index, &statement.range());

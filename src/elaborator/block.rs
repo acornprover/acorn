@@ -371,7 +371,7 @@ impl Block {
             let goal = Goal::interior(&subenv, prop.clone(), theorem_alias)
                 .map_err(|e| error::Error::new(first_token, last_token, &e))?;
             let fact = Fact::Proposition(prop);
-            let goal_node = Node::Claim(goal, fact, None, None);
+            let goal_node = Node::Claim(goal, fact);
             let goal_index = subenv.add_node(goal_node);
             // Map the goal node to the appropriate source lines
             subenv.add_node_lines(goal_index, &goal_range);
@@ -387,7 +387,7 @@ impl Block {
                     let goal = Goal::interior(&subenv, prop.clone(), None)
                         .map_err(|e| error::Error::new(first_token, last_token, &e))?;
                     let fact = Fact::Proposition(prop);
-                    let goal_node = Node::Claim(goal, fact, None, None);
+                    let goal_node = Node::Claim(goal, fact);
                     let goal_index = subenv.add_node(goal_node);
                     subenv.add_node_lines(goal_index, &range);
                 }

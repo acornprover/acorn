@@ -14,31 +14,43 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-05-08
-- Git hash: `b0cacb09` plus local `LoweredModule` refactor changes
+- Date: 2026-05-09
+- Git hash: `819cfe1f` plus local `LoweredModule` cleanup changes
 - Command: `cargo build --profile release`, then `/usr/bin/time -v target/release/acorn check`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: after the initial `LoweredModule` refactor, full acornlib check completed successfully in `1:01.41` wall, `220.79s` user, `1.21s` sys, `361%` CPU. Maximum RSS was `7,533,992 KB` (`7.19 GiB`). The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules.
-- Summary: The first `LoweredModule` cut made check-mode module loading retain `BindingMap + LoweredModule` and drop the full `Environment` tree. Compared with the pre-refactor baseline from the same day (`0:59.97` wall, `9,721,212 KB` / `9.27 GiB` max RSS), peak RSS dropped by `2,187,220 KB` (`2.09 GiB`, about `22.5%`) while wall time was roughly flat/slightly slower (`+1.44s`, about `2.4%`). Previous retained-heap diagnostics still indicate that remaining peak memory is dominated by lowered facts/goals, kernel-context snapshots, and binding contexts retained for certificate checking.
+- Timing: after deleting duplicated lowered storage from `Environment` and `Node`, full acornlib check completed successfully in `1:00.34` wall, `216.78s` user, `1.08s` sys, `361%` CPU. Maximum RSS was `7,769,036 KB` (`7.41 GiB`). The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules.
+- Summary: The `LoweredModule` cut made check-mode module loading retain `BindingMap + LoweredModule` and drop the full `Environment` tree. Compared with the pre-refactor baseline (`0:59.97` wall, `9,721,212 KB` / `9.27 GiB` max RSS), peak RSS is down by `1,952,176 KB` (`1.86 GiB`, about `20.1%`) while wall time is roughly flat/slightly slower (`+0.37s`, about `0.6%`). Removing the duplicated lowered slots from `Environment`/`Node` did not produce a clear additional RSS win versus the initial `LoweredModule` result (`7,533,992 KB` / `7.19 GiB`) or the check-mode no-retained-lowering refinement (`7,688,584 KB` / `7.33 GiB`); current variation is plausibly allocator/run noise and retained `LoweredModule`/binding state.
 - Breakdown:
 
 ```text
-Current Full Check Baseline (2026-05-08, after LoweredModule refactor)
+Current Full Check Baseline (2026-05-09, after duplicated Environment/Node lowering cleanup)
 ============================================================
 
 command: /usr/bin/time -v target/release/acorn check
 result: 302 modules, 54,155/54,155 certificates OK, 0 searches
-elapsed: 1:01.41 wall
-cpu: 220.79s user, 1.21s sys, 361%
-max rss: 7,533,992 KB = 7.19 GiB
-minor faults: 167,168
+elapsed: 1:00.34 wall
+cpu: 216.78s user, 1.08s sys, 361%
+max rss: 7,769,036 KB = 7.41 GiB
+minor faults: 64,843
 major faults: 0
 
-Comparison to pre-refactor baseline from same day:
+Comparison to pre-refactor baseline:
 ├── previous elapsed: 0:59.97 wall
 ├── previous max rss: 9,721,212 KB = 9.27 GiB
-├── RSS delta: -2,187,220 KB = -2.09 GiB (-22.5%)
-└── wall delta: +1.44s (+2.4%)
+├── RSS delta: -1,952,176 KB = -1.86 GiB (-20.1%)
+└── wall delta: +0.37s (+0.6%)
+
+Comparison to initial LoweredModule result:
+├── previous elapsed: 1:01.41 wall
+├── previous max rss: 7,533,992 KB = 7.19 GiB
+├── RSS delta: +235,044 KB = +229.5 MiB (+3.1%)
+└── wall delta: -1.07s (-1.7%)
+
+Comparison to no-retained-Environment-lowering refinement:
+├── previous elapsed: 1:00.96 wall
+├── previous max rss: 7,688,584 KB = 7.33 GiB
+├── RSS delta: +80,452 KB = +78.6 MiB (+1.0%)
+└── wall delta: -0.62s (-1.0%)
 
 Historical Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
 ============================================================

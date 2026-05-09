@@ -268,11 +268,8 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
 
     // Run the prover and generate a certificate
     let cursor = env.iter_goals().next().expect("expected a goal in main");
-    let mut processor =
-        crate::processor::Processor::with_imports(None, cursor.bindings(), &p).unwrap();
-    processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_cursor(&p, &cursor).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
@@ -281,7 +278,7 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     // Generate the certificate
     let cert = processor
         .prover()
-        .make_cert(cursor.bindings(), goal_kernel_context, true)
+        .make_cert(bindings, goal_kernel_context, true)
         .expect("make_cert failed");
 
     // Debug: print the certificate
@@ -295,7 +292,7 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     // The certificate should verify successfully
     // (If the code generator correctly uses lib(monoid).Monoid format)
     processor
-        .check_cert(&cert, None, goal_kernel_context, &p, cursor.bindings())
+        .check_cert(&cert, None, goal_kernel_context, &p, bindings)
         .expect("check_cert should succeed");
 }
 
@@ -360,11 +357,8 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
             .is_empty(),
         "let ... satisfy should create a concrete block goal rather than a parameterized goal"
     );
-    let mut processor =
-        crate::processor::Processor::with_imports(None, cursor.bindings(), &project).unwrap();
-    processor.add_module_facts(&cursor).unwrap();
-    let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-    processor.set_lowered_goal(normalized_goal);
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_cursor(&project, &cursor).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
@@ -372,7 +366,7 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
 
     let cert = processor
         .prover()
-        .make_cert(cursor.bindings(), goal_kernel_context, false)
+        .make_cert(bindings, goal_kernel_context, false)
         .expect("make_cert failed");
     let proof = cert.proof.expect("proof should exist");
 

@@ -122,21 +122,18 @@ fn test_proving_with_mixin_instance() {
     };
 
     for cursor in env.iter_goals() {
-        let mut processor =
-            crate::processor::Processor::with_imports(None, cursor.bindings(), &p).unwrap();
-        processor.add_module_facts(&cursor).unwrap();
-        let normalized_goal = cursor.lowered_goal().expect("missing lowered goal");
-        processor.set_lowered_goal(normalized_goal);
+        let (mut processor, bindings, normalized_goal) =
+            processor_for_cursor(&p, &cursor).expect("processor setup failed");
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
         assert_eq!(outcome, Outcome::Success);
         let cert = processor
             .prover()
-            .make_cert(cursor.bindings(), goal_kernel_context, true)
+            .make_cert(bindings, goal_kernel_context, true)
             .expect("make_cert failed");
         processor
-            .check_cert(&cert, None, goal_kernel_context, &p, cursor.bindings())
+            .check_cert(&cert, None, goal_kernel_context, &p, bindings)
             .expect("check_cert failed");
     }
 }
