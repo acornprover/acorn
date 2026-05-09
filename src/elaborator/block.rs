@@ -119,18 +119,12 @@ impl Block {
         expected_type: Option<&AcornType>,
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
-        let mut function_type = value.get_type();
+        let mut applied_args = vec![];
         for arg in args {
-            let AcornType::Function(ftype) = function_type else {
-                return Err(source.error("cannot apply a non-function"));
-            };
-            let Some(arg_type) = ftype.arg_types.first() else {
-                return Err(source.error("expected 0 arguments"));
-            };
-            arg.check_type(Some(arg_type), source)?;
-            function_type = ftype
-                .applied_type(1)
-                .bind_values(0, 0, std::slice::from_ref(arg));
+            let partial = AcornValue::apply(value.clone(), applied_args.clone());
+            let arg_type = partial.next_arg_type().map_err(|e| source.error(&e))?;
+            arg.check_type(Some(&arg_type), source)?;
+            applied_args.push(arg.clone());
         }
 
         let applied = AcornValue::apply(value, args.to_vec());

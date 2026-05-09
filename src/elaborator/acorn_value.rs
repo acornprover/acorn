@@ -37,6 +37,11 @@ impl FunctionApplication {
         current_type
     }
 
+    /// Gets the type expected for the next argument to this partially applied function.
+    pub fn next_arg_type(&self) -> Result<AcornType, String> {
+        AcornValue::Application(self.clone()).next_arg_type()
+    }
+
     /// Helper function for formatting function applications
     fn fmt_helper(&self, f: &mut fmt::Formatter, stack_size: usize) -> fmt::Result {
         write!(f, "{}(", Subvalue::new(&self.function, stack_size))?;
@@ -955,6 +960,18 @@ impl AcornValue {
                     panic!("Match with no cases");
                 }
             }
+        }
+    }
+
+    /// Gets the type expected for the next argument to this value.
+    pub fn next_arg_type(&self) -> Result<AcornType, String> {
+        match self.get_type() {
+            AcornType::Function(function_type) => function_type
+                .arg_types
+                .first()
+                .cloned()
+                .ok_or_else(|| "expected 0 arguments".to_string()),
+            other => Err(format!("cannot apply a non-function of type {}", other)),
         }
     }
 
@@ -3610,6 +3627,58 @@ mod tests {
             panic!("expected function type");
         };
         assert_eq!(function_type.arg_types[1], subspace_t_a_const);
+    }
+
+    #[test]
+    fn test_partial_application_next_arg_type_uses_applied_receiver_context() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+        let subspace_t_x0 = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let subspace_t_x1 = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type),
+                DependentTypeArg::Value(AcornValue::Variable(1, set_t)),
+            ],
+        );
+        let set_subspace_t_x0 = AcornType::Data(set_datatype.clone(), vec![subspace_t_x0.clone()]);
+        let contains_type = AcornType::functional(
+            vec![set_subspace_t_x0.clone(), subspace_t_x1],
+            AcornType::Bool,
+        );
+        let contains = AcornValue::constant(
+            ConstantName::datatype_attr(ModuleId(0), set_datatype, "contains"),
+            vec![],
+            contains_type.clone(),
+            contains_type,
+            vec![],
+            vec![],
+        );
+        let receiver = AcornValue::Variable(0, set_subspace_t_x0);
+        let partial = AcornValue::apply(contains, vec![receiver]);
+        let AcornValue::Application(application) = partial else {
+            panic!("expected application");
+        };
+
+        assert_eq!(application.next_arg_type().unwrap(), subspace_t_x0);
     }
 
     #[test]

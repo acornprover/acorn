@@ -165,6 +165,72 @@ the value parameter `a: Set[T]` when the goal mentions
     }
 ```
 
+## Dependent Value Parameter Empty Set Helper Certificate
+
+The generated certificate for a helper proving
+`subspace_open(Set[Subspace[T, a]].empty_set)` should preserve the value
+parameter `a: Set[T]` when replaying the `subspace_open` definition.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    define constant_false[T](x: T) -> Bool {
+        false
+    }
+
+    attributes Set[T] {
+        let empty_set = Set[T].new(constant_false[T])
+    }
+
+    theorem empty_set_contains_eq[T](x: T) {
+        Set[T].empty_set.contains(x) = false
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+
+        open_empty {
+            T.is_open(Set[T].empty_set)
+        }
+    }
+
+    theorem open_empty[T: TopologicalSpace] {
+        T.is_open(Set[T].empty_set)
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    define subspace_open[T: TopologicalSpace, a: Set[T]](
+        u: Set[Subspace[T, a]]) -> Bool {
+        exists(v: Set[T]) {
+            T.is_open(v) and forall(p: Subspace[T, a]) {
+                u.contains(p) = v.contains(p.value)
+            }
+        }
+    }
+
+    theorem subspace_open_empty_helper[T: TopologicalSpace, a: Set[T]] {
+        subspace_open(Set[Subspace[T, a]].empty_set)
+    } by {
+        open_empty[T]
+        forall(p: Subspace[T, a]) {
+            empty_set_contains_eq[Subspace[T, a]](p)
+            empty_set_contains_eq[T](p.value)
+        }
+        exists(v: Set[T]) {
+            T.is_open(v) and forall(p: Subspace[T, a]) {
+                Set[Subspace[T, a]].empty_set.contains(p) = v.contains(p.value)
+            }
+        }
+    }
+```
+
 ## Dependent Value Parameter Family Predicate Hypothesis
 
 A theorem with both a structure value parameter `a: Set[T]` and a function

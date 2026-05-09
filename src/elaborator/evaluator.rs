@@ -1385,7 +1385,6 @@ impl<'a> Evaluator<'a> {
         // Handle Resolved and Unresolved cases differently
         let value = match potential {
             PotentialValue::Resolved(partial) => {
-                // Resolved case: use the old logic to preserve value structure for code generation
                 let mut fa = match partial {
                     AcornValue::Application(fa) => fa,
                     _ => {
@@ -1395,22 +1394,8 @@ impl<'a> Evaluator<'a> {
                         )))
                     }
                 };
-                match fa.function.get_type() {
-                    AcornType::Function(f) => {
-                        if f.arg_types.len() != 2 {
-                            return Err(expression.error(&format!(
-                                "expected a binary function for '{}' method",
-                                name
-                            )));
-                        }
-                        right_value.check_type(Some(&f.arg_types[1]), expression)?;
-                    }
-                    _ => {
-                        return Err(
-                            expression.error(&format!("unexpected type for '{}' method", name))
-                        )
-                    }
-                };
+                let arg_type = fa.next_arg_type().map_err(|e| expression.error(&e))?;
+                right_value.check_type(Some(&arg_type), expression)?;
 
                 fa.args.push(right_value);
                 AcornValue::apply(*fa.function, fa.args)
@@ -1920,15 +1905,10 @@ impl<'a> Evaluator<'a> {
                         let mut args = vec![];
                         for arg_expr in &arg_exprs {
                             let partial = AcornValue::apply(function.clone(), args.clone());
-                            let partial_type = partial.get_type();
-                            let AcornType::Function(partial_function_type) = partial_type else {
-                                return Err(args_expr.error("too many arguments"));
-                            };
-                            let Some(arg_type) = partial_function_type.arg_types.first() else {
-                                return Err(args_expr.error("too many arguments"));
-                            };
+                            let arg_type =
+                                partial.next_arg_type().map_err(|e| args_expr.error(&e))?;
                             let arg =
-                                self.evaluate_value_with_stack(stack, arg_expr, Some(arg_type))?;
+                                self.evaluate_value_with_stack(stack, arg_expr, Some(&arg_type))?;
                             args.push(arg);
                         }
                         let value = AcornValue::apply(function, args);
