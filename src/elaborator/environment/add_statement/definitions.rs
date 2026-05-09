@@ -266,7 +266,10 @@ impl Environment {
         let acorn_type = if explicit_value_param_types.is_empty() {
             acorn_type
         } else {
-            AcornType::functional(explicit_value_param_types.clone(), acorn_type)
+            AcornType::functional_from_promoted_ambient(
+                explicit_value_param_types.clone(),
+                acorn_type,
+            )
         };
         let value = if explicit_value_param_types.is_empty() {
             value
@@ -732,7 +735,7 @@ impl Environment {
             let constant_type = if explicit_value_param_types.is_empty() {
                 generic_value_type.clone()
             } else {
-                AcornType::functional(
+                AcornType::functional_from_promoted_ambient(
                     explicit_value_param_types.clone(),
                     generic_value_type.clone(),
                 )

@@ -1934,6 +1934,7 @@ impl<'a> Evaluator<'a> {
                 if args.len() < 1 {
                     return Err(token.error("binders must have at least one argument"));
                 }
+                let ambient_stack_size = stack.len() as AtomId;
                 let (arg_names, arg_types) = self.bind_args(stack, args, None)?;
                 let body_type = match token.token_type {
                     TokenType::ForAll => Some(&AcornType::Bool),
@@ -1951,7 +1952,13 @@ impl<'a> Evaluator<'a> {
                 };
                 stack.remove_all(&arg_names);
                 if ret_val.is_ok() && token.token_type == TokenType::Function {
-                    ret_val.as_ref().unwrap().check_type(expected_type, token)?;
+                    if let Some(expected_type) = expected_type {
+                        let actual_type = ret_val
+                            .as_ref()
+                            .unwrap()
+                            .get_type_with_ambient_stack(ambient_stack_size);
+                        actual_type.check_eq(Some(expected_type), token)?;
+                    }
                 }
                 ret_val?
             }

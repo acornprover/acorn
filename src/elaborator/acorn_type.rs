@@ -739,6 +739,7 @@ impl TypeclassInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::ModuleId;
 
     #[test]
     fn telescope_preserves_family_order_while_exposing_split_views() {
@@ -775,6 +776,42 @@ mod tests {
             ]
         );
         assert_eq!(value_args, vec![AcornValue::Variable(0, AcornType::Bool)]);
+    }
+
+    #[test]
+    fn promoted_ambient_prefix_rotates_nested_function_type_refs() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let scoped_body_type = AcornType::functional_from_flat_context(
+            vec![subspace_t_a.clone(), t_type.clone()],
+            subspace_t_a.clone(),
+        );
+
+        let promoted =
+            AcornType::functional_from_promoted_ambient(vec![set_t.clone()], scoped_body_type);
+
+        let expected =
+            AcornType::functional(vec![set_t, subspace_t_a.clone(), t_type], subspace_t_a);
+        assert_eq!(promoted, expected);
     }
 }
 
@@ -1001,6 +1038,44 @@ impl AcornType {
             shifted_args.len() as AtomId,
         );
         AcornType::functional(shifted_args, shifted_return)
+    }
+
+    /// Creates a function type by promoting ambient value parameters to visible leading arguments.
+    ///
+    /// The body type was evaluated in a source scope where these value parameters were ambient.
+    /// If the body is already a function type, its later argument and return types have those
+    /// ambient references after the body's visible binders. Once the ambient values become leading
+    /// visible arguments, rotate those references back before the body's visible binders.
+    pub fn functional_from_promoted_ambient(
+        prefix_arg_types: Vec<AcornType>,
+        scoped_body_type: AcornType,
+    ) -> AcornType {
+        let ambient_count = prefix_arg_types.len() as AtomId;
+        if ambient_count == 0 {
+            return scoped_body_type;
+        }
+
+        let AcornType::Function(function_type) = scoped_body_type else {
+            return AcornType::functional(prefix_arg_types, scoped_body_type);
+        };
+
+        let mut arg_types = prefix_arg_types;
+        let body_arg_count = function_type.arg_types.len() as AtomId;
+        arg_types.extend(
+            function_type
+                .arg_types
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg_type)| {
+                    arg_type.move_ambient_after_visible(0, i as AtomId, ambient_count)
+                }),
+        );
+        let return_type = (*function_type.return_type).move_ambient_after_visible(
+            0,
+            body_arg_count,
+            ambient_count,
+        );
+        AcornType::functional(arg_types, return_type)
     }
 
     pub(crate) fn move_ambient_after_visible(

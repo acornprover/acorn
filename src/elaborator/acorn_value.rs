@@ -967,6 +967,30 @@ impl AcornValue {
         }
     }
 
+    /// Gets the type of a lambda in a source scope with ambient value parameters.
+    ///
+    /// Consecutive lambdas represent one uncurried function type, so flatten them before rotating
+    /// ambient references. This keeps references to earlier visible arguments attached to those
+    /// arguments instead of treating them like ambient family values.
+    pub fn get_type_with_ambient_stack(&self, ambient_stack_size: AtomId) -> AcornType {
+        let mut value = self;
+        let mut arg_types = Vec::new();
+        while let AcornValue::Lambda(args, return_value) = value {
+            arg_types.extend(args.iter().cloned());
+            value = return_value;
+        }
+
+        if arg_types.is_empty() {
+            self.get_type()
+        } else {
+            AcornType::functional_from_scoped_context(
+                arg_types,
+                value.get_type(),
+                ambient_stack_size,
+            )
+        }
+    }
+
     /// Gets the type expected for the next argument to this value.
     pub fn next_arg_type(&self) -> Result<AcornType, String> {
         match self.get_type() {
@@ -3270,20 +3294,12 @@ impl AcornValue {
         source: &dyn ErrorContext,
     ) -> error::Result<()> {
         if let Some(t) = expected_type {
-            if let AcornValue::Lambda(args, return_value) = self {
-                let actual_type = self.get_type();
-                if &actual_type == t {
-                    return Ok(());
-                }
-                let shifted_return_type = return_value
-                    .get_type()
-                    .insert_stack(0, args.len() as AtomId);
-                let shifted_type = AcornType::functional(args.clone(), shifted_return_type);
-                if &shifted_type == t {
-                    return Ok(());
-                }
-            }
-            self.get_type().check_eq(Some(t), source)
+            let actual_type = if matches!(self, AcornValue::Lambda(_, _)) {
+                self.get_type_with_ambient_stack(0)
+            } else {
+                self.get_type()
+            };
+            actual_type.check_eq(Some(t), source)
         } else {
             Ok(())
         }
@@ -3643,6 +3659,33 @@ mod tests {
             AcornValue::Variable(1, subspace_t_a),
         );
         assert_eq!(instantiated, expected);
+    }
+
+    #[test]
+    fn test_lambda_type_with_ambient_stack_keeps_visible_arg_refs() {
+        let nat_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let fin_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Fin".to_string(),
+        };
+        let nat_type = AcornType::Data(nat_datatype, vec![]);
+        let fin_n = AcornType::Family(
+            fin_datatype,
+            vec![DependentTypeArg::Value(AcornValue::Variable(
+                0,
+                nat_type.clone(),
+            ))],
+        );
+        let value = AcornValue::lambda(
+            vec![nat_type.clone()],
+            AcornValue::lambda(vec![fin_n.clone()], AcornValue::Variable(1, fin_n.clone())),
+        );
+        let expected = AcornType::functional(vec![nat_type, fin_n.clone()], fin_n);
+
+        assert_eq!(value.get_type_with_ambient_stack(0), expected);
     }
 
     #[test]
