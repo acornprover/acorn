@@ -115,15 +115,18 @@ fn test_proving_with_mixin_instance() {
     );
 
     let module_id = p.load_module_by_name("main").expect("load failed");
-    let env = match p.get_module_by_id(module_id) {
-        crate::module::LoadState::Ok(env) => env,
+    match p.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(_) => {}
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
-    };
+    }
 
-    for cursor in env.iter_goals() {
+    let lowered = p
+        .get_lowered_module(module_id)
+        .expect("missing lowered module");
+    for (goal_id, _) in lowered.goals() {
         let (mut processor, bindings, normalized_goal) =
-            processor_for_cursor(&p, &cursor).expect("processor setup failed");
+            processor_for_lowered_goal(&p, module_id, goal_id).expect("processor setup failed");
         let goal_kernel_context = &normalized_goal.kernel_context;
 
         let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);

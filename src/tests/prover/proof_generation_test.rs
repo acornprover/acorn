@@ -1,6 +1,5 @@
 use crate::tests::support::*;
 use crate::{
-    module::LoadState,
     project::Project,
     prover::{Outcome, ProverMode},
 };
@@ -37,15 +36,9 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
-        LoadState::Error(e) => panic!("error: {}", e),
-        _ => panic!("no module"),
-    };
 
-    let cursor = env.get_node_by_goal_name("goal");
     let (mut processor, bindings, normalized_goal) =
-        processor_for_cursor(&project, &cursor).expect("processor setup failed");
+        processor_for_goal_name(&project, module_id, "goal").expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
@@ -174,15 +167,10 @@ fn test_cert_generation_replays_flipped_simplification_match() {
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
-        LoadState::Error(e) => panic!("error: {}", e),
-        _ => panic!("no module"),
-    };
 
-    let cursor = env.get_node_by_goal_name("n = Nat.zero");
     let (mut processor, bindings, normalized_goal) =
-        processor_for_cursor(&project, &cursor).expect("processor setup failed");
+        processor_for_goal_name(&project, module_id, "n = Nat.zero")
+            .expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
     let outcome = processor.search(
         ProverMode::Interactive {

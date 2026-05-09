@@ -1,6 +1,5 @@
 use super::CodeGenerator;
 use crate::elaborator::evaluator::Evaluator;
-use crate::elaborator::node::NodeCursor;
 use crate::module::LoadState;
 use crate::project::Project;
 use crate::syntax::expression::Expression;
@@ -546,13 +545,14 @@ fn test_codegen_preserves_generic_args_for_partial_application() {
     p.check_goal_code("main", "goal", "apply_fn(constant(a), x) = a");
 
     let module_id = p.expect_ok("main");
-    let env = p.get_env_by_id(module_id).expect("no env");
-    let node = env.get_node_by_goal_name("goal");
-    let goal_context = node.goal().unwrap();
-    let mut generator = CodeGenerator::new_for_certificate(&node.env().bindings);
+    let lowered = p
+        .get_lowered_module(module_id)
+        .expect("missing lowered module");
+    let (_, entry) = lowered.goal_by_name("goal").expect("missing lowered goal");
+    let mut generator = CodeGenerator::new_for_certificate(&entry.bindings);
     assert_eq!(
         generator
-            .value_to_code(&goal_context.proposition.value)
+            .value_to_code(&entry.lowered_goal.goal.proposition.value)
             .expect("certificate codegen should render the goal"),
         "apply_fn(constant[Point, Point](a), x) = a"
     );
@@ -757,23 +757,21 @@ instance Foo: Mul {
         .load_module_by_name("main")
         .expect("module should load");
     let (full_bindings, goal_bindings) = {
-        let env = match project.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
+        let module = match project.get_module_by_id(module_id) {
+            LoadState::Ok(module) => module,
             LoadState::Error(e) => panic!("module loading error: {}", e),
             _ => panic!("unexpected module load state"),
         };
-        let node_path = env
-            .path_for_line(8)
+        let internal_line = 8;
+        let (_, entry) = module
+            .lowered
+            .goals()
+            .find(|(_, entry)| {
+                let goal = &entry.lowered_goal.goal;
+                goal.first_line <= internal_line && internal_line <= goal.last_line
+            })
             .expect("the selected theorem body line should resolve to a goal");
-        let cursor = NodeCursor::from_path(env, &node_path);
-        (
-            env.bindings.clone(),
-            cursor
-                .goal_env()
-                .expect("selected line should have goal bindings")
-                .bindings
-                .clone(),
-        )
+        (module.bindings.clone(), entry.bindings.clone())
     };
 
     let expr =

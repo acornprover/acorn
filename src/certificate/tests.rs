@@ -98,18 +98,21 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
         .load_module_by_name("main")
         .expect("module should load");
     let (bindings, kernel_context) = {
-        let env = match project.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
+        match project.get_module_by_id(module_id) {
+            LoadState::Ok(_) => {}
             LoadState::Error(e) => panic!("module loading error: {}", e),
             _ => panic!("unexpected module load state"),
-        };
-        let node_path = env
-            .path_for_line(line - 1)
-            .expect("selected line should resolve to a node path");
-        let cursor = crate::elaborator::node::NodeCursor::from_path(env, &node_path);
-        let goal = cursor.goal().expect("selected line should have a goal");
-        let (_, entry) = project
-            .lowered_goal_for_goal(goal)
+        }
+        let internal_line = line - 1;
+        let lowered = project
+            .get_lowered_module(module_id)
+            .expect("selected module should be lowered");
+        let (_, entry) = lowered
+            .goals()
+            .find(|(_, entry)| {
+                let goal = &entry.lowered_goal.goal;
+                goal.first_line <= internal_line && internal_line <= goal.last_line
+            })
             .expect("selected line should have a lowered goal");
         (
             entry.bindings.clone(),
@@ -1265,18 +1268,16 @@ fn test_parsed_claim_matches_definition_clause() {
     let module_id = project
         .load_module_by_name("main")
         .expect("module should load");
-    let env = match project.get_module_by_id(module_id) {
-        LoadState::Ok(env) => env,
+    match project.get_module_by_id(module_id) {
+        LoadState::Ok(_) => {}
         LoadState::Error(e) => panic!("module loading error: {}", e),
         _ => panic!("unexpected module load state"),
-    };
-    let cursor = env.get_node_by_goal_name("goal");
-    let goal = cursor.goal().expect("expected goal");
+    }
     let lowered = project
-        .get_lowered_module(goal.module_id)
+        .get_lowered_module(module_id)
         .expect("lowered module should be available");
-    let (goal_id, entry) = project
-        .lowered_goal_for_goal(goal)
+    let (goal_id, entry) = lowered
+        .goal_by_name("goal")
         .expect("lowered goal should be available");
     let normalized_facts = lowered
         .visible_facts_for_goal(goal_id)

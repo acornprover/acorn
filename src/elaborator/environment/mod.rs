@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_goal_bindings_ignore_later_imports() {
-        let mut project = Project::new_mock();
+        let mut project = Project::new_mock_ide();
         project.mock(
             "/mock/common.ac",
             r#"
@@ -1240,7 +1240,7 @@ mod tests {
 
         let module_id = project.load_module_by_name("main").expect("load failed");
         let env = match project.get_module_by_id(module_id) {
-            LoadState::Ok(env) => env,
+            LoadState::Ok(module) => module.env().expect("expected retained environment"),
             LoadState::Error(e) => panic!("error: {}", e),
             _ => panic!("no module"),
         };

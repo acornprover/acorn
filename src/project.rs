@@ -150,6 +150,26 @@ mod tests {
             .to_string()
             .contains("module has more than 500 exported declarations"));
     }
+
+    #[test]
+    fn mock_verify_project_keeps_lowered_module_but_drops_environment() {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", "theorem goal { true }\n");
+        let module_id = project.load_module_by_name("main").unwrap();
+
+        assert!(project.get_lowered_module(module_id).is_some());
+        assert!(project.get_env_by_id(module_id).is_none());
+    }
+
+    #[test]
+    fn mock_ide_project_retains_environment() {
+        let mut project = Project::new_mock_ide();
+        project.mock("/mock/main.ac", "theorem goal { true }\n");
+        let module_id = project.load_module_by_name("main").unwrap();
+
+        assert!(project.get_lowered_module(module_id).is_some());
+        assert!(project.get_env_by_id(module_id).is_some());
+    }
 }
 
 /// Configuration options for the project.
@@ -406,10 +426,19 @@ impl Project {
 
     // Create a Project where nothing can be imported.
     pub fn new_mock() -> Project {
+        Self::new_mock_with_usage_mode(UsageMode::Verify)
+    }
+
+    #[cfg(test)]
+    pub fn new_mock_ide() -> Project {
+        Self::new_mock_with_usage_mode(UsageMode::Ide)
+    }
+
+    fn new_mock_with_usage_mode(usage_mode: UsageMode) -> Project {
         let mock_dir = PathBuf::from(localize_mock_filename("/mock"));
         let build_dir = mock_dir.join("build");
         let config = ProjectConfig {
-            usage_mode: UsageMode::Verify,
+            usage_mode,
             use_filesystem: false,
             read_cache: false,
             write_cache: false,
@@ -1911,7 +1940,7 @@ impl Project {
         // We ignore errors here since some facts may intentionally fail to normalize
         // (e.g., exists over uninhabited types in test cases).
         let lowering = env.run_lowering_pass(self);
-        if self.config.usage_mode == UsageMode::Check {
+        if !self.config.usage_mode.keeps_ide_metadata() {
             env.discard_ide_metadata();
         }
 
@@ -1919,11 +1948,7 @@ impl Project {
         content_hasher.update(text.as_bytes());
         let content_hash = content_hasher.finalize();
         let bindings = env.bindings.clone();
-        let retained_env = if self.config.usage_mode == UsageMode::Check {
-            None
-        } else {
-            Some(env)
-        };
+        let retained_env = self.config.usage_mode.keeps_ide_metadata().then_some(env);
         self.modules[module_id.get() as usize].load_ok(
             bindings,
             lowering.module,
@@ -2353,13 +2378,15 @@ impl Project {
 
         let module_id = self.expect_ok(module_name);
         let expression = Expression::expect_value(input);
-        let env = self.get_env_by_id(module_id).expect("no env");
-        let value =
-            match Evaluator::new(self, &env.bindings, None).evaluate_value(&expression, None) {
-                Ok(value) => value,
-                Err(e) => panic!("evaluation error: {}", e),
-            };
-        CodeGenerator::expect(&env.bindings, input, &value, expected);
+        let bindings = match self.get_module_by_id(module_id) {
+            LoadState::Ok(module) => &module.bindings,
+            _ => panic!("no module"),
+        };
+        let value = match Evaluator::new(self, bindings, None).evaluate_value(&expression, None) {
+            Ok(value) => value,
+            Err(e) => panic!("evaluation error: {}", e),
+        };
+        CodeGenerator::expect(bindings, input, &value, expected);
     }
 
     #[cfg(test)]
@@ -2373,11 +2400,14 @@ impl Project {
         use crate::code_generator::CodeGenerator;
 
         let module_id = self.expect_ok(module_name);
-        let env = self.get_env_by_id(module_id).expect("no env");
-        let node = env.get_node_by_goal_name(theorem_name);
-        let goal_context = node.goal().unwrap();
-        let value = &goal_context.proposition.value;
+        let lowered = self
+            .get_lowered_module(module_id)
+            .expect("missing lowered module");
+        let (_, entry) = lowered
+            .goal_by_name(theorem_name)
+            .expect("missing lowered goal");
+        let value = &entry.lowered_goal.goal.proposition.value;
         let fake_input = format!("<{}>", theorem_name);
-        CodeGenerator::expect(&node.env().bindings, &fake_input, &value, expected);
+        CodeGenerator::expect(&entry.bindings, &fake_input, value, expected);
     }
 }

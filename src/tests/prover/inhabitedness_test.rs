@@ -254,22 +254,26 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
     );
 
     let module_id = p.load_module_by_name("main").expect("load failed");
-    let env = match p.get_module_by_id(module_id) {
-        crate::module::LoadState::Ok(env) => env,
+    let module = match p.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(module) => module,
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
 
     // Check that Monoid is NOT in name_to_typeclass
     assert!(
-        !env.bindings.has_typeclass_name("Monoid"),
+        !module.bindings.has_typeclass_name("Monoid"),
         "Monoid should NOT be in name_to_typeclass for main module"
     );
 
     // Run the prover and generate a certificate
-    let cursor = env.iter_goals().next().expect("expected a goal in main");
+    let (goal_id, _) = module
+        .lowered
+        .goals()
+        .next()
+        .expect("expected a goal in main");
     let (mut processor, bindings, normalized_goal) =
-        processor_for_cursor(&p, &cursor).expect("processor setup failed");
+        processor_for_lowered_goal(&p, module_id, goal_id).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
@@ -334,31 +338,28 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
     let mut project = Project::new_mock();
     project.mock("/mock/main.ac", text);
     let module_id = project.load_module_by_name("main").expect("load failed");
-    let env = match project.get_module_by_id(module_id) {
-        crate::module::LoadState::Ok(env) => env,
+    let module = match project.get_module_by_id(module_id) {
+        crate::module::LoadState::Ok(module) => module,
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
-    let cursor = env
-        .iter_goals()
-        .find(|cursor| {
-            cursor
-                .goal()
-                .map(|goal| goal.name.starts_with("exists(k0: Subgroup["))
-                .unwrap_or(false)
+    let (goal_id, entry) = module
+        .lowered
+        .goals()
+        .find(|(_, entry)| {
+            entry
+                .lowered_goal
+                .goal
+                .name
+                .starts_with("exists(k0: Subgroup[")
         })
         .expect("expected subgroup existence goal");
     assert!(
-        cursor
-            .goal()
-            .expect("expected concrete subgroup goal")
-            .proposition
-            .params
-            .is_empty(),
+        entry.lowered_goal.goal.proposition.params.is_empty(),
         "let ... satisfy should create a concrete block goal rather than a parameterized goal"
     );
     let (mut processor, bindings, normalized_goal) =
-        processor_for_cursor(&project, &cursor).expect("processor setup failed");
+        processor_for_lowered_goal(&project, module_id, goal_id).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
 
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
