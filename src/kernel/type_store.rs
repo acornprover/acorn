@@ -7,6 +7,7 @@ use im::Vector as ImVector;
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, DependentTypeArg, FunctionType, TypeParam, Typeclass,
 };
+use crate::elaborator::acorn_value::AcornValue;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
@@ -192,6 +193,7 @@ impl TypeStore {
     fn param_kinds_for_dependent_args(&mut self, args: &[DependentTypeArg]) -> Vec<Term> {
         let mut param_kinds = vec![];
         let mut type_var_map = StdHashMap::new();
+        let mut value_var_stack = vec![];
         let mut type_param_count: AtomId = 0;
         for arg in args {
             match arg {
@@ -207,13 +209,104 @@ impl TypeStore {
                     let value_type = value.get_type();
                     self.add_type_internal(&value_type);
                     let kind = self
-                        .to_type_term_with_vars(&value_type, Some(&type_var_map))
-                        .convert_free_to_bound(type_param_count as u16);
+                        .to_type_term_with_vars_and_value_stack(
+                            &value_type,
+                            Some(&type_var_map),
+                            &value_var_stack,
+                        )
+                        .convert_free_to_bound(
+                            type_param_count as u16 + value_var_stack.len() as u16,
+                        );
                     param_kinds.push(kind);
+                    value_var_stack.push(Term::atom(Atom::FreeVariable(
+                        type_param_count + value_var_stack.len() as AtomId,
+                    )));
                 }
             }
         }
         param_kinds
+    }
+
+    fn lower_dependent_type_value_arg(value: &AcornValue, value_stack: &[Term]) -> Term {
+        match value {
+            AcornValue::Variable(i, _) => value_stack.get(*i as usize).cloned().unwrap_or_else(|| {
+                panic!(
+                    "dependent type value argument x{} is out of scope while registering parameter kinds",
+                    i
+                )
+            }),
+            _ => panic!(
+                "non-variable dependent type argument {} cannot be lowered through TypeStore directly",
+                value
+            ),
+        }
+    }
+
+    fn to_type_term_with_vars_and_value_stack(
+        &self,
+        acorn_type: &AcornType,
+        type_var_map: Option<&StdHashMap<String, (AtomId, Term)>>,
+        value_stack: &[Term],
+    ) -> Term {
+        match acorn_type {
+            AcornType::Data(datatype, params) if !params.is_empty() => {
+                let constructor_ground = self
+                    .datatype_to_ground_id
+                    .get(datatype)
+                    .unwrap_or_else(|| panic!("Data type {} not registered", datatype.name));
+                let head = Term::ground_type(*constructor_ground);
+                let args: Vec<Term> = params
+                    .iter()
+                    .map(|param| {
+                        self.to_type_term_with_vars_and_value_stack(
+                            param,
+                            type_var_map,
+                            value_stack,
+                        )
+                    })
+                    .collect();
+                Term::type_application(head, args)
+            }
+            AcornType::Family(datatype, args) => {
+                let constructor_ground = self
+                    .datatype_to_ground_id
+                    .get(datatype)
+                    .unwrap_or_else(|| panic!("Data type {} not registered", datatype.name));
+                let head = Term::ground_type(*constructor_ground);
+                let args: Vec<Term> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => self
+                            .to_type_term_with_vars_and_value_stack(
+                                acorn_type,
+                                type_var_map,
+                                value_stack,
+                            ),
+                        DependentTypeArg::Value(value) => {
+                            Self::lower_dependent_type_value_arg(value, value_stack)
+                        }
+                    })
+                    .collect();
+                Term::type_application(head, args)
+            }
+            AcornType::Function(ft) => {
+                let mut result = self.to_type_term_with_vars_and_value_stack(
+                    &ft.return_type,
+                    type_var_map,
+                    value_stack,
+                );
+                for arg_type in ft.arg_types.iter().rev() {
+                    let arg_type_term = self.to_type_term_with_vars_and_value_stack(
+                        arg_type,
+                        type_var_map,
+                        value_stack,
+                    );
+                    result = Term::pi(arg_type_term, result);
+                }
+                result
+            }
+            _ => self.to_type_term_with_vars(acorn_type, type_var_map),
+        }
     }
 
     fn update_datatype_param_kinds(&mut self, datatype: &Datatype, param_kinds: Vec<Term>) {
@@ -1775,6 +1868,65 @@ mod tests {
         assert_eq!(param_kinds.len(), 2);
         assert!(param_kinds[0].as_ref().is_type_param_kind());
         assert!(!param_kinds[1].as_ref().is_type_param_kind());
+    }
+
+    #[test]
+    fn test_family_value_param_kind_can_depend_on_earlier_value_param() {
+        let mut store = TypeStore::new();
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        store.add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        store.set_datatype_arity(&set_datatype, 1);
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let nested_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "NestedSubspace".to_string(),
+        };
+        let typeclass = Typeclass {
+            module_id: ModuleId(0),
+            name: "TopologicalSpace".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: Some(typeclass),
+        };
+        let t = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t.clone()]);
+        let a = AcornValue::Variable(0, set_t.clone());
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t.clone()),
+                DependentTypeArg::Value(a.clone()),
+            ],
+        );
+        store.add_type(&subspace_t_a);
+        let set_subspace_t_a = AcornType::Data(set_datatype, vec![subspace_t_a]);
+        let u = AcornValue::Variable(1, set_subspace_t_a.clone());
+        let nested_type = AcornType::Family(
+            nested_datatype,
+            vec![
+                DependentTypeArg::Type(t),
+                DependentTypeArg::Value(a),
+                DependentTypeArg::Value(u),
+            ],
+        );
+
+        store.add_type(&nested_type);
+
+        let ground_id = store
+            .get_ground_id_by_name("NestedSubspace")
+            .expect("NestedSubspace should be registered");
+        let param_kinds = store.get_param_kinds(ground_id);
+        assert_eq!(param_kinds.len(), 3);
+        assert!(param_kinds[0].as_ref().is_type_param_kind());
+        assert!(!param_kinds[1].as_ref().is_type_param_kind());
+        assert!(!param_kinds[2].as_ref().is_type_param_kind());
     }
 
     #[test]

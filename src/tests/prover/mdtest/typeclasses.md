@@ -231,6 +231,34 @@ parameter `a: Set[T]` when replaying the `subspace_open` definition.
     }
 ```
 
+## Nested Dependent Value Parameter Constraint
+
+Nested value parameters should lower without replacing the outer value
+parameter `a: Set[T]` by the later dependent parameter
+`u: Set[Subspace[T, a]]`.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    structure NestedSubspace[T: TopologicalSpace, a: Set[T], u: Set[Subspace[T, a]]] {
+        point: Subspace[T, a]
+    } constraint {
+        u.contains(point)
+    }
+```
+
 ## Dependent Value Parameter Family Predicate Hypothesis
 
 A theorem with both a structure value parameter `a: Set[T]` and a function

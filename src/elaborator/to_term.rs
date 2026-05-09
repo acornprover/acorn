@@ -42,6 +42,21 @@ pub fn build_type_var_map(
         .collect()
 }
 
+/// Wraps a body type in Pi binders for an ordered telescope.
+///
+/// `binder_types[i]` may refer to only earlier binders as `FreeVariable(0..i)`.
+/// It is the input type of binder `i`, not a term under the later binders, so
+/// later binders must not affect its de Bruijn depth. The body is under the
+/// whole telescope and may refer to any binder.
+fn pi_from_telescope_binders(binder_types: &[Term], body_type: Term) -> Term {
+    let mut result = body_type.convert_free_to_bound(binder_types.len() as u16);
+    for i in (0..binder_types.len()).rev() {
+        let input_type = binder_types[i].convert_free_to_bound(i as u16);
+        result = Term::pi(input_type, result);
+    }
+    result
+}
+
 /// Lowers an `AcornType` into a kernel `Term`.
 ///
 /// This handles:
@@ -465,14 +480,7 @@ pub(crate) fn register_value_symbols(
                 Some(&type_var_map),
                 &value_var_stack,
             );
-            let total_binders = binder_types.len() as u16;
-            let mut result = body_type.convert_free_to_bound(total_binders);
-            for i in (0..binder_types.len()).rev() {
-                let depth = (binder_types.len() - 1 - i) as u16;
-                let input_type = binder_types[i].convert_free_to_bound_with_depth(i as u16, depth);
-                result = Term::pi(input_type, result);
-            }
-            result
+            pi_from_telescope_binders(&binder_types, body_type)
         };
 
         let _symbol = kernel_context
@@ -1234,6 +1242,7 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::symbol::Symbol;
     use crate::kernel::symbol_table::NewConstantType;
+    use crate::kernel::types::GroundTypeId;
     use crate::module::ModuleId;
     use crate::project::Project;
     use crate::syntax::expression::Expression;
@@ -1335,6 +1344,38 @@ mod tests {
             term.as_ref().get_head_atom(),
             Atom::Symbol(crate::kernel::symbol::Symbol::Typeclass(_))
         ));
+    }
+
+    #[test]
+    fn test_pi_from_telescope_binders_uses_only_earlier_binders_in_input_types() {
+        let set_head = Term::ground_type(GroundTypeId::test(0));
+        let subspace_head = Term::ground_type(GroundTypeId::test(1));
+        let set = |arg: Term| Term::type_application(set_head.clone(), vec![arg]);
+        let subspace = |typ: Term, value: Term| {
+            Term::type_application(subspace_head.clone(), vec![typ, value])
+        };
+        let free = |i| Term::atom(Atom::FreeVariable(i));
+        let bound = |i| Term::atom(Atom::BoundVariable(i));
+
+        let binder_types = vec![
+            Term::type_sort(),
+            set(free(0)),
+            set(subspace(free(0), free(1))),
+        ];
+        let body_type = Term::pi(subspace(free(0), free(1)), Term::bool_type());
+        let result = pi_from_telescope_binders(&binder_types, body_type);
+
+        let expected = Term::pi(
+            Term::type_sort(),
+            Term::pi(
+                set(bound(0)),
+                Term::pi(
+                    set(subspace(bound(1), bound(0))),
+                    Term::pi(subspace(bound(2), bound(1)), Term::bool_type()),
+                ),
+            ),
+        );
+        assert_eq!(result, expected);
     }
 
     fn assert_term_roundtrip_stable(value: AcornValue) {
