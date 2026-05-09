@@ -145,8 +145,10 @@ impl Environment {
                 .zip(&field_doc_comments)
                 .zip(&ss.fields)
         {
-            let member_fn_type =
-                AcornType::functional(vec![struct_type.clone()], field_type.clone());
+            let member_fn_type = AcornType::functional_from_flat_context(
+                vec![struct_type.clone()],
+                field_type.clone(),
+            );
             let def_str = format!(
                 "{}.{}: {}",
                 ss.name_token.text(),
@@ -169,7 +171,8 @@ impl Environment {
 
         let bind_new = unbound_constraint.is_none();
         let new_fn = if bind_new {
-            let new_fn_type = AcornType::functional(field_types.clone(), struct_type.clone());
+            let new_fn_type =
+                AcornType::functional_from_flat_context(field_types.clone(), struct_type.clone());
             let constructor_info = ConstructorInfo {
                 datatype: datatype.clone(),
                 index: 0,
@@ -209,7 +212,8 @@ impl Environment {
         };
 
         let constraint_fn = if let Some(unbound_constraint) = &unbound_constraint {
-            let constraint_fn_type = AcornType::functional(field_types.clone(), AcornType::Bool);
+            let constraint_fn_type =
+                AcornType::functional_from_flat_context(field_types.clone(), AcornType::Bool);
             let def_str = format!(
                 "{}.constraint: {}",
                 ss.name_token.text(),
@@ -362,8 +366,10 @@ impl Environment {
                     .get_constant_value(&DefinedName::Constant(none_name))
                     .map_err(|e| ss.name_token.error(&e))?;
 
-                let new_fn_type =
-                    AcornType::functional(field_types.clone(), option_struct_type.clone());
+                let new_fn_type = AcornType::functional_from_flat_context(
+                    field_types.clone(),
+                    option_struct_type.clone(),
+                );
                 let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
                 let new_fn = self.bindings.add_datatype_attribute(
                     &datatype,

@@ -60,12 +60,9 @@ impl FunctionApplication {
         if let AcornValue::Constant(constant) = base {
             let num_specialization_args =
                 constant.pending_value_specialization_arg_count(all_args.len());
-            for (i, (arg, arg_type)) in all_args[..num_specialization_args]
-                .iter()
-                .zip(constant.value_param_types.iter())
-                .enumerate()
-            {
-                if !arg.is_type(arg_type) {
+            for (i, arg) in all_args[..num_specialization_args].iter().enumerate() {
+                let arg_type = constant.value_param_type_after_previous_args(i, &all_args);
+                if !arg.is_type(&arg_type) {
                     return Err(format!(
                         "Argument {} has type {}, but expected {}",
                         i,
@@ -135,15 +132,12 @@ impl FunctionApplication {
         all_args: &[AcornValue],
     ) -> (AcornType, usize, AtomId) {
         match base {
-            AcornValue::Constant(constant) if !constant.bound_value_args.is_empty() => (
-                constant.instance_type.clone(),
-                0,
-                constant.bound_value_args.len() as AtomId,
-            ),
+            AcornValue::Constant(constant) if !constant.bound_value_args.is_empty() => {
+                (constant.instance_type.clone(), 0, 0)
+            }
             AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
                 let num_specialization_args =
                     constant.pending_value_specialization_arg_count(all_args.len());
-                let binding_offset = num_specialization_args as AtomId;
                 let visible_prefix_count = constant
                     .visible_value_param_prefix_count()
                     .min(num_specialization_args);
@@ -156,8 +150,8 @@ impl FunctionApplication {
                             AcornType::Function(function_type) => function_type
                                 .applied_type(1)
                                 .bind_values(
-                                    binding_offset,
-                                    binding_offset,
+                                    0,
+                                    0,
                                     std::slice::from_ref(arg),
                                 ),
                             _ => panic!(
@@ -166,7 +160,7 @@ impl FunctionApplication {
                         };
                     }
                 }
-                (function_type, num_specialization_args, binding_offset)
+                (function_type, num_specialization_args, 0)
             }
             _ => (base.get_type(), 0, 0),
         }
@@ -364,12 +358,11 @@ impl ConstantInstance {
                 .min(values.len());
         let mut instance_type = instance_type.bind_value_params(values);
         if visible_prefix_count > 0 {
-            let binding_offset = values.len() as AtomId;
             for value in &values[..visible_prefix_count] {
                 instance_type = match instance_type {
                     AcornType::Function(function_type) => function_type
                         .applied_type(1)
-                        .bind_values(binding_offset, binding_offset, std::slice::from_ref(value)),
+                        .bind_values(0, 0, std::slice::from_ref(value)),
                     _ => instance_type,
                 };
             }
@@ -392,6 +385,10 @@ impl ConstantInstance {
         } else {
             0
         }
+    }
+
+    fn value_param_type_after_previous_args(&self, index: usize, args: &[AcornValue]) -> AcornType {
+        self.value_param_types[index].bind_value_params(&args[..index])
     }
 
     /// Make another constant with the same name as this one.
@@ -436,8 +433,15 @@ impl ConstantInstance {
                     .bind_values(first_binding_index, stack_size, values)
             })
             .collect();
-        if !self.type_param_names.is_empty() && self.type_param_names.len() == params.len() {
-            let named_params: Vec<_> = self.type_param_names.iter().cloned().zip(params).collect();
+        if !self.bound_value_args.is_empty()
+            || (!self.type_param_names.is_empty() && self.type_param_names.len() == params.len())
+        {
+            let named_params: Vec<_> = self
+                .type_param_names
+                .iter()
+                .cloned()
+                .zip(params.clone())
+                .collect();
             let generic_type = if self.bound_value_args.is_empty() {
                 self.generic_type
                     .bind_values(first_binding_index, stack_size, values)
@@ -1592,6 +1596,167 @@ impl AcornValue {
                     .bound_value_args
                     .into_iter()
                     .map(|value| value.insert_stack(index, increment))
+                    .collect(),
+            }),
+            AcornValue::Bool(_) => self,
+        }
+    }
+
+    pub(crate) fn move_ambient_after_visible(
+        self,
+        base: AtomId,
+        ambient_count: AtomId,
+        visible_count: AtomId,
+    ) -> AcornValue {
+        let move_index = |i: AtomId| {
+            if i >= base && i < base + ambient_count {
+                i + visible_count
+            } else if i >= base + ambient_count && i < base + ambient_count + visible_count {
+                i - ambient_count
+            } else {
+                i
+            }
+        };
+
+        match self {
+            AcornValue::Variable(i, var_type) => AcornValue::Variable(
+                move_index(i),
+                var_type.move_ambient_after_visible(base, ambient_count, visible_count),
+            ),
+            AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
+                function: Box::new(app.function.move_ambient_after_visible(
+                    base,
+                    ambient_count,
+                    visible_count,
+                )),
+                args: app
+                    .args
+                    .into_iter()
+                    .map(|x| x.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(app.function.move_ambient_after_visible(
+                    base,
+                    ambient_count,
+                    visible_count,
+                )),
+                type_param_names: app.type_param_names,
+                type_param_constraints: app.type_param_constraints,
+                type_args: app
+                    .type_args
+                    .iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+            }),
+            AcornValue::Lambda(args, return_value) => AcornValue::Lambda(
+                args.into_iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+                Box::new(return_value.move_ambient_after_visible(
+                    base,
+                    ambient_count,
+                    visible_count,
+                )),
+            ),
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                op,
+                Box::new(left.move_ambient_after_visible(base, ambient_count, visible_count)),
+                Box::new(right.move_ambient_after_visible(base, ambient_count, visible_count)),
+            ),
+            AcornValue::Not(x) => AcornValue::Not(Box::new(x.move_ambient_after_visible(
+                base,
+                ambient_count,
+                visible_count,
+            ))),
+            AcornValue::Try(x, t) => AcornValue::Try(
+                Box::new(x.move_ambient_after_visible(base, ambient_count, visible_count)),
+                t.move_ambient_after_visible(base, ambient_count, visible_count),
+            ),
+            AcornValue::ForAll(quants, value) => AcornValue::ForAll(
+                quants
+                    .into_iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+                Box::new(value.move_ambient_after_visible(base, ambient_count, visible_count)),
+            ),
+            AcornValue::Exists(quants, value) => AcornValue::Exists(
+                quants
+                    .into_iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+                Box::new(value.move_ambient_after_visible(base, ambient_count, visible_count)),
+            ),
+            AcornValue::Grouping(value) => AcornValue::Grouping(Box::new(
+                value.move_ambient_after_visible(base, ambient_count, visible_count),
+            )),
+            AcornValue::IfThenElse(cond, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(cond.move_ambient_after_visible(base, ambient_count, visible_count)),
+                Box::new(if_value.move_ambient_after_visible(base, ambient_count, visible_count)),
+                Box::new(else_value.move_ambient_after_visible(base, ambient_count, visible_count)),
+            ),
+            AcornValue::Match(scrutinee, cases) => {
+                let new_scrutinee =
+                    scrutinee.move_ambient_after_visible(base, ambient_count, visible_count);
+                let new_cases = cases
+                    .into_iter()
+                    .map(|case| MatchCase {
+                        new_vars: case
+                            .new_vars
+                            .into_iter()
+                            .map(|t| {
+                                t.move_ambient_after_visible(base, ambient_count, visible_count)
+                            })
+                            .collect(),
+                        pattern: case.pattern.move_ambient_after_visible(
+                            base,
+                            ambient_count,
+                            visible_count,
+                        ),
+                        result: case.result.move_ambient_after_visible(
+                            base,
+                            ambient_count,
+                            visible_count,
+                        ),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    })
+                    .collect();
+                AcornValue::Match(Box::new(new_scrutinee), new_cases)
+            }
+            AcornValue::Constant(c) => AcornValue::Constant(ConstantInstance {
+                name: c.name,
+                params: c
+                    .params
+                    .into_iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+                instance_type: c.instance_type.move_ambient_after_visible(
+                    base,
+                    ambient_count,
+                    visible_count,
+                ),
+                generic_type: if c.bound_value_args.is_empty() {
+                    c.generic_type
+                        .move_ambient_after_visible(base, ambient_count, visible_count)
+                } else {
+                    c.generic_type
+                },
+                type_param_names: c.type_param_names,
+                value_param_types: if c.bound_value_args.is_empty() {
+                    c.value_param_types
+                        .into_iter()
+                        .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                        .collect()
+                } else {
+                    c.value_param_types
+                },
+                bound_value_args: c
+                    .bound_value_args
+                    .into_iter()
+                    .map(|value| {
+                        value.move_ambient_after_visible(base, ambient_count, visible_count)
+                    })
                     .collect(),
             }),
             AcornValue::Bool(_) => self,
@@ -3071,7 +3236,16 @@ impl AcornValue {
     /// a statement that they are equal for all arguments.
     /// If this is a function definition, return the inflated version.
     pub fn inflate_function_definition(&self, definition: AcornValue) -> AcornValue {
-        if let AcornValue::Lambda(acorn_types, return_value) = definition {
+        let mut acorn_types = vec![];
+        let mut body = definition;
+        while let AcornValue::Lambda(args, return_value) = body {
+            acorn_types.extend(args);
+            body = *return_value;
+        }
+
+        if acorn_types.is_empty() {
+            AcornValue::equals(self.clone(), body)
+        } else {
             let args: Vec<_> = acorn_types
                 .iter()
                 .enumerate()
@@ -3083,11 +3257,9 @@ impl AcornValue {
                 Box::new(AcornValue::Binary(
                     BinaryOp::Equals,
                     Box::new(app),
-                    return_value,
+                    Box::new(body),
                 )),
             )
-        } else {
-            AcornValue::equals(self.clone(), definition)
         }
     }
 
@@ -3098,6 +3270,19 @@ impl AcornValue {
         source: &dyn ErrorContext,
     ) -> error::Result<()> {
         if let Some(t) = expected_type {
+            if let AcornValue::Lambda(args, return_value) = self {
+                let actual_type = self.get_type();
+                if &actual_type == t {
+                    return Ok(());
+                }
+                let shifted_return_type = return_value
+                    .get_type()
+                    .insert_stack(0, args.len() as AtomId);
+                let shifted_type = AcornType::functional(args.clone(), shifted_return_type);
+                if &shifted_type == t {
+                    return Ok(());
+                }
+            }
             self.get_type().check_eq(Some(t), source)
         } else {
             Ok(())
@@ -3121,12 +3306,9 @@ impl AcornValue {
             AcornValue::Constant(constant) if !constant.value_param_types.is_empty() => {
                 let num_specialization_args =
                     constant.pending_value_specialization_arg_count(args.len());
-                let binding_offset = num_specialization_args as AtomId;
-                for (arg, arg_type) in args[..num_specialization_args]
-                    .iter()
-                    .zip(constant.value_param_types.iter())
-                {
-                    arg.check_type(Some(arg_type), source)?;
+                for (i, arg) in args[..num_specialization_args].iter().enumerate() {
+                    let arg_type = constant.value_param_type_after_previous_args(i, &args);
+                    arg.check_type(Some(&arg_type), source)?;
                 }
                 let visible_prefix_count = constant
                     .visible_value_param_prefix_count()
@@ -3137,13 +3319,9 @@ impl AcornValue {
                 if visible_prefix_count > 0 {
                     for arg in &args[..visible_prefix_count] {
                         function_type = match function_type {
-                            AcornType::Function(function_type) => {
-                                function_type.applied_type(1).bind_values(
-                                    binding_offset,
-                                    binding_offset,
-                                    std::slice::from_ref(arg),
-                                )
-                            }
+                            AcornType::Function(function_type) => function_type
+                                .applied_type(1)
+                                .bind_values(0, 0, std::slice::from_ref(arg)),
                             _ => {
                                 return Err(
                                     source.error("cannot apply visible dependent value parameters")
@@ -3800,5 +3978,62 @@ mod tests {
             panic!("expected function type");
         };
         assert_eq!(function_type.arg_types[0], set_subspace_t_a);
+    }
+
+    #[test]
+    fn test_hidden_value_params_do_not_capture_visible_receiver_in_return_type() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let nested_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nested".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param.clone());
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+        let a_type = set_t.clone();
+        let a = AcornValue::Variable(0, a_type.clone());
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(a.clone()),
+            ],
+        );
+        let u_type = AcornType::Data(set_datatype, vec![subspace_t_a.clone()]);
+        let u = AcornValue::Variable(1, u_type.clone());
+        let nested_t_a_u = AcornType::Family(
+            nested_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(a.clone()),
+                DependentTypeArg::Value(u.clone()),
+            ],
+        );
+        let point_type = AcornType::functional_from_flat_context(
+            vec![nested_t_a_u.clone()],
+            subspace_t_a.clone(),
+        );
+        let point = AcornValue::constant(
+            ConstantName::datatype_attr(ModuleId(0), nested_datatype, "point"),
+            vec![t_type],
+            point_type.clone(),
+            point_type,
+            vec!["T".to_string()],
+            vec![a_type, u_type],
+        );
+        let receiver = AcornValue::Variable(2, nested_t_a_u);
+        let applied = AcornValue::apply(point, vec![a, u, receiver]);
+
+        assert_eq!(applied.get_type(), subspace_t_a);
     }
 }

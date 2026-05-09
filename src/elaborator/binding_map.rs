@@ -2153,8 +2153,14 @@ impl BindingMap {
         };
 
         if let Some(function_name) = function_name {
-            let mut fn_type =
-                AcornType::functional(internal_arg_types.clone(), internal_value_type.clone());
+            let ambient_value_param_count = datatype_value_params
+                .map(|params| params.len() as AtomId)
+                .unwrap_or(0);
+            let mut fn_type = AcornType::functional_from_scoped_context(
+                internal_arg_types.clone(),
+                internal_value_type.clone(),
+                ambient_value_param_count,
+            );
             // The function is bound to its name locally, to handle recursive definitions.
             // Internally to the definition, this function is not polymorphic, but it may have
             // type parameters from both the datatype (if it's a method) and the function itself.

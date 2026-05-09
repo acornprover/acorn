@@ -139,17 +139,17 @@ fn lower_type_to_term_with_stack(
             Term::type_application(Term::ground_type(ground_id), arg_terms)
         }
         AcornType::Function(ft) => {
-            let function_stack =
-                |num_visible_args: usize| {
-                    let mut function_stack: Vec<Term> = stack
+            let function_stack = |num_visible_args: usize| {
+                let mut function_stack: Vec<Term> = (0..num_visible_args)
+                    .map(|i| Term::atom(Atom::BoundVariable((num_visible_args - 1 - i) as u16)))
+                    .collect();
+                function_stack.extend(
+                    stack
                         .iter()
-                        .map(|term| term.shift_bound(0, num_visible_args as i16))
-                        .collect();
-                    function_stack.extend((0..num_visible_args).map(|i| {
-                        Term::atom(Atom::BoundVariable((num_visible_args - 1 - i) as u16))
-                    }));
-                    function_stack
-                };
+                        .map(|term| term.shift_bound(0, num_visible_args as i16)),
+                );
+                function_stack
+            };
 
             let return_stack = function_stack(ft.arg_types.len());
             let mut result = lower_type_to_term_with_stack(

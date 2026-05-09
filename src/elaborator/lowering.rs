@@ -390,22 +390,17 @@ impl KernelContext {
                         };
                         context_types.push(kind);
                     }
-                    let value_stack: Vec<_> = instance
-                        .value_params()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| {
-                            Term::atom(Atom::FreeVariable(
-                                (instance.type_params().len() + i) as AtomId,
-                            ))
-                        })
-                        .collect();
-                    for value_param in instance.value_params() {
-                        context_types.push(lower_type_to_term(
+                    let mut value_stack = vec![];
+                    for (i, value_param) in instance.value_params().iter().enumerate() {
+                        context_types.push(lower_type_to_term_with_value_stack(
                             self,
                             &value_param.value_type,
                             Some(&type_var_map),
+                            &value_stack,
                         ));
+                        value_stack.push(Term::atom(Atom::FreeVariable(
+                            (instance.type_params().len() + i) as AtomId,
+                        )));
                     }
                     let target = lower_type_to_term_with_value_stack(
                         self,

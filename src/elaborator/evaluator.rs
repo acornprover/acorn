@@ -574,10 +574,9 @@ impl<'a> Evaluator<'a> {
                         arg_types.push(self.evaluate_type_with_stack(stack, arg_expr)?);
                     }
                     let return_type = self.evaluate_type_with_stack(stack, right)?;
-                    Ok(PotentialType::Resolved(AcornType::functional(
-                        arg_types,
-                        return_type,
-                    )))
+                    Ok(PotentialType::Resolved(
+                        AcornType::functional_from_flat_context(arg_types, return_type),
+                    ))
                 }
                 TokenType::Dot => {
                     let entity = self.evaluate_entity(stack, expression)?;

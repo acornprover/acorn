@@ -194,16 +194,16 @@ impl TypeStore {
         let mut param_kinds = vec![];
         let mut type_var_map = StdHashMap::new();
         let mut value_var_stack = vec![];
-        let mut type_param_count: AtomId = 0;
+        let mut source_param_count: AtomId = 0;
         for arg in args {
             match arg {
                 DependentTypeArg::Type(acorn_type) => {
                     let kind = self.param_kind_for_type_arg(acorn_type);
                     if let AcornType::Variable(param) | AcornType::Arbitrary(param) = acorn_type {
-                        type_var_map.insert(param.name.clone(), (type_param_count, kind.clone()));
+                        type_var_map.insert(param.name.clone(), (source_param_count, kind.clone()));
                     }
-                    type_param_count += 1;
                     param_kinds.push(kind);
+                    source_param_count += 1;
                 }
                 DependentTypeArg::Value(value) => {
                     let value_type = value.get_type();
@@ -214,13 +214,10 @@ impl TypeStore {
                             Some(&type_var_map),
                             &value_var_stack,
                         )
-                        .convert_free_to_bound(
-                            type_param_count as u16 + value_var_stack.len() as u16,
-                        );
+                        .convert_free_to_bound(source_param_count as u16);
                     param_kinds.push(kind);
-                    value_var_stack.push(Term::atom(Atom::FreeVariable(
-                        type_param_count + value_var_stack.len() as AtomId,
-                    )));
+                    value_var_stack.push(Term::atom(Atom::FreeVariable(source_param_count)));
+                    source_param_count += 1;
                 }
             }
         }
@@ -290,16 +287,30 @@ impl TypeStore {
                 Term::type_application(head, args)
             }
             AcornType::Function(ft) => {
+                let function_stack = |num_visible_args: usize| {
+                    let mut function_stack: Vec<Term> = (0..num_visible_args)
+                        .map(|i| Term::atom(Atom::BoundVariable((num_visible_args - 1 - i) as u16)))
+                        .collect();
+                    function_stack.extend(
+                        value_stack
+                            .iter()
+                            .map(|term| term.shift_bound(0, num_visible_args as i16)),
+                    );
+                    function_stack
+                };
+
+                let return_stack = function_stack(ft.arg_types.len());
                 let mut result = self.to_type_term_with_vars_and_value_stack(
                     &ft.return_type,
                     type_var_map,
-                    value_stack,
+                    &return_stack,
                 );
-                for arg_type in ft.arg_types.iter().rev() {
+                for i in (0..ft.arg_types.len()).rev() {
+                    let arg_stack = function_stack(i);
                     let arg_type_term = self.to_type_term_with_vars_and_value_stack(
-                        arg_type,
+                        &ft.arg_types[i],
                         type_var_map,
-                        value_stack,
+                        &arg_stack,
                     );
                     result = Term::pi(arg_type_term, result);
                 }
