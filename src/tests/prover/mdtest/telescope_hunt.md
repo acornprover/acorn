@@ -148,3 +148,33 @@
         x.id = x.id
     }
 ```
+
+## Function Value Parameter Returning Dependent Family
+
+The family value parameter `f` has a function type whose return type mentions
+the earlier family value parameter `a`. Projecting `x.key` should infer the
+hidden family value arguments without confusing the shifted reference to `a`
+inside `f`'s return type with `f` itself.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    structure Fiber[T, U, a: Set[T], f: U -> Subspace[T, a]] {
+        key: U
+    } constraint {
+        a.contains(f(key).value)
+    }
+
+    theorem fiber_key_projection_typechecks[T, U, a: Set[T], f: U -> Subspace[T, a]](
+        x: Fiber[T, U, a, f]) {
+        x.key = x.key
+    }
+```
