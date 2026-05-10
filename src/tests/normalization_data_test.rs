@@ -824,8 +824,8 @@ fn load_mock_module(code: &str) -> (Project, BindingMap, KernelContext) {
         .expect("module should load");
     let (bindings, kernel_context) = match project.get_module_by_id(module_id) {
         LoadState::Ok(module) => (
-            module.bindings.clone(),
-            module.lowered.final_kernel_context.clone(),
+            module.bindings().clone(),
+            module.export.final_kernel_context.clone(),
         ),
         LoadState::Error(error) => panic!("module loading error: {}", error),
         _ => panic!("unexpected module load state"),

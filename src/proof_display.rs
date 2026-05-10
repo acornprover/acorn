@@ -55,7 +55,7 @@ mod tests {
         let bindings = project
             .get_loaded_module_by_id(module_id)
             .unwrap()
-            .bindings
+            .bindings()
             .clone();
 
         let long_statement = "x".repeat(MAX_DISPLAY_STATEMENT_CHARS + 25);

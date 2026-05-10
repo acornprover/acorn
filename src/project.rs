@@ -19,7 +19,9 @@ use crate::elaborator::environment::Environment;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
-use crate::elaborator::lowered_module::{LoweredGoalEntry, LoweredGoalId, LoweredModule};
+use crate::elaborator::lowered_module::{
+    LoweredGoalEntry, LoweredGoalId, LoweredModule, ModuleExport,
+};
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
@@ -169,6 +171,32 @@ mod tests {
 
         assert!(project.get_lowered_module(module_id).is_some());
         assert!(project.get_env_by_id(module_id).is_some());
+    }
+
+    #[test]
+    fn batch_drain_keeps_exports_and_drops_module_work() {
+        let mut project = Project::new_mock();
+        project.mock("/mock/dep.ac", "theorem dep_truth { true }\n");
+        project.mock(
+            "/mock/main.ac",
+            "from dep import dep_truth\ntheorem goal { dep_truth }\n",
+        );
+        project.add_target_by_name("main").unwrap();
+        let main_id = project.get_module_id_by_name("main").unwrap();
+        let dep_id = project.get_module_id_by_name("dep").unwrap();
+
+        let mut targets = project.targets.iter().cloned().collect::<Vec<_>>();
+        targets.sort();
+        let work = project.take_lowered_modules_for_targets(&targets);
+
+        assert!(work
+            .iter()
+            .any(|(descriptor, _)| descriptor == &ModuleDescriptor::name("main")));
+        assert!(project.get_module_export(main_id).is_some());
+        assert!(project.get_module_export(dep_id).is_some());
+        assert!(project.get_lowered_module(main_id).is_none());
+        assert!(project.get_lowered_module(dep_id).is_none());
+        assert!(project.get_module_export(dep_id).unwrap().fact_count() > 0);
     }
 }
 
@@ -1076,8 +1104,33 @@ impl Project {
         }
     }
 
+    pub fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        Some(&self.get_loaded_module_by_id(module_id)?.export)
+    }
+
     pub fn get_lowered_module(&self, module_id: ModuleId) -> Option<&LoweredModule> {
-        Some(&self.get_loaded_module_by_id(module_id)?.lowered)
+        self.get_loaded_module_by_id(module_id)?.lowered()
+    }
+
+    pub fn take_lowered_modules_for_targets(
+        &mut self,
+        targets: &[ModuleDescriptor],
+    ) -> Vec<(ModuleDescriptor, LoweredModule)> {
+        let target_set: HashSet<_> = targets.iter().cloned().collect();
+        let mut lowered = Vec::new();
+        for module in &mut self.modules {
+            let LoadState::Ok(loaded) = &mut module.state else {
+                continue;
+            };
+            let Some(work) = loaded.lowered.take() else {
+                continue;
+            };
+            if target_set.contains(&module.descriptor) {
+                lowered.push((module.descriptor.clone(), work));
+            }
+        }
+        lowered.sort_by(|(left, _), (right, _)| left.cmp(right));
+        lowered
     }
 
     pub fn lowered_goal_for_goal(&self, goal: &Goal) -> Option<(LoweredGoalId, &LoweredGoalEntry)> {
@@ -1948,10 +2001,11 @@ impl Project {
         content_hasher.update(text.as_bytes());
         let content_hash = content_hasher.finalize();
         let bindings = env.bindings.clone();
+        let export = ModuleExport::from_lowered(bindings, &lowering.module, self.config.usage_mode);
         let retained_env = self.config.usage_mode.keeps_ide_metadata().then_some(env);
         self.modules[module_id.get() as usize].load_ok(
-            bindings,
-            lowering.module,
+            export,
+            Some(lowering.module),
             retained_env,
             content_hash,
         );
@@ -2008,7 +2062,7 @@ impl Project {
 
     pub fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap> {
         if let LoadState::Ok(module) = self.get_module_by_id(module_id) {
-            Some(&module.bindings)
+            Some(&module.export.bindings)
         } else {
             None
         }
@@ -2379,7 +2433,7 @@ impl Project {
         let module_id = self.expect_ok(module_name);
         let expression = Expression::expect_value(input);
         let bindings = match self.get_module_by_id(module_id) {
-            LoadState::Ok(module) => &module.bindings,
+            LoadState::Ok(module) => module.bindings(),
             _ => panic!("no module"),
         };
         let value = match Evaluator::new(self, bindings, None).evaluate_value(&expression, None) {

@@ -350,6 +350,13 @@ impl Verifier {
             }
         }
         let target_load_time = target_load_start.elapsed();
+        let module_work = if config.usage_mode.is_batch() {
+            let mut build_targets = project.targets.iter().cloned().collect::<Vec<_>>();
+            build_targets.sort();
+            project.take_lowered_modules_for_targets(&build_targets)
+        } else {
+            Vec::new()
+        };
 
         // Unsafe is to make this self-referential
         let project_box = Box::new(project);
@@ -370,6 +377,9 @@ impl Verifier {
 
         if target.is_none() {
             builder.log_secondary_errors = false;
+        }
+        if !module_work.is_empty() {
+            builder.set_module_work(module_work);
         }
 
         Ok(Self {

@@ -178,7 +178,8 @@ fn resolve_print_proof_line_selection(
 
     let goal_lines: Vec<u32> = match project.get_module(&descriptor) {
         LoadState::Ok(module) => module
-            .lowered
+            .lowered()
+            .ok_or_else(|| format!("Error loading target '{}'", target))?
             .goals()
             .map(|(_, entry)| entry.lowered_goal.goal.first_line + 1)
             .collect(),
