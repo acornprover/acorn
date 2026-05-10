@@ -315,3 +315,155 @@ function type.
         make_curried(a)(x, value) = x
     }
 ```
+
+## Constructor With Function Family Value Parameter
+
+The generated `.new` constructor for a structure with a function-valued family
+parameter should specialize the hidden value arguments before replaying the
+projection certificate.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    }
+
+    structure RawFiber[T, U, a: Set[T], f: U -> Subspace[T, a]] {
+        key: U
+    }
+
+    theorem raw_fiber_new_projection[T, U](a: Set[T], f: U -> Subspace[T, a], key: U) {
+        RawFiber[T, U, a, f].new(key).key = key
+    }
+```
+
+## Attribute Let Returns Function Family Value Parameter Result
+
+A function-valued attribute let can return a dependent-family result produced
+by a hidden function-valued family parameter.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    }
+
+    structure RawFiber[T, U, a: Set[T], f: U -> Subspace[T, a]] {
+        key: U
+    }
+
+    attributes RawFiber[T, U, a: Set[T], f: U -> Subspace[T, a]] {
+        let image: RawFiber[T, U, a, f] -> Subspace[T, a] = function(fiber: RawFiber[T, U, a, f]) {
+            f(fiber.key)
+        }
+    }
+
+    theorem raw_fiber_image_attribute[T, U](
+        a: Set[T], f: U -> Subspace[T, a], x: RawFiber[T, U, a, f]) {
+        x.image = f(x.key)
+    }
+```
+
+## Curried Function Family Value Parameter
+
+The hidden function-valued family parameter can itself be curried, with the
+final return type still depending on an earlier family value parameter.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    }
+
+    structure HigherFiber[T, U, a: Set[T], f: U -> T -> Subspace[T, a]] {
+        key: U
+        seed: T
+    }
+
+    attributes HigherFiber[T, U, a: Set[T], f: U -> T -> Subspace[T, a]] {
+        define image(self) -> Subspace[T, a] {
+            f(self.key, self.seed)
+        }
+    }
+
+    theorem higher_fiber_image_attribute[T, U](
+        a: Set[T], f: U -> T -> Subspace[T, a], x: HigherFiber[T, U, a, f]) {
+        x.image = f(x.key, x.seed)
+    }
+```
+
+## Function Argument Mentions Family Value Parameter
+
+A field can itself be a function whose return type depends on the datatype
+family telescope, and a hidden family parameter can consume that field.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    }
+
+    structure FunctionalFiber[T, U, a: Set[T], h: (U -> Subspace[T, a]) -> Subspace[T, a]] {
+        f: U -> Subspace[T, a]
+    }
+
+    attributes FunctionalFiber[T, U, a: Set[T], h: (U -> Subspace[T, a]) -> Subspace[T, a]] {
+        define image(self) -> Subspace[T, a] {
+            h(self.f)
+        }
+    }
+
+    theorem functional_fiber_image_attribute[T, U](
+        a: Set[T], h: (U -> Subspace[T, a]) -> Subspace[T, a],
+        x: FunctionalFiber[T, U, a, h]) {
+        x.image = h(x.f)
+    }
+```
+
+## Later Function Parameter Mentions Earlier Function Parameter
+
+A later function-valued family parameter may take a datatype whose family
+arguments include an earlier function-valued family parameter.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    structure Subspace[T, a: Set[T]] {
+        value: T
+    }
+
+    structure RawFiber[T, U, a: Set[T], f: U -> Subspace[T, a]] {
+        key: U
+    }
+
+    structure Mapper[T, U, a: Set[T], f: U -> Subspace[T, a], g: RawFiber[T, U, a, f] -> Subspace[T, a]] {
+        item: RawFiber[T, U, a, f]
+    }
+
+    attributes Mapper[T, U, a: Set[T], f: U -> Subspace[T, a], g: RawFiber[T, U, a, f] -> Subspace[T, a]] {
+        define image(self) -> Subspace[T, a] {
+            g(self.item)
+        }
+    }
+
+    theorem mapper_image_attribute[T, U](
+        a: Set[T], f: U -> Subspace[T, a],
+        g: RawFiber[T, U, a, f] -> Subspace[T, a],
+        x: Mapper[T, U, a, f, g]) {
+        x.image = g(x.item)
+    }
+```

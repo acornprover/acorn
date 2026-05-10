@@ -1005,6 +1005,54 @@ mod tests {
 
         assert_eq!(source_view, expected_source_view);
     }
+
+    #[test]
+    fn function_to_scoped_context_recurses_into_function_argument_type() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let u_param = TypeParam {
+            name: "U".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let u_type = AcornType::Variable(u_param);
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t)),
+            ],
+        );
+        let nested_function_type = AcornType::functional_from_scoped_context(
+            vec![u_type.clone()],
+            subspace_t_a.clone(),
+            1,
+        );
+        let canonical = AcornType::functional_from_scoped_context(
+            vec![nested_function_type],
+            subspace_t_a.clone(),
+            1,
+        );
+        let expected_source_view = AcornType::functional(
+            vec![AcornType::functional(vec![u_type], subspace_t_a.clone())],
+            subspace_t_a,
+        );
+
+        let source_view = canonical.function_to_scoped_context(1);
+
+        assert_eq!(source_view, expected_source_view);
+    }
 }
 
 /// Every AcornValue has an AcornType.
@@ -1241,23 +1289,22 @@ impl AcornType {
         let AcornType::Function(function_type) = self else {
             return self.clone();
         };
-        if ambient_stack_size == 0 {
-            return self.clone();
-        }
 
         let arg_types = function_type
             .arg_types
             .iter()
             .enumerate()
             .map(|(i, arg_type)| {
-                arg_type.move_ambient_after_visible(0, i as AtomId, ambient_stack_size)
+                arg_type
+                    .move_ambient_after_visible(0, i as AtomId, ambient_stack_size)
+                    .function_to_scoped_context(ambient_stack_size + i as AtomId)
             })
             .collect();
-        let return_type = function_type.return_type.move_ambient_after_visible(
-            0,
-            function_type.arg_types.len() as AtomId,
-            ambient_stack_size,
-        );
+        let arg_count = function_type.arg_types.len() as AtomId;
+        let return_type = function_type
+            .return_type
+            .move_ambient_after_visible(0, arg_count, ambient_stack_size)
+            .function_to_scoped_context(ambient_stack_size + arg_count);
         AcornType::Function(FunctionType {
             arg_types,
             return_type: Box::new(return_type),
