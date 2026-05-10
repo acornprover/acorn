@@ -23,7 +23,7 @@ parameter before the satisfy claim is exported.
         }
     }
 
-    theorem ambient_set_is_family_parameter[T, a: Set[T]] {
+    theorem ambient_set_is_family_parameter[T](a: Set[T]) {
         Subspace[T, a].ambient_set = a
     }
 ```
@@ -54,7 +54,7 @@ distinct value parameters do not collide.
         let flag: Bool = true
     }
 
-    theorem split_receiver_typeclass[T, U, a: Set[T], b: Set[U]] {
+    theorem split_receiver_typeclass[T, U](a: Set[T], b: Set[U]) {
         BiSubspace[T, U, a, b].flag
     }
 ```
@@ -89,7 +89,7 @@ must lower with the previous value parameters in scope.
         let flag: Bool = true
     }
 
-    theorem nested_receiver_typeclass[T, a: Set[T], u: Set[Subspace[T, a]]] {
+    theorem nested_receiver_typeclass[T](a: Set[T], u: Set[Subspace[T, a]]) {
         Nested[T, a, u].flag
     }
 ```
@@ -120,7 +120,7 @@ family value parameter distinct from the visible method argument.
         }
     }
 
-    theorem idlike_subspace_is_well_typed[T, a: Set[T]](x: Subspace[T, a]) {
+    theorem idlike_subspace_is_well_typed[T](a: Set[T], x: Subspace[T, a]) {
         x.id = x.id
     }
 ```

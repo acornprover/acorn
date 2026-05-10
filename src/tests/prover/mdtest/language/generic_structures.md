@@ -115,7 +115,7 @@ structure Subspace[T: Blah, a: Set[T]] {
     value: T
 }
 
-theorem subspace_round_trip[T: Blah, a: Set[T]](x: T) {
+theorem subspace_round_trip[T: Blah](a: Set[T], x: T) {
     Subspace[T, a].new(x).value = x
 }
 
@@ -133,7 +133,7 @@ instance Subspace[T: Blah, a: Set[T]]: AlwaysTrue {
     }
 }
 
-theorem subspace_ok[T: Blah, a: Set[T]](x: Subspace[T, a]) {
+theorem subspace_ok[T: Blah](a: Set[T], x: Subspace[T, a]) {
     x.ok
 }
 ```

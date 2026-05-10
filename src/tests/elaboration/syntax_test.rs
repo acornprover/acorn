@@ -188,27 +188,23 @@ fn test_dependent_structures_can_be_used() {
     env.add("theorem zmod_round_trip(k: Nat, x: Nat) { Zmod[k].new(x).value = x }");
 }
 
-#[cfg(not(feature = "nivp"))]
 #[test]
-fn test_top_level_dependent_value_params_can_be_called() {
+fn test_top_level_dependent_explicit_value_params_can_be_called() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
     env.add("type Indexed[n: Nat]: axiom");
-    env.add("theorem all_true[n: Nat] { true }");
-    env.add("theorem goal[T, n: Nat](x: T, y: Indexed[n]) { x = x and y = y }");
-    env.add("define pick[T, n: Nat](x: T, y: Indexed[n]) -> Indexed[n] { y }");
-    env.add("let default[n: Nat]: Indexed[n] = axiom");
-    env.add("let select[T, n: Nat](value: T, x: Indexed[n]) -> y: Indexed[n] satisfy { y = x }");
+    env.add("theorem all_true(n: Nat) { true }");
+    env.add("theorem goal[T](n: Nat, x: T, y: Indexed[n]) { x = x and y = y }");
+    env.add("define pick[T](n: Nat, x: T, y: Indexed[n]) -> Indexed[n] { y }");
+    env.add("let select[T](n: Nat, value: T, x: Indexed[n]) -> y: Indexed[n] satisfy { y = x }");
     env.add("theorem use_all_true(n: Nat) { all_true(n) }");
     env.add("theorem use_goal(n: Nat, x: Indexed[n]) { goal[Bool](n, true, x) }");
     env.add("theorem use_pick(n: Nat, x: Indexed[n]) { pick[Bool](n, true, x) = x }");
-    env.add("theorem use_default(n: Nat) { default(n) = default(n) }");
     env.add("theorem use_select(n: Nat, x: Indexed[n]) { select[Bool](n, true, x) = x }");
 }
 
-#[cfg(feature = "nivp")]
 #[test]
-fn test_nivp_rejects_value_params_in_value_brackets() {
+fn test_rejects_value_params_in_value_brackets() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
     env.add("type Indexed[n: Nat]: axiom");
@@ -226,9 +222,8 @@ fn test_nivp_rejects_value_params_in_value_brackets() {
     assert!(error.contains("implicit value parameter 'n' in [] is not supported"));
 }
 
-#[cfg(feature = "nivp")]
 #[test]
-fn test_nivp_allows_value_params_on_type_families() {
+fn test_allows_value_params_on_type_families() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");
     env.add("type Indexed[n: Nat]: axiom");

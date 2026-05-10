@@ -103,12 +103,12 @@ The dependent value parameter `a: Set[T]` should be inferred from
         a.contains(value)
     }
 
-    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
+    define subspace_open[T: TopologicalSpace](a: Set[T], u: Set[Subspace[T, a]]) -> Bool {
         true
     }
 
-    theorem implicit_call[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) {
-        subspace_open(u)
+    theorem implicit_call[T: TopologicalSpace](a: Set[T], u: Set[Subspace[T, a]]) {
+        subspace_open(a, u)
     }
 ```
 
@@ -145,8 +145,8 @@ the value parameter `a: Set[T]` when the goal mentions
         a.contains(value)
     }
 
-    define subspace_open[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) -> Bool {
+    define subspace_open[T: TopologicalSpace](
+        a: Set[T], u: Set[Subspace[T, a]]) -> Bool {
         exists(v: Set[T]) {
             T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
                 v.contains(x.value)
@@ -154,13 +154,13 @@ the value parameter `a: Set[T]` when the goal mentions
         }
     }
 
-    axiom subspace_open_empty_carrier[T: TopologicalSpace, a: Set[T]] {
-        subspace_open(Set[Subspace[T, a]].empty_set)
+    axiom subspace_open_empty_carrier[T: TopologicalSpace](a: Set[T]) {
+        subspace_open(a, Set[Subspace[T, a]].empty_set)
     }
 
     instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
         let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
-            subspace_open(u)
+            subspace_open(a, u)
         }
     }
 ```
@@ -206,8 +206,8 @@ parameter `a: Set[T]` when replaying the `subspace_open` definition.
         a.contains(value)
     }
 
-    define subspace_open[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) -> Bool {
+    define subspace_open[T: TopologicalSpace](
+        a: Set[T], u: Set[Subspace[T, a]]) -> Bool {
         exists(v: Set[T]) {
             T.is_open(v) and forall(p: Subspace[T, a]) {
                 u.contains(p) = v.contains(p.value)
@@ -215,8 +215,8 @@ parameter `a: Set[T]` when replaying the `subspace_open` definition.
         }
     }
 
-    theorem subspace_open_empty_helper[T: TopologicalSpace, a: Set[T]] {
-        subspace_open(Set[Subspace[T, a]].empty_set)
+    theorem subspace_open_empty_helper[T: TopologicalSpace](a: Set[T]) {
+        subspace_open(a, Set[Subspace[T, a]].empty_set)
     } by {
         open_empty[T]
         forall(p: Subspace[T, a]) {
@@ -280,8 +280,8 @@ parameter slots while lowering a hypothesis over `Set[Subspace[T, a]]`.
         a.contains(value)
     }
 
-    theorem family_predicate_hypothesis[T: TopologicalSpace, a: Set[T]](
-        fam: Set[Subspace[T, a]] -> Bool, p: Subspace[T, a]) {
+    theorem family_predicate_hypothesis[T: TopologicalSpace](
+        a: Set[T], fam: Set[Subspace[T, a]] -> Bool, p: Subspace[T, a]) {
         (forall(s: Set[Subspace[T, a]]) {
             fam(s) implies s.contains(p)
         }) implies true
@@ -314,215 +314,17 @@ that reads `z.carrier`.
         carrier: Set[Int]
     }
 
-    axiom has_representative[n: Nat](z: Zmod[n]) {
+    axiom has_representative(n: Nat, z: Zmod[n]) {
         exists(a: Int) {
             z.carrier = equivalence_class(n, a)
         }
     }
 
-    theorem dependent_satisfy_keeps_outer_param[n: Nat](z: Zmod[n]) {
+    theorem dependent_satisfy_keeps_outer_param(n: Nat, z: Zmod[n]) {
         true
     } by {
         let a: Int satisfy {
             z.carrier = equivalence_class(n, a)
-        }
-    }
-```
-
-## Dependent Value Parameter Inline Instance Big Union
-
-The `Subspace[T, a]: TopologicalSpace` instance should be able to discharge the
-`open_big_union` obligation when the generated `is_open` function is backed by
-an explicit helper theorem.
-
-```acorn
-    structure Set[T] {
-        contains: T -> Bool
-    }
-
-    define big_union_contains[T](c: Set[T] -> Bool, x: T) -> Bool {
-        exists(s: Set[T]) {
-            c(s) and s.contains(x)
-        }
-    }
-
-    define big_union[T](c: Set[T] -> Bool) -> Set[T] {
-        Set[T].new(big_union_contains(c))
-    }
-
-    typeclass T: TopologicalSpace {
-        is_open: Set[T] -> Bool
-
-        open_big_union(c: Set[T] -> Bool) {
-            (forall(s: Set[T]) { c(s) implies T.is_open(s) })
-                implies T.is_open(big_union(c))
-        }
-    }
-
-    structure Subspace[T: TopologicalSpace, a: Set[T]] {
-        value: T
-    } constraint {
-        a.contains(value)
-    }
-
-    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
-        exists(v: Set[T]) {
-            T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
-                v.contains(x.value)
-            })
-        }
-    }
-
-    axiom subspace_open_big_union[T: TopologicalSpace](a: Set[T]) {
-        forall(c: Set[Subspace[T, a]] -> Bool) {
-            (forall(s: Set[Subspace[T, a]]) {
-                c(s) implies subspace_open(s)
-            }) implies subspace_open(big_union(c))
-        }
-    }
-
-    instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
-        let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
-            subspace_open(u)
-        }
-    } by {
-        forall(c: Set[Subspace[T, a]] -> Bool) {
-            if forall(s: Set[Subspace[T, a]]) { c(s) implies subspace_open(s) } {
-                subspace_open(big_union(c))
-            }
-        }
-    }
-```
-
-## Dependent Value Parameter Let Satisfy With Helper Predicate
-
-A `let ... satisfy` witness for a helper predicate should keep the enclosing
-structure value parameter `a: Set[T]` distinct from the local witness
-`v: Set[T]`.
-
-```acorn
-    structure Set[T] {
-        contains: T -> Bool
-    }
-
-    typeclass T: TopologicalSpace {
-        is_open: Set[T] -> Bool
-    }
-
-    structure Subspace[T: TopologicalSpace, a: Set[T]] {
-        value: T
-    } constraint {
-        a.contains(value)
-    }
-
-    define has_subspace_witness[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]], v: Set[T]) -> Bool {
-        T.is_open(v) and u = Set[Subspace[T, a]].new(function(x: Subspace[T, a]) {
-            v.contains(x.value)
-        })
-    }
-
-    define subspace_open[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) -> Bool {
-        exists(v: Set[T]) {
-            has_subspace_witness(u, v)
-        }
-    }
-
-    theorem subspace_open_has_witness[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) {
-        subspace_open(u) implies subspace_open(u)
-    } by {
-        if subspace_open(u) {
-            subspace_open(u) = exists(v: Set[T]) {
-                has_subspace_witness(u, v)
-            }
-            let v: Set[T] satisfy {
-                has_subspace_witness(u, v)
-            }
-        }
-    }
-```
-
-## Dependent Value Parameter Witnesses In Related Binder Forms
-
-The hidden subspace carrier parameter should remain the outer `a: Set[T]` when
-nearby binder forms introduce their own local witnesses of the same type.
-
-```acorn
-    structure Set[T] {
-        contains: T -> Bool
-    }
-
-    typeclass T: TopologicalSpace {
-        is_open: Set[T] -> Bool
-
-        open_self(s: Set[T]) {
-            T.is_open(s) implies T.is_open(s)
-        }
-    }
-
-    structure Subspace[T: TopologicalSpace, a: Set[T]] {
-        value: T
-    } constraint {
-        a.contains(value)
-    }
-
-    define has_subspace_witness[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]], v: Set[T]) -> Bool {
-        true
-    }
-
-    define subspace_open[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) -> Bool {
-        exists(v: Set[T]) {
-            has_subspace_witness(u, v)
-        }
-    }
-
-    theorem implicit_let_satisfy[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) {
-        true
-    } by {
-        let v: Set[T] satisfy {
-            has_subspace_witness(u, v)
-        }
-    }
-
-    theorem explicit_let_satisfy[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) {
-        true
-    } by {
-        let v: Set[T] satisfy {
-            has_subspace_witness[T, a](u, v)
-        }
-    }
-
-    theorem tuple_let_satisfy[T: TopologicalSpace, a: Set[T]](
-        u: Set[Subspace[T, a]]) {
-        true
-    } by {
-        let (v: Set[T], w: Set[T]) satisfy {
-            has_subspace_witness(u, v) and has_subspace_witness(u, w)
-        }
-    }
-
-    let choose_witness[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> v: Set[T] satisfy {
-        has_subspace_witness(u, v)
-    }
-
-    instance Subspace[T: TopologicalSpace, a: Set[T]]: TopologicalSpace {
-        let is_open: Set[Subspace[T, a]] -> Bool = function(u: Set[Subspace[T, a]]) {
-            subspace_open(u)
-        }
-    } by {
-        forall(u: Set[Subspace[T, a]]) {
-            if subspace_open(u) {
-                let v: Set[T] satisfy {
-                    has_subspace_witness(u, v)
-                }
-                subspace_open(u)
-            }
         }
     }
 ```
@@ -547,12 +349,12 @@ using the family-application spelling.
         a.contains(value)
     }
 
-    define subspace_open[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) -> Bool {
+    define subspace_open[T: TopologicalSpace](a: Set[T], u: Set[Subspace[T, a]]) -> Bool {
         true
     }
 
-    theorem explicit_call[T: TopologicalSpace, a: Set[T]](u: Set[Subspace[T, a]]) {
-        subspace_open[T, a](u)
+    theorem explicit_call[T: TopologicalSpace](a: Set[T], u: Set[Subspace[T, a]]) {
+        subspace_open[T](a, u)
     }
 ```
 

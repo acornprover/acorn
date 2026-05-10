@@ -17,7 +17,7 @@ constraint when type parameters are listed before value parameters.
         a.contains(left)
     }
 
-    theorem tagged_value_type[T, U, a: Set[T]](x: Tagged[T, U, a]) {
+    theorem tagged_value_type[T, U](a: Set[T], x: Tagged[T, U, a]) {
         a.contains(x.left)
     }
 ```
@@ -44,7 +44,7 @@ earlier value parameter through a nested dependent family.
         u.contains(point)
     }
 
-    theorem nested_constraint[T, a: Set[T], u: Set[Subspace[T, a]], x: Nested[T, a, u]] {
+    theorem nested_constraint[T](a: Set[T], u: Set[Subspace[T, a]], x: Nested[T, a, u]) {
         u.contains(x.point)
     }
 ```
@@ -73,7 +73,7 @@ instance whose receiver has a dependent value parameter.
         let marked: Bool = true
     }
 
-    theorem subspace_marked[T, a: Set[T]] {
+    theorem subspace_marked[T](a: Set[T]) {
         Subspace[T, a].marked
     }
 ```
@@ -100,7 +100,7 @@ dependent datatype family.
         }
     }
 
-    theorem subspace_carrier[T, a: Set[T]](x: Subspace[T, a]) {
+    theorem subspace_carrier[T](a: Set[T], x: Subspace[T, a]) {
         x.carrier = x.value
     }
 ```

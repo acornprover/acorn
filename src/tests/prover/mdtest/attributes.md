@@ -295,7 +295,7 @@ Just testing that we can define something, then immediately prove the definition
         lt(value, n)
     }
 
-    define fin_self[n: Nat](x: Fin[n]) -> Fin[n] {
+    define fin_self(n: Nat, x: Fin[n]) -> Fin[n] {
         x
     }
 
@@ -305,7 +305,7 @@ Just testing that we can define something, then immediately prove the definition
         }
     }
 
-    theorem value_lt_bound[n: Nat](x: Fin[n]) {
+    theorem value_lt_bound(n: Nat, x: Fin[n]) {
         lt(x.value, n)
     }
     

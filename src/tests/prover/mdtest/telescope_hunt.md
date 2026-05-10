@@ -17,11 +17,11 @@
         }
     }
 
-    theorem predicate_attribute_tracks_hidden_function[T, p: T -> Bool, x: T] {
+    theorem predicate_attribute_tracks_hidden_function[T](p: T -> Bool, x: T) {
         PredSet[T, p].predicate(x) = p(x)
     }
 
-    theorem accepts_uses_hidden_function[T, p: T -> Bool](x: PredSet[T, p]) {
+    theorem accepts_uses_hidden_function[T](p: T -> Bool, x: PredSet[T, p]) {
         x.accepts
     }
 ```
@@ -50,26 +50,6 @@
     }
 ```
 
-## Explicit Hidden Function Argument With Dependent Return
-
-```acorn
-    structure Set[T] {
-        contains: T -> Bool
-    }
-
-    structure Subspace[T, a: Set[T]] {
-        value: T
-    } constraint {
-        a.contains(value)
-    }
-
-    let pick_subspace[T, a: Set[T]]: Subspace[T, a] = axiom
-
-    theorem explicit_hidden_arg_in_return[T, a: Set[T]] {
-        pick_subspace[T, a] = pick_subspace[T, a]
-    }
-```
-
 ## Nested Function Return Mentions Ambient Family Value
 
 ```acorn
@@ -91,7 +71,7 @@
         }
     }
 
-    theorem nested_function_return_type[T, a: Set[T]](x: Subspace[T, a], value: T) {
+    theorem nested_function_return_type[T](a: Set[T], x: Subspace[T, a], value: T) {
         x.make_const(value) = x
     }
 ```
@@ -109,15 +89,12 @@
         a.contains(value)
     }
 
-    let make_const[T, a: Set[T]]: Subspace[T, a] -> T -> Subspace[T, a] =
-        function(x: Subspace[T, a]) {
-            function(value: T) {
-                x
-            }
-        }
+    define make_const[T](a: Set[T], x: Subspace[T, a], value: T) -> Subspace[T, a] {
+        x
+    }
 
-    theorem top_level_nested_function_return_type[T, a: Set[T]](x: Subspace[T, a], value: T) {
-        make_const[T, a](x, value) = x
+    theorem top_level_nested_function_return_type[T](a: Set[T], x: Subspace[T, a], value: T) {
+        make_const[T](a, x, value) = x
     }
 ```
 
@@ -144,7 +121,7 @@
         }
     }
 
-    theorem idlike_subspace_is_well_typed[T, a: Set[T]](x: Subspace[T, a]) {
+    theorem idlike_subspace_is_well_typed[T](a: Set[T], x: Subspace[T, a]) {
         x.id = x.id
     }
 ```
@@ -173,8 +150,8 @@ inside `f`'s return type with `f` itself.
         a.contains(f(key).value)
     }
 
-    theorem fiber_key_projection_typechecks[T, U, a: Set[T], f: U -> Subspace[T, a]](
-        x: Fiber[T, U, a, f]) {
+    theorem fiber_key_projection_typechecks[T, U](
+        a: Set[T], f: U -> Subspace[T, a], x: Fiber[T, U, a, f]) {
         x.key = x.key
     }
 ```
