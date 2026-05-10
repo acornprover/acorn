@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use crate::elaborator::acorn_type::{AcornType, Datatype, DependentTypeArg, TypeParam, Typeclass};
-use crate::elaborator::acorn_value::{
-    AcornValue, ConstantInstance, FunctionApplication, MatchCase, TypeApplication,
-};
+use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
@@ -161,10 +159,8 @@ impl<'a> TypeUnifier<'a> {
                 if instance_type.has_type_variable(&param.name) {
                     return Err(Error::Other);
                 }
-                let mapped_type =
-                    Self::drop_stack_block_from_type(instance_type, 0, visible_prefix)
-                        .ok_or(Error::Other)?;
-                self.mapping.insert(param.name.clone(), mapped_type);
+                self.mapping
+                    .insert(param.name.clone(), instance_type.clone());
             }
             (AcornType::Arbitrary(param), _) => {
                 // Arbitrary types work like Variable types for unification purposes
@@ -209,19 +205,15 @@ impl<'a> TypeUnifier<'a> {
                     if let AcornType::Arbitrary(p) = instance_type {
                         if p == param {
                             // This is T = T, add to mapping so type inference knows T was inferred
-                            let mapped_type =
-                                Self::drop_stack_block_from_type(instance_type, 0, visible_prefix)
-                                    .ok_or(Error::Other)?;
-                            self.mapping.insert(param.name.clone(), mapped_type);
+                            self.mapping
+                                .insert(param.name.clone(), instance_type.clone());
                             return Ok(());
                         }
                     }
                     return Err(Error::Other);
                 }
-                let mapped_type =
-                    Self::drop_stack_block_from_type(instance_type, 0, visible_prefix)
-                        .ok_or(Error::Other)?;
-                self.mapping.insert(param.name.clone(), mapped_type);
+                self.mapping
+                    .insert(param.name.clone(), instance_type.clone());
             }
             (AcornType::Function(f), AcornType::Function(g)) => {
                 if f.arg_types.len() < g.arg_types.len() {
@@ -345,13 +337,15 @@ impl<'a> TypeUnifier<'a> {
                                 Err(Error::Other)
                             }
                         } else {
-                            let base_value = Self::drop_stack_block_from_value(
-                                instance_value,
-                                0,
-                                visible_prefix,
-                            )
-                            .ok_or(Error::Other)?;
-                            self.value_mapping.insert(hidden_index, base_value);
+                            if visible_prefix > 0 {
+                                // Avoid inferring a hidden family argument from inside a function
+                                // type scope. In normal telescope order, earlier hidden arguments
+                                // are encountered at the base scope before dependent function
+                                // returns mention them.
+                                return Err(Error::Other);
+                            }
+                            self.value_mapping
+                                .insert(hidden_index, instance_value.clone());
                             Ok(())
                         }
                     }
@@ -360,199 +354,6 @@ impl<'a> TypeUnifier<'a> {
                 }
             }
             _ => Err(Error::Other),
-        }
-    }
-
-    fn drop_stack_block_from_type(
-        ty: &AcornType,
-        base: AtomId,
-        count: AtomId,
-    ) -> Option<AcornType> {
-        if count == 0 {
-            return Some(ty.clone());
-        }
-        match ty {
-            AcornType::Family(datatype, args) => Some(AcornType::new_datatype_application(
-                datatype.clone(),
-                args.iter()
-                    .map(|arg| match arg {
-                        DependentTypeArg::Type(acorn_type) => {
-                            Self::drop_stack_block_from_type(acorn_type, base, count)
-                                .map(DependentTypeArg::Type)
-                        }
-                        DependentTypeArg::Value(value) => {
-                            Self::drop_stack_block_from_value(value, base, count)
-                                .map(DependentTypeArg::Value)
-                        }
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            AcornType::Function(function_type) => {
-                let arg_types = function_type
-                    .arg_types
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| Self::drop_stack_block_from_type(t, base + i as AtomId, count))
-                    .collect::<Option<Vec<_>>>()?;
-                Some(AcornType::functional(
-                    arg_types,
-                    Self::drop_stack_block_from_type(
-                        &function_type.return_type,
-                        base + function_type.arg_types.len() as AtomId,
-                        count,
-                    )?,
-                ))
-            }
-            AcornType::Data(datatype, types) => Some(AcornType::Data(
-                datatype.clone(),
-                types
-                    .iter()
-                    .map(|t| Self::drop_stack_block_from_type(t, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            _ => Some(ty.clone()),
-        }
-    }
-
-    fn drop_stack_block_from_value(
-        value: &AcornValue,
-        base: AtomId,
-        count: AtomId,
-    ) -> Option<AcornValue> {
-        if count == 0 {
-            return Some(value.clone());
-        }
-        match value {
-            AcornValue::Variable(index, var_type) => {
-                if *index >= base && *index < base + count {
-                    return None;
-                }
-                let new_index = if *index >= base + count {
-                    *index - count
-                } else {
-                    *index
-                };
-                Some(AcornValue::Variable(
-                    new_index,
-                    Self::drop_stack_block_from_type(var_type, base, count)?,
-                ))
-            }
-            AcornValue::Application(app) => Some(AcornValue::Application(FunctionApplication {
-                function: Box::new(Self::drop_stack_block_from_value(
-                    &app.function,
-                    base,
-                    count,
-                )?),
-                args: app
-                    .args
-                    .iter()
-                    .map(|arg| Self::drop_stack_block_from_value(arg, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-            })),
-            AcornValue::TypeApplication(app) => {
-                Some(AcornValue::TypeApplication(TypeApplication {
-                    function: Box::new(Self::drop_stack_block_from_value(
-                        &app.function,
-                        base,
-                        count,
-                    )?),
-                    type_param_names: app.type_param_names.clone(),
-                    type_param_constraints: app.type_param_constraints.clone(),
-                    type_args: app
-                        .type_args
-                        .iter()
-                        .map(|arg| Self::drop_stack_block_from_type(arg, base, count))
-                        .collect::<Option<Vec<_>>>()?,
-                }))
-            }
-            AcornValue::Lambda(args, body) => Some(AcornValue::Lambda(
-                args.iter()
-                    .map(|arg| Self::drop_stack_block_from_type(arg, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-                Box::new(Self::drop_stack_block_from_value(body, base, count)?),
-            )),
-            AcornValue::Binary(op, left, right) => Some(AcornValue::Binary(
-                *op,
-                Box::new(Self::drop_stack_block_from_value(left, base, count)?),
-                Box::new(Self::drop_stack_block_from_value(right, base, count)?),
-            )),
-            AcornValue::Not(value) => Some(AcornValue::Not(Box::new(
-                Self::drop_stack_block_from_value(value, base, count)?,
-            ))),
-            AcornValue::Try(value, ty) => Some(AcornValue::Try(
-                Box::new(Self::drop_stack_block_from_value(value, base, count)?),
-                Self::drop_stack_block_from_type(ty, base, count)?,
-            )),
-            AcornValue::ForAll(quants, body) => Some(AcornValue::ForAll(
-                quants
-                    .iter()
-                    .map(|quant| Self::drop_stack_block_from_type(quant, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-                Box::new(Self::drop_stack_block_from_value(body, base, count)?),
-            )),
-            AcornValue::Exists(quants, body) => Some(AcornValue::Exists(
-                quants
-                    .iter()
-                    .map(|quant| Self::drop_stack_block_from_type(quant, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-                Box::new(Self::drop_stack_block_from_value(body, base, count)?),
-            )),
-            AcornValue::Grouping(value) => Some(AcornValue::Grouping(Box::new(
-                Self::drop_stack_block_from_value(value, base, count)?,
-            ))),
-            AcornValue::IfThenElse(cond, if_value, else_value) => Some(AcornValue::IfThenElse(
-                Box::new(Self::drop_stack_block_from_value(cond, base, count)?),
-                Box::new(Self::drop_stack_block_from_value(if_value, base, count)?),
-                Box::new(Self::drop_stack_block_from_value(else_value, base, count)?),
-            )),
-            AcornValue::Match(scrutinee, cases) => Some(AcornValue::Match(
-                Box::new(Self::drop_stack_block_from_value(scrutinee, base, count)?),
-                cases
-                    .iter()
-                    .map(|case| {
-                        Some(MatchCase {
-                            new_vars: case
-                                .new_vars
-                                .iter()
-                                .map(|t| Self::drop_stack_block_from_type(t, base, count))
-                                .collect::<Option<Vec<_>>>()?,
-                            pattern: Self::drop_stack_block_from_value(&case.pattern, base, count)?,
-                            result: Self::drop_stack_block_from_value(&case.result, base, count)?,
-                            constructor_index: case.constructor_index,
-                            constructor_total: case.constructor_total,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            AcornValue::Constant(c) => Some(AcornValue::Constant(ConstantInstance {
-                name: c.name.clone(),
-                params: c
-                    .params
-                    .iter()
-                    .map(|t| Self::drop_stack_block_from_type(t, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-                instance_type: Self::drop_stack_block_from_type(&c.instance_type, base, count)?,
-                generic_type: if c.bound_value_args.is_empty() {
-                    Self::drop_stack_block_from_type(&c.generic_type, base, count)?
-                } else {
-                    c.generic_type.clone()
-                },
-                type_param_names: c.type_param_names.clone(),
-                value_param_types: if c.bound_value_args.is_empty() {
-                    c.value_param_types
-                        .iter()
-                        .map(|t| Self::drop_stack_block_from_type(t, base, count))
-                        .collect::<Option<Vec<_>>>()?
-                } else {
-                    c.value_param_types.clone()
-                },
-                bound_value_args: c
-                    .bound_value_args
-                    .iter()
-                    .map(|value| Self::drop_stack_block_from_value(value, base, count))
-                    .collect::<Option<Vec<_>>>()?,
-            })),
-            AcornValue::Bool(value) => Some(AcornValue::Bool(*value)),
         }
     }
 
