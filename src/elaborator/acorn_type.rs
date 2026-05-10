@@ -739,6 +739,7 @@ impl TypeclassInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::ModuleId;
 
     #[test]
     fn telescope_preserves_family_order_while_exposing_split_views() {
@@ -775,6 +776,42 @@ mod tests {
             ]
         );
         assert_eq!(value_args, vec![AcornValue::Variable(0, AcornType::Bool)]);
+    }
+
+    #[test]
+    fn promoted_ambient_prefix_rotates_nested_function_type_refs() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let scoped_body_type = AcornType::functional_from_flat_context(
+            vec![subspace_t_a.clone(), t_type.clone()],
+            subspace_t_a.clone(),
+        );
+
+        let promoted =
+            AcornType::functional_from_promoted_ambient(vec![set_t.clone()], scoped_body_type);
+
+        let expected =
+            AcornType::functional(vec![set_t, subspace_t_a.clone(), t_type], subspace_t_a);
+        assert_eq!(promoted, expected);
     }
 }
 
@@ -954,6 +991,154 @@ impl AcornType {
         }
     }
 
+    /// Creates a function type from components evaluated in the same ambient value-stack context.
+    ///
+    /// The internal function representation treats each later argument and the return type as
+    /// living under the previous visible argument binders. Source arrow syntax and datatype
+    /// member declarations evaluate those component types before those visible binders exist, so
+    /// ambient value references must be shifted under the visible binders here.
+    pub fn functional_from_flat_context(
+        arg_types: Vec<AcornType>,
+        return_type: AcornType,
+    ) -> AcornType {
+        let shifted_args = arg_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg_type)| arg_type.insert_stack(0, i as AtomId))
+            .collect::<Vec<_>>();
+        let shifted_return = return_type.insert_stack(0, shifted_args.len() as AtomId);
+        AcornType::functional(shifted_args, shifted_return)
+    }
+
+    /// Creates a function type from components evaluated in a normal source value scope.
+    ///
+    /// Source scopes put ambient datatype-family value parameters before the visible function
+    /// arguments. The internal function representation puts each visible function argument before
+    /// those ambient parameters in later argument and return types. This rotates only that ambient
+    /// prefix; references to earlier visible arguments stay attached to those arguments.
+    pub fn functional_from_scoped_context(
+        arg_types: Vec<AcornType>,
+        return_type: AcornType,
+        ambient_stack_size: AtomId,
+    ) -> AcornType {
+        if ambient_stack_size == 0 {
+            return AcornType::functional(arg_types, return_type);
+        }
+
+        let shifted_args = arg_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg_type)| {
+                arg_type.move_ambient_after_visible(0, ambient_stack_size, i as AtomId)
+            })
+            .collect::<Vec<_>>();
+        let shifted_return = return_type.move_ambient_after_visible(
+            0,
+            ambient_stack_size,
+            shifted_args.len() as AtomId,
+        );
+        AcornType::functional(shifted_args, shifted_return)
+    }
+
+    /// Creates a function type by promoting ambient value parameters to visible leading arguments.
+    ///
+    /// The body type was evaluated in a source scope where these value parameters were ambient.
+    /// If the body is already a function type, its later argument and return types have those
+    /// ambient references after the body's visible binders. Once the ambient values become leading
+    /// visible arguments, rotate those references back before the body's visible binders.
+    pub fn functional_from_promoted_ambient(
+        prefix_arg_types: Vec<AcornType>,
+        scoped_body_type: AcornType,
+    ) -> AcornType {
+        let ambient_count = prefix_arg_types.len() as AtomId;
+        if ambient_count == 0 {
+            return scoped_body_type;
+        }
+
+        let AcornType::Function(function_type) = scoped_body_type else {
+            return AcornType::functional(prefix_arg_types, scoped_body_type);
+        };
+
+        let mut arg_types = prefix_arg_types;
+        let body_arg_count = function_type.arg_types.len() as AtomId;
+        arg_types.extend(
+            function_type
+                .arg_types
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg_type)| {
+                    arg_type.move_ambient_after_visible(0, i as AtomId, ambient_count)
+                }),
+        );
+        let return_type = (*function_type.return_type).move_ambient_after_visible(
+            0,
+            body_arg_count,
+            ambient_count,
+        );
+        AcornType::functional(arg_types, return_type)
+    }
+
+    pub(crate) fn move_ambient_after_visible(
+        &self,
+        base: AtomId,
+        ambient_count: AtomId,
+        visible_count: AtomId,
+    ) -> AcornType {
+        match self {
+            AcornType::Family(datatype, args) => AcornType::new_datatype_application(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            DependentTypeArg::Type(acorn_type.move_ambient_after_visible(
+                                base,
+                                ambient_count,
+                                visible_count,
+                            ))
+                        }
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(value.clone().move_ambient_after_visible(
+                                base,
+                                ambient_count,
+                                visible_count,
+                            ))
+                        }
+                    })
+                    .collect(),
+            ),
+            AcornType::Function(function_type) => {
+                let arg_types = function_type
+                    .arg_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        t.move_ambient_after_visible(
+                            base + i as AtomId,
+                            ambient_count,
+                            visible_count,
+                        )
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type.return_type.move_ambient_after_visible(
+                        base + function_type.arg_types.len() as AtomId,
+                        ambient_count,
+                        visible_count,
+                    ),
+                )
+            }
+            AcornType::Data(datatype, types) => AcornType::Data(
+                datatype.clone(),
+                types
+                    .iter()
+                    .map(|t| t.move_ambient_after_visible(base, ambient_count, visible_count))
+                    .collect(),
+            ),
+            _ => self.clone(),
+        }
+    }
+
     /// Whether this type contains the given type variable within it somewhere.
     pub fn has_type_variable(&self, name: &str) -> bool {
         match self {
@@ -1106,6 +1291,21 @@ impl AcornType {
     }
 
     fn bind_value_params_with_stack(&self, stack_size: AtomId, values: &[AcornValue]) -> AcornType {
+        fn bind_value_at_stack(
+            value: &AcornValue,
+            stack_size: AtomId,
+            values: &[AcornValue],
+        ) -> AcornValue {
+            let shifted_values: Vec<_> = values
+                .iter()
+                .cloned()
+                .map(|value| value.insert_stack(0, stack_size))
+                .collect();
+            value
+                .clone()
+                .bind_values(stack_size, stack_size, &shifted_values)
+        }
+
         match self {
             AcornType::Family(datatype, args) => AcornType::new_datatype_application(
                 datatype.clone(),
@@ -1114,23 +1314,28 @@ impl AcornType {
                         DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
                             acorn_type.bind_value_params_with_stack(stack_size, values),
                         ),
-                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
-                            value.clone().bind_values(0, stack_size, values),
-                        ),
+                        DependentTypeArg::Value(value) => {
+                            DependentTypeArg::Value(bind_value_at_stack(value, stack_size, values))
+                        }
                     })
                     .collect(),
             ),
             AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
                 let arg_types = function_type
                     .arg_types
                     .iter()
-                    .map(|t| t.bind_value_params_with_stack(stack_size, values))
+                    .map(|t| {
+                        let bound = t.bind_value_params_with_stack(current_stack_size, values);
+                        current_stack_size += 1;
+                        bound
+                    })
                     .collect();
                 AcornType::functional(
                     arg_types,
                     function_type
                         .return_type
-                        .bind_value_params_with_stack(stack_size, values),
+                        .bind_value_params_with_stack(current_stack_size, values),
                 )
             }
             AcornType::Data(datatype, types) => AcornType::Data(

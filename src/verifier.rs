@@ -492,6 +492,16 @@ mod tests {
         (temp, src, build)
     }
 
+    fn log_text(output: &VerifierOutput) -> String {
+        output
+            .events
+            .iter()
+            .filter_map(|e| e.log_message.as_ref())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn test_verifier_rejects_real_acornlib_in_unit_tests() {
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -828,6 +838,70 @@ mod tests {
         assert_eq!(output.status, BuildStatus::Error);
         assert_eq!(output.metrics.pending_modules_total, 0);
         assert_eq!(output.metrics.pending_goals_total, 0);
+    }
+
+    #[test]
+    fn test_check_reports_type_param_after_value_param_without_panic() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("bad_order.ac")
+            .write_str(
+                r#"
+                type Nat: axiom
+                let bad[n: Nat, T]: Nat = n
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("bad_order".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Error);
+        let error_text = log_text(&output);
+        assert!(
+            error_text.contains("type parameters must come before value parameters"),
+            "expected ordered-param error, got: {error_text}"
+        );
+    }
+
+    #[test]
+    fn test_check_reports_value_param_type_that_mentions_later_type_without_panic() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("bad_later_type.ac")
+            .write_str(
+                r#"
+                structure Set[T] {
+                    contains: T -> Bool
+                }
+                let bad[a: Set[T], T]: Bool = true
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("bad_later_type".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Error);
+        let error_text = log_text(&output);
+        assert!(
+            error_text.contains("expected a typeclass constraint or a value type"),
+            "expected clean elaboration error, got: {error_text}"
+        );
     }
 
     #[test]

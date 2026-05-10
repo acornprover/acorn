@@ -266,7 +266,10 @@ impl Environment {
         let acorn_type = if explicit_value_param_types.is_empty() {
             acorn_type
         } else {
-            AcornType::functional(explicit_value_param_types.clone(), acorn_type)
+            AcornType::functional_from_promoted_ambient(
+                explicit_value_param_types.clone(),
+                acorn_type,
+            )
         };
         let value = if explicit_value_param_types.is_empty() {
             value
@@ -401,7 +404,11 @@ impl Environment {
         }
 
         if let Some(v) = unbound_value {
-            let fn_type = AcornType::functional(arg_types.clone(), value_type.clone());
+            let fn_type = AcornType::functional_from_scoped_context(
+                arg_types.clone(),
+                value_type.clone(),
+                datatype_value_param_types.len() as AtomId,
+            );
             let mut fn_value = AcornValue::lambda(arg_types, v);
 
             let params = if let Some(datatype_params) = datatype_params {
@@ -436,7 +443,11 @@ impl Environment {
             return Ok(());
         }
 
-        let new_axiom_type = AcornType::functional(arg_types, value_type);
+        let new_axiom_type = AcornType::functional_from_scoped_context(
+            arg_types,
+            value_type,
+            datatype_value_param_types.len() as AtomId,
+        );
         let params = if let Some(datatype_params) = datatype_params {
             if !fn_param_names.is_empty() {
                 let mut combined_params = datatype_params.type_params().to_vec();
@@ -724,7 +735,7 @@ impl Environment {
             let constant_type = if explicit_value_param_types.is_empty() {
                 generic_value_type.clone()
             } else {
-                AcornType::functional(
+                AcornType::functional_from_promoted_ambient(
                     explicit_value_param_types.clone(),
                     generic_value_type.clone(),
                 )
@@ -768,7 +779,19 @@ impl Environment {
                     explicit_value_param_types.clone()
                 },
             );
-            if !explicit_value_param_types.is_empty() {
+            if explicit_value_param_types.is_empty() && !family_value_param_types.is_empty() {
+                let family_value_args = datatype_params
+                    .expect("family value params should have a datatype scope")
+                    .value_params()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value_param)| {
+                        AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                    })
+                    .collect::<Vec<_>>();
+                constant_value =
+                    constant_value.bind_value_params(&family_value_args, declaration.token())?;
+            } else if !explicit_value_param_types.is_empty() {
                 let explicit_value_args = local_family_params
                     .value_params
                     .iter()
@@ -905,7 +928,11 @@ impl Environment {
             fss.body.as_ref(),
         )?;
 
-        let function_type = AcornType::functional(arg_types.clone(), return_type);
+        let function_type = AcornType::functional_from_scoped_context(
+            arg_types.clone(),
+            return_type,
+            family_value_param_count,
+        );
         let mut all_type_params = datatype_params
             .map(|params| params.type_params().to_vec())
             .unwrap_or_default();
