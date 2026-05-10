@@ -262,16 +262,13 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
 
     // Check that Monoid is NOT in name_to_typeclass
     assert!(
-        !module.bindings.has_typeclass_name("Monoid"),
+        !module.bindings().has_typeclass_name("Monoid"),
         "Monoid should NOT be in name_to_typeclass for main module"
     );
 
     // Run the prover and generate a certificate
-    let (goal_id, _) = module
-        .lowered
-        .goals()
-        .next()
-        .expect("expected a goal in main");
+    let lowered = module.lowered().expect("module should retain lowered work");
+    let (goal_id, _) = lowered.goals().next().expect("expected a goal in main");
     let (mut processor, bindings, normalized_goal) =
         processor_for_lowered_goal(&p, module_id, goal_id).expect("processor setup failed");
     let goal_kernel_context = &normalized_goal.kernel_context;
@@ -343,8 +340,8 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
         crate::module::LoadState::Error(e) => panic!("error: {}", e),
         _ => panic!("no module"),
     };
-    let (goal_id, entry) = module
-        .lowered
+    let lowered = module.lowered().expect("module should retain lowered work");
+    let (goal_id, entry) = lowered
         .goals()
         .find(|(_, entry)| {
             entry

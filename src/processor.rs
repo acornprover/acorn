@@ -6,7 +6,9 @@ use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
 use crate::code_generator::Error;
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::lowered_module::{LoweredGoalId, LoweredModule};
+use crate::elaborator::lowered_module::{
+    CheckExportFact, ExportedFact, LoweredGoalId, LoweredModule,
+};
 use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
@@ -129,14 +131,14 @@ impl Processor {
         if !self.imported_modules.insert(module_id) {
             return Ok(());
         }
-        let lowered = project.get_lowered_module(module_id).ok_or_else(|| {
+        let export = project.get_module_export(module_id).ok_or_else(|| {
             BuildError::new(
                 Default::default(),
                 format!("missing dependency {}", module_id.0),
             )
         })?;
-        for normalized in lowered.module_facts() {
-            self.add_lowered_fact(normalized)?;
+        for fact in export.facts() {
+            self.add_exported_fact(fact)?;
         }
         Ok(())
     }
@@ -192,6 +194,30 @@ impl Processor {
             prover.add_steps(normalized.steps.clone(), kernel_context);
         }
         Ok(())
+    }
+
+    fn add_check_export_fact(&mut self, fact: &CheckExportFact) -> Result<(), BuildError> {
+        if self.prover.is_some() {
+            return Err(BuildError::new(
+                Default::default(),
+                "check-only module export cannot be used by a prover".to_string(),
+            ));
+        }
+        for assumption in &fact.assumptions {
+            self.checker.insert_clause(
+                &assumption.clause,
+                StepReason::Assumption(assumption.source.clone()),
+                &fact.kernel_context,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn add_exported_fact(&mut self, fact: &ExportedFact) -> Result<(), BuildError> {
+        match fact {
+            ExportedFact::Check(fact) => self.add_check_export_fact(fact),
+            ExportedFact::Prove(fact) => self.add_lowered_fact(fact),
+        }
     }
 
     /// Sets a lowered goal as the prover's goal.

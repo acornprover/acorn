@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::error;
-use crate::elaborator::lowered_module::LoweredModule;
+use crate::elaborator::lowered_module::{LoweredModule, ModuleExport};
 
 // The code in one file is exposed to other Acorn code as a "module".
 // You could have two different types both named "MyStruct" but defined in different places.
@@ -79,13 +79,13 @@ impl Module {
     // Called when a module load succeeds.
     pub fn load_ok(
         &mut self,
-        bindings: BindingMap,
-        lowered: LoweredModule,
+        export: ModuleExport,
+        lowered: Option<LoweredModule>,
         env: Option<Environment>,
         content_hash: blake3::Hash,
     ) {
         self.state = LoadState::Ok(LoadedModule {
-            bindings,
+            export,
             lowered,
             env,
         });
@@ -100,15 +100,28 @@ impl Module {
     }
 }
 
-// The loaded representation of a module. Batch checking/proving uses `lowered`;
-// IDE features use `env` when it is retained.
+// The loaded representation of a module. Other modules import through `export`;
+// batch checking/proving consumes `lowered` as module-local work; IDE features use
+// `env` when it is retained.
 pub struct LoadedModule {
-    pub bindings: BindingMap,
-    pub lowered: LoweredModule,
+    pub export: ModuleExport,
+    pub lowered: Option<LoweredModule>,
     pub env: Option<Environment>,
 }
 
 impl LoadedModule {
+    pub fn bindings(&self) -> &BindingMap {
+        &self.export.bindings
+    }
+
+    pub fn lowered(&self) -> Option<&LoweredModule> {
+        self.lowered.as_ref()
+    }
+
+    pub fn lowered_mut(&mut self) -> Option<&mut LoweredModule> {
+        self.lowered.as_mut()
+    }
+
     pub fn env(&self) -> Option<&Environment> {
         self.env.as_ref()
     }

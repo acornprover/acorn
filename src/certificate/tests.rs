@@ -82,8 +82,8 @@ fn setup_claim_codec_env(code: &str) -> (Project, BindingMap, KernelContext) {
             _ => panic!("unexpected module load state"),
         };
         (
-            module.bindings.clone(),
-            module.lowered.final_kernel_context.clone(),
+            module.bindings().clone(),
+            module.export.final_kernel_context.clone(),
         )
     };
 

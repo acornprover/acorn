@@ -763,15 +763,15 @@ instance Foo: Mul {
             _ => panic!("unexpected module load state"),
         };
         let internal_line = 8;
-        let (_, entry) = module
-            .lowered
+        let lowered = module.lowered().expect("module should retain lowered work");
+        let (_, entry) = lowered
             .goals()
             .find(|(_, entry)| {
                 let goal = &entry.lowered_goal.goal;
                 goal.first_line <= internal_line && internal_line <= goal.last_line
             })
             .expect("the selected theorem body line should resolve to a goal");
-        (module.bindings.clone(), entry.bindings.clone())
+        (module.bindings().clone(), entry.bindings.clone())
     };
 
     let expr =

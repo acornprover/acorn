@@ -2,7 +2,7 @@ use acorn::elaborator::acorn_value::AcornValue;
 use acorn::elaborator::binding_map::{BindingMap, BindingMapProfileCounts};
 use acorn::elaborator::environment::Environment;
 use acorn::elaborator::fact::Fact;
-use acorn::elaborator::lowered_module::LoweredModule;
+use acorn::elaborator::lowered_module::{ExportedFact, LoweredModule};
 use acorn::elaborator::lowering::{LoweredFact, LoweredGoal};
 use acorn::elaborator::node::Node;
 use acorn::elaborator::source::Source;
@@ -189,6 +189,14 @@ fn main() {
     let load_time = load_start.elapsed();
     sample("after full check-style load", &mut samples);
 
+    let mut targets = project.targets.iter().cloned().collect::<Vec<_>>();
+    targets.sort();
+    let module_work = project.take_lowered_modules_for_targets(&targets);
+    let module_work_count = module_work.len();
+    sample("after draining module work", &mut samples);
+    drop(module_work);
+    sample("after dropping module work", &mut samples);
+
     {
         let errors = project.errors();
         if !errors.is_empty() {
@@ -200,7 +208,13 @@ fn main() {
     }
 
     let (total_stats, mut module_stats) = collect_project_stats(&project);
-    print_header(project_time, load_time, total_start.elapsed(), &samples);
+    print_header(
+        project_time,
+        load_time,
+        total_start.elapsed(),
+        module_work_count,
+        &samples,
+    );
     print_stats(&total_stats);
     print_top_modules(&mut module_stats);
     print_clear_sequence(&mut project);
@@ -246,11 +260,13 @@ fn print_header(
     project_time: Duration,
     load_time: Duration,
     total_time: Duration,
+    module_work_count: usize,
     samples: &[(&'static str, StatusMemory)],
 ) {
     println!("profile_memory target: full check-style load");
     println!("project setup: {}", format_duration(project_time));
     println!("target/dependency load: {}", format_duration(load_time));
+    println!("drained module work packets: {}", module_work_count);
     println!("total measured so far: {}", format_duration(total_time));
     println!();
     println!("rss samples:");
@@ -284,13 +300,26 @@ fn collect_project_stats(project: &Project) -> (ProfileStats, Vec<ModuleProfile>
 }
 
 fn add_loaded_module_stats(loaded: &LoadedModule, stats: &mut ProfileStats) {
-    add_lowered_module_stats(&loaded.lowered, stats);
+    if let Some(lowered) = loaded.lowered() {
+        add_lowered_module_stats(lowered, stats);
+    } else {
+        stats
+            .env_kernel_contexts
+            .add_context(&loaded.export.final_kernel_context);
+        for fact in loaded.export.facts() {
+            add_exported_fact_stats(
+                fact,
+                &mut stats.lowered_module_facts,
+                &mut stats.lowered_kernel_contexts,
+            );
+        }
+    }
     if let Some(env) = loaded.env() {
         add_env_stats(env, stats);
     } else {
         stats
             .current_binding_counts
-            .add_counts(loaded.bindings.profile_counts());
+            .add_counts(loaded.export.bindings.profile_counts());
     }
 }
 
@@ -311,6 +340,25 @@ fn add_lowered_module_stats(lowered: &LoweredModule, stats: &mut ProfileStats) {
             &mut stats.lowered_goals,
             &mut stats.lowered_kernel_contexts,
         );
+    }
+}
+
+fn add_exported_fact_stats(
+    fact: &ExportedFact,
+    proof_stats: &mut ProofBucketStats,
+    context_stats: &mut KernelContextStats,
+) {
+    match fact {
+        ExportedFact::Check(fact) => {
+            proof_stats.lowered_facts += 1;
+            proof_stats.proof_steps += fact.assumptions.len();
+            proof_stats.clauses += fact.assumptions.len();
+            for assumption in &fact.assumptions {
+                add_clause(&assumption.clause, proof_stats);
+            }
+            context_stats.add_context(&fact.kernel_context);
+        }
+        ExportedFact::Prove(fact) => add_lowered_fact(fact, proof_stats, context_stats),
     }
 }
 
@@ -832,9 +880,18 @@ fn clear_env_bucket(env: &mut Environment, bucket: ClearBucket) {
 
 fn clear_loaded_bucket(module: &mut LoadedModule, bucket: ClearBucket) {
     match bucket {
-        ClearBucket::LoweredModule => module.lowered.profile_clear_lowered(),
+        ClearBucket::LoweredModule => {
+            if let Some(lowered) = module.lowered_mut() {
+                lowered.profile_clear_lowered();
+            } else {
+                module.export.profile_clear_facts();
+            }
+        }
         ClearBucket::KernelContexts => {
-            module.lowered.final_kernel_context = KernelContext::new();
+            module.export.final_kernel_context = KernelContext::new();
+            if let Some(lowered) = module.lowered_mut() {
+                lowered.final_kernel_context = KernelContext::new();
+            }
             if let Some(env) = module.env_mut() {
                 clear_env_bucket(env, bucket);
             }

@@ -780,8 +780,8 @@ impl Environment {
                     continue;
                 }
                 let dep_kernel_context = project
-                    .get_lowered_module(module_id)
-                    .map(|lowered| &lowered.final_kernel_context)
+                    .get_module_export(module_id)
+                    .map(|export| &export.final_kernel_context)
                     .unwrap_or_else(|| panic!("Dependency {} not lowered", module_id.0));
                 kernel_context.merge_imports(dep_kernel_context);
             }
@@ -819,8 +819,8 @@ impl Environment {
         for dep_id in deps {
             if imported_modules.insert(dep_id) {
                 let dep_kernel_context = project
-                    .get_lowered_module(dep_id)
-                    .map(|lowered| &lowered.final_kernel_context)
+                    .get_module_export(dep_id)
+                    .map(|export| &export.final_kernel_context)
                     .unwrap_or_else(|| panic!("Dependency {} not lowered", dep_id.0));
                 kernel_context.merge_imports(dep_kernel_context);
             }

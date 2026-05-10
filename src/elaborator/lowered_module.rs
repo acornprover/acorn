@@ -3,8 +3,13 @@ use tower_lsp::lsp_types::Range;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::lowering::{LoweredFact, LoweredGoal};
+use crate::elaborator::source::Source;
+use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
+use crate::project::UsageMode;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LoweredFactId(usize);
@@ -40,11 +45,114 @@ pub enum LoweredItem {
 }
 
 #[derive(Clone)]
+pub struct CheckAssumption {
+    pub clause: Clause,
+    pub source: Source,
+}
+
+#[derive(Clone)]
+pub struct CheckExportFact {
+    pub assumptions: Vec<CheckAssumption>,
+    pub kernel_context: KernelContext,
+}
+
+impl CheckExportFact {
+    fn from_lowered(fact: &LoweredFact) -> Self {
+        let assumptions = fact
+            .steps
+            .iter()
+            .map(|step| {
+                let Rule::Assumption(info) = &step.rule else {
+                    panic!("exported lowered facts must contain only assumption steps");
+                };
+                CheckAssumption {
+                    clause: step.clause.clone(),
+                    source: info.source.clone(),
+                }
+            })
+            .collect();
+        Self {
+            assumptions,
+            kernel_context: fact.kernel_context.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum ExportedFact {
+    Check(Arc<CheckExportFact>),
+    Prove(Arc<LoweredFact>),
+}
+
+#[derive(Clone)]
+pub struct ModuleExport {
+    pub module_id: ModuleId,
+    pub bindings: BindingMap,
+    pub final_kernel_context: KernelContext,
+    facts: Vec<ExportedFact>,
+}
+
+impl ModuleExport {
+    pub fn new(
+        module_id: ModuleId,
+        bindings: BindingMap,
+        final_kernel_context: KernelContext,
+        facts: Vec<ExportedFact>,
+    ) -> Self {
+        Self {
+            module_id,
+            bindings,
+            final_kernel_context,
+            facts,
+        }
+    }
+
+    pub fn from_lowered(
+        bindings: BindingMap,
+        lowered: &LoweredModule,
+        usage_mode: UsageMode,
+    ) -> Self {
+        let facts = lowered
+            .module_fact_ids
+            .iter()
+            .map(|id| match usage_mode {
+                UsageMode::Check => {
+                    ExportedFact::Check(Arc::new(CheckExportFact::from_lowered(lowered.fact(*id))))
+                }
+                UsageMode::Verify | UsageMode::Ide => {
+                    ExportedFact::Prove(Arc::clone(&lowered.facts[id.0]))
+                }
+            })
+            .collect();
+        Self::new(
+            lowered.module_id,
+            bindings,
+            lowered.final_kernel_context.clone(),
+            facts,
+        )
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &ExportedFact> {
+        self.facts.iter()
+    }
+
+    pub fn fact_count(&self) -> usize {
+        self.facts.len()
+    }
+
+    #[doc(hidden)]
+    pub fn profile_clear_facts(&mut self) {
+        self.facts.clear();
+        self.facts.shrink_to_fit();
+    }
+}
+
+#[derive(Clone)]
 pub struct LoweredModule {
     pub module_id: ModuleId,
     pub initial_bindings: BindingMap,
     pub final_kernel_context: KernelContext,
-    facts: Vec<LoweredFact>,
+    facts: Vec<Arc<LoweredFact>>,
     goals: Vec<LoweredGoalEntry>,
     pub module_fact_ids: Vec<LoweredFactId>,
     pub items: Vec<LoweredItem>,
@@ -67,7 +175,7 @@ impl LoweredModule {
 
     pub fn add_fact(&mut self, fact: LoweredFact) -> LoweredFactId {
         let id = LoweredFactId(self.facts.len());
-        self.facts.push(fact);
+        self.facts.push(Arc::new(fact));
         id
     }
 
@@ -81,7 +189,7 @@ impl LoweredModule {
     }
 
     pub fn fact(&self, id: LoweredFactId) -> &LoweredFact {
-        &self.facts[id.0]
+        self.facts[id.0].as_ref()
     }
 
     pub fn goal(&self, id: LoweredGoalId) -> &LoweredGoalEntry {
@@ -93,7 +201,7 @@ impl LoweredModule {
     }
 
     pub fn facts(&self) -> impl Iterator<Item = &LoweredFact> {
-        self.facts.iter()
+        self.facts.iter().map(|fact| fact.as_ref())
     }
 
     pub fn goals(&self) -> impl Iterator<Item = (LoweredGoalId, &LoweredGoalEntry)> {

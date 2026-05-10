@@ -1,9 +1,10 @@
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -251,6 +252,10 @@ pub struct Builder<'a> {
     /// Eval skip modes to run for each benchmark goal.
     pub eval_skip_modes: Vec<usize>,
 
+    /// Owned module-local work for batch builds. When present, the Project only retains
+    /// module exports and the builder consumes these lowered work packets.
+    module_work: Option<Vec<(ModuleDescriptor, LoweredModule)>>,
+
     /// The current module we are proving.
     current_module: Option<ModuleDescriptor>,
 
@@ -320,6 +325,13 @@ struct ScheduledModule<'a> {
     index: usize,
     target: ModuleDescriptor,
     lowered: &'a LoweredModule,
+    work_estimate: usize,
+}
+
+struct OwnedScheduledModule {
+    index: usize,
+    target: ModuleDescriptor,
+    lowered: LoweredModule,
     work_estimate: usize,
 }
 
@@ -1125,6 +1137,7 @@ impl<'a> Builder<'a> {
             force_search: false,
             eval_mode: false,
             eval_skip_modes: vec![0, 1],
+            module_work: None,
             current_module: None,
             single_line_goal_count: 0,
             current_module_good: true,
@@ -1142,6 +1155,10 @@ impl<'a> Builder<'a> {
             activation_limit: 2000,
             check_jobs: 1,
         }
+    }
+
+    pub fn set_module_work(&mut self, module_work: Vec<(ModuleDescriptor, LoweredModule)>) {
+        self.module_work = Some(module_work);
     }
 
     fn record_module_timing(
@@ -2418,6 +2435,90 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn build_owned_modules_parallel(
+        &mut self,
+        modules: Vec<(usize, ModuleDescriptor, LoweredModule)>,
+    ) {
+        let worker_count = self.check_jobs.min(modules.len()).max(1);
+        let mut modules = modules
+            .into_iter()
+            .map(|(index, target, lowered)| OwnedScheduledModule {
+                work_estimate: self.module_work_estimate(&target, &lowered),
+                index,
+                target,
+                lowered,
+            })
+            .collect::<Vec<_>>();
+        modules.sort_by(|a, b| {
+            b.work_estimate
+                .cmp(&a.work_estimate)
+                .then_with(|| a.index.cmp(&b.index))
+        });
+
+        let work_queue = Mutex::new(VecDeque::from(modules));
+        let project = self.project;
+        let worker_config = ModuleWorkerConfig::from_builder(self);
+        let cancellation_token = self.cancellation_token.clone();
+        let mut results = Vec::new();
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..worker_count {
+                let token = cancellation_token.clone();
+                let config = worker_config.clone();
+                let work_queue = &work_queue;
+                handles.push(scope.spawn(move || {
+                    let mut worker_results = Vec::new();
+                    loop {
+                        let module = {
+                            let mut queue = work_queue.lock().expect("module work queue poisoned");
+                            queue.pop_front()
+                        };
+                        let Some(module) = module else {
+                            break;
+                        };
+                        worker_results.push(Self::build_module_on_worker(
+                            project,
+                            token.clone(),
+                            module.index,
+                            module.target,
+                            &module.lowered,
+                            &config,
+                        ));
+                    }
+                    worker_results
+                }));
+            }
+
+            for handle in handles {
+                match handle.join() {
+                    Ok(mut worker_results) => results.append(&mut worker_results),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        });
+
+        results.sort_by_key(|result| result.index);
+
+        for result in results {
+            self.metrics.add_module_result(&result.metrics);
+            self.module_timings.extend(result.module_timings);
+            match result.status {
+                BuildStatus::Error => self.status = BuildStatus::Error,
+                BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
+                BuildStatus::Good | BuildStatus::Warning => {}
+            }
+
+            for mut event in result.events {
+                event.build_id = self.id;
+                if event.progress.is_some() {
+                    event.progress = Some((self.metrics.goals_done, self.metrics.goals_total));
+                }
+                (self.event_handler)(event);
+            }
+        }
+    }
+
     fn prepare_eval_mode(&mut self) {
         if !self.eval_mode {
             return;
@@ -2435,6 +2536,146 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn build_owned_module_work(
+        &mut self,
+        targets: Vec<ModuleDescriptor>,
+        module_work: Vec<(ModuleDescriptor, LoweredModule)>,
+    ) {
+        let loading_start = std::time::Instant::now();
+        let mut work_by_target: HashMap<ModuleDescriptor, LoweredModule> =
+            module_work.into_iter().collect();
+        let mut lowered_modules = Vec::new();
+        for target in &targets {
+            let module = self.project.get_module(target);
+            match module {
+                LoadState::Ok(_) => {
+                    if let Some(lowered) = work_by_target.remove(target) {
+                        self.lowered_module_loaded(&lowered);
+                        lowered_modules.push((target.clone(), lowered));
+                    } else {
+                        self.log_global(format!("error: module {} has no lowered work", target));
+                    }
+                }
+                LoadState::Error(e) => {
+                    if e.indirect {
+                        if self.log_secondary_errors {
+                            self.log_global(e.to_string());
+                        }
+                    } else {
+                        self.log_loading_error(target, e);
+                    }
+                }
+                LoadState::None => {
+                    self.log_global(format!("error: module {} is not loaded", target));
+                }
+                LoadState::Loading | LoadState::Registered => {
+                    self.log_global(format!("error: module {} stuck in loading", target));
+                }
+            }
+        }
+        self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
+
+        if self.status.is_error() {
+            return;
+        }
+
+        self.loading_phase_complete();
+        self.metrics.modules_total = lowered_modules.len() as i32;
+
+        if self.can_build_modules_in_parallel(lowered_modules.len()) {
+            let modules = lowered_modules
+                .into_iter()
+                .enumerate()
+                .map(|(index, (target, lowered))| (index, target, lowered))
+                .collect();
+            let verification_start = std::time::Instant::now();
+            self.build_owned_modules_parallel(modules);
+            self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
+            return;
+        }
+
+        let verification_start = std::time::Instant::now();
+        for (target, lowered) in lowered_modules {
+            let goal_count = lowered.goal_count() as i32;
+
+            if let Some(ref filter) = self.goal_filter {
+                let filter_module = match filter {
+                    GoalFilter::SingleLine { module, .. } => module,
+                    GoalFilter::LineRange { module, .. } => module,
+                };
+                if filter_module != &target {
+                    continue;
+                }
+            }
+
+            let skip_metrics_before = self.metrics.clone();
+            let skip_start = std::time::Instant::now();
+            if self.try_skip_unchanged_module(lowered.module_id, &target) {
+                self.metrics.goals_done += goal_count;
+                self.metrics.goals_success += goal_count;
+                self.metrics.certs_cached += goal_count;
+                self.metrics.modules_cached += 1;
+                self.record_module_timing(
+                    target.clone(),
+                    goal_count,
+                    &skip_metrics_before,
+                    skip_start.elapsed(),
+                    true,
+                );
+
+                let event = BuildEvent {
+                    progress: Some((self.metrics.goals_done, self.metrics.goals_total)),
+                    ..self.default_event()
+                };
+                (self.event_handler)(event);
+
+                continue;
+            }
+
+            if self.goal_filter.is_none() && !self.project.config.read_cache && !self.check_mode {
+                self.log_global(format!("force-searching: {}", target));
+            }
+
+            let module_metrics_before = self.metrics.clone();
+            let module_start = std::time::Instant::now();
+            if let Err(e) = self.verify_lowered_module(&target, &lowered) {
+                self.record_module_timing(
+                    target.clone(),
+                    goal_count,
+                    &module_metrics_before,
+                    module_start.elapsed(),
+                    false,
+                );
+                self.log_build_error(&e);
+                self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
+                return;
+            }
+            self.record_module_timing(
+                target.clone(),
+                goal_count,
+                &module_metrics_before,
+                module_start.elapsed(),
+                false,
+            );
+
+            if self.exit_on_warning && !self.status.is_good() {
+                self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
+                return;
+            }
+        }
+        self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
+
+        if self.status.is_good() {
+            if let Some(ref mut cache) = self.build_cache {
+                for (descriptor, used_cert_count) in &self.used_cert_counts {
+                    if let Some(cert_store) = cache.get_certificates_mut(descriptor) {
+                        cert_store.certs.truncate(*used_cert_count);
+                    }
+                }
+            }
+        }
+    }
+
     /// Builds all open modules, logging build events.
     pub fn build(&mut self) {
         self.prepare_eval_mode();
@@ -2443,7 +2684,7 @@ impl<'a> Builder<'a> {
         self.build_cache = Some(BuildCache::new(self.project.build_dir.clone()));
 
         // Build in alphabetical order by module name for consistency.
-        let mut targets = self.project.targets.iter().collect::<Vec<_>>();
+        let mut targets = self.project.targets.iter().cloned().collect::<Vec<_>>();
         targets.sort();
 
         let verification_message = if targets.len() > 5 {
@@ -2460,6 +2701,11 @@ impl<'a> Builder<'a> {
         };
         self.log_global(verification_message);
 
+        if let Some(module_work) = self.module_work.take() {
+            self.build_owned_module_work(targets, module_work);
+            return;
+        }
+
         // The first phase is the "loading phase". We load modules and look for errors.
         // If there are errors, we won't try to do proving.
         let loading_start = std::time::Instant::now();
@@ -2468,8 +2714,12 @@ impl<'a> Builder<'a> {
             let module = self.project.get_module(target);
             match module {
                 LoadState::Ok(module) => {
-                    self.lowered_module_loaded(&module.lowered);
-                    lowered_modules.push(&module.lowered);
+                    if let Some(lowered) = module.lowered() {
+                        self.lowered_module_loaded(lowered);
+                        lowered_modules.push(lowered);
+                    } else {
+                        self.log_global(format!("error: module {} has no lowered work", target));
+                    }
                 }
                 LoadState::Error(e) => {
                     if e.indirect {
@@ -2519,7 +2769,7 @@ impl<'a> Builder<'a> {
 
         // The second pass is the "proving phase".
         let verification_start = std::time::Instant::now();
-        for (target, lowered) in targets.into_iter().zip(lowered_modules) {
+        for (target, lowered) in targets.iter().zip(lowered_modules) {
             let goal_count = lowered.goal_count() as i32;
 
             // Skip modules that don't match the goal filter
@@ -2535,7 +2785,7 @@ impl<'a> Builder<'a> {
 
             let skip_metrics_before = self.metrics.clone();
             let skip_start = std::time::Instant::now();
-            if self.try_skip_unchanged_module(lowered.module_id, &target) {
+            if self.try_skip_unchanged_module(lowered.module_id, target) {
                 // Update metrics to count the goals in this module as a success
                 self.metrics.goals_done += goal_count;
                 self.metrics.goals_success += goal_count;
@@ -2565,7 +2815,7 @@ impl<'a> Builder<'a> {
 
             let module_metrics_before = self.metrics.clone();
             let module_start = std::time::Instant::now();
-            if let Err(e) = self.verify_lowered_module(&target, lowered) {
+            if let Err(e) = self.verify_lowered_module(target, lowered) {
                 self.record_module_timing(
                     target.clone(),
                     goal_count,
