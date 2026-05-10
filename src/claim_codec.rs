@@ -378,11 +378,12 @@ impl ClaimCodec {
                 false,
             );
             value_lambda_arg_types.push(acorn_type.clone());
+            let decl_type =
+                acorn_type.function_to_scoped_context(value_decl_names_in_scope.len() as AtomId);
             value_decl_codes.push(format!(
                 "{}: {}",
                 var_name,
-                generator
-                    .type_to_code_with_initial_vars(&acorn_type, &value_decl_names_in_scope)?
+                generator.type_to_code_with_initial_vars(&decl_type, &value_decl_names_in_scope)?
             ));
             value_decl_names_in_scope.push(var_name.clone());
 
@@ -770,7 +771,7 @@ impl ClaimCodec {
         }
         let mut args = Vec::with_capacity(shape.value_args.len());
         for (expr, arg_type) in shape.value_args.iter().zip(specialized_arg_types.iter()) {
-            let expected_type = arg_type.bind_values(0, 0, &args);
+            let expected_type = arg_type.bind_value_params(&args);
             let value = evaluator.evaluate_value_with_stack(
                 &mut specialized_stack,
                 expr,

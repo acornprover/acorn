@@ -2515,6 +2515,7 @@ mod tests {
         )
         .expect("lower dependent forall");
 
+        let term = crate::kernel::term_normalization::normalize_term(&term);
         let clause = kernel_context
             .lower_normalized_term_to_clause(&term, Some(type_var_map))
             .expect("lower dependent forall clause");
@@ -2522,6 +2523,215 @@ mod tests {
         assert_eq!(
             quoted.to_string(),
             "forall(x0: Set[T0*], x1: Set[Subspace[T0*, x0]]) { p[T0*](x0, x1) }"
+        );
+    }
+
+    #[test]
+    fn test_lower_dependent_forall_function_binder_type_refers_to_outer_value_binder() {
+        let mut kernel_context = KernelContext::new();
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let u_param = TypeParam {
+            name: "U".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param.clone());
+        let u_type = AcornType::Variable(u_param.clone());
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let function_type = AcornType::functional_from_flat_context(
+            vec![subspace_t_a.clone(), u_type],
+            subspace_t_a,
+        );
+        let predicate_type = AcornType::functional_from_scoped_context(
+            vec![set_t.clone(), function_type.clone()],
+            AcornType::Bool,
+            0,
+        );
+        let predicate = AcornValue::constant(
+            ConstantName::unqualified(ModuleId(0), "p"),
+            vec![
+                AcornType::Variable(t_param.clone()),
+                AcornType::Variable(u_param.clone()),
+            ],
+            predicate_type.clone(),
+            predicate_type,
+            vec!["T".to_string(), "U".to_string()],
+            vec![],
+        );
+        let value = AcornValue::forall(
+            vec![set_t.clone(), function_type.clone()],
+            AcornValue::apply(
+                predicate,
+                vec![
+                    AcornValue::Variable(0, set_t),
+                    AcornValue::Variable(1, function_type),
+                ],
+            ),
+        );
+        let type_var_map = build_type_var_map(&mut kernel_context, &[t_param, u_param]);
+
+        let term = lower_value_to_term(
+            &mut kernel_context,
+            &value,
+            NewConstantType::Local,
+            Some(&type_var_map),
+        )
+        .expect("lower dependent function binder");
+
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(&term, Some(type_var_map))
+            .expect("lower dependent function binder clause");
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        assert_eq!(
+            quoted.to_string(),
+            "forall(x0: Set[T0*], x1: (Subspace[T0*, x0], T1*) -> Subspace[T0*, x0]) { p[T0*, T1*](x0, x1) }"
+        );
+    }
+
+    #[test]
+    fn test_lower_hidden_value_param_function_type_refs_outer_value_binder() {
+        struct NoContext;
+        impl crate::elaborator::error::ErrorContext for NoContext {
+            fn error(&self, msg: &str) -> crate::elaborator::error::Error {
+                let empty_token = crate::syntax::token::Token::empty();
+                crate::elaborator::error::Error::new(&empty_token, &empty_token, msg)
+            }
+        }
+
+        let mut kernel_context = KernelContext::new();
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let u_param = TypeParam {
+            name: "U".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let transport_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Transport".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param.clone());
+        let u_type = AcornType::Variable(u_param.clone());
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let function_type = AcornType::functional_from_flat_context(
+            vec![subspace_t_a.clone(), u_type.clone()],
+            subspace_t_a.clone(),
+        );
+        let transport_type = AcornType::Family(
+            transport_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Type(u_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+                DependentTypeArg::Value(AcornValue::Variable(1, function_type.clone())),
+            ],
+        );
+        let projection_type = AcornType::functional_from_flat_context(
+            vec![transport_type.clone()],
+            subspace_t_a.clone(),
+        );
+        let point_projection = AcornValue::constant(
+            ConstantName::datatype_attr(ModuleId(0), transport_datatype.clone(), "point"),
+            vec![t_type.clone(), u_type.clone()],
+            projection_type.clone(),
+            projection_type,
+            vec!["T".to_string(), "U".to_string()],
+            vec![set_t.clone(), function_type.clone()],
+        );
+        let point_projection = point_projection
+            .bind_value_params(
+                &[
+                    AcornValue::Variable(0, set_t.clone()),
+                    AcornValue::Variable(1, function_type.clone()),
+                ],
+                &NoContext,
+            )
+            .expect("bind hidden value params");
+        let point = AcornValue::apply(
+            point_projection,
+            vec![AcornValue::Variable(2, transport_type.clone())],
+        );
+        let key_projection_type =
+            AcornType::functional_from_flat_context(vec![transport_type.clone()], u_type.clone());
+        let key_projection = AcornValue::constant(
+            ConstantName::datatype_attr(ModuleId(0), transport_datatype, "key"),
+            vec![t_type.clone(), u_type.clone()],
+            key_projection_type.clone(),
+            key_projection_type,
+            vec!["T".to_string(), "U".to_string()],
+            vec![set_t.clone(), function_type.clone()],
+        );
+        let key_projection = key_projection
+            .bind_value_params(
+                &[
+                    AcornValue::Variable(0, set_t.clone()),
+                    AcornValue::Variable(1, function_type.clone()),
+                ],
+                &NoContext,
+            )
+            .expect("bind hidden value params");
+        let key = AcornValue::apply(
+            key_projection,
+            vec![AcornValue::Variable(2, transport_type.clone())],
+        );
+        let value = AcornValue::forall(
+            vec![set_t, function_type, transport_type],
+            AcornValue::and(
+                AcornValue::equals(point.clone(), point),
+                AcornValue::equals(key.clone(), key),
+            ),
+        );
+        let type_var_map = build_type_var_map(&mut kernel_context, &[t_param, u_param]);
+
+        let term = lower_value_to_term(
+            &mut kernel_context,
+            &value,
+            NewConstantType::Local,
+            Some(&type_var_map),
+        )
+        .expect("lower hidden value param projection");
+
+        let term = crate::kernel::term_normalization::normalize_term(&term);
+        let clause = kernel_context
+            .lower_normalized_term_to_clause(&term, Some(type_var_map))
+            .expect("lower hidden value param projection clause");
+        let quoted = kernel_context.quote_clause(&clause, None, None, false);
+        assert_eq!(
+            quoted.to_string(),
+            "forall(x0: Set[T0*], x1: (Subspace[T0*, x0], T1*) -> Subspace[T0*, x0], x2: Transport[T0*, T1*, x0, x1]) { ((Transport.point[T0*, T1*](x0, x1, x2) = Transport.point[T0*, T1*](x0, x1, x2)) and (Transport.key[T0*, T1*](x0, x1, x2) = Transport.key[T0*, T1*](x0, x1, x2))) }"
         );
     }
 }

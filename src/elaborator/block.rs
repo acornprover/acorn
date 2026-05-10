@@ -170,10 +170,9 @@ impl Block {
         // Inside the block, the arguments are constants.
         let mut internal_args = vec![];
         for (arg_name, generic_arg_type) in &args {
-            let specific_arg_type =
-                generic_arg_type
-                    .instantiate(&param_pairs)
-                    .bind_values(0, 0, &internal_args);
+            let specific_arg_type = generic_arg_type
+                .instantiate(&param_pairs)
+                .bind_value_params(&internal_args);
             let def_str = format!("{}: {}", arg_name, specific_arg_type);
             let potential = subenv.bindings.add_unqualified_constant(
                 arg_name,

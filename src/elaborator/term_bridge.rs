@@ -1459,6 +1459,19 @@ impl<'a> TermBridge<'a> {
             let mut arg_types = vec![];
             let mut current_context = local_context.clone();
             let mut current_term = type_term;
+            let ambient_stack_size = var_remapping.map(|mapping| {
+                current_term
+                    .iter_atoms()
+                    .filter_map(|atom| match atom {
+                        Atom::FreeVariable(var_id) => mapping
+                            .get(*var_id as usize)
+                            .and_then(|entry| *entry)
+                            .map(|mapped| mapped as AtomId),
+                        _ => None,
+                    })
+                    .max()
+                    .map_or(0, |mapped| mapped + 1)
+            });
             let mut current_var_remapping = var_remapping.map(|mapping| mapping.to_vec());
 
             while let Some((input, output)) = current_term.as_ref().split_pi() {
@@ -1496,6 +1509,13 @@ impl<'a> TermBridge<'a> {
             );
             if arg_types.is_empty() {
                 return return_type;
+            }
+            if let Some(ambient_stack_size) = ambient_stack_size {
+                return AcornType::functional_from_scoped_context(
+                    arg_types,
+                    return_type,
+                    ambient_stack_size,
+                );
             }
             return AcornType::Function(crate::elaborator::acorn_type::FunctionType {
                 arg_types,
@@ -1763,6 +1783,66 @@ mod tests {
             inner_types[0],
             AcornType::Data(set_datatype, vec![subspace_t0_x0])
         );
+    }
+
+    #[test]
+    fn test_quote_remapped_function_type_preserves_outer_value_ref() {
+        let mut kernel_context = KernelContext::new();
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        kernel_context
+            .type_store
+            .add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        kernel_context
+            .type_store
+            .set_datatype_arity(&set_datatype, 1);
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T0".to_string(),
+            typeclass: None,
+        };
+        let u_param = TypeParam {
+            name: "T1".to_string(),
+            typeclass: None,
+        };
+        let t_type = AcornType::Variable(t_param.clone());
+        let u_type = AcornType::Variable(u_param);
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        kernel_context.type_store.add_type(&subspace_t_a);
+
+        let local_context = LocalContext::from_types(vec![
+            Term::type_sort(),
+            Term::type_sort(),
+            kernel_context.parse_type("Set[T0]"),
+            Term::bool_type(),
+        ]);
+        let function_type_term = Term::pi(
+            Term::new_variable(1),
+            kernel_context.parse_type("Subspace[T0, x2]"),
+        );
+        let type_var_id_to_name = HashMap::from([(0, "T0".to_string()), (1, "T1".to_string())]);
+        let quoted = TermBridge::new(&kernel_context).quote_type_with_context_remapped(
+            function_type_term,
+            &local_context,
+            Some(&[None, None, Some(0), Some(1)]),
+            Some(&type_var_id_to_name),
+            false,
+        );
+
+        let expected = AcornType::functional_from_flat_context(vec![u_type], subspace_t_a);
+        assert_eq!(quoted, expected);
     }
 
     #[test]
