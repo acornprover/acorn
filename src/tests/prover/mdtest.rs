@@ -133,8 +133,44 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     "non-string panic payload".to_string()
 }
 
-fn case_supported_in_current_features(_case: &MdCase) -> bool {
-    true
+#[cfg(feature = "nivp")]
+fn line_has_bracketed_value_param(line: &str) -> bool {
+    let Some(open_bracket) = line.find('[') else {
+        return false;
+    };
+    let Some(close_bracket) = line[open_bracket + 1..].find(']') else {
+        return false;
+    };
+    let params = &line[open_bracket + 1..open_bracket + 1 + close_bracket];
+    params.split(',').any(|param| {
+        let Some((name, _)) = param.trim().split_once(':') else {
+            return false;
+        };
+        name.trim().chars().next().is_some_and(|c| c.is_lowercase())
+    })
+}
+
+#[cfg(feature = "nivp")]
+fn line_starts_value_declaration(line: &str) -> bool {
+    ["theorem ", "define ", "let ", "axiom "]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+fn case_supported_in_current_features(case: &MdCase) -> bool {
+    #[cfg(feature = "nivp")]
+    {
+        !case.source.lines().any(|line| {
+            let line = line.trim_start();
+            line_starts_value_declaration(line) && line_has_bracketed_value_param(line)
+        })
+    }
+
+    #[cfg(not(feature = "nivp"))]
+    {
+        let _ = case;
+        true
+    }
 }
 
 #[test]

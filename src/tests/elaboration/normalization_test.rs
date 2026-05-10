@@ -198,7 +198,7 @@ fn test_top_level_dependent_theorem_module_loads() {
         type Nat: axiom
         type Indexed[n: Nat]: axiom
 
-        theorem goal[n: Nat](x: Indexed[n]) {
+        theorem goal(n: Nat, x: Indexed[n]) {
             x = x
         }
         "#,
@@ -226,7 +226,7 @@ fn test_dependent_structure_theorem_module_loads() {
             value = value
         }
 
-        theorem value_refl[n: Nat](x: Fin[n]) {
+        theorem value_refl(n: Nat, x: Fin[n]) {
             x.value = x.value
         }
         "#,
@@ -288,7 +288,7 @@ fn test_top_level_dependent_function_satisfy_module_loads() {
             value: Nat
         }
 
-        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+        let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
             result = x
         }
 
@@ -318,7 +318,7 @@ fn test_top_level_dependent_function_satisfy_lowering() {
             value: Nat
         }
 
-        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+        let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
             result = x
         }
 
@@ -366,7 +366,7 @@ fn test_validate_roundtrip_top_level_dependent_function_satisfy_clauses() {
             value: Nat
         }
 
-        let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+        let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
             result = x
         }
 

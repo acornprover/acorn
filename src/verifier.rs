@@ -2967,7 +2967,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
                     value: Nat
                 }
 
-                let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+                let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
                     result = x
                 }
 
@@ -3014,7 +3014,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
                     lt(value, n)
                 }
 
-                let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+                let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
                     result = x
                 }
 

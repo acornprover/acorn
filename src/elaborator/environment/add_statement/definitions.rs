@@ -103,6 +103,12 @@ impl Environment {
                     local_family_params.type_params.push(type_param);
                 }
                 crate::elaborator::acorn_type::FamilyParam::Value(value_param) => {
+                    if cfg!(feature = "nivp") {
+                        return Err(expr.name.error(&format!(
+                            "implicit value parameter '{}' in [] is not supported; put value parameters in () instead",
+                            expr.name.text()
+                        )));
+                    }
                     let annotation = expr.typeclass.clone().expect(
                         "value family parameters should always carry their type annotation",
                     );

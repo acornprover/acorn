@@ -479,7 +479,7 @@ fn test_dependent_family_attribute_body_can_use_value_param() {
                 value: Nat
             }
 
-            let choose_self[n: Nat](x: Fin[n]) -> result: Fin[n] satisfy {
+            let choose_self(n: Nat, x: Fin[n]) -> result: Fin[n] satisfy {
                 result = x
             }
 
