@@ -1863,7 +1863,7 @@ impl CodeGenerator<'_> {
                                     );
                                 if receiver_matches_explicit_param
                                     && !self.allow_out_of_scope_typeclass_calls
-                                    && !self.bindings.is_instance_of(datatype, typeclass)
+                                    && !self.bindings.is_instance_of_type(&receiver_type, typeclass)
                                 {
                                     return Err(Error::GeneratedBadCode(format!(
                                         "typeclass attribute '{}.{}' for concrete receiver '{}' is not available in the current scope while rendering '{}'",

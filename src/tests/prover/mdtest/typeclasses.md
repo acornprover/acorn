@@ -927,3 +927,56 @@ theorem goal {
         Group.id[NonZero[Foo]] = Group.id[NonZero[Foo]]
     }
 ```
+
+## Parameterized Instance Of Extending Typeclass
+
+Mimics the `AddMonoidAlgebra[R: Semiring, M]: AddCommMonoid` case from the library:
+a parameterized structure declared as an instance of a typeclass whose `extends` chain
+includes typeclasses with a function-shaped attribute (e.g. `+`). Without the
+code-generator fix, rendering the inherited operator on the parameterized receiver
+fails with "concrete receiver 'Pair' is not available in the current scope".
+
+```acorn
+    typeclass A: HasAdd {
+        add: (A, A) -> A
+    }
+
+    typeclass A: ExtraAdd extends HasAdd {
+        extra: A
+
+        extra_idempotent_left {
+            A.extra.add(A.extra) = A.extra
+        }
+    }
+
+    structure Pair[R: HasAdd, M] {
+        first: R
+        second: M
+    }
+
+    define pair_add[R: HasAdd, M](p: Pair[R, M], q: Pair[R, M]) -> Pair[R, M] {
+        Pair[R, M].new(p.first.add(q.first), p.second)
+    }
+
+    define pair_extra_first[R: HasAdd](r: R) -> R {
+        r.add(r)
+    }
+    let pair_extra_first_witness[R: HasAdd]: R = axiom
+    let pair_extra_second_witness[R: HasAdd, M]: M = axiom
+    let pair_extra[R: HasAdd, M]: Pair[R, M] =
+        Pair[R, M].new(pair_extra_first(pair_extra_first_witness[R]), pair_extra_second_witness[R, M])
+
+    instance Pair[R: HasAdd, M]: HasAdd {
+        let add: (Pair[R, M], Pair[R, M]) -> Pair[R, M] = pair_add[R, M]
+    }
+
+    axiom pair_extra_idempotent[R: HasAdd, M] {
+        pair_add(pair_extra[R, M], pair_extra[R, M]) = pair_extra[R, M]
+    }
+
+    instance Pair[R: HasAdd, M]: ExtraAdd {
+        let extra: Pair[R, M] = pair_extra[R, M]
+    } by {
+        pair_extra_idempotent[R, M]
+    }
+```
