@@ -1,10 +1,10 @@
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -333,6 +333,58 @@ struct OwnedScheduledModule {
     target: ModuleDescriptor,
     lowered: LoweredModule,
     work_estimate: usize,
+}
+
+pub(crate) struct LoadedModuleWorkBatch {
+    pub project: Option<ProjectView>,
+    pub modules: Vec<(ModuleDescriptor, LoweredModule)>,
+    pub load_elapsed: Duration,
+}
+
+struct PipelineQueuedModule {
+    index: usize,
+    target: ModuleDescriptor,
+    lowered: LoweredModule,
+    project: ProjectView,
+    work_estimate: usize,
+}
+
+impl PartialEq for PipelineQueuedModule {
+    fn eq(&self, other: &Self) -> bool {
+        self.work_estimate == other.work_estimate && self.index == other.index
+    }
+}
+
+impl Eq for PipelineQueuedModule {}
+
+impl PartialOrd for PipelineQueuedModule {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PipelineQueuedModule {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.work_estimate
+            .cmp(&other.work_estimate)
+            .then_with(|| other.index.cmp(&self.index))
+    }
+}
+
+struct PipelineQueueState {
+    modules: BinaryHeap<PipelineQueuedModule>,
+    closed: bool,
+    capacity: usize,
+}
+
+impl PipelineQueueState {
+    fn new(capacity: usize) -> Self {
+        Self {
+            modules: BinaryHeap::new(),
+            closed: false,
+            capacity,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1226,6 +1278,232 @@ impl<'a> Builder<'a> {
             }
         }
         self.metrics.verification_time += verification_start.elapsed().as_secs_f64();
+    }
+
+    pub(crate) fn can_pipeline_module_work(&self, target_count: usize) -> bool {
+        self.can_build_modules_in_parallel(target_count)
+    }
+
+    pub(crate) fn process_module_work_pipeline<L>(
+        &mut self,
+        mut load_next: L,
+    ) -> Result<(Duration, HashSet<ModuleDescriptor>), String>
+    where
+        L: FnMut() -> Result<Option<LoadedModuleWorkBatch>, String>,
+    {
+        let worker_count = self.check_jobs.max(1);
+        let queue_capacity = (worker_count * 4).max(1);
+        let queue = Arc::new((
+            Mutex::new(PipelineQueueState::new(queue_capacity)),
+            Condvar::new(),
+        ));
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_config = ModuleWorkerConfig::from_builder(self);
+        let cancellation_token = self.cancellation_token.clone();
+        let mut processed = HashSet::new();
+        let mut next_index = 0usize;
+        let mut next_merge_index = 0usize;
+        let mut pending_results = BTreeMap::new();
+        let mut active_jobs = 0usize;
+        let mut load_elapsed = Duration::default();
+        let mut verification_start = None;
+        let mut loader_error = None;
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..worker_count {
+                let queue = Arc::clone(&queue);
+                let result_tx = result_tx.clone();
+                let token = cancellation_token.clone();
+                let config = worker_config.clone();
+                handles.push(scope.spawn(move || loop {
+                    let module = {
+                        let (lock, cvar) = &*queue;
+                        let mut state = lock.lock().expect("pipeline work queue poisoned");
+                        loop {
+                            if let Some(module) = state.modules.pop() {
+                                cvar.notify_all();
+                                break Some(module);
+                            }
+                            if state.closed {
+                                break None;
+                            }
+                            state = cvar.wait(state).expect("pipeline work queue poisoned");
+                        }
+                    };
+                    let Some(module) = module else {
+                        break;
+                    };
+                    let result = Self::build_module_on_worker(
+                        module.project,
+                        token.clone(),
+                        module.index,
+                        module.target,
+                        &module.lowered,
+                        &config,
+                    );
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }));
+            }
+            drop(result_tx);
+
+            loop {
+                self.drain_pipeline_results(
+                    &result_rx,
+                    &mut active_jobs,
+                    &mut pending_results,
+                    &mut next_merge_index,
+                );
+                if self.status.is_error() || (self.exit_on_warning && !self.status.is_good()) {
+                    break;
+                }
+
+                match load_next() {
+                    Ok(Some(batch)) => {
+                        load_elapsed += batch.load_elapsed;
+                        if batch.modules.is_empty() {
+                            continue;
+                        }
+                        let project = batch
+                            .project
+                            .expect("nonempty module work batches should include a project view");
+                        self.set_project_view(project.clone());
+                        self.add_loaded_module_work(&batch.modules);
+                        for (target, lowered) in batch.modules {
+                            processed.insert(target.clone());
+                            let work_estimate = self.module_work_estimate(&target, &lowered);
+                            let module = PipelineQueuedModule {
+                                index: next_index,
+                                target,
+                                lowered,
+                                project: project.clone(),
+                                work_estimate,
+                            };
+                            verification_start.get_or_insert_with(std::time::Instant::now);
+                            next_index += 1;
+                            self.enqueue_pipeline_module(&queue, module);
+                            active_jobs += 1;
+                            self.drain_pipeline_results(
+                                &result_rx,
+                                &mut active_jobs,
+                                &mut pending_results,
+                                &mut next_merge_index,
+                            );
+                            if self.status.is_error()
+                                || (self.exit_on_warning && !self.status.is_good())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        loader_error = Some(error);
+                        break;
+                    }
+                }
+            }
+
+            {
+                let (lock, cvar) = &*queue;
+                let mut state = lock.lock().expect("pipeline work queue poisoned");
+                state.closed = true;
+                cvar.notify_all();
+            }
+
+            while active_jobs > 0 {
+                match result_rx.recv() {
+                    Ok(result) => {
+                        active_jobs -= 1;
+                        self.merge_pipeline_result(
+                            result,
+                            &mut pending_results,
+                            &mut next_merge_index,
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            for handle in handles {
+                match handle.join() {
+                    Ok(()) => {}
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        });
+
+        if let Some(verification_start) = verification_start {
+            self.metrics.verification_time += verification_start.elapsed().as_secs_f64();
+        }
+
+        if let Some(error) = loader_error {
+            return Err(error);
+        }
+        Ok((load_elapsed, processed))
+    }
+
+    fn enqueue_pipeline_module(
+        &self,
+        queue: &Arc<(Mutex<PipelineQueueState>, Condvar)>,
+        module: PipelineQueuedModule,
+    ) {
+        let (lock, cvar) = &**queue;
+        let mut state = lock.lock().expect("pipeline work queue poisoned");
+        while state.modules.len() >= state.capacity && !state.closed {
+            state = cvar.wait(state).expect("pipeline work queue poisoned");
+        }
+        if state.closed {
+            return;
+        }
+        state.modules.push(module);
+        cvar.notify_all();
+    }
+
+    fn drain_pipeline_results(
+        &mut self,
+        result_rx: &mpsc::Receiver<ModuleBuildResult>,
+        active_jobs: &mut usize,
+        pending_results: &mut BTreeMap<usize, ModuleBuildResult>,
+        next_merge_index: &mut usize,
+    ) {
+        while let Ok(result) = result_rx.try_recv() {
+            *active_jobs = active_jobs.saturating_sub(1);
+            self.merge_pipeline_result(result, pending_results, next_merge_index);
+        }
+    }
+
+    fn merge_pipeline_result(
+        &mut self,
+        result: ModuleBuildResult,
+        pending_results: &mut BTreeMap<usize, ModuleBuildResult>,
+        next_merge_index: &mut usize,
+    ) {
+        pending_results.insert(result.index, result);
+        while let Some(result) = pending_results.remove(&*next_merge_index) {
+            self.merge_module_build_result(result);
+            *next_merge_index += 1;
+        }
+    }
+
+    fn merge_module_build_result(&mut self, result: ModuleBuildResult) {
+        self.metrics.add_module_result(&result.metrics);
+        self.module_timings.extend(result.module_timings);
+        match result.status {
+            BuildStatus::Error => self.status = BuildStatus::Error,
+            BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
+            BuildStatus::Good | BuildStatus::Warning => {}
+        }
+
+        for mut event in result.events {
+            event.build_id = self.id;
+            if event.progress.is_some() {
+                event.progress = Some((self.metrics.goals_done, self.metrics.goals_total));
+            }
+            (self.event_handler)(event);
+        }
     }
 
     pub fn finish_module_work_build(&mut self) {

@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder, ModuleTiming};
+use crate::builder::{
+    BuildEvent, BuildMetrics, BuildStatus, Builder, LoadedModuleWorkBatch, ModuleTiming,
+};
 use crate::module::ModuleDescriptor;
 use crate::project::{Project, ProjectConfig, ProjectView, UsageMode};
 
@@ -500,6 +502,46 @@ impl Verifier {
         let propagate_load_errors = !matches!(self.target_spec, TargetSpec::All);
 
         self.builder.begin_module_work_build(targets.len());
+
+        if self.builder.can_pipeline_module_work(targets.len()) {
+            let project_ptr = self.project_ptr;
+            let mut load_index = 0usize;
+            let (load_elapsed, processed) = self.builder.process_module_work_pipeline(|| {
+                let Some(descriptor) = load_order.get(load_index) else {
+                    return Ok(None);
+                };
+                load_index += 1;
+
+                let load_start = std::time::Instant::now();
+                let load_result =
+                    unsafe { (&mut *project_ptr).load_target_by_descriptor(descriptor) };
+                if let Err(error) = load_result {
+                    if propagate_load_errors {
+                        return Err(format!("Error loading target '{}': {}", descriptor, error));
+                    }
+                }
+
+                let work =
+                    unsafe { (&mut *project_ptr).take_lowered_modules_for_targets(&targets) };
+                let project = if work.is_empty() {
+                    None
+                } else {
+                    Some(unsafe { ProjectView::new_without_lowered(&*project_ptr) })
+                };
+                Ok(Some(LoadedModuleWorkBatch {
+                    project,
+                    modules: work,
+                    load_elapsed: load_start.elapsed(),
+                }))
+            })?;
+
+            let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+            self.builder.set_project_view(project_view);
+            self.builder
+                .log_unprocessed_target_states(&targets, &processed);
+            self.builder.finish_module_work_build();
+            return Ok(load_elapsed);
+        }
 
         let mut processed = HashSet::new();
         let mut batch = Vec::new();
