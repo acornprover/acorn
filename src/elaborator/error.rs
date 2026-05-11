@@ -7,7 +7,7 @@ use crate::syntax::token::Token;
 
 // Errors that happen during elaboration.
 // We will want to report these along with a location in the source code.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Error {
     // The range of tokens the error occurred at.
     first_token: Token,

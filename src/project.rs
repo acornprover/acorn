@@ -2,6 +2,7 @@ use core::panic;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
@@ -91,7 +92,7 @@ pub struct Project {
 
     // The last known-good build cache.
     // This is different from the Builder's build cache, which is created during a build.
-    pub build_cache: BuildCache,
+    pub build_cache: Arc<BuildCache>,
 
     // Time spent loading the build cache during project creation.
     pub cache_load_time: Duration,
@@ -99,6 +100,351 @@ pub struct Project {
     // A flag for whether something is using the project to build right now.
     // Only used in the parallel server code.
     pub building: bool,
+}
+
+/// Read-only project operations needed while evaluating expressions and replaying certificates.
+pub trait ProjectLookup: Sync {
+    fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap>;
+    fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor>;
+    fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId>;
+}
+
+#[derive(Clone)]
+enum ProjectViewModuleState {
+    Registered,
+    Loading,
+    Error(Arc<error::Error>),
+    Ok(Arc<ModuleExport>),
+}
+
+pub enum ProjectViewModule<'a> {
+    None,
+    Registered,
+    Loading,
+    Error(&'a error::Error),
+    Ok(&'a ModuleExport),
+}
+
+/// Owned read-only snapshot of project state used while checking or proving modules.
+///
+/// Cloning this value is cheap: the snapshot maps and module exports are shared through `Arc`.
+#[derive(Clone)]
+pub struct ProjectView {
+    config: ProjectConfig,
+    src_dir: Arc<PathBuf>,
+    build_dir: Arc<PathBuf>,
+    build_cache: Arc<BuildCache>,
+    targets: Arc<HashSet<ModuleDescriptor>>,
+    surface_check_targets: Arc<HashSet<ModuleDescriptor>>,
+    module_states: Arc<HashMap<ModuleDescriptor, ProjectViewModuleState>>,
+    module_map: Arc<HashMap<ModuleDescriptor, ModuleId>>,
+    module_descriptors: Arc<HashMap<ModuleId, ModuleDescriptor>>,
+    module_exports: Arc<HashMap<ModuleId, Arc<ModuleExport>>>,
+    lowered_modules: Arc<HashMap<ModuleDescriptor, Arc<LoweredModule>>>,
+    content_hashes: Arc<HashMap<ModuleId, blake3::Hash>>,
+    open_file_paths: Arc<HashSet<PathBuf>>,
+}
+
+impl ProjectView {
+    pub fn new(project: &Project) -> Self {
+        Self::new_internal(project, true)
+    }
+
+    pub fn new_without_lowered(project: &Project) -> Self {
+        Self::new_internal(project, false)
+    }
+
+    fn new_internal(project: &Project, include_lowered: bool) -> Self {
+        let mut module_states = HashMap::new();
+        let mut module_descriptors = HashMap::new();
+        let mut module_exports = HashMap::new();
+        let mut lowered_modules = HashMap::new();
+        let mut content_hashes = HashMap::new();
+
+        for (index, module) in project.modules.iter().enumerate() {
+            let module_id = ModuleId(index as u16);
+            module_descriptors.insert(module_id, module.descriptor.clone());
+            let state = match &module.state {
+                LoadState::None => continue,
+                LoadState::Registered => ProjectViewModuleState::Registered,
+                LoadState::Loading => ProjectViewModuleState::Loading,
+                LoadState::Error(error) => ProjectViewModuleState::Error(Arc::new(error.clone())),
+                LoadState::Ok(loaded) => {
+                    module_exports.insert(module_id, Arc::clone(&loaded.export));
+                    if include_lowered {
+                        if let Some(lowered) = &loaded.lowered {
+                            lowered_modules.insert(module.descriptor.clone(), Arc::clone(lowered));
+                        }
+                    }
+                    ProjectViewModuleState::Ok(Arc::clone(&loaded.export))
+                }
+            };
+            module_states.insert(module.descriptor.clone(), state);
+            if let Some(hash) = module.hash {
+                content_hashes.insert(module_id, hash);
+            }
+        }
+
+        Self {
+            config: project.config.clone(),
+            src_dir: Arc::new(project.src_dir.clone()),
+            build_dir: Arc::new(project.build_dir.clone()),
+            build_cache: Arc::clone(&project.build_cache),
+            targets: Arc::new(project.targets.clone()),
+            surface_check_targets: Arc::new(project.surface_check_targets.clone()),
+            module_states: Arc::new(module_states),
+            module_map: Arc::new(project.module_map.clone()),
+            module_descriptors: Arc::new(module_descriptors),
+            module_exports: Arc::new(module_exports),
+            lowered_modules: Arc::new(lowered_modules),
+            content_hashes: Arc::new(content_hashes),
+            open_file_paths: Arc::new(project.open_files.keys().cloned().collect()),
+        }
+    }
+
+    pub fn config(&self) -> &ProjectConfig {
+        &self.config
+    }
+
+    pub fn build_dir(&self) -> &PathBuf {
+        &self.build_dir
+    }
+
+    pub fn build_cache(&self) -> &BuildCache {
+        &self.build_cache
+    }
+
+    pub fn targets(&self) -> &HashSet<ModuleDescriptor> {
+        &self.targets
+    }
+
+    pub fn get_module(&self, descriptor: &ModuleDescriptor) -> ProjectViewModule<'_> {
+        match self.module_states.get(descriptor) {
+            Some(ProjectViewModuleState::Registered) => ProjectViewModule::Registered,
+            Some(ProjectViewModuleState::Loading) => ProjectViewModule::Loading,
+            Some(ProjectViewModuleState::Error(error)) => ProjectViewModule::Error(error),
+            Some(ProjectViewModuleState::Ok(export)) => ProjectViewModule::Ok(export),
+            None => ProjectViewModule::None,
+        }
+    }
+
+    pub fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        self.module_exports
+            .get(&module_id)
+            .map(|export| export.as_ref())
+    }
+
+    pub fn get_lowered_module(&self, descriptor: &ModuleDescriptor) -> Option<&LoweredModule> {
+        self.lowered_modules
+            .get(descriptor)
+            .map(|lowered| lowered.as_ref())
+    }
+
+    pub fn is_surface_check_target(&self, descriptor: &ModuleDescriptor) -> bool {
+        self.surface_check_targets.contains(descriptor)
+    }
+
+    pub fn is_surface_check_module(&self, module_id: ModuleId) -> bool {
+        self.get_module_descriptor(module_id)
+            .is_some_and(|descriptor| self.is_surface_check_target(descriptor))
+    }
+
+    pub fn get_module_content_hash(&self, module_id: ModuleId) -> Option<blake3::Hash> {
+        self.content_hashes.get(&module_id).copied()
+    }
+
+    pub fn display_path(&self, descriptor: &ModuleDescriptor) -> String {
+        let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/");
+        match self.path_from_descriptor(descriptor) {
+            Ok(full_path) => match full_path.strip_prefix(self.src_dir.as_ref()) {
+                Ok(relative_path) => normalize(relative_path),
+                Err(_) => normalize(&full_path),
+            },
+            Err(_) => descriptor.to_string(),
+        }
+    }
+
+    pub fn descriptor_from_path(&self, path: &Path) -> Result<ModuleDescriptor, ImportError> {
+        let relative = match path.strip_prefix(self.src_dir.as_ref()) {
+            Ok(relative) => relative,
+            Err(_) => return Ok(ModuleDescriptor::File(path.to_path_buf())),
+        };
+        let components: Vec<_> = relative
+            .components()
+            .map(|comp| comp.as_os_str().to_string_lossy())
+            .collect();
+        let mut parts = Vec::new();
+        for (i, component) in components.iter().enumerate() {
+            let part = if i + 1 == components.len() {
+                if !component.ends_with(".ac") {
+                    return Err(ImportError::NotFound(format!(
+                        "path {} does not end with .ac",
+                        path.display()
+                    )));
+                }
+                if component == "default.ac" && i > 0 {
+                    break;
+                }
+                component[..component.len() - 3].to_string()
+            } else {
+                component.to_string()
+            };
+            let name_so_far = if parts.is_empty() {
+                part.clone()
+            } else {
+                format!("{}.{}", parts.join("."), part)
+            };
+            check_valid_module_part(&part, &name_so_far)?;
+            parts.push(part);
+        }
+
+        Ok(ModuleDescriptor::Name(parts))
+    }
+
+    pub fn path_from_descriptor(
+        &self,
+        descriptor: &ModuleDescriptor,
+    ) -> Result<PathBuf, ImportError> {
+        let name = match descriptor {
+            ModuleDescriptor::Name(parts) => parts.join("."),
+            ModuleDescriptor::File(path) => return Ok(path.clone()),
+            ModuleDescriptor::Anonymous => {
+                return Err(ImportError::NotFound("anonymous module".to_string()))
+            }
+        };
+
+        self.path_from_module_name(&name)
+    }
+
+    fn path_from_module_name(&self, module_name: &str) -> Result<PathBuf, ImportError> {
+        let mut path = self.src_dir.as_ref().clone();
+        let parts: Vec<&str> = module_name.split('.').collect();
+
+        for (i, part) in parts.iter().enumerate() {
+            check_valid_module_part(part, module_name)?;
+
+            if i + 1 == parts.len() {
+                let file_path = path.join(format!("{}.ac", part));
+                let dir_path = path.join(part).join("default.ac");
+
+                let file_exists = self.module_path_exists(&file_path);
+                let dir_exists = self.module_path_exists(&dir_path);
+
+                if file_exists && dir_exists {
+                    return Err(ImportError::NotFound(format!(
+                        "ambiguous module '{}': both {} and {} exist",
+                        module_name,
+                        file_path.display(),
+                        dir_path.display()
+                    )));
+                } else if file_exists {
+                    return Ok(file_path);
+                } else if dir_exists {
+                    return Ok(dir_path);
+                } else {
+                    return Ok(file_path);
+                }
+            } else {
+                path.push(part.to_string());
+            }
+        }
+        unreachable!("should have returned in the loop")
+    }
+
+    fn module_path_exists(&self, path: &Path) -> bool {
+        if self.config.use_filesystem {
+            path.exists()
+        } else {
+            self.open_file_paths.contains(path)
+        }
+    }
+
+    fn canonicalize_name_descriptor(&self, descriptor: &ModuleDescriptor) -> ModuleDescriptor {
+        let ModuleDescriptor::Name(_) = descriptor else {
+            return descriptor.clone();
+        };
+
+        let Ok(path) = self.path_from_descriptor(descriptor) else {
+            return descriptor.clone();
+        };
+
+        if !self.module_path_exists(&path) {
+            return descriptor.clone();
+        }
+
+        self.descriptor_from_path(&path)
+            .unwrap_or_else(|_| descriptor.clone())
+    }
+
+    pub fn all_dependencies(&self, original_module_id: ModuleId) -> Vec<ModuleId> {
+        let mut answer = vec![];
+        let mut seen = HashSet::new();
+        self.append_dependencies(&mut seen, &mut answer, original_module_id);
+        answer
+    }
+
+    fn append_dependencies(
+        &self,
+        seen: &mut HashSet<ModuleId>,
+        output: &mut Vec<ModuleId>,
+        module_id: ModuleId,
+    ) -> bool {
+        if !seen.insert(module_id) {
+            return false;
+        }
+        if let Some(bindings) = self.get_bindings(module_id) {
+            for dep in bindings.direct_dependencies() {
+                if self.append_dependencies(seen, output, dep) {
+                    output.push(dep);
+                }
+            }
+        }
+        true
+    }
+}
+
+impl ProjectLookup for ProjectView {
+    fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap> {
+        self.module_exports
+            .get(&module_id)
+            .map(|export| &export.bindings)
+    }
+
+    fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
+        self.module_descriptors.get(&module_id)
+    }
+
+    fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId> {
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        self.module_map.get(&canonical_descriptor).copied()
+    }
+}
+
+impl From<&Project> for ProjectView {
+    fn from(project: &Project) -> Self {
+        Self::new(project)
+    }
+}
+
+impl From<&ProjectView> for ProjectView {
+    fn from(project: &ProjectView) -> Self {
+        project.clone()
+    }
+}
+
+impl ProjectLookup for Project {
+    fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap> {
+        Project::get_bindings(self, module_id)
+    }
+
+    fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
+        Project::get_module_descriptor(self, module_id)
+    }
+
+    fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId> {
+        Project::get_module_id_by_name(self, module_name)
+    }
 }
 
 /// The main workflow a project instance is serving.
@@ -358,7 +704,7 @@ impl Project {
             module_map: HashMap::new(),
             targets: HashSet::new(),
             surface_check_targets: HashSet::new(),
-            build_cache,
+            build_cache: Arc::new(build_cache),
             cache_load_time,
             build_dir,
             building: false,
@@ -482,14 +828,14 @@ impl Project {
         if self.config.write_cache {
             // Save and merge: writes only new JSONL files, preserves manifest based on build type,
             // and merges old certificates back into memory
-            let _ = new_cache.save_merging_old(&self.build_cache, is_partial_build);
+            let _ = new_cache.save_merging_old(self.build_cache.as_ref(), is_partial_build);
         } else {
             // Even if we're not writing to disk, we need to merge the old certificates
             // into memory so they're available for future builds
-            new_cache.merge_certificates_from(&self.build_cache);
+            new_cache.merge_certificates_from(self.build_cache.as_ref());
         }
 
-        self.build_cache = new_cache;
+        self.build_cache = Arc::new(new_cache);
     }
 
     // Dropping existing modules lets you update the project for new data.
@@ -1156,7 +1502,7 @@ impl Project {
     }
 
     pub fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
-        Some(&self.get_loaded_module_by_id(module_id)?.export)
+        Some(self.get_loaded_module_by_id(module_id)?.export.as_ref())
     }
 
     pub fn get_lowered_module(&self, module_id: ModuleId) -> Option<&LoweredModule> {
@@ -1177,6 +1523,7 @@ impl Project {
                 continue;
             };
             if target_set.contains(&module.descriptor) {
+                let work = Arc::try_unwrap(work).unwrap_or_else(|work| (*work).clone());
                 lowered.push((module.descriptor.clone(), work));
             }
         }
@@ -2053,6 +2400,7 @@ impl Project {
         let content_hash = content_hasher.finalize();
         let bindings = env.bindings.clone();
         let export = ModuleExport::from_lowered(bindings, &lowering.module, self.config.usage_mode);
+        let export = Arc::new(export);
         let retained_env = self.config.usage_mode.keeps_ide_metadata().then_some(env);
         self.modules[module_id.get() as usize].load_ok(
             export,
@@ -2409,7 +2757,7 @@ impl Project {
                     return None;
                 }
             };
-            return env.bindings.get_completions(partial, true, &self);
+            return env.bindings.get_completions(partial, true, self);
         }
 
         // If we don't have a path, we can only complete imports.
@@ -2433,7 +2781,7 @@ impl Project {
         };
         let env = env.env_for_line(env_line);
 
-        env.bindings.get_completions(word, false, &self)
+        env.bindings.get_completions(word, false, self)
     }
 
     // Yields (url, version) for all open files.

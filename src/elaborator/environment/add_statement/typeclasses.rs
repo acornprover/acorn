@@ -30,7 +30,7 @@ impl Environment {
             doc_comments,
             Some(ts.typeclass_name.range()),
             definition_string,
-            &project,
+            project,
             &ts.typeclass_name,
         )?;
 
@@ -378,7 +378,7 @@ impl Environment {
                             &attr_name,
                             family_scope.type_params(),
                             &family_value_args,
-                            &project,
+                            project,
                             substatement,
                         )?;
                         let public_definition =
@@ -414,7 +414,7 @@ impl Environment {
                             &attr_name,
                             family_scope.type_params(),
                             &family_value_args,
-                            &project,
+                            project,
                             substatement,
                         )?;
                         let public_definition =
@@ -430,7 +430,7 @@ impl Environment {
             }
         }
 
-        let attributes = self.bindings.get_typeclass_attributes(&typeclass, &project);
+        let attributes = self.bindings.get_typeclass_attributes(&typeclass, project);
         let mut conditions = vec![];
         let mut defaults_to_add = vec![];
 

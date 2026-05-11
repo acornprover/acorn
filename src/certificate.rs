@@ -33,7 +33,7 @@ use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::{ModuleDescriptor, ModuleId};
-use crate::project::Project;
+use crate::project::ProjectLookup;
 use crate::prover::proof::ConcreteStep;
 use crate::prover::synthetic::{
     witness_application, witness_signature, WitnessEntry, WitnessRegistry,
@@ -267,7 +267,7 @@ impl Certificate {
     /// should pass mutable views and then use the updated state for subsequent checking.
     pub fn parse_cert_steps(
         proof: &[String],
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
@@ -276,7 +276,7 @@ impl Certificate {
 
     fn parse_cert_steps_internal(
         proof: &[String],
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
         #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
@@ -538,7 +538,7 @@ impl Certificate {
     fn validate_certificate_step_roundtrip(
         step: &CertificateStep,
         original_code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         pre_bindings: &BindingMap,
         pre_kernel_context: &KernelContext,
         post_bindings: &BindingMap,
@@ -603,7 +603,7 @@ impl Certificate {
     /// Parse a single code line, updating bindings/kernel_context, and return structured result.
     pub fn parse_code_line(
         code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
@@ -838,7 +838,7 @@ impl Certificate {
     /// Parse a certificate variable witness declaration into checker-ready clauses.
     fn parse_variable_satisfy_step(
         code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         vss: crate::syntax::statement::VariableSatisfyStatement,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
@@ -926,7 +926,7 @@ impl Certificate {
     /// Parse a certificate function witness declaration into checker-ready clauses.
     fn parse_function_satisfy_step(
         code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         fss: crate::syntax::statement::FunctionSatisfyStatement,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
@@ -1054,7 +1054,7 @@ impl Certificate {
     /// parsing.
     pub fn deserialize_claim_with_args(
         code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) -> Result<Claim, CodeGenError> {
@@ -1067,7 +1067,7 @@ impl Certificate {
     pub fn check(
         &self,
         checker: Checker,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<Vec<CertificateLine>, CodeGenError> {
@@ -1082,7 +1082,7 @@ impl Certificate {
     pub fn check_with_usage(
         &self,
         checker: Checker,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {
@@ -1092,7 +1092,7 @@ impl Certificate {
     fn check_with_usage_internal(
         &self,
         mut checker: Checker,
-        project: &Project,
+        project: &dyn ProjectLookup,
         mut bindings: Cow<BindingMap>,
         mut kernel_context: Cow<KernelContext>,
         validate_generated: bool,
@@ -1144,7 +1144,7 @@ impl Certificate {
     pub fn check_generated_with_usage(
         &self,
         checker: Checker,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {

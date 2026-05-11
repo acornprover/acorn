@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder, ModuleTiming};
 use crate::module::ModuleDescriptor;
-use crate::project::{Project, ProjectConfig, UsageMode};
+use crate::project::{Project, ProjectConfig, ProjectView, UsageMode};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     let path = PathBuf::from(target);
@@ -518,6 +518,10 @@ impl Verifier {
 
             let work =
                 unsafe { (&mut *self.project_ptr).take_lowered_modules_for_targets(&targets) };
+            if !work.is_empty() {
+                let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+                self.builder.set_project_view(project_view);
+            }
             self.builder.add_loaded_module_work(&work);
             for (descriptor, _) in &work {
                 processed.insert(descriptor.clone());
@@ -527,6 +531,8 @@ impl Verifier {
 
             if batch.len() >= batch_limit {
                 let ready = std::mem::take(&mut batch);
+                let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+                self.builder.set_project_view(project_view);
                 self.builder
                     .process_module_work_batch(ready, &mut next_index);
                 if self.builder.status.is_error() {
@@ -536,10 +542,14 @@ impl Verifier {
         }
 
         if !batch.is_empty() && !self.builder.status.is_error() {
+            let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+            self.builder.set_project_view(project_view);
             self.builder
                 .process_module_work_batch(batch, &mut next_index);
         }
 
+        let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+        self.builder.set_project_view(project_view);
         self.builder
             .log_unprocessed_target_states(&targets, &processed);
         self.builder.finish_module_work_build();
@@ -561,6 +571,8 @@ impl Verifier {
             true
         } else {
             self.target_load_time = self.load_targets_regular()?;
+            let project_view = unsafe { ProjectView::new(&*self.project_ptr) };
+            self.builder.set_project_view(project_view);
             false
         };
 

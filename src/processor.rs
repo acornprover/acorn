@@ -14,7 +14,7 @@ use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
-use crate::project::Project;
+use crate::project::ProjectView;
 use crate::prover::{Outcome, Prover, ProverMode, SearchStats};
 use tokio_util::sync::CancellationToken;
 
@@ -77,7 +77,7 @@ impl Processor {
     pub fn with_imports(
         cancellation_token: Option<CancellationToken>,
         bindings: &BindingMap,
-        project: &Project,
+        project: impl Into<ProjectView>,
     ) -> Result<Processor, BuildError> {
         let mut processor = Self::new_with_optional_prover(cancellation_token, true);
         processor.add_imports_from_bindings(bindings, project)?;
@@ -88,7 +88,7 @@ impl Processor {
     pub fn with_imports_for_checking(
         cancellation_token: Option<CancellationToken>,
         bindings: &BindingMap,
-        project: &Project,
+        project: impl Into<ProjectView>,
     ) -> Result<Processor, BuildError> {
         let mut processor = Self::new_with_optional_prover(cancellation_token, false);
         processor.add_imports_from_bindings(bindings, project)?;
@@ -98,8 +98,9 @@ impl Processor {
     pub fn add_imports_from_bindings(
         &mut self,
         bindings: &BindingMap,
-        project: &Project,
+        project: impl Into<ProjectView>,
     ) -> Result<(), BuildError> {
+        let project = project.into();
         if self.has_imports_for_bindings(bindings) {
             return Ok(());
         }
@@ -110,7 +111,7 @@ impl Processor {
                 .into_iter()
                 .chain(std::iter::once(dep_id))
             {
-                self.add_imported_module(project, module_id)?;
+                self.add_imported_module(&project, module_id)?;
             }
         }
         Ok(())
@@ -125,7 +126,7 @@ impl Processor {
 
     fn add_imported_module(
         &mut self,
-        project: &Project,
+        project: &ProjectView,
         module_id: ModuleId,
     ) -> Result<(), BuildError> {
         if !self.imported_modules.insert(module_id) {
@@ -281,7 +282,7 @@ impl Processor {
         cert: &Certificate,
         normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
-        project: &Project,
+        project: impl Into<ProjectView>,
         bindings: &BindingMap,
     ) -> Result<Vec<CertificateLine>, Error> {
         Ok(self
@@ -295,7 +296,7 @@ impl Processor {
         cert: &Certificate,
         normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
-        project: &Project,
+        project: impl Into<ProjectView>,
         bindings: &BindingMap,
     ) -> Result<Vec<CertificateLine>, Error> {
         Ok(self
@@ -315,7 +316,7 @@ impl Processor {
         cert: &Certificate,
         normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
-        project: &Project,
+        project: impl Into<ProjectView>,
         bindings: &BindingMap,
     ) -> Result<CheckedCertificate, Error> {
         self.check_cert_with_usage_internal(
@@ -333,10 +334,11 @@ impl Processor {
         cert: &Certificate,
         normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
-        project: &Project,
+        project: impl Into<ProjectView>,
         bindings: &BindingMap,
         #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
     ) -> Result<CheckedCertificate, Error> {
+        let project = project.into();
         let mut checker = self.checker.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
         let effective_kernel_context: &KernelContext;
@@ -362,13 +364,13 @@ impl Processor {
         if validate_generated {
             return cert.check_generated_with_usage(
                 checker,
-                project,
+                &project,
                 cert_bindings,
                 kernel_context,
             );
         }
 
-        cert.check_with_usage(checker, project, cert_bindings, kernel_context)
+        cert.check_with_usage(checker, &project, cert_bindings, kernel_context)
     }
 
     #[cfg(feature = "validate")]
@@ -377,7 +379,7 @@ impl Processor {
         cert: &Certificate,
         normalized_goal: Option<&LoweredGoal>,
         kernel_context: &KernelContext,
-        project: &Project,
+        project: impl Into<ProjectView>,
         bindings: &BindingMap,
     ) -> Result<CheckedCertificate, Error> {
         self.check_cert_with_usage_internal(
@@ -395,7 +397,7 @@ impl Processor {
     /// Returns the Processor and the goal-level BindingMap.
     #[cfg(test)]
     pub fn test_goal(code: &str) -> (Processor, BindingMap, LoweredGoal) {
-        let mut p = Project::new_mock();
+        let mut p = crate::project::Project::new_mock();
         p.mock("/mock/main.ac", code);
 
         let module_id = p.load_module_by_name("main").expect("load failed");
@@ -429,7 +431,7 @@ impl Processor {
 
         let mut kernel_context_cow = Cow::Owned(kernel_context.clone());
         let mut bindings_cow = Cow::Borrowed(bindings);
-        let project = Project::new_mock();
+        let project = crate::project::Project::new_mock();
 
         Certificate::parse_code_line(code, &project, &mut bindings_cow, &mut kernel_context_cow)
             .unwrap();
@@ -439,6 +441,7 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::Project;
 
     #[test]
     fn check_only_processor_can_verify_a_generated_certificate() {

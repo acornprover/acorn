@@ -16,7 +16,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
-use crate::project::Project;
+use crate::project::ProjectLookup;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::statement::{Statement, StatementInfo};
 use crate::syntax::token::TokenType;
@@ -502,7 +502,7 @@ impl ClaimCodec {
     /// Parse a serialized claim-with-args line.
     pub(crate) fn deserialize_claim_with_args(
         code: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &BindingMap,
         kernel_context: &KernelContext,
     ) -> Result<Claim, CodeGenError> {
@@ -530,7 +530,7 @@ impl ClaimCodec {
     /// Try to parse a claim-with-args expression without falling back to plain claim parsing.
     pub(crate) fn try_deserialize_claim_expression(
         expr: &Expression,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &BindingMap,
         kernel_context: &mut KernelContext,
     ) -> Result<Option<Claim>, CodeGenError> {
@@ -727,7 +727,7 @@ impl ClaimCodec {
     /// Evaluate a structurally split claim expression without collapsing body and args together.
     fn evaluate_claim_expression_shape(
         shape: ClaimExpressionShape<'_>,
-        project: &Project,
+        project: &dyn ProjectLookup,
         bindings: &BindingMap,
     ) -> Result<(ClaimFunctionValue, Vec<AcornValue>), CodeGenError> {
         let mut type_param_evaluator = Evaluator::new(project, bindings, None);

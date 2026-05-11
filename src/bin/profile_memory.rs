@@ -884,11 +884,12 @@ fn clear_loaded_bucket(module: &mut LoadedModule, bucket: ClearBucket) {
             if let Some(lowered) = module.lowered_mut() {
                 lowered.profile_clear_lowered();
             } else {
-                module.export.profile_clear_facts();
+                std::sync::Arc::make_mut(&mut module.export).profile_clear_facts();
             }
         }
         ClearBucket::KernelContexts => {
-            module.export.final_kernel_context = KernelContext::new();
+            std::sync::Arc::make_mut(&mut module.export).final_kernel_context =
+                KernelContext::new();
             if let Some(lowered) = module.lowered_mut() {
                 lowered.final_kernel_context = KernelContext::new();
             }

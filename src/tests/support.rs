@@ -97,7 +97,7 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, project, bindings) {
+    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, &*project, bindings) {
         panic!("check_cert failed: {}", e);
     }
     cert

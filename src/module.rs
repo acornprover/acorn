@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -79,14 +79,14 @@ impl Module {
     // Called when a module load succeeds.
     pub fn load_ok(
         &mut self,
-        export: ModuleExport,
+        export: Arc<ModuleExport>,
         lowered: Option<LoweredModule>,
         env: Option<Environment>,
         content_hash: blake3::Hash,
     ) {
         self.state = LoadState::Ok(LoadedModule {
             export,
-            lowered,
+            lowered: lowered.map(Arc::new),
             env,
         });
         self.hash = Some(content_hash);
@@ -104,8 +104,8 @@ impl Module {
 // batch checking/proving consumes `lowered` as module-local work; IDE features use
 // `env` when it is retained.
 pub struct LoadedModule {
-    pub export: ModuleExport,
-    pub lowered: Option<LoweredModule>,
+    pub export: Arc<ModuleExport>,
+    pub lowered: Option<Arc<LoweredModule>>,
     pub env: Option<Environment>,
 }
 
@@ -115,11 +115,11 @@ impl LoadedModule {
     }
 
     pub fn lowered(&self) -> Option<&LoweredModule> {
-        self.lowered.as_ref()
+        self.lowered.as_deref()
     }
 
     pub fn lowered_mut(&mut self) -> Option<&mut LoweredModule> {
-        self.lowered.as_mut()
+        self.lowered.as_mut().map(Arc::make_mut)
     }
 
     pub fn env(&self) -> Option<&Environment> {

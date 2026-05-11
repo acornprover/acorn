@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -19,9 +18,9 @@ use crate::elaborator::lowered_module::{LoweredItem, LoweredModule};
 use crate::elaborator::lowering::LoweredGoal;
 use crate::elaborator::node::NodeCursor;
 use crate::elaborator::source::SourceType;
-use crate::module::{LoadState, ModuleDescriptor, ModuleId};
+use crate::module::{ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
-use crate::project::Project;
+use crate::project::{Project, ProjectLookup, ProjectView, ProjectViewModule};
 use crate::proof_display::display_certificate_lines;
 use crate::prover::{Outcome, ProverMode, SearchStats};
 
@@ -203,14 +202,8 @@ impl EvalGoalCounts {
 /// This is separate from the Project because you can read information from the Project from other
 /// threads while a build is ongoing, but a Builder is only used by the build itself.
 pub struct Builder<'a> {
-    /// Pointer to the project being built.
-    ///
-    /// The builder creates short-lived shared references from this pointer when
-    /// it needs to read project state. This lets batch loaders mutate the
-    /// project between build batches without keeping a long-lived `&Project`
-    /// alive inside the builder.
-    project: *const Project,
-    project_lifetime: PhantomData<&'a Project>,
+    /// Read-only project state visible to the build.
+    project: ProjectView,
 
     /// A single event handler is used across all modules.
     event_handler: Box<dyn FnMut(BuildEvent) + 'a>,
@@ -1127,10 +1120,17 @@ impl<'a> Builder<'a> {
         cancellation_token: CancellationToken,
         event_handler: impl FnMut(BuildEvent) + 'a,
     ) -> Self {
+        Self::new_with_view(ProjectView::new(project), cancellation_token, event_handler)
+    }
+
+    pub fn new_with_view(
+        project: ProjectView,
+        cancellation_token: CancellationToken,
+        event_handler: impl FnMut(BuildEvent) + 'a,
+    ) -> Self {
         let event_handler = Box::new(event_handler);
         Builder {
-            project: project as *const Project,
-            project_lifetime: PhantomData,
+            project,
             event_handler,
             status: BuildStatus::Good,
             id: NEXT_BUILD_ID.fetch_add(1, Ordering::SeqCst),
@@ -1165,17 +1165,21 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn project(&self) -> &'a Project {
-        unsafe { &*self.project }
+    fn project(&self) -> &ProjectView {
+        &self.project
     }
 
     pub fn set_module_work(&mut self, module_work: Vec<(ModuleDescriptor, LoweredModule)>) {
         self.module_work = Some(module_work);
     }
 
+    pub fn set_project_view(&mut self, project: ProjectView) {
+        self.project = project;
+    }
+
     pub fn begin_module_work_build(&mut self, target_count: usize) {
         self.prepare_eval_mode();
-        self.build_cache = Some(BuildCache::new(self.project().build_dir.clone()));
+        self.build_cache = Some(BuildCache::new(self.project().build_dir().clone()));
         self.log_global(format!("verifying {} modules...", target_count));
     }
 
@@ -1239,11 +1243,12 @@ impl<'a> Builder<'a> {
             if processed.contains(target) {
                 continue;
             }
-            match self.project().get_module(target) {
-                LoadState::Ok(_) => {
+            let project = self.project().clone();
+            match project.get_module(target) {
+                ProjectViewModule::Ok(_) => {
                     self.log_global(format!("error: module {} has no lowered work", target));
                 }
-                LoadState::Error(e) => {
+                ProjectViewModule::Error(e) => {
                     if e.indirect {
                         if self.log_secondary_errors {
                             self.log_global(e.to_string());
@@ -1252,10 +1257,10 @@ impl<'a> Builder<'a> {
                         self.log_loading_error(target, e);
                     }
                 }
-                LoadState::None => {
+                ProjectViewModule::None => {
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                LoadState::Loading | LoadState::Registered => {
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {
                     self.log_global(format!("error: module {} stuck in loading", target));
                 }
             }
@@ -1298,7 +1303,7 @@ impl<'a> Builder<'a> {
 
         let include_empty = self.eval_skip_modes.iter().any(|&skip| skip > 0);
         let mut counts: HashMap<String, EvalGoalCounts> = HashMap::new();
-        if let Some(store) = self.project().build_cache.get_certificates(target) {
+        if let Some(store) = self.project().build_cache().get_certificates(target) {
             for cert in &store.certs {
                 if let Some(proof) = &cert.proof {
                     if proof.is_empty() {
@@ -2285,8 +2290,8 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let mut worklist = if self.project().config.read_cache {
-            self.project().build_cache.make_worklist(target)
+        let mut worklist = if self.project().config().read_cache {
+            self.project().build_cache().make_worklist(target)
         } else {
             CertificateWorklist::new(CertificateStore { certs: vec![] })
         };
@@ -2378,8 +2383,8 @@ impl<'a> Builder<'a> {
             && !self.print_proof
             && !self.print_found_proof
             && !self.exit_on_warning
-            && self.project().config.read_cache
-            && !self.project().config.write_cache
+            && self.project().config().read_cache
+            && !self.project().config().write_cache
     }
 
     fn eval_module_search_estimate(&self, target: &ModuleDescriptor) -> usize {
@@ -2390,7 +2395,7 @@ impl<'a> Builder<'a> {
             .filter(|&&skip| skip > 0)
             .count();
 
-        let Some(store) = self.project().build_cache.get_certificates(target) else {
+        let Some(store) = self.project().build_cache().get_certificates(target) else {
             return 0;
         };
         store
@@ -2413,7 +2418,7 @@ impl<'a> Builder<'a> {
     }
 
     fn build_module_on_worker(
-        project: &Project,
+        project: ProjectView,
         cancellation_token: CancellationToken,
         index: usize,
         target: ModuleDescriptor,
@@ -2421,12 +2426,14 @@ impl<'a> Builder<'a> {
         config: &ModuleWorkerConfig,
     ) -> ModuleBuildResult {
         let mut events = Vec::new();
-        let mut builder = Builder::new(project, cancellation_token, |event| events.push(event));
+        let build_dir = project.build_dir().clone();
+        let mut builder =
+            Builder::new_with_view(project, cancellation_token, |event| events.push(event));
         config.apply_to(&mut builder);
         builder.metrics.modules_total = 1;
         let goal_count = lowered.goal_count() as i32;
         builder.metrics.goals_total = goal_count;
-        builder.build_cache = Some(BuildCache::new(project.build_dir.clone()));
+        builder.build_cache = Some(BuildCache::new(build_dir));
         builder.prepare_eval_mode();
 
         let module_metrics_before = builder.metrics.clone();
@@ -2474,7 +2481,7 @@ impl<'a> Builder<'a> {
                 .then_with(|| a.index.cmp(&b.index))
         });
 
-        let project = self.project();
+        let project = self.project().clone();
         let worker_config = ModuleWorkerConfig::from_builder(self);
         let cancellation_token = self.cancellation_token.clone();
         let next_module = AtomicUsize::new(0);
@@ -2487,6 +2494,7 @@ impl<'a> Builder<'a> {
                 let config = worker_config.clone();
                 let modules = &modules;
                 let next_module = &next_module;
+                let project = project.clone();
                 handles.push(scope.spawn(move || {
                     let mut worker_results = Vec::new();
                     loop {
@@ -2495,7 +2503,7 @@ impl<'a> Builder<'a> {
                             break;
                         };
                         worker_results.push(Self::build_module_on_worker(
-                            project,
+                            project.clone(),
                             token.clone(),
                             module.index,
                             module.target.clone(),
@@ -2557,7 +2565,7 @@ impl<'a> Builder<'a> {
         });
 
         let work_queue = Mutex::new(VecDeque::from(modules));
-        let project = self.project();
+        let project = self.project().clone();
         let worker_config = ModuleWorkerConfig::from_builder(self);
         let cancellation_token = self.cancellation_token.clone();
         let mut results = Vec::new();
@@ -2568,6 +2576,7 @@ impl<'a> Builder<'a> {
                 let token = cancellation_token.clone();
                 let config = worker_config.clone();
                 let work_queue = &work_queue;
+                let project = project.clone();
                 handles.push(scope.spawn(move || {
                     let mut worker_results = Vec::new();
                     loop {
@@ -2579,7 +2588,7 @@ impl<'a> Builder<'a> {
                             break;
                         };
                         worker_results.push(Self::build_module_on_worker(
-                            project,
+                            project.clone(),
                             token.clone(),
                             module.index,
                             module.target,
@@ -2646,10 +2655,11 @@ impl<'a> Builder<'a> {
         let mut work_by_target: HashMap<ModuleDescriptor, LoweredModule> =
             module_work.into_iter().collect();
         let mut lowered_modules = Vec::new();
+        let project = self.project().clone();
         for target in &targets {
-            let module = self.project().get_module(target);
+            let module = project.get_module(target);
             match module {
-                LoadState::Ok(_) => {
+                ProjectViewModule::Ok(_) => {
                     if let Some(lowered) = work_by_target.remove(target) {
                         self.lowered_module_loaded(&lowered);
                         lowered_modules.push((target.clone(), lowered));
@@ -2657,7 +2667,7 @@ impl<'a> Builder<'a> {
                         self.log_global(format!("error: module {} has no lowered work", target));
                     }
                 }
-                LoadState::Error(e) => {
+                ProjectViewModule::Error(e) => {
                     if e.indirect {
                         if self.log_secondary_errors {
                             self.log_global(e.to_string());
@@ -2666,10 +2676,10 @@ impl<'a> Builder<'a> {
                         self.log_loading_error(target, e);
                     }
                 }
-                LoadState::None => {
+                ProjectViewModule::None => {
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                LoadState::Loading | LoadState::Registered => {
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {
                     self.log_global(format!("error: module {} stuck in loading", target));
                 }
             }
@@ -2733,7 +2743,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
 
-            if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
+            if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode
+            {
                 self.log_global(format!("force-searching: {}", target));
             }
 
@@ -2811,7 +2822,7 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
+        if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode {
             self.log_global(format!("force-searching: {}", target));
         }
 
@@ -2855,10 +2866,10 @@ impl<'a> Builder<'a> {
         self.prepare_eval_mode();
 
         // Initialize the build cache
-        self.build_cache = Some(BuildCache::new(self.project().build_dir.clone()));
+        self.build_cache = Some(BuildCache::new(self.project().build_dir().clone()));
 
         // Build in alphabetical order by module name for consistency.
-        let mut targets = self.project().targets.iter().cloned().collect::<Vec<_>>();
+        let mut targets = self.project().targets().iter().cloned().collect::<Vec<_>>();
         targets.sort();
 
         let verification_message = if targets.len() > 5 {
@@ -2884,18 +2895,19 @@ impl<'a> Builder<'a> {
         // If there are errors, we won't try to do proving.
         let loading_start = std::time::Instant::now();
         let mut lowered_modules = vec![];
+        let project = self.project().clone();
         for target in &targets {
-            let module = self.project().get_module(target);
+            let module = project.get_module(target);
             match module {
-                LoadState::Ok(module) => {
-                    if let Some(lowered) = module.lowered() {
+                ProjectViewModule::Ok(_) => {
+                    if let Some(lowered) = project.get_lowered_module(target) {
                         self.lowered_module_loaded(lowered);
                         lowered_modules.push(lowered);
                     } else {
                         self.log_global(format!("error: module {} has no lowered work", target));
                     }
                 }
-                LoadState::Error(e) => {
+                ProjectViewModule::Error(e) => {
                     if e.indirect {
                         if self.log_secondary_errors {
                             // The real problem is in a different module.
@@ -2906,11 +2918,11 @@ impl<'a> Builder<'a> {
                         self.log_loading_error(target, e);
                     }
                 }
-                LoadState::None => {
+                ProjectViewModule::None => {
                     // Targets are supposed to be loaded already.
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                LoadState::Loading | LoadState::Registered => {
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {
                     // Happens if there's a circular import. A more localized error should
                     // show up elsewhere, so let's just log.
                     self.log_global(format!("error: module {} stuck in loading", target));
@@ -2983,7 +2995,8 @@ impl<'a> Builder<'a> {
             }
 
             // Log module name when forcing whole-project proof search.
-            if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
+            if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode
+            {
                 self.log_global(format!("force-searching: {}", target));
             }
 
@@ -3052,7 +3065,7 @@ impl<'a> Builder<'a> {
 
         if !self
             .project()
-            .build_cache
+            .build_cache()
             .manifest_matches(descriptor, current_hash)
         {
             return false;
@@ -3070,14 +3083,14 @@ impl<'a> Builder<'a> {
 
             if !self
                 .project()
-                .build_cache
+                .build_cache()
                 .manifest_matches(dep_descriptor, dep_hash)
             {
                 return false;
             }
         }
 
-        let Some(_existing_certs) = self.project().build_cache.get_certificates(target) else {
+        let Some(_existing_certs) = self.project().build_cache().get_certificates(target) else {
             // This is a bad case. The different build files are inconsistent.
             // Well, just ignore it.
             return false;

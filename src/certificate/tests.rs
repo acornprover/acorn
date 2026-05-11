@@ -2,6 +2,7 @@ use super::*;
 use crate::module::LoadState;
 use crate::module::ModuleId;
 use crate::processor::Processor;
+use crate::project::Project;
 use std::borrow::Cow;
 use tempfile::tempdir;
 

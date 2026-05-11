@@ -25,7 +25,7 @@ use crate::elaborator::type_unifier::{TypeUnifier, TypeclassRegistry};
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::AtomId;
 use crate::module::{ModuleDescriptor, ModuleId};
-use crate::project::Project;
+use crate::project::{Project, ProjectLookup};
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::{self, Token, TokenType};
 use crate::syntax::token_map::TokenMap;
@@ -447,7 +447,11 @@ impl BindingMap {
     }
 
     /// A helper to get the bindings from the project if needed bindings.
-    pub fn get_bindings<'a>(&'a self, module_id: ModuleId, project: &'a Project) -> &'a BindingMap {
+    pub fn get_bindings<'a>(
+        &'a self,
+        module_id: ModuleId,
+        project: &'a dyn ProjectLookup,
+    ) -> &'a BindingMap {
         if module_id == self.module_id {
             self
         } else {
@@ -458,7 +462,7 @@ impl BindingMap {
     pub fn get_typeclass_attributes<'a>(
         &'a self,
         typeclass: &Typeclass,
-        project: &'a Project,
+        project: &'a dyn ProjectLookup,
     ) -> &'a BTreeMap<String, (ModuleId, Typeclass)> {
         &self
             .get_bindings(typeclass.module_id, project)
@@ -910,7 +914,7 @@ impl BindingMap {
         doc_comments: Vec<String>,
         range: Option<Range>,
         definition_string: Option<String>,
-        project: &Project,
+        project: &dyn ProjectLookup,
         source: &dyn ErrorContext,
     ) -> error::Result<()> {
         let mut info = TypeclassDefinition::new();
@@ -993,7 +997,7 @@ impl BindingMap {
         attr_name: &str,
         type_params: &[TypeParam],
         value_args: &[AcornValue],
-        project: &Project,
+        project: &dyn ProjectLookup,
         source: &dyn ErrorContext,
     ) -> error::Result<(AcornValue, AcornValue)> {
         // Get the relevant properties of the typeclass.
@@ -1678,7 +1682,7 @@ impl BindingMap {
     pub fn import_prelude(
         &mut self,
         prelude_bindings: &BindingMap,
-        project: &Project,
+        project: &dyn ProjectLookup,
     ) -> error::Result<()> {
         // First, import the module's typeclass and datatype info
         self.import_module(
@@ -1724,7 +1728,7 @@ impl BindingMap {
     }
 
     /// Whether this value is calling a theorem on some arguments.
-    pub fn is_citation(&self, claim: &AcornValue, project: &Project) -> bool {
+    pub fn is_citation(&self, claim: &AcornValue, project: &dyn ProjectLookup) -> bool {
         match claim.is_named_function_call().or_else(|| claim.as_name()) {
             Some(constant_name) => {
                 let bindings = self.get_bindings(constant_name.module_id(), project);
@@ -1738,7 +1742,7 @@ impl BindingMap {
         &self,
         typeclass: &Typeclass,
         prefix: &str,
-        project: &Project,
+        project: &dyn ProjectLookup,
     ) -> Option<Vec<CompletionItem>> {
         let mut answer = vec![];
         if let Some(info) = self
@@ -1789,7 +1793,7 @@ impl BindingMap {
         &self,
         prefix: &str,
         importing: bool,
-        project: &Project,
+        project: &dyn ProjectLookup,
     ) -> Option<Vec<CompletionItem>> {
         if prefix.contains('.') {
             if importing {
@@ -1895,7 +1899,7 @@ impl BindingMap {
     /// The name could either be a type or a value.
     pub fn import_name(
         &mut self,
-        project: &Project,
+        project: &dyn ProjectLookup,
         module: ModuleId,
         name_token: &Token,
     ) -> error::Result<NamedEntity> {
@@ -2026,7 +2030,7 @@ impl BindingMap {
         condition_name: &str,
         instance_type: &AcornType,
         ambient_stack_size: crate::kernel::atom::AtomId,
-        project: &Project,
+        project: &dyn ProjectLookup,
         source: &dyn ErrorContext,
     ) -> error::Result<AcornValue> {
         let tc_condition_name =
@@ -2106,7 +2110,7 @@ impl BindingMap {
         current_instance: Option<&InstanceName>,
         datatype_type_params: Option<&[TypeParam]>,
         datatype_value_params: Option<&[crate::elaborator::acorn_type::ValueParam]>,
-        project: &Project,
+        project: &dyn ProjectLookup,
         mut token_map: Option<&mut TokenMap>,
     ) -> error::Result<(
         Vec<TypeParam>,
@@ -2352,11 +2356,15 @@ impl BindingMap {
     }
 
     /// Replaces the cited outer theorem with its definition.
-    pub fn expand_citation(&self, proposition: Proposition, project: &Project) -> Proposition {
+    pub fn expand_citation(
+        &self,
+        proposition: Proposition,
+        project: &dyn ProjectLookup,
+    ) -> Proposition {
         fn expand_citation_value(
             bindings: &BindingMap,
             value: &AcornValue,
-            project: &Project,
+            project: &dyn ProjectLookup,
             stack_size: AtomId,
         ) -> Option<AcornValue> {
             match value {

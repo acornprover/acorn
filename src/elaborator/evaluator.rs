@@ -13,7 +13,9 @@ use crate::elaborator::stack::Stack;
 use crate::elaborator::unresolved_constant::UnresolvedConstant;
 use crate::kernel::atom::AtomId;
 use crate::module::ModuleId;
+#[cfg(test)]
 use crate::project::Project;
+use crate::project::ProjectLookup;
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
@@ -43,7 +45,7 @@ pub struct Evaluator<'a> {
     bindings: &'a BindingMap,
 
     /// The overall project.
-    project: &'a Project,
+    project: &'a dyn ProjectLookup,
 
     /// If the token map is provided, we update it whenever we first determine the
     /// semantics of a token.
@@ -60,7 +62,7 @@ pub struct Evaluator<'a> {
 impl<'a> Evaluator<'a> {
     /// Creates a new evaluator.
     pub fn new(
-        project: &'a Project,
+        project: &'a dyn ProjectLookup,
         bindings: &'a BindingMap,
         token_map: Option<&'a mut TokenMap>,
     ) -> Self {
@@ -73,7 +75,7 @@ impl<'a> Evaluator<'a> {
     }
 
     pub fn new_for_instance_member(
-        project: &'a Project,
+        project: &'a dyn ProjectLookup,
         bindings: &'a BindingMap,
         token_map: Option<&'a mut TokenMap>,
         instance_name: &InstanceName,
