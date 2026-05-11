@@ -87,3 +87,43 @@ declaration order `[K, I]`, or the replayed claim no longer matches.
         }
         
 ```
+
+## Match On Generic Inductive Over Dependent Type
+
+Reproduces an elaboration failure where matching a `Maybe[Fin[n]]` mishandles the
+dependent index. The `Maybe.some(t)` pattern's `Fin` index gets a fresh variable
+that doesn't unify with the scrutinee's `Fin[n]`, producing
+"the pattern has type Maybe[Fin[x1]] but we are matching type Maybe[Fin[x0]]".
+
+```acorn
+        type Nat: axiom
+        let lt: (Nat, Nat) -> Bool = axiom
+        let zero: Nat = axiom
+
+        structure Fin[n: Nat] {
+            value: Nat
+        } constraint {
+            lt(value, n)
+        }
+
+        inductive Maybe[T] {
+            none
+            some(T)
+        }
+
+        define maybe_fin(n: Nat) -> Maybe[Fin[n]] {
+            Maybe.none
+        }
+
+        define value_or_zero(n: Nat) -> Nat {
+            match maybe_fin(n) {
+                Maybe.none {
+                    zero
+                }
+                Maybe.some(t) {
+                    t.value
+                }
+            }
+        }
+        
+```
