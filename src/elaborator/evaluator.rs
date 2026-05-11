@@ -883,7 +883,8 @@ impl<'a> Evaluator<'a> {
         let AcornType::Function(f) = constructor.get_type() else {
             return Err(fn_exp.error("expected a function"));
         };
-        if &*f.return_type != expected_type {
+        let shifted_expected = expected_type.insert_stack(0, f.arg_types.len() as AtomId);
+        if *f.return_type != shifted_expected {
             return Err(pattern.error(&format!(
                 "the pattern has type {} but we are matching type {}",
                 &*f.return_type, expected_type
