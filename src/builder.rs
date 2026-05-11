@@ -1,5 +1,6 @@
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -202,8 +203,14 @@ impl EvalGoalCounts {
 /// This is separate from the Project because you can read information from the Project from other
 /// threads while a build is ongoing, but a Builder is only used by the build itself.
 pub struct Builder<'a> {
-    /// Reference to the project being built.
-    project: &'a Project,
+    /// Pointer to the project being built.
+    ///
+    /// The builder creates short-lived shared references from this pointer when
+    /// it needs to read project state. This lets batch loaders mutate the
+    /// project between build batches without keeping a long-lived `&Project`
+    /// alive inside the builder.
+    project: *const Project,
+    project_lifetime: PhantomData<&'a Project>,
 
     /// A single event handler is used across all modules.
     event_handler: Box<dyn FnMut(BuildEvent) + 'a>,
@@ -1122,7 +1129,8 @@ impl<'a> Builder<'a> {
     ) -> Self {
         let event_handler = Box::new(event_handler);
         Builder {
-            project,
+            project: project as *const Project,
+            project_lifetime: PhantomData,
             event_handler,
             status: BuildStatus::Good,
             id: NEXT_BUILD_ID.fetch_add(1, Ordering::SeqCst),
@@ -1157,8 +1165,101 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn project(&self) -> &'a Project {
+        unsafe { &*self.project }
+    }
+
     pub fn set_module_work(&mut self, module_work: Vec<(ModuleDescriptor, LoweredModule)>) {
         self.module_work = Some(module_work);
+    }
+
+    pub fn begin_module_work_build(&mut self, target_count: usize) {
+        self.prepare_eval_mode();
+        self.build_cache = Some(BuildCache::new(self.project().build_dir.clone()));
+        self.log_global(format!("verifying {} modules...", target_count));
+    }
+
+    pub fn add_loaded_module_work(&mut self, modules: &[(ModuleDescriptor, LoweredModule)]) {
+        for (_, lowered) in modules {
+            self.lowered_module_loaded(lowered);
+        }
+        self.metrics.modules_total += modules.len() as i32;
+    }
+
+    pub fn process_module_work_batch(
+        &mut self,
+        modules: Vec<(ModuleDescriptor, LoweredModule)>,
+        next_index: &mut usize,
+    ) {
+        if modules.is_empty() || self.status.is_error() {
+            return;
+        }
+
+        let verification_start = std::time::Instant::now();
+        if self.can_build_modules_in_parallel(modules.len()) {
+            let modules = modules
+                .into_iter()
+                .map(|(target, lowered)| {
+                    let index = *next_index;
+                    *next_index += 1;
+                    (index, target, lowered)
+                })
+                .collect();
+            self.build_owned_modules_parallel(modules);
+            self.metrics.verification_time += verification_start.elapsed().as_secs_f64();
+            return;
+        }
+
+        for (target, lowered) in modules {
+            let index = *next_index;
+            *next_index += 1;
+            self.process_one_owned_module(index, target, lowered);
+            if self.exit_on_warning && !self.status.is_good() {
+                break;
+            }
+            if self.status.is_error() {
+                break;
+            }
+        }
+        self.metrics.verification_time += verification_start.elapsed().as_secs_f64();
+    }
+
+    pub fn finish_module_work_build(&mut self) {
+        if self.status.is_good() {
+            self.trim_unused_certificates();
+        }
+    }
+
+    pub fn log_unprocessed_target_states(
+        &mut self,
+        targets: &[ModuleDescriptor],
+        processed: &HashSet<ModuleDescriptor>,
+    ) {
+        for target in targets {
+            if processed.contains(target) {
+                continue;
+            }
+            match self.project().get_module(target) {
+                LoadState::Ok(_) => {
+                    self.log_global(format!("error: module {} has no lowered work", target));
+                }
+                LoadState::Error(e) => {
+                    if e.indirect {
+                        if self.log_secondary_errors {
+                            self.log_global(e.to_string());
+                        }
+                    } else {
+                        self.log_loading_error(target, e);
+                    }
+                }
+                LoadState::None => {
+                    self.log_global(format!("error: module {} is not loaded", target));
+                }
+                LoadState::Loading | LoadState::Registered => {
+                    self.log_global(format!("error: module {} stuck in loading", target));
+                }
+            }
+        }
     }
 
     fn record_module_timing(
@@ -1197,7 +1298,7 @@ impl<'a> Builder<'a> {
 
         let include_empty = self.eval_skip_modes.iter().any(|&skip| skip > 0);
         let mut counts: HashMap<String, EvalGoalCounts> = HashMap::new();
-        if let Some(store) = self.project.build_cache.get_certificates(target) {
+        if let Some(store) = self.project().build_cache.get_certificates(target) {
             for cert in &store.certs {
                 if let Some(proof) = &cert.proof {
                     if proof.is_empty() {
@@ -1234,7 +1335,7 @@ impl<'a> Builder<'a> {
 
     pub fn lowered_module_loaded(&mut self, lowered: &LoweredModule) {
         let goal_count = lowered.goal_count() as i32;
-        if self.project.is_surface_check_module(lowered.module_id) {
+        if self.project().is_surface_check_module(lowered.module_id) {
             self.metrics.pending_modules_total += 1;
             self.metrics.pending_goals_total += goal_count;
         } else {
@@ -1265,7 +1366,7 @@ impl<'a> Builder<'a> {
 
     /// Logs an error during the loading phase, that can be localized to a particular place.
     pub fn log_loading_error(&mut self, descriptor: &ModuleDescriptor, error: &ElaborationError) {
-        let display_path = self.project.display_path(descriptor);
+        let display_path = self.project().display_path(descriptor);
         let line = error.range().start.line + 1;
         let log_message = format!(
             "{}, line {}: elaboration error: {}",
@@ -1457,7 +1558,7 @@ impl<'a> Builder<'a> {
         short_message: &str,
         sev: Option<DiagnosticSeverity>,
     ) -> BuildEvent {
-        let display_path = self.project.display_path(&self.module());
+        let display_path = self.project().display_path(&self.module());
         let line = range.start.line + 1;
         let long_message = format!("{}, line {}: {}", display_path, line, short_message);
         let diagnostic = sev.map(|severity| Diagnostic {
@@ -1579,17 +1680,17 @@ impl<'a> Builder<'a> {
     fn target_descriptor(&self, target: &str) -> Result<ModuleDescriptor, String> {
         if target.ends_with(".ac") {
             return self
-                .project
+                .project()
                 .descriptor_from_path(Path::new(target))
                 .map_err(|e| format!("Module '{}' not found: {}", target, e));
         }
 
         let module_id = self
-            .project
+            .project()
             .get_module_id_by_name(target)
             .ok_or_else(|| format!("Module '{}' not found", target))?;
 
-        self.project
+        self.project()
             .get_module_descriptor(module_id)
             .cloned()
             .ok_or_else(|| format!("No descriptor found for module '{}'", target))
@@ -1647,7 +1748,7 @@ impl<'a> Builder<'a> {
                 cert,
                 Some(normalized_goal),
                 goal_kernel_context,
-                self.project,
+                self.project(),
                 bindings,
             );
             let check_elapsed = check_start.elapsed();
@@ -1683,7 +1784,7 @@ impl<'a> Builder<'a> {
                     &cert,
                     Some(normalized_goal),
                     goal_kernel_context,
-                    self.project,
+                    self.project(),
                     bindings,
                 );
                 let check_elapsed = check_start.elapsed();
@@ -1805,7 +1906,7 @@ impl<'a> Builder<'a> {
                                 &cert,
                                 Some(normalized_goal),
                                 goal_kernel_context,
-                                self.project,
+                                self.project(),
                                 bindings,
                             ) {
                                 Ok(lines) => {
@@ -1841,7 +1942,7 @@ impl<'a> Builder<'a> {
                                 &cert,
                                 Some(normalized_goal),
                                 goal_kernel_context,
-                                self.project,
+                                self.project(),
                                 bindings,
                             ) {
                                 Ok(lines) => checked_cert_lines = Some(lines),
@@ -1918,7 +2019,7 @@ impl<'a> Builder<'a> {
         bindings: &crate::elaborator::binding_map::BindingMap,
     ) -> Result<Rc<Processor>, BuildError> {
         if !processor.has_imports_for_bindings(bindings) {
-            Rc::make_mut(&mut processor).add_imports_from_bindings(bindings, self.project)?;
+            Rc::make_mut(&mut processor).add_imports_from_bindings(bindings, self.project())?;
         }
         Ok(processor)
     }
@@ -2184,8 +2285,8 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let mut worklist = if self.project.config.read_cache {
-            self.project.build_cache.make_worklist(target)
+        let mut worklist = if self.project().config.read_cache {
+            self.project().build_cache.make_worklist(target)
         } else {
             CertificateWorklist::new(CertificateStore { certs: vec![] })
         };
@@ -2198,7 +2299,7 @@ impl<'a> Builder<'a> {
         }
         let mut new_certs = vec![];
 
-        if self.project.is_surface_check_target(target) {
+        if self.project().is_surface_check_target(target) {
             return Ok(());
         }
 
@@ -2208,13 +2309,13 @@ impl<'a> Builder<'a> {
                 Processor::with_imports_for_checking(
                     Some(self.cancellation_token.clone()),
                     &lowered.initial_bindings,
-                    self.project,
+                    self.project(),
                 )?
             } else {
                 Processor::with_imports(
                     Some(self.cancellation_token.clone()),
                     &lowered.initial_bindings,
-                    self.project,
+                    self.project(),
                 )?
             };
             let mut processor = Rc::new(processor);
@@ -2255,7 +2356,7 @@ impl<'a> Builder<'a> {
             .insert(target.clone(), used_cert_count);
 
         let content_hash = if module_good {
-            self.project.get_module_content_hash(lowered.module_id)
+            self.project().get_module_content_hash(lowered.module_id)
         } else {
             None
         };
@@ -2277,8 +2378,8 @@ impl<'a> Builder<'a> {
             && !self.print_proof
             && !self.print_found_proof
             && !self.exit_on_warning
-            && self.project.config.read_cache
-            && !self.project.config.write_cache
+            && self.project().config.read_cache
+            && !self.project().config.write_cache
     }
 
     fn eval_module_search_estimate(&self, target: &ModuleDescriptor) -> usize {
@@ -2289,7 +2390,7 @@ impl<'a> Builder<'a> {
             .filter(|&&skip| skip > 0)
             .count();
 
-        let Some(store) = self.project.build_cache.get_certificates(target) else {
+        let Some(store) = self.project().build_cache.get_certificates(target) else {
             return 0;
         };
         store
@@ -2373,7 +2474,7 @@ impl<'a> Builder<'a> {
                 .then_with(|| a.index.cmp(&b.index))
         });
 
-        let project = self.project;
+        let project = self.project();
         let worker_config = ModuleWorkerConfig::from_builder(self);
         let cancellation_token = self.cancellation_token.clone();
         let next_module = AtomicUsize::new(0);
@@ -2456,7 +2557,7 @@ impl<'a> Builder<'a> {
         });
 
         let work_queue = Mutex::new(VecDeque::from(modules));
-        let project = self.project;
+        let project = self.project();
         let worker_config = ModuleWorkerConfig::from_builder(self);
         let cancellation_token = self.cancellation_token.clone();
         let mut results = Vec::new();
@@ -2546,7 +2647,7 @@ impl<'a> Builder<'a> {
             module_work.into_iter().collect();
         let mut lowered_modules = Vec::new();
         for target in &targets {
-            let module = self.project.get_module(target);
+            let module = self.project().get_module(target);
             match module {
                 LoadState::Ok(_) => {
                     if let Some(lowered) = work_by_target.remove(target) {
@@ -2632,7 +2733,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
 
-            if self.goal_filter.is_none() && !self.project.config.read_cache && !self.check_mode {
+            if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
                 self.log_global(format!("force-searching: {}", target));
             }
 
@@ -2665,12 +2766,85 @@ impl<'a> Builder<'a> {
         }
         self.metrics.verification_time = verification_start.elapsed().as_secs_f64();
 
-        if self.status.is_good() {
-            if let Some(ref mut cache) = self.build_cache {
-                for (descriptor, used_cert_count) in &self.used_cert_counts {
-                    if let Some(cert_store) = cache.get_certificates_mut(descriptor) {
-                        cert_store.certs.truncate(*used_cert_count);
-                    }
+        self.trim_unused_certificates();
+    }
+
+    fn process_one_owned_module(
+        &mut self,
+        _index: usize,
+        target: ModuleDescriptor,
+        lowered: LoweredModule,
+    ) {
+        let goal_count = lowered.goal_count() as i32;
+
+        if let Some(ref filter) = self.goal_filter {
+            let filter_module = match filter {
+                GoalFilter::SingleLine { module, .. } => module,
+                GoalFilter::LineRange { module, .. } => module,
+            };
+            if filter_module != &target {
+                return;
+            }
+        }
+
+        let skip_metrics_before = self.metrics.clone();
+        let skip_start = std::time::Instant::now();
+        if self.try_skip_unchanged_module(lowered.module_id, &target) {
+            self.metrics.goals_done += goal_count;
+            self.metrics.goals_success += goal_count;
+            self.metrics.certs_cached += goal_count;
+            self.metrics.modules_cached += 1;
+            self.record_module_timing(
+                target.clone(),
+                goal_count,
+                &skip_metrics_before,
+                skip_start.elapsed(),
+                true,
+            );
+
+            let event = BuildEvent {
+                progress: Some((self.metrics.goals_done, self.metrics.goals_total)),
+                ..self.default_event()
+            };
+            (self.event_handler)(event);
+
+            return;
+        }
+
+        if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
+            self.log_global(format!("force-searching: {}", target));
+        }
+
+        let module_metrics_before = self.metrics.clone();
+        let module_start = std::time::Instant::now();
+        if let Err(e) = self.verify_lowered_module(&target, &lowered) {
+            self.record_module_timing(
+                target.clone(),
+                goal_count,
+                &module_metrics_before,
+                module_start.elapsed(),
+                false,
+            );
+            self.log_build_error(&e);
+            return;
+        }
+        self.record_module_timing(
+            target,
+            goal_count,
+            &module_metrics_before,
+            module_start.elapsed(),
+            false,
+        );
+    }
+
+    fn trim_unused_certificates(&mut self) {
+        if !self.status.is_good() {
+            return;
+        }
+        if let Some(ref mut cache) = self.build_cache {
+            for (descriptor, used_cert_count) in &self.used_cert_counts {
+                if let Some(cert_store) = cache.get_certificates_mut(descriptor) {
+                    cert_store.certs.truncate(*used_cert_count);
                 }
             }
         }
@@ -2681,10 +2855,10 @@ impl<'a> Builder<'a> {
         self.prepare_eval_mode();
 
         // Initialize the build cache
-        self.build_cache = Some(BuildCache::new(self.project.build_dir.clone()));
+        self.build_cache = Some(BuildCache::new(self.project().build_dir.clone()));
 
         // Build in alphabetical order by module name for consistency.
-        let mut targets = self.project.targets.iter().cloned().collect::<Vec<_>>();
+        let mut targets = self.project().targets.iter().cloned().collect::<Vec<_>>();
         targets.sort();
 
         let verification_message = if targets.len() > 5 {
@@ -2711,7 +2885,7 @@ impl<'a> Builder<'a> {
         let loading_start = std::time::Instant::now();
         let mut lowered_modules = vec![];
         for target in &targets {
-            let module = self.project.get_module(target);
+            let module = self.project().get_module(target);
             match module {
                 LoadState::Ok(module) => {
                     if let Some(lowered) = module.lowered() {
@@ -2809,7 +2983,7 @@ impl<'a> Builder<'a> {
             }
 
             // Log module name when forcing whole-project proof search.
-            if self.goal_filter.is_none() && !self.project.config.read_cache && !self.check_mode {
+            if self.goal_filter.is_none() && !self.project().config.read_cache && !self.check_mode {
                 self.log_global(format!("force-searching: {}", target));
             }
 
@@ -2868,16 +3042,16 @@ impl<'a> Builder<'a> {
             return false;
         }
 
-        let Some(descriptor) = self.project.get_module_descriptor(module_id) else {
+        let Some(descriptor) = self.project().get_module_descriptor(module_id) else {
             return false;
         };
 
-        let Some(current_hash) = self.project.get_module_content_hash(module_id) else {
+        let Some(current_hash) = self.project().get_module_content_hash(module_id) else {
             return false;
         };
 
         if !self
-            .project
+            .project()
             .build_cache
             .manifest_matches(descriptor, current_hash)
         {
@@ -2885,17 +3059,17 @@ impl<'a> Builder<'a> {
         }
 
         // Check all dependencies recursively
-        for dep_id in self.project.all_dependencies(module_id) {
-            let Some(dep_descriptor) = self.project.get_module_descriptor(dep_id) else {
+        for dep_id in self.project().all_dependencies(module_id) {
+            let Some(dep_descriptor) = self.project().get_module_descriptor(dep_id) else {
                 return false;
             };
 
-            let Some(dep_hash) = self.project.get_module_content_hash(dep_id) else {
+            let Some(dep_hash) = self.project().get_module_content_hash(dep_id) else {
                 return false;
             };
 
             if !self
-                .project
+                .project()
                 .build_cache
                 .manifest_matches(dep_descriptor, dep_hash)
             {
@@ -2903,7 +3077,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let Some(_existing_certs) = self.project.build_cache.get_certificates(target) else {
+        let Some(_existing_certs) = self.project().build_cache.get_certificates(target) else {
             // This is a bad case. The different build files are inconsistent.
             // Well, just ignore it.
             return false;
@@ -2933,6 +3107,16 @@ impl<'a> Builder<'a> {
         // so that selection requests can show proofs for individual verified statements
         if !self.status.is_error() && self.goal_filter.is_none() {
             self.build_cache
+        } else {
+            None
+        }
+    }
+
+    /// Returns the build cache if the build was successful and leaves the builder
+    /// otherwise intact. This is useful for owners that need their own Drop logic.
+    pub fn take_build_cache(&mut self) -> Option<BuildCache> {
+        if !self.status.is_error() && self.goal_filter.is_none() {
+            self.build_cache.take()
         } else {
             None
         }

@@ -511,6 +511,34 @@ impl Project {
         result.map(|_| ())
     }
 
+    pub fn add_unloaded_target_by_descriptor(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+    ) -> ModuleDescriptor {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        self.targets.insert(canonical_descriptor.clone());
+        canonical_descriptor
+    }
+
+    pub fn add_unloaded_surface_target_by_descriptor(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+    ) -> ModuleDescriptor {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        self.targets.insert(canonical_descriptor.clone());
+        self.surface_check_targets
+            .insert(canonical_descriptor.clone());
+        canonical_descriptor
+    }
+
+    pub fn load_target_by_descriptor(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+    ) -> Result<(), ImportError> {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        self.load_module(&canonical_descriptor, false).map(|_| ())
+    }
+
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
     pub fn add_target_by_name(&mut self, module_name: &str) -> Result<(), ImportError> {
         self.register_all_modules();
@@ -903,9 +931,14 @@ impl Project {
         if !self.config.use_filesystem {
             panic!("cannot add_src_targets without filesystem access")
         }
-        self.register_all_modules();
+        for path in self.src_target_paths() {
+            // Ignore errors when adding all targets
+            let _ = self.add_target_by_path(&path);
+        }
+    }
 
-        // Collect and sort paths for deterministic loading order
+    pub fn src_target_paths(&mut self) -> Vec<PathBuf> {
+        self.register_all_modules();
         let mut paths: Vec<PathBuf> = Vec::new();
         for entry in WalkDir::new(&self.src_dir)
             .into_iter()
@@ -919,11 +952,19 @@ impl Project {
             }
         }
         paths.sort();
+        paths
+    }
 
-        for path in paths {
-            // Ignore errors when adding all targets
-            let _ = self.add_target_by_path(&path);
-        }
+    pub fn src_target_descriptors(&mut self) -> Vec<ModuleDescriptor> {
+        let mut descriptors = self
+            .src_target_paths()
+            .into_iter()
+            .filter_map(|path| self.descriptor_from_path(&path).ok())
+            .map(|descriptor| self.canonicalize_name_descriptor(&descriptor))
+            .collect::<Vec<_>>();
+        descriptors.sort();
+        descriptors.dedup();
+        descriptors
     }
 
     fn pending_dir(&self) -> Option<PathBuf> {
@@ -941,11 +982,17 @@ impl Project {
             panic!("cannot add_pending_targets without filesystem access")
         }
 
+        for path in self.pending_target_paths() {
+            let _ = self.add_surface_target_by_path(&path);
+        }
+    }
+
+    pub fn pending_target_paths(&self) -> Vec<PathBuf> {
         let Some(pending_dir) = self.pending_dir() else {
-            return;
+            return Vec::new();
         };
         if !pending_dir.is_dir() {
-            return;
+            return Vec::new();
         }
 
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -961,10 +1008,14 @@ impl Project {
             }
         }
         paths.sort();
+        paths
+    }
 
-        for path in paths {
-            let _ = self.add_surface_target_by_path(&path);
-        }
+    pub fn pending_target_descriptors(&self) -> Vec<ModuleDescriptor> {
+        self.pending_target_paths()
+            .into_iter()
+            .filter_map(|path| self.descriptor_from_path(&path).ok())
+            .collect()
     }
 
     pub fn is_surface_check_target(&self, descriptor: &ModuleDescriptor) -> bool {

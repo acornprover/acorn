@@ -14,65 +14,55 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-05-09
-- Git hash: `275285ad` plus local `LoweredModule` cleanup changes
-- Command: `cargo run --profile release -- check --timing`
+- Date: 2026-05-10
+- Git hash: `82c1e0d5` plus local streaming check changes
+- Command: `/usr/bin/time -v target/release/acorn check --timing`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: after the upstream merge and local `LoweredModule` cleanup changes, full acornlib check completed successfully with `61.787s` measured time: `17.854s` project setup, including `17.841s` target/module load, plus `43.932s` certificate checking. The run verified `302` modules, checked `54,155` cached certificates, performed `0` searches, and elaborated `7` pending goals in `5` modules. This timing-only run did not collect max RSS; the prior max-RSS baseline was `7,769,036 KB` (`7.41 GiB`).
-- Summary: The `LoweredModule` cut made check-mode module loading retain `BindingMap + LoweredModule` and drop the full `Environment` tree. Compared with the pre-refactor baseline (`0:59.97` wall, `9,721,212 KB` / `9.27 GiB` max RSS), peak RSS is down by `1,952,176 KB` (`1.86 GiB`, about `20.1%`) while wall time is roughly flat/slightly slower (`+0.37s`, about `0.6%`). Removing the duplicated lowered slots from `Environment`/`Node` did not produce a clear additional RSS win versus the initial `LoweredModule` result (`7,533,992 KB` / `7.19 GiB`) or the check-mode no-retained-lowering refinement (`7,688,584 KB` / `7.33 GiB`); current variation is plausibly allocator/run noise and retained `LoweredModule`/binding state.
+- Timing: streaming full acornlib check completed successfully with `82.314s` measured time: `18.363s` target/module load, `63.926s` certificate checking, `24.685s` inside cached certificate checks, and `39.241s` other verification. The run verified `319` modules, checked `56,405` cached certificates, performed `0` searches, elaborated `7` pending goals in `5` modules, and peaked at `2,416,780 KB` max RSS (`2.31 GiB`).
+- Summary: The streaming check refactor now drains each target module's `LoweredModule` work as it is loaded, processes bounded batches, and drops that batch before continuing. Compared with the previous full-check max-RSS baseline (`7,769,036 KB` / `7.41 GiB`), peak RSS is down by `5,352,256 KB` (`5.10 GiB`, about `68.9%`). Compared with the older pre-`LoweredModule` baseline (`9,721,212 KB` / `9.27 GiB`), peak RSS is down by `7,304,432 KB` (`6.96 GiB`, about `75.1%`). The tradeoff is runtime: the old timing baseline was `61.787s` on a smaller 302-module / 54,155-certificate library, while this run took `82.314s` on 319 modules / 56,405 certificates. The likely cause is chunk scheduling: processing bounded batches caps retained work, but it prevents the old whole-library longest-work-first scheduler from balancing all modules at once.
 - Breakdown:
 
 ```text
-Current Full Check Baseline (2026-05-09, after duplicated Environment/Node lowering cleanup)
+Current Full Check Baseline (2026-05-10, streaming module work)
 ============================================================
 
-command: cargo run --profile release -- check --timing
-result: 302 modules, 54,155/54,155 certificates OK, 0 searches
-total measured: 61.787s
-project setup: 17.854s
-cache load: 13.3ms
-target/module load: 17.841s
-build loading phase: 0.1ms
-certificate checking: 43.932s
-cached cert checks: 28.571s
-other verification: 15.361s
-certificate throughput: 1233 certs/s
+command: /usr/bin/time -v target/release/acorn check --timing
+result: 319 modules, 56,405/56,405 certificates OK, 0 searches
+max RSS: 2,416,780 KB = 2.31 GiB
+total measured: 82.314s
+wall clock: 1:22.53
+user time: 206.63s
+system time: 1.66s
+CPU: 252%
+project setup: 21.7ms
+cache load: 21.7ms
+target/module load: 18.363s
+build loading phase: 0.0ms
+certificate checking: 63.926s
+cached cert checks: 24.685s
+other verification: 39.241s
+certificate throughput: 882 certs/s
 
 Phase split by measured time:
-├── target/module load: 17.841s / 61.787s = 28.9%
-├── build loading scan: 0.1ms / 61.787s = ~0.0%
-└── processing/checking: 43.932s / 61.787s = 71.1%
-    ├── cached cert check calls: 28.571s / 61.787s = 46.2%
-    └── other verification work: 15.361s / 61.787s = 24.9%
+├── target/module load: 18.363s / 82.314s = 22.3%
+└── processing/checking: 63.926s / 82.314s = 77.7%
+    ├── cached cert check calls: 24.685s / 82.314s = 30.0%
+    └── other verification work: 39.241s / 82.314s = 47.7%
 
-Current retained load memory diagnostic (2026-05-09, `target/release/profile_memory`):
-├── check-style load time: 18.890s
-├── RSS after full check-style load: 6.97 GiB
-├── retained environments: 0
-├── retained environment nodes: 0
-├── retained binding maps: 302 current maps / 81,152 entries; 0 snapshots
-├── retained lowered module facts: 126,100 facts / 125,790 proof steps
-├── retained lowered goals: 54,162 goals / 58,153 proof steps
-├── retained lowered kernel contexts: 180,262 contexts
-└── destructive clear of `LoweredModule`: -3.56 GiB
+Comparison to previous full-check max-RSS baseline:
+├── previous max rss: 7,769,036 KB = 7.41 GiB
+├── current max rss: 2,416,780 KB = 2.31 GiB
+└── RSS delta: -5,352,256 KB = -5.10 GiB (-68.9%)
 
-Comparison to pre-refactor baseline:
-├── previous elapsed: 0:59.97 wall
+Comparison to older pre-LoweredModule baseline:
 ├── previous max rss: 9,721,212 KB = 9.27 GiB
-├── RSS delta: -1,952,176 KB = -1.86 GiB (-20.1%)
-└── wall delta: +0.37s (+0.6%)
+├── current max rss: 2,416,780 KB = 2.31 GiB
+└── RSS delta: -7,304,432 KB = -6.96 GiB (-75.1%)
 
-Comparison to initial LoweredModule result:
-├── previous elapsed: 1:01.41 wall
-├── previous max rss: 7,533,992 KB = 7.19 GiB
-├── RSS delta: +235,044 KB = +229.5 MiB (+3.1%)
-└── wall delta: -1.07s (-1.7%)
-
-Comparison to no-retained-Environment-lowering refinement:
-├── previous elapsed: 1:00.96 wall
-├── previous max rss: 7,688,584 KB = 7.33 GiB
-├── RSS delta: +80,452 KB = +78.6 MiB (+1.0%)
-└── wall delta: -0.62s (-1.0%)
+Runtime comparison caveat:
+├── previous measured time: 61.787s for 302 modules / 54,155 certs
+├── current measured time: 82.314s for 319 modules / 56,405 certs
+└── likely regression source: bounded module batches reduce retained memory but weaken global work balancing
 
 Historical Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
 ============================================================

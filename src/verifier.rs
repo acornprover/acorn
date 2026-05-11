@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::builder::{BuildEvent, BuildMetrics, BuildStatus, Builder, ModuleTiming};
+use crate::module::ModuleDescriptor;
 use crate::project::{Project, ProjectConfig, UsageMode};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
@@ -67,22 +69,22 @@ pub struct VerifierOutput {
 /// Timing information for one verifier run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VerifierTimings {
-    /// Total time spent constructing the verifier, including cache and target loading.
+    /// Total time spent constructing the verifier before target loading.
     pub setup: Duration,
 
     /// Time spent loading the build cache.
     pub cache_load: Duration,
 
-    /// Time spent adding targets, which loads and elaborates target modules.
+    /// Time spent loading and elaborating target modules.
     pub target_load: Duration,
 
-    /// Time spent in the builder loading phase.
+    /// Time spent in the builder's module-work staging phase.
     pub build_loading: Duration,
 
     /// Time spent in the builder verification phase.
     pub build_verification: Duration,
 
-    /// Total time spent in `Builder::build`.
+    /// Total time spent loading targets and running builder work after setup.
     pub build_total: Duration,
 }
 
@@ -129,7 +131,7 @@ impl VerifierOutput {
             Self::format_duration(self.timings.cache_load)
         );
         println!(
-            "  target/module load: {}",
+            "target/module load: {}",
             Self::format_duration(self.timings.target_load)
         );
         println!(
@@ -251,6 +253,13 @@ pub enum LineSelection {
     Range(u32, u32),
 }
 
+#[derive(Clone, Debug)]
+enum TargetSpec {
+    All,
+    Path(PathBuf),
+    Name(String),
+}
+
 /// The Verifier manages the run of a single build.
 /// It creates its own project.
 pub struct Verifier {
@@ -260,6 +269,11 @@ pub struct Verifier {
     /// The target module to verify.
     /// If None, all modules are verified.
     target: Option<String>,
+
+    target_spec: TargetSpec,
+
+    include_pending_dir: bool,
+    surface_check_pending_targets: bool,
 
     /// Optional line selection (1-based, external) to verify specific goal(s).
     /// If this is set, target must be as well.
@@ -320,43 +334,26 @@ impl Verifier {
         let cache_load_time = project.cache_load_time;
         let mut normalized_target = target.clone();
 
-        // Add targets to the project
-        let target_load_start = std::time::Instant::now();
-        if let Some(ref target) = target {
+        let target_spec = if let Some(ref target) = target {
             if target == "-" {
-                let path = PathBuf::from("<stdin>");
-                project.add_target_by_path(&path)?;
+                TargetSpec::Path(PathBuf::from("<stdin>"))
             } else if let Some(inner_target) = target.strip_prefix("-:") {
                 let path = resolve_target_path(&start_path, inner_target);
                 let text = read_stdin_appended_target(&project, &path, stdin_override)?;
                 project.update_file(path.clone(), &text, 0)?;
                 normalized_target = Some(path.to_string_lossy().into_owned());
+                TargetSpec::Path(path)
             } else if target.ends_with(".ac") {
-                // Looks like a filename
                 let path = resolve_target_path(&start_path, target);
-                if surface_check_pending_targets && project.is_pending_path(&path) {
-                    project.add_surface_target_by_path(&path)?;
-                } else {
-                    project.add_target_by_path(&path)?;
-                }
                 normalized_target = Some(path.to_string_lossy().into_owned());
+                TargetSpec::Path(path)
             } else {
-                project.add_target_by_name(target)?;
+                TargetSpec::Name(target.clone())
             }
         } else {
-            project.add_src_targets();
-            if include_pending_dir {
-                project.add_pending_targets();
-            }
-        }
-        let target_load_time = target_load_start.elapsed();
-        let module_work = if config.usage_mode.is_batch() {
-            let mut build_targets = project.targets.iter().cloned().collect::<Vec<_>>();
-            build_targets.sort();
-            project.take_lowered_modules_for_targets(&build_targets)
-        } else {
-            Vec::new()
+            TargetSpec::All
         };
+        let target_load_time = Duration::default();
 
         // Unsafe is to make this self-referential
         let project_box = Box::new(project);
@@ -378,13 +375,13 @@ impl Verifier {
         if target.is_none() {
             builder.log_secondary_errors = false;
         }
-        if !module_work.is_empty() {
-            builder.set_module_work(module_work);
-        }
 
         Ok(Self {
             project_ptr,
             target: normalized_target,
+            target_spec,
+            include_pending_dir,
+            surface_check_pending_targets,
             line_selection: None,
             goal_index: None,
             exit_on_warning: false,
@@ -406,9 +403,167 @@ impl Verifier {
         Self::new_inner(start_path, config, target, stdin_override, false, false)
     }
 
+    fn project_mut(&mut self) -> &mut Project {
+        unsafe { &mut *self.project_ptr }
+    }
+
+    fn prepare_targets(
+        &mut self,
+    ) -> Result<(Vec<ModuleDescriptor>, Vec<ModuleDescriptor>), String> {
+        let target_spec = self.target_spec.clone();
+        let include_pending_dir = self.include_pending_dir;
+        let surface_check_pending_targets = self.surface_check_pending_targets;
+        let project = self.project_mut();
+        let mut targets = Vec::new();
+        let mut load_order = Vec::new();
+
+        match target_spec {
+            TargetSpec::All => {
+                for descriptor in project.src_target_descriptors() {
+                    let descriptor = project.add_unloaded_target_by_descriptor(&descriptor);
+                    targets.push(descriptor.clone());
+                    load_order.push(descriptor);
+                }
+                if include_pending_dir {
+                    for descriptor in project.pending_target_descriptors() {
+                        let descriptor =
+                            project.add_unloaded_surface_target_by_descriptor(&descriptor);
+                        targets.push(descriptor.clone());
+                        load_order.push(descriptor);
+                    }
+                }
+            }
+            TargetSpec::Path(path) => {
+                let descriptor = project
+                    .descriptor_from_path(&path)
+                    .map_err(|e| format!("Error resolving target '{}': {}", path.display(), e))?;
+                let descriptor = if surface_check_pending_targets && project.is_pending_path(&path)
+                {
+                    project.add_unloaded_surface_target_by_descriptor(&descriptor)
+                } else {
+                    project.add_unloaded_target_by_descriptor(&descriptor)
+                };
+                targets.push(descriptor.clone());
+                load_order.push(descriptor);
+            }
+            TargetSpec::Name(name) => {
+                let descriptor =
+                    project.add_unloaded_target_by_descriptor(&ModuleDescriptor::name(&name));
+                targets.push(descriptor.clone());
+                load_order.push(descriptor);
+            }
+        }
+
+        targets.sort();
+        targets.dedup();
+        load_order.sort();
+        load_order.dedup();
+        Ok((targets, load_order))
+    }
+
+    fn load_targets_regular(&mut self) -> Result<Duration, String> {
+        let start = std::time::Instant::now();
+        let target_spec = self.target_spec.clone();
+        let include_pending_dir = self.include_pending_dir;
+        let surface_check_pending_targets = self.surface_check_pending_targets;
+        let project = self.project_mut();
+        match target_spec {
+            TargetSpec::All => {
+                project.add_src_targets();
+                if include_pending_dir {
+                    project.add_pending_targets();
+                }
+            }
+            TargetSpec::Path(path) => {
+                if surface_check_pending_targets && project.is_pending_path(&path) {
+                    project
+                        .add_surface_target_by_path(&path)
+                        .map_err(|e| format!("Error loading target '{}': {}", path.display(), e))?;
+                } else {
+                    project
+                        .add_target_by_path(&path)
+                        .map_err(|e| format!("Error loading target '{}': {}", path.display(), e))?;
+                }
+            }
+            TargetSpec::Name(name) => {
+                project
+                    .add_target_by_name(&name)
+                    .map_err(|e| format!("Error loading module '{}': {}", name, e))?;
+            }
+        }
+        Ok(start.elapsed())
+    }
+
+    fn load_and_build_streaming(&mut self) -> Result<Duration, String> {
+        let (targets, load_order) = self.prepare_targets()?;
+        let batch_limit = (self.builder.check_jobs.max(1) * 2).max(1);
+        let propagate_load_errors = !matches!(self.target_spec, TargetSpec::All);
+
+        self.builder.begin_module_work_build(targets.len());
+
+        let mut processed = HashSet::new();
+        let mut batch = Vec::new();
+        let mut next_index = 0usize;
+        let mut load_elapsed = Duration::default();
+
+        for descriptor in &load_order {
+            let load_start = std::time::Instant::now();
+            let load_result =
+                unsafe { (&mut *self.project_ptr).load_target_by_descriptor(descriptor) };
+            if let Err(error) = load_result {
+                if propagate_load_errors {
+                    return Err(format!("Error loading target '{}': {}", descriptor, error));
+                }
+            }
+
+            let work =
+                unsafe { (&mut *self.project_ptr).take_lowered_modules_for_targets(&targets) };
+            self.builder.add_loaded_module_work(&work);
+            for (descriptor, _) in &work {
+                processed.insert(descriptor.clone());
+            }
+            batch.extend(work);
+            load_elapsed += load_start.elapsed();
+
+            if batch.len() >= batch_limit {
+                let ready = std::mem::take(&mut batch);
+                self.builder
+                    .process_module_work_batch(ready, &mut next_index);
+                if self.builder.status.is_error() {
+                    break;
+                }
+            }
+        }
+
+        if !batch.is_empty() && !self.builder.status.is_error() {
+            self.builder
+                .process_module_work_batch(batch, &mut next_index);
+        }
+
+        self.builder
+            .log_unprocessed_target_states(&targets, &processed);
+        self.builder.finish_module_work_build();
+        Ok(load_elapsed)
+    }
+
     /// Returns VerifierOutput on success or clean failure.
     /// Returns an error string if verification fails during setup.
     pub fn run(mut self) -> Result<VerifierOutput, String> {
+        self.builder.exit_on_warning = self.exit_on_warning;
+
+        let can_stream_module_work = unsafe { (*self.project_ptr).config.usage_mode.is_batch() }
+            && self.line_selection.is_none()
+            && self.builder.cert_override.is_none();
+
+        let build_start = std::time::Instant::now();
+        let streamed = if can_stream_module_work {
+            self.target_load_time = self.load_and_build_streaming()?;
+            true
+        } else {
+            self.target_load_time = self.load_targets_regular()?;
+            false
+        };
+
         // If a specific line selection is provided along with a target, set up goal filtering
         if let Some(ref line_sel) = self.line_selection {
             let Some(target) = &self.target else {
@@ -432,12 +587,9 @@ impl Verifier {
             }
         }
 
-        // Pass the exit_on_warning flag to the builder
-        self.builder.exit_on_warning = self.exit_on_warning;
-
-        // Build
-        let build_start = std::time::Instant::now();
-        self.builder.build();
+        if !streamed {
+            self.builder.build();
+        }
         let build_total = build_start.elapsed();
         self.builder.validate_goal_filter()?;
         self.builder.metrics.print(self.builder.status);
@@ -465,19 +617,26 @@ impl Verifier {
 
         // Update the build cache if the build was successful
         // Pass is_partial_build flag: true if we have a specific target, false for full build
-        if let Some(build_cache) = self.builder.into_build_cache() {
+        if let Some(build_cache) = self.builder.take_build_cache() {
             let is_partial_build = self.target.is_some();
             unsafe {
                 (*self.project_ptr).update_build_cache(build_cache, is_partial_build);
             }
         }
 
-        // Clean up the project
+        Ok(output)
+    }
+}
+
+impl Drop for Verifier {
+    fn drop(&mut self) {
+        if self.project_ptr.is_null() {
+            return;
+        }
         unsafe {
             drop(Box::from_raw(self.project_ptr));
         }
-
-        Ok(output)
+        self.project_ptr = std::ptr::null_mut();
     }
 }
 
@@ -1895,14 +2054,17 @@ instance Nat: Two
             .write_str("from foo import Foo")
             .unwrap();
 
-        let result = Verifier::new(
+        let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
             ProjectConfig::default(),
             Some("foo".to_string()),
-        );
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        let result = verifier.run();
 
         let Err(err) = result else {
-            panic!("Verifier::new should fail on circular import");
+            panic!("Verifier::run should fail on circular import");
         };
 
         assert!(
