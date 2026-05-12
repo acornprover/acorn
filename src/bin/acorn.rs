@@ -985,6 +985,7 @@ async fn main() {
                 Ok(output) => {
                     if timing {
                         output.print_timing_breakdown("Check", "certificate checking", true);
+                        output.print_verify_module_timing();
                     }
                     if !output.is_success() {
                         std::process::exit(1);

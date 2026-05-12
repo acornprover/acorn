@@ -183,7 +183,7 @@ impl VerifierOutput {
         }
     }
 
-    /// Print per-module timing details for verify runs.
+    /// Print per-module timing details for build runs.
     pub fn print_verify_module_timing(&self) {
         let skipped_count = self
             .module_timings
@@ -197,7 +197,7 @@ impl VerifierOutput {
             .collect::<Vec<_>>();
 
         println!();
-        println!("Verify module timing:");
+        println!("Module timing:");
         println!("skipped modules: {}", skipped_count);
         println!("rebuilt modules: {}", rebuilt.len());
 

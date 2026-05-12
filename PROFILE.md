@@ -14,55 +14,67 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-05-10
-- Git hash: `82c1e0d5` plus local streaming check changes
-- Command: `/usr/bin/time -v target/release/acorn check --timing`
+- Date: 2026-05-11
+- Git hash: `a1e4091c` plus local checkpoint-lifetime cleanup
+- Command: `/usr/bin/time -v target/release/acorn check --jobs 20 --timing`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: streaming full acornlib check completed successfully with `82.314s` measured time: `18.363s` target/module load, `63.926s` certificate checking, `24.685s` inside cached certificate checks, and `39.241s` other verification. The run verified `319` modules, checked `56,405` cached certificates, performed `0` searches, elaborated `7` pending goals in `5` modules, and peaked at `2,416,780 KB` max RSS (`2.31 GiB`).
-- Summary: The streaming check refactor now drains each target module's `LoweredModule` work as it is loaded, processes bounded batches, and drops that batch before continuing. Compared with the previous full-check max-RSS baseline (`7,769,036 KB` / `7.41 GiB`), peak RSS is down by `5,352,256 KB` (`5.10 GiB`, about `68.9%`). Compared with the older pre-`LoweredModule` baseline (`9,721,212 KB` / `9.27 GiB`), peak RSS is down by `7,304,432 KB` (`6.96 GiB`, about `75.1%`). The tradeoff is runtime: the old timing baseline was `61.787s` on a smaller 302-module / 54,155-certificate library, while this run took `82.314s` on 319 modules / 56,405 certificates. The likely cause is chunk scheduling: processing bounded batches caps retained work, but it prevents the old whole-library longest-work-first scheduler from balancing all modules at once.
+- Timing: full acornlib check completed successfully with `23.445s` measured time: `20.461s` target/module load, `23.389s` certificate checking, `19.101s` inside cached certificate checks, and `4.288s` other verification. The run verified `319` modules, checked `56,405` cached certificates, performed `0` searches, elaborated `7` pending goals in `5` modules, and peaked at `2,477,768 KB` max RSS (`2.36 GiB`). `/usr/bin/time` reported `0:23.63` wall, `100.76s` user, `1.18s` system, and `431%` CPU.
+- Summary: Check still requests all available worker threads by default. The useful fix was not adding duplicate work to raise CPU usage; it was removing repeated checker work and keeping the existing workers busier. The checker now skips repeated concrete clauses and re-expands repeated variable clauses only when new concrete facts have arrived. Check-mode exports are pre-normalized, active module processors retain newly visible imports, check scheduling includes local lowered step counts, and ordinary check mode no longer keeps eval-only processor checkpoints alive across `Rc::make_mut`. Compared with the previous local `--jobs 20` baseline (`0:48.94`, `2,527,464 KB` max RSS, `307%` CPU), wall time is down about `25.31s` (`51.7%`), peak RSS is down `49,696 KB` (`2.0%`), and CPU utilization is up to `431%`.
 - Breakdown:
 
 ```text
-Current Full Check Baseline (2026-05-10, streaming module work)
-============================================================
+Current Full Check Baseline (2026-05-11, checkpoint-lifetime cleanup)
+=====================================================================
 
-command: /usr/bin/time -v target/release/acorn check --timing
+command: /usr/bin/time -v target/release/acorn check --jobs 20 --timing
 result: 319 modules, 56,405/56,405 certificates OK, 0 searches
-max RSS: 2,416,780 KB = 2.31 GiB
-total measured: 82.314s
-wall clock: 1:22.53
-user time: 206.63s
-system time: 1.66s
-CPU: 252%
-project setup: 21.7ms
-cache load: 21.7ms
-target/module load: 18.363s
+max RSS: 2,477,768 KB = 2.36 GiB
+total measured: 23.445s
+wall clock: 0:23.63
+user time: 100.76s
+system time: 1.18s
+CPU: 431%
+project setup: 19.5ms
+cache load: 19.5ms
+target/module load: 20.461s
 build loading phase: 0.0ms
-certificate checking: 63.926s
-cached cert checks: 24.685s
-other verification: 39.241s
-certificate throughput: 882 certs/s
+certificate checking: 23.389s
+cached cert checks: 19.101s
+other verification: 4.288s
+certificate throughput: 2412 certs/s
 
-Phase split by measured time:
-├── target/module load: 18.363s / 82.314s = 22.3%
-└── processing/checking: 63.926s / 82.314s = 77.7%
-    ├── cached cert check calls: 24.685s / 82.314s = 30.0%
-    └── other verification work: 39.241s / 82.314s = 47.7%
+Overlapped timing measurements:
+├── target/module load: 20.461s / 23.445s = 87.3%
+└── processing/checking: 23.389s / 23.445s = 99.8%
+    ├── cached cert check calls: 19.101s / 23.445s = 81.5%
+    └── other verification work: 4.288s / 23.445s = 18.3%
 
-Comparison to previous full-check max-RSS baseline:
-├── previous max rss: 7,769,036 KB = 7.41 GiB
-├── current max rss: 2,416,780 KB = 2.31 GiB
-└── RSS delta: -5,352,256 KB = -5.10 GiB (-68.9%)
+Slowest rebuilt modules by total processing time:
+├── function_product_algebra: 5.566s total, 1.335s cert time
+├── finite_group: 3.776s total, 69.7ms cert time
+├── top100.theorem_071_order_of_a_subgroup: 3.034s total, 111.9ms cert time
+├── int.lattice: 1.922s total, 201.2ms cert time
+└── function_product_units: 1.360s total, 203.4ms cert time
+
+Perf top-down sample after the checker duplicate-expansion change (2026-05-11):
+├── command: perf record -g --call-graph fp -o perf.data target/fastdev/profile_check
+├── samples: 414,152; perf.data 109.2 MB
+├── dominant path: Verifier::run -> Builder::process_module_work_batch -> Builder::verify_lowered_module
+├── roughly 53% of the captured top-down path was Processor::add_imports_from_bindings
+├── roughly 46% of the captured path was Checker::insert_clause_internal under imported facts
+└── hot self-time was allocator/memmove/term ownership, normalization, hashing, and equality-graph cloning
+
+Interval CPU sample for full check (2026-05-11):
+├── command: target/release/acorn check --jobs 20 --timing, sampled with `pidstat -h -u -p $pid 1 1`
+├── one-second `%CPU` samples: 133, 101, 1025, 351, 261, 279, 733, 886, 292, 650, 351, 657, 537, 483, 376, 667, 332, 575, 335, 481, 363, 106, 100
+├── peak observed interval: 1025% = about 10.25 cores
+├── median observed interval: 363% = about 3.63 cores
+└── conclusion: the run does not saturate the 20 logical CPUs even in the middle; workers are frequently starved by the single-threaded load/lowering pipeline and by module-sized scheduling granularity
 
 Comparison to older pre-LoweredModule baseline:
 ├── previous max rss: 9,721,212 KB = 9.27 GiB
-├── current max rss: 2,416,780 KB = 2.31 GiB
-└── RSS delta: -7,304,432 KB = -6.96 GiB (-75.1%)
-
-Runtime comparison caveat:
-├── previous measured time: 61.787s for 302 modules / 54,155 certs
-├── current measured time: 82.314s for 319 modules / 56,405 certs
-└── likely regression source: bounded module batches reduce retained memory but weaken global work balancing
+├── current max rss: 2,477,768 KB = 2.36 GiB
+└── RSS delta: -7,243,444 KB = -6.91 GiB (-74.5%)
 
 Historical Page-Fault Top-Down Breakdown (2026-05-05, not rerun)
 ============================================================

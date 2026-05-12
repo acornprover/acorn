@@ -7,6 +7,7 @@ use crate::elaborator::source::Source;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
+use crate::kernel::term_normalization::normalize_clause_subterms;
 use crate::module::ModuleId;
 use crate::project::UsageMode;
 use std::sync::Arc;
@@ -66,7 +67,7 @@ impl CheckExportFact {
                     panic!("exported lowered facts must contain only assumption steps");
                 };
                 CheckAssumption {
-                    clause: step.clause.clone(),
+                    clause: normalize_clause_subterms(&step.clause).normalized(),
                     source: info.source.clone(),
                 }
             })
