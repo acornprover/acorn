@@ -967,6 +967,51 @@ mod tests {
     }
 
     #[test]
+    fn bind_ambient_values_preserves_visible_function_arg_refs() {
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype,
+            vec![
+                DependentTypeArg::Type(t_type),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        );
+        let function_type = AcornType::functional(
+            vec![
+                set_t.clone(),
+                AcornType::Data(set_datatype, vec![subspace_t_a]),
+                set_t.clone(),
+            ],
+            AcornType::Bool,
+        );
+        let replacement = AcornValue::constant(
+            crate::elaborator::names::ConstantName::unqualified(ModuleId(0), "v"),
+            vec![],
+            set_t.clone(),
+            set_t,
+            vec![],
+            vec![],
+        );
+
+        let bound = function_type.bind_ambient_values(0, 1, &[replacement]);
+
+        assert_eq!(bound, function_type);
+    }
+
+    #[test]
     fn function_to_scoped_context_restores_source_telescope_order() {
         let t_param = TypeParam {
             name: "T".to_string(),
@@ -1672,6 +1717,70 @@ impl AcornType {
                 types
                     .iter()
                     .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                    .collect(),
+            ),
+            _ => self.clone(),
+        }
+    }
+
+    /// Binds values from the surrounding stack inside a type annotation.
+    ///
+    /// This differs from `bind_values` for function types: visible function
+    /// arguments are inserted before ambient stack entries in later argument
+    /// and return types, so the ambient binding range has to shift under them.
+    pub fn bind_ambient_values(
+        &self,
+        first_binding_index: AtomId,
+        stack_size: AtomId,
+        values: &[AcornValue],
+    ) -> AcornType {
+        match self {
+            AcornType::Family(datatype, args) => AcornType::new_datatype_application(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
+                            acorn_type.bind_ambient_values(first_binding_index, stack_size, values),
+                        ),
+                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
+                            value
+                                .clone()
+                                .bind_values(first_binding_index, stack_size, values),
+                        ),
+                    })
+                    .collect(),
+            ),
+            AcornType::Function(function_type) => {
+                let mut current_stack_size = stack_size;
+                let arg_types = function_type
+                    .arg_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let visible_args = i as AtomId;
+                        let bound = t.bind_ambient_values(
+                            first_binding_index + visible_args,
+                            current_stack_size,
+                            values,
+                        );
+                        current_stack_size += 1;
+                        bound
+                    })
+                    .collect();
+                AcornType::functional(
+                    arg_types,
+                    function_type.return_type.bind_ambient_values(
+                        first_binding_index + function_type.arg_types.len() as AtomId,
+                        current_stack_size,
+                        values,
+                    ),
+                )
+            }
+            AcornType::Data(datatype, types) => AcornType::Data(
+                datatype.clone(),
+                types
+                    .iter()
+                    .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
                     .collect(),
             ),
             _ => self.clone(),

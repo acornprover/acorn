@@ -414,12 +414,12 @@ impl ConstantInstance {
         let params: Vec<_> = self
             .params
             .iter()
-            .map(|t| t.bind_values(first_binding_index, stack_size, values))
+            .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
             .collect();
         let value_param_types: Vec<_> = if self.bound_value_args.is_empty() {
             self.value_param_types
                 .iter()
-                .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
                 .collect()
         } else {
             self.value_param_types.clone()
@@ -444,7 +444,7 @@ impl ConstantInstance {
                 .collect();
             let generic_type = if self.bound_value_args.is_empty() {
                 self.generic_type
-                    .bind_values(first_binding_index, stack_size, values)
+                    .bind_ambient_values(first_binding_index, stack_size, values)
             } else {
                 self.generic_type.clone()
             };
@@ -457,7 +457,7 @@ impl ConstantInstance {
             )
         } else {
             self.instance_type
-                .bind_values(first_binding_index, stack_size, values)
+                .bind_ambient_values(first_binding_index, stack_size, values)
         }
     }
 
@@ -1283,8 +1283,11 @@ impl AcornValue {
         binder_types
             .iter()
             .map(|binder_type| {
-                let bound =
-                    binder_type.bind_values(first_binding_index, current_stack_size, values);
+                let bound = binder_type.bind_ambient_values(
+                    first_binding_index,
+                    current_stack_size,
+                    values,
+                );
                 current_stack_size += 1;
                 bound
             })
@@ -1330,7 +1333,8 @@ impl AcornValue {
     ) -> AcornValue {
         match self {
             AcornValue::Variable(i, var_type) => {
-                let bound_type = var_type.bind_values(first_binding_index, stack_size, values);
+                let bound_type =
+                    var_type.bind_ambient_values(first_binding_index, stack_size, values);
                 if i < first_binding_index {
                     // This reference is unchanged
                     return AcornValue::Variable(i, bound_type);
@@ -1370,7 +1374,7 @@ impl AcornValue {
                 type_args: app
                     .type_args
                     .iter()
-                    .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                    .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
                     .collect(),
             }),
             AcornValue::Lambda(args, return_value) => {
@@ -1398,7 +1402,7 @@ impl AcornValue {
             ))),
             AcornValue::Try(x, t) => AcornValue::Try(
                 Box::new(x.bind_values(first_binding_index, stack_size, values)),
-                t.bind_values(first_binding_index, stack_size, values),
+                t.bind_ambient_values(first_binding_index, stack_size, values),
             ),
             AcornValue::ForAll(quants, value) => {
                 let new_quants =
@@ -1464,7 +1468,7 @@ impl AcornValue {
                 params: c
                     .params
                     .iter()
-                    .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                    .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
                     .collect(),
                 instance_type: c.instance_type_after_binding_values(
                     first_binding_index,
@@ -1473,7 +1477,7 @@ impl AcornValue {
                 ),
                 generic_type: if c.bound_value_args.is_empty() {
                     c.generic_type
-                        .bind_values(first_binding_index, stack_size, values)
+                        .bind_ambient_values(first_binding_index, stack_size, values)
                 } else {
                     c.generic_type.clone()
                 },
@@ -1481,7 +1485,7 @@ impl AcornValue {
                 value_param_types: if c.bound_value_args.is_empty() {
                     c.value_param_types
                         .iter()
-                        .map(|t| t.bind_values(first_binding_index, stack_size, values))
+                        .map(|t| t.bind_ambient_values(first_binding_index, stack_size, values))
                         .collect()
                 } else {
                     c.value_param_types.clone()

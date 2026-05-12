@@ -329,6 +329,53 @@ that reads `z.carrier`.
     }
 ```
 
+## Dependent Value Parameter Let Satisfy Helper Keeps Explicit Parameter
+
+The subspace helper path from acornlib PR 303 should keep the explicit
+subspace value parameter `a: Set[T]` distinct from the local witness
+`v: Set[T]` while lowering the `let ... satisfy` claim.
+
+```acorn
+    structure Set[T] {
+        contains: T -> Bool
+    }
+
+    typeclass T: TopologicalSpace {
+        is_open: Set[T] -> Bool
+    }
+
+    structure Subspace[T: TopologicalSpace, a: Set[T]] {
+        value: T
+    } constraint {
+        a.contains(value)
+    }
+
+    define has_subspace_witness[T: TopologicalSpace](
+        a: Set[T], u: Set[Subspace[T, a]], v: Set[T]
+    ) -> Bool {
+        true
+    }
+
+    axiom has_some_subspace_witness[T: TopologicalSpace](
+        a: Set[T], u: Set[Subspace[T, a]]
+    ) {
+        exists(v: Set[T]) {
+            has_subspace_witness(a, u, v)
+        }
+    }
+
+    theorem let_satisfy_subspace_witness[T: TopologicalSpace](
+        a: Set[T], u: Set[Subspace[T, a]]
+    ) {
+        true
+    } by {
+        has_some_subspace_witness(a, u)
+        let v: Set[T] satisfy {
+            has_subspace_witness(a, u, v)
+        }
+    }
+```
+
 ## Dependent Value Parameter Function Accepts Explicit Argument
 
 The same dependent value parameter should also be passable explicitly
