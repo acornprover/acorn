@@ -9,6 +9,12 @@ current_dir="$(pwd)"
 # Exit immediately if any command fails
 set -e
 
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Error: working tree has uncommitted changes"
+  git status --short
+  exit 1
+fi
+
 # Get local version from VERSION file
 local_version=$(cat VERSION)
 
