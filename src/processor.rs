@@ -205,7 +205,7 @@ impl Processor {
             ));
         }
         for assumption in &fact.assumptions {
-            self.checker.insert_clause(
+            self.checker.insert_normalized_clause(
                 &assumption.clause,
                 StepReason::Assumption(assumption.source.clone()),
                 &fact.kernel_context,

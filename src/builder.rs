@@ -2488,6 +2488,12 @@ impl<'a> Builder<'a> {
                     drop(checkpoint_before_node);
                 }
                 LoweredItem::Claim { post_fact, .. } => {
+                    let LoweredItem::Claim { goal, .. } = item else {
+                        unreachable!();
+                    };
+                    let entry = lowered.goal(*goal);
+                    *processor =
+                        self.processor_with_imports(Rc::clone(processor), &entry.bindings)?;
                     let checkpoint_before_node = Rc::clone(processor);
                     self.verify_lowered_claim(
                         Rc::clone(processor),
@@ -2499,9 +2505,6 @@ impl<'a> Builder<'a> {
                         eval_skip_tail,
                     )?;
                     Rc::make_mut(processor).add_lowered_fact(lowered.fact(*post_fact))?;
-                    let LoweredItem::Claim { goal, .. } = item else {
-                        unreachable!();
-                    };
                     let goal = &lowered.goal(*goal).lowered_goal.goal;
                     self.update_eval_skip_tail_for_lowered_goal(
                         eval_skip_tail,
@@ -2690,9 +2693,36 @@ impl<'a> Builder<'a> {
     fn module_work_estimate(&self, target: &ModuleDescriptor, lowered: &LoweredModule) -> usize {
         if self.eval_mode {
             self.eval_module_search_estimate(target)
+        } else if self.check_mode {
+            self.check_module_work_estimate(lowered)
         } else {
             lowered.goal_count()
         }
+    }
+
+    fn check_module_work_estimate(&self, lowered: &LoweredModule) -> usize {
+        let mut imported_modules = HashSet::new();
+        for dep_id in lowered.initial_bindings.direct_dependencies() {
+            for module_id in self
+                .project()
+                .all_dependencies(dep_id)
+                .into_iter()
+                .chain(std::iter::once(dep_id))
+            {
+                imported_modules.insert(module_id);
+            }
+        }
+        let imported_facts = imported_modules
+            .into_iter()
+            .filter_map(|module_id| self.project().get_module_export(module_id))
+            .map(|export| export.fact_count())
+            .sum::<usize>();
+        let local_fact_steps = lowered.facts().map(|fact| fact.steps.len()).sum::<usize>();
+        let local_goal_steps = lowered
+            .goals()
+            .map(|(_, goal)| goal.lowered_goal.steps.len())
+            .sum::<usize>();
+        lowered.goal_count() + imported_facts + local_fact_steps + local_goal_steps
     }
 
     fn build_module_on_worker(

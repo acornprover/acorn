@@ -123,6 +123,12 @@ pub struct Checker {
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
 
+    /// The concrete-fact generation at which each variable clause was last expanded.
+    variable_clause_generations: ImHashMap<Clause, u64>,
+
+    /// Increments whenever a new concrete clause is added to the equality graph.
+    concrete_generation: u64,
+
     /// A hack, but we need to break out of loops, since equality factoring and boolean
     /// reduction can create cycles.
     past_boolean_reductions: ImHashSet<Clause>,
@@ -137,6 +143,8 @@ impl Checker {
             term_graph: EqualityGraph::new(),
             exact_clauses: ImHashMap::new(),
             direct_contradiction: false,
+            variable_clause_generations: ImHashMap::new(),
+            concrete_generation: 0,
             past_boolean_reductions: ImHashSet::new(),
             reasons: ImVector::new(),
         }
@@ -165,12 +173,27 @@ impl Checker {
             return;
         }
 
+        let has_any_variable = clause.has_any_variable();
+        if has_any_variable {
+            if self
+                .variable_clause_generations
+                .get(clause)
+                .is_some_and(|generation| *generation == self.concrete_generation)
+            {
+                return;
+            }
+            self.variable_clause_generations
+                .insert(clause.clone(), self.concrete_generation);
+        } else if self.exact_clauses.contains_key(clause) {
+            return;
+        }
+
         let step_id = self.reasons.len();
         self.reasons.push_back(reason.clone());
 
         self.exact_clauses.entry(clause.clone()).or_insert(step_id);
 
-        if clause.has_any_variable() {
+        if has_any_variable {
             if let Some(reduced_clause) =
                 self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
             {
@@ -201,6 +224,7 @@ impl Checker {
             }
         } else {
             // The clause is concrete.
+            self.concrete_generation += 1;
             self.term_graph
                 .insert_clause(clause, StepId(step_id), kernel_context);
         }
@@ -245,6 +269,21 @@ impl Checker {
     ) {
         let clause = normalize_clause_subterms(clause).normalized();
         self.insert_clause_internal(&clause, reason, kernel_context);
+    }
+
+    /// Adds a true clause that was already normalized while lowering.
+    pub fn insert_normalized_clause(
+        &mut self,
+        clause: &Clause,
+        reason: StepReason,
+        kernel_context: &KernelContext,
+    ) {
+        debug_assert_eq!(
+            normalize_clause_subterms(clause).normalized(),
+            *clause,
+            "insert_normalized_clause called with an unnormalized clause"
+        );
+        self.insert_clause_internal(clause, reason, kernel_context);
     }
 
     /// Checks if a clause is known to be true, and returns the reason if so.
