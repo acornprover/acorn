@@ -787,6 +787,7 @@ impl ActiveSet {
                         &new_subterm,
                         &new_subterm_context,
                         pattern_var_map.clone(),
+                        kernel_context,
                     );
                     if !Self::rewrite_step_is_well_typed(&ps, kernel_context) {
                         continue;
@@ -904,6 +905,7 @@ impl ActiveSet {
                         &new_subterm,
                         &new_subterm_context,
                         pattern_var_map.clone(),
+                        kernel_context,
                     );
                     if !Self::rewrite_step_is_well_typed(&ps, kernel_context) {
                         continue;

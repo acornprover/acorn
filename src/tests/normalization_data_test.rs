@@ -595,6 +595,130 @@ fn build_clause_with_single_false_literal(
     .normalized_preserving_locals()
 }
 
+/// Mock module with a `Metric` typeclass and a `Real: Metric` instance, shared by the two
+/// typeclass-dispatch roundtrip cases so the parametric and instance-specialized symbols see
+/// identical surroundings.
+fn load_metric_module() -> (Project, BindingMap, KernelContext) {
+    load_mock_module(
+        r#"
+            type Real: axiom
+            let real_dist: (Real, Real) -> Real = axiom
+
+            typeclass M: Metric {
+                distance: (M, M) -> Real
+            }
+
+            instance Real: Metric {
+                let distance: (Real, Real) -> Real = real_dist
+            }
+
+            theorem goal {
+                true
+            }
+        "#,
+    )
+}
+
+/// Builds a clause containing the parametric typeclass method `Metric.distance` applied at the
+/// concrete type `Real`. The kernel keeps this as `Metric.distance[Real](x0, x1)` (a polymorphic
+/// `GlobalConstant` with a leading type argument). The quote/lower roundtrip must preserve that
+/// form rather than collapse it to the instance-specialized `Real.distance(x0, x1)`.
+fn build_clause_with_parametric_typeclass_method_at_concrete_type(
+    kernel_context: &mut KernelContext,
+) -> Clause {
+    let (_project, bindings, loaded_context) = load_metric_module();
+    *kernel_context = loaded_context;
+
+    let metric_typeclass = bindings
+        .get_typeclass_for_name("Metric")
+        .expect("Metric typeclass should be registered")
+        .clone();
+    let metric_distance_name =
+        ConstantName::typeclass_attr(metric_typeclass.module_id, metric_typeclass, "distance");
+    let metric_distance = kernel_context
+        .symbol_table
+        .get_symbol(&metric_distance_name)
+        .expect("Metric.distance should be registered");
+
+    let real_potential = bindings
+        .get_type_for_typename("Real")
+        .expect("Real type should be registered")
+        .clone();
+    let real_acorn = match real_potential {
+        crate::elaborator::acorn_type::PotentialType::Resolved(t) => t,
+        _ => panic!("Real should be a resolved type"),
+    };
+    let real_type = kernel_context
+        .type_store
+        .get_type_term(&real_acorn)
+        .expect("Real type term should be available");
+    let x0 = Term::new_variable(0);
+    let x1 = Term::new_variable(1);
+    let x2 = Term::new_variable(2);
+
+    let parametric_application =
+        Term::atom(Atom::Symbol(metric_distance)).apply(&[real_type.clone(), x0, x1]);
+
+    Clause::from_literals_unnormalized(
+        vec![Literal::equals(parametric_application, x2)],
+        &LocalContext::from_types(vec![real_type.clone(), real_type.clone(), real_type]),
+    )
+    .normalized_preserving_locals()
+}
+
+/// Builds a clause containing the instance-specialized symbol `Real.distance(x0, x1)` —
+/// the form the elaborator emits when the receiver type is concretely `Real`. The kernel
+/// stores this as a non-polymorphic `GlobalConstant` distinct from `Metric.distance[Real]`.
+/// The quote/lower roundtrip must preserve this form too (and not collapse it to the
+/// parametric `Metric.distance[Real]`), so both representations remain stable.
+fn build_clause_with_instance_specialized_method(kernel_context: &mut KernelContext) -> Clause {
+    let (_project, bindings, loaded_context) = load_metric_module();
+    *kernel_context = loaded_context;
+
+    let real_datatype = crate::elaborator::acorn_type::Datatype {
+        module_id: bindings.module_id(),
+        name: "Real".to_string(),
+    };
+    let metric_typeclass = bindings
+        .get_typeclass_for_name("Metric")
+        .expect("Metric typeclass should be registered")
+        .clone();
+    let instance_name = crate::elaborator::names::InstanceName {
+        typeclass: metric_typeclass,
+        attribute: "distance".to_string(),
+        datatype: real_datatype,
+    };
+    let real_distance_name = ConstantName::instance_attr(bindings.module_id(), instance_name);
+    let real_distance = kernel_context
+        .symbol_table
+        .get_symbol(&real_distance_name)
+        .expect("Real.distance instance method should be registered");
+
+    let real_potential = bindings
+        .get_type_for_typename("Real")
+        .expect("Real type should be registered")
+        .clone();
+    let real_acorn = match real_potential {
+        crate::elaborator::acorn_type::PotentialType::Resolved(t) => t,
+        _ => panic!("Real should be a resolved type"),
+    };
+    let real_type = kernel_context
+        .type_store
+        .get_type_term(&real_acorn)
+        .expect("Real type term should be available");
+    let x0 = Term::new_variable(0);
+    let x1 = Term::new_variable(1);
+    let x2 = Term::new_variable(2);
+
+    let instance_application = Term::atom(Atom::Symbol(real_distance)).apply(&[x0, x1]);
+
+    Clause::from_literals_unnormalized(
+        vec![Literal::equals(instance_application, x2)],
+        &LocalContext::from_types(vec![real_type.clone(), real_type.clone(), real_type]),
+    )
+    .normalized_preserving_locals()
+}
+
 const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "false_disjunct_literal",
@@ -623,6 +747,14 @@ const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "head_lambda_application",
         build: build_clause_with_head_lambda_application,
+    },
+    KernelClauseRoundtripCase {
+        name: "parametric_typeclass_method_at_concrete_type",
+        build: build_clause_with_parametric_typeclass_method_at_concrete_type,
+    },
+    KernelClauseRoundtripCase {
+        name: "instance_specialized_method",
+        build: build_clause_with_instance_specialized_method,
     },
 ];
 

@@ -22,6 +22,133 @@ impl KernelContext {
         }
     }
 
+    /// Rewrites `Metric.distance[Real](x, y)` (a typeclass method applied at a concrete type
+    /// that has a registered instance) into `Real.distance(x, y)` (the instance alias).
+    ///
+    /// The elaborator/lowering pair already does this canonicalization via
+    /// `prefer_instance_aliases=true`, but the prover's kernel-level type substitution paths
+    /// (see `ProofStep::rewrite` and friends) build terms directly without going back through
+    /// lowering. Without this method, those paths leave the typeclass-attr-at-concrete-type
+    /// form sitting next to its instance-alias twin in the same clause, which is structurally
+    /// distinct from but semantically equal to the alias form — breaking cert round-trip
+    /// because the cert printer prints both as `x.distance(y)` method-call syntax.
+    ///
+    /// The walk is idempotent: applying it to an already-canonical term returns the same term.
+    pub fn canonicalize_instance_calls(&self, term: &Term) -> Term {
+        use crate::kernel::term::Decomposition;
+
+        // Bottom-up: canonicalize the head and args first, then check the application pattern
+        // at this level. The single-symbol case falls through with the original term.
+        match term.as_ref().decompose() {
+            Decomposition::Atom(_) => term.clone(),
+            Decomposition::Pi(input, output) => Term::pi(
+                self.canonicalize_instance_calls(&input.to_owned()),
+                self.canonicalize_instance_calls(&output.to_owned()),
+            ),
+            Decomposition::Lambda(input, body) => Term::lambda(
+                self.canonicalize_instance_calls(&input.to_owned()),
+                self.canonicalize_instance_calls(&body.to_owned()),
+            ),
+            Decomposition::ForAll(input, body) => Term::forall(
+                self.canonicalize_instance_calls(&input.to_owned()),
+                self.canonicalize_instance_calls(&body.to_owned()),
+            ),
+            Decomposition::Exists(input, body) => Term::exists(
+                self.canonicalize_instance_calls(&input.to_owned()),
+                self.canonicalize_instance_calls(&body.to_owned()),
+            ),
+            Decomposition::Application(_, _) => {
+                let Some((head, args)) = term.as_ref().split_application_multi() else {
+                    return term.clone();
+                };
+                // Recurse into args first.
+                let canon_args: Vec<Term> = args
+                    .iter()
+                    .map(|a| self.canonicalize_instance_calls(a))
+                    .collect();
+
+                // Try to canonicalize at the head.
+                if let Some(canonicalized_head_app) =
+                    self.try_canonicalize_typeclass_call(&head, &canon_args)
+                {
+                    return canonicalized_head_app;
+                }
+
+                let canon_head = self.canonicalize_instance_calls(&head);
+                canon_head.apply(&canon_args)
+            }
+        }
+    }
+
+    fn try_canonicalize_typeclass_call(&self, head: &Term, args: &[Term]) -> Option<Term> {
+        use crate::elaborator::names::ConstantName;
+        use crate::kernel::symbol::Symbol;
+
+        let head_ref = head.as_ref();
+        if !head_ref.is_atomic() {
+            return None;
+        }
+        let Atom::Symbol(Symbol::GlobalConstant(module_id, atom_id)) = head_ref.get_head_atom()
+        else {
+            return None;
+        };
+        let name = self
+            .symbol_table
+            .try_name_for_global_id(*module_id, *atom_id)?;
+        if !matches!(name, ConstantName::TypeclassAttribute(_, _, _)) {
+            return None;
+        }
+        let poly_info = self.symbol_table.get_polymorphic_info(name)?;
+        let type_param_count = poly_info.type_param_names.len();
+        if type_param_count == 0 || args.len() < type_param_count {
+            return None;
+        }
+        // Dependent typeclasses with value-family parameters require bound_value_args in the
+        // instance lookup key. We don't reconstruct AcornValue from kernel Terms here, so skip
+        // canonicalization for those — the lookup would miss anyway since the registered
+        // instance has non-empty bound_value_args while our key would have empty.
+        if !poly_info.value_param_types.is_empty() {
+            return None;
+        }
+        // Dependent type args (e.g. `Subspace[T, a]` where `a` is a value parameter) are encoded
+        // as terms with value atoms embedded in the type position. `type_term_to_acorn_type`
+        // can't handle those — and the instance lookup would also miss them since the registered
+        // ConstantInstance has the value param in `bound_value_args`, not `params`. Bail.
+        if args[..type_param_count]
+            .iter()
+            .any(|t| !self.looks_like_type_term(t))
+        {
+            return None;
+        }
+        let type_args: Vec<crate::elaborator::acorn_type::AcornType> = args[..type_param_count]
+            .iter()
+            .map(|t| self.type_store.type_term_to_acorn_type(t))
+            .collect();
+        let alias_symbol =
+            self.symbol_table
+                .lookup_instance_alias_by_keys(name, &type_args, &[])?;
+        let value_args = &args[type_param_count..];
+        Some(Term::atom(Atom::Symbol(alias_symbol)).apply(value_args))
+    }
+
+    /// True if `term` looks like a pure type term (no embedded value atoms). Used by
+    /// `canonicalize_instance_calls` to skip dependent-type arguments whose value embeddings
+    /// would trip up `type_term_to_acorn_type` (which expects pure type structure) and which
+    /// we can't construct an instance lookup key for anyway.
+    fn looks_like_type_term(&self, term: &Term) -> bool {
+        term.as_ref().iter_atoms().all(|atom| {
+            matches!(
+                atom,
+                Atom::Symbol(Symbol::Bool)
+                    | Atom::Symbol(Symbol::Type0)
+                    | Atom::Symbol(Symbol::Type(_))
+                    | Atom::Symbol(Symbol::Typeclass(_))
+                    | Atom::BoundVariable(_)
+                    | Atom::FreeVariable(_)
+            )
+        })
+    }
+
     /// Returns a human-readable string representation of an atom.
     pub fn atom_str(&self, atom: &Atom) -> String {
         match atom {

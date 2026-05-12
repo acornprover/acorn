@@ -922,12 +922,26 @@ impl ProofStep {
         new_subterm: &Term,
         new_subterm_context: &LocalContext,
         pattern_var_map: VariableMap,
+        kernel_context: &KernelContext,
     ) -> ProofStep {
         assert_eq!(target_step.clause.literals.len(), 1);
 
         let target_literal = &target_step.clause.literals[0];
         let (new_literal, _flipped) =
             target_literal.replace_at_path(target_left, path, new_subterm.clone());
+
+        // Canonicalize typeclass-method-at-concrete-type applications. After type
+        // substitution, a polymorphic pattern can produce e.g. `Metric.distance[Real](x, y)`
+        // sitting next to its instance-alias twin `Real.distance(x, y)`. The two are
+        // semantically equal but structurally distinct, which the cert layer cannot
+        // distinguish — bringing the kernel substitution path in line with the
+        // alias-preferring lowering keeps the prover's internal terms consistent with
+        // what the cert round-trip produces.
+        let new_literal = Literal::new(
+            new_literal.positive,
+            kernel_context.canonicalize_instance_calls(&new_literal.left),
+            kernel_context.canonicalize_instance_calls(&new_literal.right),
+        );
 
         let simplifying = new_literal.extended_kbo_cmp(&target_literal) == Ordering::Less;
 
@@ -1389,6 +1403,7 @@ mod tests {
             &new_subterm,
             &pattern_context,   // context for new_subterm's variables
             VariableMap::new(), // mock test - empty var map
+            &kctx,
         );
 
         // The clause should have all variables in its context

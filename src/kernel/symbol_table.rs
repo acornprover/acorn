@@ -347,6 +347,30 @@ impl SymbolTable {
         self.instance_to_symbol.get(constant).copied()
     }
 
+    /// Look up the instance alias symbol for a typeclass-attribute application by its
+    /// kernel-level lookup keys. `ConstantInstance` equality (and hash) ignores the
+    /// derived fields, so we fill them with dummy values just to construct the lookup key.
+    pub fn lookup_instance_alias_by_keys(
+        &self,
+        name: &ConstantName,
+        params: &[crate::elaborator::acorn_type::AcornType],
+        bound_value_args: &[crate::elaborator::acorn_value::AcornValue],
+    ) -> Option<Symbol> {
+        use crate::elaborator::acorn_type::AcornType;
+        use crate::elaborator::acorn_value::ConstantInstance;
+        let key = ConstantInstance {
+            name: name.clone(),
+            params: params.to_vec(),
+            // The fields below are derived and ignored by PartialEq/Hash; fill with dummies.
+            instance_type: AcornType::Bool,
+            generic_type: AcornType::Bool,
+            type_param_names: Vec::new(),
+            value_param_types: Vec::new(),
+            bound_value_args: bound_value_args.to_vec(),
+        };
+        self.instance_to_symbol.get(&key).copied()
+    }
+
     /// Get polymorphic info for a constant, if it's polymorphic.
     pub fn get_polymorphic_info(&self, name: &ConstantName) -> Option<&PolymorphicInfo> {
         self.polymorphic_info.get(name)

@@ -161,3 +161,43 @@ theorem partial_constant_replay(a: Point, x: Point) {
             theorem goal(x: Nat) { not f(x) }
         
 ```
+
+## Definition Equation With Forall Body Alpha Rename
+
+Regression test for [acornlib PR #603](https://github.com/acornprover/acornlib/pull/603).
+When the body of a `define` is a `forall`, an in-proof equation
+`f(args) = forall(...) { ... }` should produce a cert that re-verifies
+even though the kernel may alpha-rename the bound variables in the
+generated certificate line.
+
+```acorn
+type Nat: axiom
+type Real: axiom
+let lt: (Real, Real) -> Bool = axiom
+let lte: (Nat, Nat) -> Bool = axiom
+let real_dist: (Real, Real) -> Real = axiom
+
+typeclass M: Metric {
+    distance: (M, M) -> Real
+}
+
+instance Real: Metric {
+    let distance: (Real, Real) -> Real = real_dist
+}
+
+define cauchy_bound[M: Metric](q: Nat -> M, n: Nat, eps: Real) -> Bool {
+    forall(i: Nat, j: Nat) {
+        lte(n, i) and lte(n, j) implies lt(q(i).distance(q(j)), eps)
+    }
+}
+
+theorem goal(q: Nat -> Real, n: Nat, eps: Real) {
+    cauchy_bound(q, n, eps) implies forall(i: Nat, j: Nat) {
+        lte(n, i) and lte(n, j) implies lt(real_dist(q(i), q(j)), eps)
+    }
+} by {
+    cauchy_bound(q, n, eps) = forall(i: Nat, j: Nat) {
+        lte(n, i) and lte(n, j) implies lt(q(i).distance(q(j)), eps)
+    }
+}
+```

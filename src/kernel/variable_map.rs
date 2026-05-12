@@ -565,20 +565,27 @@ impl VariableMap {
         output_context: &LocalContext,
         kernel_context: &KernelContext,
     ) -> Literal {
+        // Substitution can leave behind `Metric.distance[Real](x, y)` (a typeclass method at a
+        // concrete type that has a registered instance) where the elaborator/lowering pair would
+        // have produced the instance alias `Real.distance(x, y)`. Without canonicalizing here,
+        // specialized clauses sit alongside their instance-alias twins in the active set,
+        // structurally distinct but semantically equal — breaking contradiction detection.
+        let left = self.specialize_term(
+            literal.left.as_ref(),
+            input_context,
+            output_context,
+            kernel_context,
+        );
+        let right = self.specialize_term(
+            literal.right.as_ref(),
+            input_context,
+            output_context,
+            kernel_context,
+        );
         Literal::new(
             literal.positive,
-            self.specialize_term(
-                literal.left.as_ref(),
-                input_context,
-                output_context,
-                kernel_context,
-            ),
-            self.specialize_term(
-                literal.right.as_ref(),
-                input_context,
-                output_context,
-                kernel_context,
-            ),
+            kernel_context.canonicalize_instance_calls(&left),
+            kernel_context.canonicalize_instance_calls(&right),
         )
     }
 
