@@ -64,6 +64,13 @@ Perf top-down sample after the checker duplicate-expansion change (2026-05-11):
 ├── roughly 46% of the captured path was Checker::insert_clause_internal under imported facts
 └── hot self-time was allocator/memmove/term ownership, normalization, hashing, and equality-graph cloning
 
+Interval CPU sample for full check (2026-05-11):
+├── command: target/release/acorn check --jobs 20 --timing, sampled with `pidstat -h -u -p $pid 1 1`
+├── one-second `%CPU` samples: 133, 101, 1025, 351, 261, 279, 733, 886, 292, 650, 351, 657, 537, 483, 376, 667, 332, 575, 335, 481, 363, 106, 100
+├── peak observed interval: 1025% = about 10.25 cores
+├── median observed interval: 363% = about 3.63 cores
+└── conclusion: the run does not saturate the 20 logical CPUs even in the middle; workers are frequently starved by the single-threaded load/lowering pipeline and by module-sized scheduling granularity
+
 Comparison to older pre-LoweredModule baseline:
 ├── previous max rss: 9,721,212 KB = 9.27 GiB
 ├── current max rss: 2,477,768 KB = 2.36 GiB
