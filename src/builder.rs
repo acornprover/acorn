@@ -1292,7 +1292,9 @@ impl<'a> Builder<'a> {
         L: FnMut() -> Result<Option<LoadedModuleWorkBatch>, String>,
     {
         let worker_count = self.check_jobs.max(1);
-        let queue_capacity = (worker_count * 4).max(1);
+        // Keep the producer from retaining too many lowered modules while workers are busy.
+        // The modules are large enough that a deep queue costs more memory than it saves time.
+        let queue_capacity = (worker_count / 2).max(1);
         let queue = Arc::new((
             Mutex::new(PipelineQueueState::new(queue_capacity)),
             Condvar::new(),

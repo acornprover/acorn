@@ -12,7 +12,7 @@ use crate::builder::{
     BuildEvent, BuildMetrics, BuildStatus, Builder, LoadedModuleWorkBatch, ModuleTiming,
 };
 use crate::module::ModuleDescriptor;
-use crate::project::{Project, ProjectConfig, ProjectView, UsageMode};
+use crate::project::{ParallelProjectLoader, Project, ProjectConfig, ProjectView, UsageMode};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     let path = PathBuf::from(target);
@@ -262,20 +262,6 @@ enum TargetSpec {
     Name(String),
 }
 
-fn cached_module_work_estimate(project: &Project, descriptor: &ModuleDescriptor) -> usize {
-    project
-        .build_cache
-        .get_certificates(descriptor)
-        .map(|store| {
-            store
-                .certs
-                .iter()
-                .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
 /// The Verifier manages the run of a single build.
 /// It creates its own project.
 pub struct Verifier {
@@ -475,8 +461,9 @@ impl Verifier {
         load_order.sort();
         load_order.dedup();
         load_order.sort_by(|left, right| {
-            cached_module_work_estimate(project, right)
-                .cmp(&cached_module_work_estimate(project, left))
+            project
+                .cached_module_work_estimate(right)
+                .cmp(&project.cached_module_work_estimate(left))
                 .then_with(|| left.cmp(right))
         });
         Ok((targets, load_order))
@@ -517,12 +504,49 @@ impl Verifier {
 
     fn load_and_build_streaming(&mut self) -> Result<Duration, String> {
         let (targets, load_order) = self.prepare_targets()?;
-        let batch_limit = (self.builder.check_jobs.max(1) * 2).max(1);
+        let batch_limit = self.builder.check_jobs.max(1);
         let propagate_load_errors = !matches!(self.target_spec, TargetSpec::All);
 
         self.builder.begin_module_work_build(targets.len());
 
         if self.builder.can_pipeline_module_work(targets.len()) {
+            if matches!(self.target_spec, TargetSpec::All) {
+                // Elaboration/lowering has higher per-worker memory pressure than certificate
+                // checking, so use a smaller loader pool and let the checker consume with
+                // its normal --jobs parallelism.
+                let loader_jobs = (self.builder.check_jobs / 4).max(1);
+                let project_ptr = self.project_ptr;
+                let mut loader = {
+                    let project = unsafe { &mut *project_ptr };
+                    ParallelProjectLoader::new(project, &targets, &load_order, loader_jobs)
+                        .map_err(|error| format!("Error loading targets: {}", error))?
+                };
+                let (load_elapsed, processed) =
+                    self.builder.process_module_work_pipeline(|| {
+                        let load_start = std::time::Instant::now();
+                        let project = unsafe { &mut *project_ptr };
+                        match loader.next_loaded_modules(project, &targets) {
+                            Ok(Some(work)) => {
+                                let project_view = ProjectView::new_without_lowered(project);
+                                Ok(Some(LoadedModuleWorkBatch {
+                                    project: Some(project_view),
+                                    modules: work,
+                                    load_elapsed: load_start.elapsed(),
+                                }))
+                            }
+                            Ok(None) => Ok(None),
+                            Err(error) => Err(format!("Error loading targets: {}", error)),
+                        }
+                    })?;
+
+                let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
+                self.builder.set_project_view(project_view);
+                self.builder
+                    .log_unprocessed_target_states(&targets, &processed);
+                self.builder.finish_module_work_build();
+                return Ok(load_elapsed);
+            }
+
             let project_ptr = self.project_ptr;
             let mut load_index = 0usize;
             let (load_elapsed, processed) = self.builder.process_module_work_pipeline(|| {
@@ -894,14 +918,15 @@ mod tests {
             )
             .unwrap();
 
-        let mut verifier = Verifier::new_for_check(
-            acornlib.path().to_path_buf(),
-            ProjectConfig::default(),
-            None,
-        )
-        .unwrap();
+        let config = ProjectConfig {
+            write_cache: false,
+            ..ProjectConfig::default()
+        };
+        let mut verifier =
+            Verifier::new_for_check(acornlib.path().to_path_buf(), config, None).unwrap();
         verifier.builder.check_mode = true;
         verifier.builder.check_hashes = false;
+        verifier.builder.check_jobs = 4;
 
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);

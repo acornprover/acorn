@@ -1,7 +1,7 @@
 use core::panic;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use std::{fmt, io};
 
@@ -103,6 +103,44 @@ pub struct Project {
     // A flag for whether something is using the project to build right now.
     // Only used in the parallel server code.
     pub building: bool,
+}
+
+struct ParallelModuleLoadJob {
+    descriptor: ModuleDescriptor,
+    module_id: ModuleId,
+    parsed: Option<ParsedModule>,
+    is_prelude: bool,
+    dependencies: Vec<ModuleId>,
+    lib_dependencies: Vec<(ModuleId, Vec<String>)>,
+}
+
+struct ParallelModuleWorkerJob {
+    index: usize,
+    module_id: ModuleId,
+    parsed: ParsedModule,
+    is_prelude: bool,
+    lib_dependencies: Vec<(ModuleId, Vec<String>)>,
+    project: ProjectView,
+    usage_mode: UsageMode,
+}
+
+struct ParallelModuleLoadResult {
+    index: usize,
+    module_id: ModuleId,
+    loaded: Result<crate::loader::module_loader::LoadedModuleParts, error::Error>,
+}
+
+pub struct ParallelProjectLoader {
+    jobs: Vec<ParallelModuleLoadJob>,
+    remaining_dependencies: Vec<usize>,
+    dependents: Vec<Vec<usize>>,
+    ready: Vec<usize>,
+    job_tx: Option<mpsc::Sender<ParallelModuleWorkerJob>>,
+    result_rx: mpsc::Receiver<ParallelModuleLoadResult>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+    active_jobs: usize,
+    completed_jobs: usize,
+    worker_count: usize,
 }
 
 /// Read-only project operations needed while evaluating expressions and replaying certificates.
@@ -495,6 +533,190 @@ impl ProjectLookup for Project {
 
     fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
         Project::get_loaded_module_id_by_name(self, module_name)
+    }
+}
+
+impl ParallelProjectLoader {
+    pub fn new(
+        project: &mut Project,
+        targets: &[ModuleDescriptor],
+        load_order: &[ModuleDescriptor],
+        worker_count: usize,
+    ) -> Result<Self, ImportError> {
+        project.register_all_modules();
+
+        let target_set: HashSet<_> = targets.iter().cloned().collect();
+        let mut jobs = Vec::new();
+        for descriptor in load_order {
+            if !target_set.contains(descriptor) {
+                continue;
+            }
+            if let Some(job) = project.prepare_parallel_module_load_job(descriptor, false)? {
+                jobs.push(job);
+            }
+        }
+
+        let module_to_job: HashMap<ModuleId, usize> = jobs
+            .iter()
+            .enumerate()
+            .map(|(index, job)| (job.module_id, index))
+            .collect();
+        let mut remaining_dependencies = vec![0usize; jobs.len()];
+        let mut dependents = vec![Vec::new(); jobs.len()];
+        for (job_index, job) in jobs.iter().enumerate() {
+            for dep_id in &job.dependencies {
+                if let Some(&dep_index) = module_to_job.get(dep_id) {
+                    remaining_dependencies[job_index] += 1;
+                    dependents[dep_index].push(job_index);
+                }
+            }
+        }
+
+        let ready = remaining_dependencies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &remaining)| (remaining == 0).then_some(index))
+            .collect::<Vec<_>>();
+        if !jobs.is_empty() && ready.is_empty() {
+            return Err(ImportError::Circular(jobs[0].module_id));
+        }
+
+        let worker_count = worker_count.min(jobs.len()).max(1);
+        let (job_tx, job_rx) = mpsc::channel();
+        let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut handles = Vec::new();
+
+        for _ in 0..worker_count {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            handles.push(std::thread::spawn(move || loop {
+                let job: ParallelModuleWorkerJob = {
+                    let receiver = job_rx.lock().expect("parallel load job receiver poisoned");
+                    match receiver.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    }
+                };
+                let loaded = elaborate_and_lower_module(
+                    &job.project,
+                    job.usage_mode,
+                    job.module_id,
+                    job.parsed,
+                    job.is_prelude,
+                    job.lib_dependencies,
+                );
+                if result_tx
+                    .send(ParallelModuleLoadResult {
+                        index: job.index,
+                        module_id: job.module_id,
+                        loaded,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }));
+        }
+        drop(result_tx);
+
+        let mut loader = Self {
+            jobs,
+            remaining_dependencies,
+            dependents,
+            ready,
+            job_tx: Some(job_tx),
+            result_rx,
+            handles,
+            active_jobs: 0,
+            completed_jobs: 0,
+            worker_count,
+        };
+        loader.enqueue_available(project);
+        Ok(loader)
+    }
+
+    fn enqueue_available(&mut self, project: &Project) {
+        while self.active_jobs < self.worker_count {
+            let Some(job_index) = project.pop_ready_parallel_load_job(&mut self.ready, &self.jobs)
+            else {
+                break;
+            };
+            let Some(sender) = &self.job_tx else {
+                break;
+            };
+            project.enqueue_parallel_load_job(&mut self.jobs, job_index, sender);
+            self.active_jobs += 1;
+        }
+    }
+
+    pub fn next_loaded_modules(
+        &mut self,
+        project: &mut Project,
+        targets: &[ModuleDescriptor],
+    ) -> Result<Option<Vec<(ModuleDescriptor, LoweredModule)>>, ImportError> {
+        loop {
+            if self.completed_jobs >= self.jobs.len() {
+                self.finish_workers();
+                return Ok(None);
+            }
+            if self.active_jobs == 0 && self.ready.is_empty() {
+                self.finish_workers();
+                let module_id = self
+                    .jobs
+                    .iter()
+                    .find(|job| job.parsed.is_some())
+                    .map(|job| job.module_id)
+                    .unwrap_or(self.jobs[0].module_id);
+                return Err(ImportError::Circular(module_id));
+            }
+
+            let result = self
+                .result_rx
+                .recv()
+                .expect("parallel load workers should return all active jobs");
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            self.completed_jobs += 1;
+            match result.loaded {
+                Ok(loaded) => {
+                    project.modules[result.module_id.get() as usize].load_ok(
+                        loaded.export,
+                        Some(loaded.lowered),
+                        loaded.retained_env,
+                        loaded.content_hash,
+                    );
+                }
+                Err(e) => {
+                    project.modules[result.module_id.get() as usize].load_error(e);
+                }
+            }
+
+            for dependent in &self.dependents[result.index] {
+                self.remaining_dependencies[*dependent] -= 1;
+                if self.remaining_dependencies[*dependent] == 0 {
+                    self.ready.push(*dependent);
+                }
+            }
+            self.enqueue_available(project);
+
+            let work = project.take_lowered_modules_for_targets(targets);
+            if !work.is_empty() {
+                return Ok(Some(work));
+            }
+        }
+    }
+
+    fn finish_workers(&mut self) {
+        self.job_tx.take();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ParallelProjectLoader {
+    fn drop(&mut self) {
+        self.finish_workers();
     }
 }
 
@@ -1276,6 +1498,180 @@ impl Project {
 
     pub fn get_lowered_module(&self, module_id: ModuleId) -> Option<&LoweredModule> {
         self.get_loaded_module_by_id(module_id)?.lowered()
+    }
+
+    pub fn cached_module_work_estimate(&self, descriptor: &ModuleDescriptor) -> usize {
+        self.build_cache
+            .get_certificates(descriptor)
+            .map(|store| {
+                store
+                    .certs
+                    .iter()
+                    .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn prepare_parallel_module_load_job(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+        strict: bool,
+    ) -> Result<Option<ParallelModuleLoadJob>, ImportError> {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        let descriptor = &canonical_descriptor;
+
+        let preassigned_id = if let Some(&module_id) = self.module_map.get(descriptor) {
+            match self.get_module_by_id(module_id) {
+                LoadState::Loading => return Err(ImportError::Circular(module_id)),
+                LoadState::Registered => Some(module_id),
+                LoadState::Ok(_) | LoadState::Error(_) | LoadState::None => return Ok(None),
+            }
+        } else {
+            None
+        };
+
+        let path = self.path_from_descriptor(descriptor)?;
+        let text =
+            read_source_text(&path, |path| self.read_file(path)).map_err(ImportError::NotFound)?;
+        let is_prelude = matches!(descriptor, ModuleDescriptor::Name(parts) if parts.len() == 1 && parts[0] == "prelude");
+
+        let module_id = if let Some(id) = preassigned_id {
+            self.modules[id.get() as usize] = Module::new(descriptor.clone());
+            id
+        } else if is_prelude {
+            if self.modules.is_empty() {
+                self.modules.push(Module::new(descriptor.clone()));
+            } else {
+                self.modules[ModuleId::PRELUDE.get() as usize] = Module::new(descriptor.clone());
+            }
+            ModuleId::PRELUDE
+        } else {
+            if self.modules.is_empty() {
+                self.modules.push(Module::anonymous());
+            }
+            let id = ModuleId(self.modules.len() as u16);
+            self.modules.push(Module::new(descriptor.clone()));
+            id
+        };
+        self.module_map.insert(descriptor.clone(), module_id);
+
+        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.modules[module_id.get() as usize].load_error(error);
+                return Ok(None);
+            }
+        };
+
+        let current_module_name = parsed.module_name();
+        let implicit_lib_dependency_names: HashSet<_> = parsed
+            .implicit_lib_dependency_names
+            .iter()
+            .cloned()
+            .collect();
+        let mut dependencies = Vec::new();
+        let mut seen_dependencies = HashSet::new();
+        let mut lib_dependencies = Vec::new();
+
+        for module_name in &parsed.dependency_names {
+            if current_module_name
+                .as_ref()
+                .is_some_and(|name| name == module_name)
+            {
+                continue;
+            }
+            match self.get_module_id_by_name(module_name) {
+                Some(dep_id) => {
+                    self.dependency_load_errors.remove(module_name);
+                    if dep_id != module_id && seen_dependencies.insert(dep_id) {
+                        dependencies.push(dep_id);
+                    }
+                    if implicit_lib_dependency_names.contains(module_name) {
+                        let full_name = module_name
+                            .split('.')
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>();
+                        lib_dependencies.push((dep_id, full_name));
+                    }
+                }
+                None => {
+                    let message = self
+                        .path_from_descriptor(&ModuleDescriptor::name(module_name))
+                        .and_then(|path| {
+                            read_source_text(&path, |path| self.read_file(path))
+                                .map(|_| path)
+                                .map_err(ImportError::NotFound)
+                        })
+                        .map(|path| {
+                            format!(
+                                "module '{}' has not been loaded from {}",
+                                module_name,
+                                path.display()
+                            )
+                        })
+                        .unwrap_or_else(|error| error.to_string());
+                    self.dependency_load_errors
+                        .insert(module_name.clone(), ImportError::NotFound(message));
+                }
+            }
+        }
+
+        if !is_prelude {
+            if let Some(prelude_id) = self.get_module_id_by_name("prelude") {
+                if prelude_id != module_id && seen_dependencies.insert(prelude_id) {
+                    dependencies.push(prelude_id);
+                }
+            }
+        }
+
+        Ok(Some(ParallelModuleLoadJob {
+            descriptor: descriptor.clone(),
+            module_id,
+            parsed: Some(parsed),
+            is_prelude,
+            dependencies,
+            lib_dependencies,
+        }))
+    }
+
+    fn pop_ready_parallel_load_job(
+        &self,
+        ready: &mut Vec<usize>,
+        jobs: &[ParallelModuleLoadJob],
+    ) -> Option<usize> {
+        let (ready_index, _) = ready.iter().enumerate().max_by(|(_, left), (_, right)| {
+            self.cached_module_work_estimate(&jobs[**left].descriptor)
+                .cmp(&self.cached_module_work_estimate(&jobs[**right].descriptor))
+                .then_with(|| jobs[**right].descriptor.cmp(&jobs[**left].descriptor))
+        })?;
+        Some(ready.swap_remove(ready_index))
+    }
+
+    fn enqueue_parallel_load_job(
+        &self,
+        jobs: &mut [ParallelModuleLoadJob],
+        job_index: usize,
+        sender: &mpsc::Sender<ParallelModuleWorkerJob>,
+    ) {
+        let project = ProjectView::new_without_lowered(self);
+        let job = &mut jobs[job_index];
+        let parsed = job
+            .parsed
+            .take()
+            .expect("parallel load job should only be enqueued once");
+        let worker_job = ParallelModuleWorkerJob {
+            index: job_index,
+            module_id: job.module_id,
+            parsed,
+            is_prelude: job.is_prelude,
+            lib_dependencies: job.lib_dependencies.clone(),
+            project,
+            usage_mode: self.config.usage_mode,
+        };
+        sender
+            .send(worker_job)
+            .expect("parallel load workers should still be receiving jobs");
     }
 
     pub fn take_lowered_modules_for_targets(
