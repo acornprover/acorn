@@ -53,6 +53,27 @@ fn test_prover_respects_typeclasses() {
 }
 
 #[test]
+fn test_extensionality_does_not_upgrade_typeclass_domain_to_all_types() {
+    let text = r#"
+    typeclass T: Small {
+        marker: Bool
+    }
+
+    let f[T]: Bool = axiom
+    let g[T]: Bool = axiom
+
+    axiom same_on_small[T: Small] {
+        f[T] = g[T]
+    }
+
+    theorem bad {
+        f[Bool] = g[Bool]
+    }
+    "#;
+    verify_fails(text);
+}
+
+#[test]
 fn test_proving_with_parameterized_inductive() {
     let text = r#"
     inductive List[T] {

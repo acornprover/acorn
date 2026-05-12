@@ -1,4 +1,4 @@
-use crate::tests::support::verify_succeeds;
+use crate::tests::support::{verify_fails, verify_succeeds};
 use std::env;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -9,10 +9,17 @@ const MDTEST_DIR: &str = "src/tests/prover/mdtest";
 const FILTER_ENV: &str = "ACORN_MDTEST_FILTER";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum MdExpectation {
+    Succeeds,
+    Fails,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MdCase {
     id: String,
     start_line: usize,
     source: String,
+    expectation: MdExpectation,
 }
 
 fn mdtest_root() -> PathBuf {
@@ -49,8 +56,16 @@ fn parse_fence_start(line: &str) -> Option<&str> {
     line.strip_prefix("```").map(str::trim)
 }
 
-fn is_checkable_language(language: &str) -> bool {
-    matches!(language, "ac" | "acorn")
+fn parse_checkable_language(language: &str) -> Option<MdExpectation> {
+    let parts = language
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["ac" | "acorn"] => Some(MdExpectation::Succeeds),
+        ["ac" | "acorn", "fail" | "fails" | "should-fail"] => Some(MdExpectation::Fails),
+        _ => None,
+    }
 }
 
 fn build_case_id(relative_path: &Path, headings: &[(usize, String)]) -> String {
@@ -106,12 +121,13 @@ fn parse_cases(relative_path: &Path, markdown: &str) -> Result<Vec<MdCase>, Stri
                     block_start_line - 1
                 ));
             }
-            if is_checkable_language(language) {
+            if let Some(expectation) = parse_checkable_language(language) {
                 let id = build_case_id(relative_path, &headings);
                 cases.push(MdCase {
                     id,
                     start_line: block_start_line,
                     source: block_lines.join("\n"),
+                    expectation,
                 });
             }
             index += 1;
@@ -166,7 +182,11 @@ fn mdtests() {
             }
 
             matched_cases += 1;
-            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| verify_succeeds(&case.source))) {
+            let result = catch_unwind(AssertUnwindSafe(|| match case.expectation {
+                MdExpectation::Succeeds => verify_succeeds(&case.source),
+                MdExpectation::Fails => verify_fails(&case.source),
+            }));
+            if let Err(payload) = result {
                 let message = panic_message(payload);
                 failures.push(format!(
                     "{}:{}\n{}",
@@ -209,6 +229,7 @@ fn parses_root_case() {
             id: "smoke.md".to_string(),
             start_line: 2,
             source: "let a: Bool = axiom\ntheorem { a implies a }".to_string(),
+            expectation: MdExpectation::Succeeds,
         }]
     );
 }
@@ -242,11 +263,13 @@ theorem {
                 id: "language/example.md :: Example".to_string(),
                 start_line: 6,
                 source: "let a: Bool = axiom".to_string(),
+                expectation: MdExpectation::Succeeds,
             },
             MdCase {
                 id: "language/example.md :: Example".to_string(),
                 start_line: 12,
                 source: "theorem {\n    a implies a\n}".to_string(),
+                expectation: MdExpectation::Succeeds,
             },
         ]
     );
@@ -272,6 +295,25 @@ theorem { true }
             id: "language/example.md :: Constraints / Easy".to_string(),
             start_line: 6,
             source: "theorem { true }".to_string(),
+            expectation: MdExpectation::Succeeds,
+        }]
+    );
+}
+
+#[test]
+fn parses_expected_failure_case() {
+    let cases = parse_cases(
+        Path::new("failure.md"),
+        "```acorn fail\ntheorem nope { false }\n```",
+    )
+    .expect("markdown should parse");
+    assert_eq!(
+        cases,
+        vec![MdCase {
+            id: "failure.md".to_string(),
+            start_line: 2,
+            source: "theorem nope { false }".to_string(),
+            expectation: MdExpectation::Fails,
         }]
     );
 }

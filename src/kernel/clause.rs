@@ -681,6 +681,9 @@ impl Clause {
         if !literal.positive {
             return None;
         }
+        if literal.left == literal.right {
+            return None;
+        }
 
         // Check if this is f(..., x1, x2, ..., xn) = g(..., x1, x2, ..., xn)
         // where the trailing args match and can be peeled via extensionality.
@@ -720,6 +723,25 @@ impl Clause {
 
         if matching_suffix_len == 0 {
             return None; // No matching suffix at all
+        }
+
+        fn expected_input_type_for_arg(
+            term: &Term,
+            args: &[Term],
+            arg_index: usize,
+            context: &LocalContext,
+            kernel_context: &KernelContext,
+        ) -> Option<Term> {
+            let prefix = if arg_index == 0 {
+                term.get_head_term()
+            } else {
+                Term::new(*term.get_head_atom(), args[..arg_index].to_vec())
+            };
+            let prefix_type = prefix
+                .checked_type_with_context(context, kernel_context)
+                .ok()?;
+            let (input, _) = prefix_type.as_ref().split_pi()?;
+            Some(input.to_owned())
         }
 
         fn would_leave_unsupported_bare_head(
@@ -764,10 +786,30 @@ impl Clause {
 
         for i in 0..matching_suffix_len {
             // Index from the right
+            let longer_idx = longer_len - 1 - i;
             let shorter_idx = shorter_len - 1 - i;
             let arg = &shorter_args[shorter_idx];
             match arg.atomic_variable() {
                 Some(var_id) => {
+                    let var_type = self.context.get_var_type(var_id as usize)?;
+                    let longer_input = expected_input_type_for_arg(
+                        longer,
+                        &longer_args,
+                        longer_idx,
+                        &self.context,
+                        kernel_context,
+                    )?;
+                    let shorter_input = expected_input_type_for_arg(
+                        shorter,
+                        &shorter_args,
+                        shorter_idx,
+                        &self.context,
+                        kernel_context,
+                    )?;
+                    if var_type != &longer_input || var_type != &shorter_input {
+                        break;
+                    }
+
                     // Type arguments can be peeled for ordinary polymorphic constants, but
                     // special builtins like `eq` and `ite` do not support a bare head in the
                     // clause roundtrip codec. Stop right before we would produce that shape.
@@ -1698,6 +1740,36 @@ mod tests {
             result_clause.find_extensionality(&kctx).is_none(),
             "extensionality should stop once both sides are bare generic heads"
         );
+    }
+
+    #[test]
+    fn test_extensionality_rejects_typeclass_var_for_unconstrained_type_param() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Small");
+        kctx.parse_polymorphic_constant("c1", "T: Type", "Bool");
+        kctx.parse_polymorphic_constant("c2", "T: Type", "Bool");
+
+        let clause = kctx.parse_clause("c1(x0) = c2(x0)", &["Small"]);
+        assert!(
+            clause.find_extensionality(&kctx).is_none(),
+            "forall(T: Small) {{ c1[T] = c2[T] }} must not imply c1 = c2"
+        );
+    }
+
+    #[test]
+    fn test_extensionality_peels_matching_typeclass_domain() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Small");
+        kctx.parse_polymorphic_constant("c1", "T: Small", "Bool");
+        kctx.parse_polymorphic_constant("c2", "T: Small", "Bool");
+
+        let clause = kctx.parse_clause("c1(x0) = c2(x0)", &["Small"]);
+        let result_lits = clause
+            .find_extensionality(&kctx)
+            .expect("matching typeclass domain should still support extensionality");
+        let result_clause = Clause::new(result_lits, clause.get_local_context());
+        let expected = kctx.parse_clause("c1 = c2", &[]);
+        assert_eq!(result_clause, expected);
     }
 
     #[test]

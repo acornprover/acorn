@@ -1,5 +1,27 @@
 # Typeclasses
 
+## Extensionality Does Not Widen Typeclass Domain
+
+Pointwise equality over `T: Small` should not imply equality of polymorphic
+functions over every `T: Type`.
+
+```acorn fail
+    typeclass T: Small {
+        marker: Bool
+    }
+
+    let f[T]: Bool = axiom
+    let g[T]: Bool = axiom
+
+    axiom same_on_small[T: Small] {
+        f[T] = g[T]
+    }
+
+    theorem bad {
+        f[Bool] = g[Bool]
+    }
+```
+
 ## Instance Condition With Operator Witnesses
 
 The generated certificate for an instance condition should replay the nested
