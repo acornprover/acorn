@@ -1,6 +1,5 @@
 use core::panic;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::IsTerminal;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +16,7 @@ use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
-use crate::elaborator::error::{self, ErrorContext};
+use crate::elaborator::error;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::lowered_module::{
@@ -27,15 +26,14 @@ use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
+use crate::loader::module_loader::elaborate_and_lower_module;
+use crate::loader::parsed_module::ParsedModule;
+use crate::loader::source::read_source_text;
 use crate::module::{LoadState, LoadedModule, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
-use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
-use crate::syntax::statement::{Body, Statement, StatementInfo};
-use crate::syntax::token::{Token, TokenIter, TokenType};
+use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
-
-const MAX_EXPORTED_DECLARATIONS_PER_MODULE: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryCitation {
@@ -473,31 +471,6 @@ impl UsageMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn theorem_module(count: usize) -> String {
-        let mut text = String::new();
-        for i in 0..count {
-            text.push_str(&format!("theorem t{} {{ true }}\n", i));
-        }
-        text
-    }
-
-    #[test]
-    fn exported_declaration_limit_allows_500() {
-        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE);
-        let statements = Project::parse_module_statements(&text, false).unwrap();
-        Project::check_exported_declaration_limit(&statements).unwrap();
-    }
-
-    #[test]
-    fn exported_declaration_limit_rejects_501() {
-        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE + 1);
-        let statements = Project::parse_module_statements(&text, false).unwrap();
-        let error = Project::check_exported_declaration_limit(&statements).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("module has more than 500 exported declarations"));
-    }
 
     #[test]
     fn mock_verify_project_keeps_lowered_module_but_drops_environment() {
@@ -964,312 +937,6 @@ impl Project {
                 .push(Module::new_registered(descriptor.clone()));
             self.module_map.insert(descriptor, id);
         }
-    }
-
-    fn module_name_from_expression(expression: &Expression) -> Option<String> {
-        match expression {
-            Expression::Singleton(token) if token.token_type == TokenType::Identifier => {
-                Some(token.text().to_string())
-            }
-            Expression::Binary(left, token, right) if token.token_type == TokenType::Dot => {
-                let left_name = Self::module_name_from_expression(left)?;
-                let Expression::Singleton(token) = right.as_ref() else {
-                    return None;
-                };
-                if token.token_type != TokenType::Identifier {
-                    return None;
-                }
-                Some(format!("{}.{}", left_name, token.text()))
-            }
-            _ => None,
-        }
-    }
-
-    fn collect_lib_dependencies_from_type_param(
-        type_param: &TypeParamExpr,
-        output: &mut BTreeSet<String>,
-    ) {
-        if let Some(type_expr) = &type_param.type_expr {
-            Self::collect_lib_dependencies_from_expression(type_expr, output);
-        }
-        if let Some(typeclass) = &type_param.typeclass {
-            Self::collect_lib_dependencies_from_expression(typeclass, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_declaration(
-        declaration: &Declaration,
-        output: &mut BTreeSet<String>,
-    ) {
-        if let Declaration::Typed(_, type_expr) = declaration {
-            Self::collect_lib_dependencies_from_expression(type_expr, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_expression(
-        expression: &Expression,
-        output: &mut BTreeSet<String>,
-    ) {
-        match expression {
-            Expression::Singleton(_) => {}
-            Expression::Unary(_, subexpression) => {
-                Self::collect_lib_dependencies_from_expression(subexpression, output);
-            }
-            Expression::Binary(left, _, right) => {
-                Self::collect_lib_dependencies_from_expression(left, output);
-                Self::collect_lib_dependencies_from_expression(right, output);
-            }
-            Expression::Concatenation(left, right) => {
-                if let Expression::Singleton(token) = left.as_ref() {
-                    if token.token_type == TokenType::Lib {
-                        if let Expression::Grouping(_, module_expr, _) = right.as_ref() {
-                            if let Some(module_name) =
-                                Self::module_name_from_expression(module_expr)
-                            {
-                                output.insert(module_name);
-                            }
-                        }
-                    }
-                }
-                Self::collect_lib_dependencies_from_expression(left, output);
-                Self::collect_lib_dependencies_from_expression(right, output);
-            }
-            Expression::Grouping(_, inner, _) => {
-                Self::collect_lib_dependencies_from_expression(inner, output);
-            }
-            Expression::Binder(_, declarations, body, _) => {
-                for declaration in declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(body, output);
-            }
-            Expression::GenericBinder(_, type_params, declarations, body, _) => {
-                for type_param in type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(body, output);
-            }
-            Expression::IfThenElse(_, cond, if_block, else_block, _) => {
-                Self::collect_lib_dependencies_from_expression(cond, output);
-                Self::collect_lib_dependencies_from_expression(if_block, output);
-                if let Some(else_block) = else_block {
-                    Self::collect_lib_dependencies_from_expression(else_block, output);
-                }
-            }
-            Expression::Match(_, scrutinee, cases, _) => {
-                Self::collect_lib_dependencies_from_expression(scrutinee, output);
-                for (pattern, result) in cases {
-                    Self::collect_lib_dependencies_from_expression(pattern, output);
-                    Self::collect_lib_dependencies_from_expression(result, output);
-                }
-            }
-        }
-    }
-
-    fn collect_lib_dependencies_from_body(body: &Body, output: &mut BTreeSet<String>) {
-        for statement in &body.statements {
-            Self::collect_lib_dependencies_from_statement(statement, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_statement(
-        statement: &Statement,
-        output: &mut BTreeSet<String>,
-    ) {
-        match &statement.statement {
-            StatementInfo::Let(ls) => {
-                for type_param in &ls.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                if let Some(type_expr) = &ls.type_expr {
-                    Self::collect_lib_dependencies_from_expression(type_expr, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ls.value, output);
-            }
-            StatementInfo::Define(ds) => {
-                for type_param in &ds.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &ds.args {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ds.return_type, output);
-                Self::collect_lib_dependencies_from_expression(&ds.return_value, output);
-            }
-            StatementInfo::Theorem(ts) => {
-                for type_param in &ts.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &ts.args {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ts.claim, output);
-                if let Some(body) = &ts.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Claim(cs) => {
-                Self::collect_lib_dependencies_from_expression(&cs.claim, output);
-            }
-            StatementInfo::Type(ts) => {
-                for type_param in &ts.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ts.type_expr, output);
-            }
-            StatementInfo::ForAll(fas) => {
-                for declaration in &fas.quantifiers {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_body(&fas.body, output);
-            }
-            StatementInfo::If(is) => {
-                Self::collect_lib_dependencies_from_expression(&is.condition, output);
-                Self::collect_lib_dependencies_from_body(&is.body, output);
-                if let Some(else_body) = &is.else_body {
-                    Self::collect_lib_dependencies_from_body(else_body, output);
-                }
-            }
-            StatementInfo::VariableSatisfy(vss) => {
-                for type_param in &vss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &vss.declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&vss.condition, output);
-            }
-            StatementInfo::FunctionSatisfy(fss) => {
-                for type_param in &fss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &fss.declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&fss.condition, output);
-                if let Some(body) = &fss.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Structure(ss) => {
-                for type_param in &ss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for (_, field_type, _) in &ss.fields {
-                    Self::collect_lib_dependencies_from_expression(field_type, output);
-                }
-                if let Some(constraint) = &ss.constraint {
-                    Self::collect_lib_dependencies_from_expression(constraint, output);
-                }
-                if let Some(body) = &ss.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Inductive(is) => {
-                for type_param in &is.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for (_, constructor, _) in &is.constructors {
-                    if let Some(constructor) = constructor {
-                        Self::collect_lib_dependencies_from_expression(constructor, output);
-                    }
-                }
-            }
-            StatementInfo::Import(_) => {}
-            StatementInfo::Attributes(as_) => {
-                for type_param in &as_.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_body(&as_.body, output);
-            }
-            StatementInfo::Numerals(ns) => {
-                Self::collect_lib_dependencies_from_expression(&ns.type_expr, output);
-            }
-            StatementInfo::Match(ms) => {
-                Self::collect_lib_dependencies_from_expression(&ms.scrutinee, output);
-                for (pattern, body) in &ms.cases {
-                    Self::collect_lib_dependencies_from_expression(pattern, output);
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Typeclass(ts) => {
-                for extend in &ts.extends {
-                    Self::collect_lib_dependencies_from_expression(extend, output);
-                }
-                for (_, constant_type, _) in &ts.constants {
-                    Self::collect_lib_dependencies_from_expression(constant_type, output);
-                }
-                for condition in &ts.conditions {
-                    for declaration in &condition.args {
-                        Self::collect_lib_dependencies_from_declaration(declaration, output);
-                    }
-                    Self::collect_lib_dependencies_from_expression(&condition.claim, output);
-                }
-            }
-            StatementInfo::Instance(is) => {
-                for type_param in &is.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&is.typeclass, output);
-                if let Some(definitions) = &is.definitions {
-                    Self::collect_lib_dependencies_from_body(definitions, output);
-                }
-                if let Some(body) = &is.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Destructuring(ds) => {
-                Self::collect_lib_dependencies_from_expression(&ds.function, output);
-                Self::collect_lib_dependencies_from_expression(&ds.value, output);
-            }
-            StatementInfo::DocComment(_) => {}
-        }
-    }
-
-    fn parse_module_statements(text: &str, strict: bool) -> error::Result<Vec<Statement>> {
-        let mut tokens = TokenIter::new(Token::scan(text));
-        let mut statements = vec![];
-        loop {
-            match Statement::parse(&mut tokens, false, strict) {
-                Ok((Some(statement), _)) => statements.push(statement),
-                Ok((None, _)) => return Ok(statements),
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn is_exported_declaration_statement(statement: &Statement) -> bool {
-        matches!(
-            statement.statement,
-            StatementInfo::Let(_)
-                | StatementInfo::Define(_)
-                | StatementInfo::Theorem(_)
-                | StatementInfo::Type(_)
-                | StatementInfo::Structure(_)
-                | StatementInfo::Inductive(_)
-                | StatementInfo::Typeclass(_)
-                | StatementInfo::Instance(_)
-        )
-    }
-
-    fn check_exported_declaration_limit(statements: &[Statement]) -> error::Result<()> {
-        let mut exported_declarations = 0;
-        for statement in statements {
-            if !Self::is_exported_declaration_statement(statement) {
-                continue;
-            }
-            exported_declarations += 1;
-            if exported_declarations > MAX_EXPORTED_DECLARATIONS_PER_MODULE {
-                return Err(statement.error(&format!(
-                    "module has more than {} exported declarations",
-                    MAX_EXPORTED_DECLARATIONS_PER_MODULE
-                )));
-            }
-        }
-        Ok(())
     }
 
     // Adds a target for all files in the 'src' directory.
@@ -2014,7 +1681,7 @@ impl Project {
         citations
     }
 
-    pub fn read_file(&self, path: &PathBuf) -> Result<String, ProjectError> {
+    pub fn read_file(&self, path: &Path) -> Result<String, ProjectError> {
         if let Some((content, _)) = self.open_files.get(path) {
             return Ok(content.clone());
         }
@@ -2247,51 +1914,8 @@ impl Project {
         };
 
         let path = self.path_from_descriptor(descriptor)?;
-        let mut text = String::new();
-        if let Some(path_string) = path.to_str() {
-            if path_string == "<stdin>" {
-                if io::stdin().is_terminal() {
-                    // Throws an error if it is in a terminal
-                    return Err(ImportError::NotFound(String::from(
-                        "cannot read stdin in an active terminal",
-                    )));
-                }
-                let _ = io::stdin().lock();
-                for line in io::stdin().lines() {
-                    text.push_str(&line.unwrap());
-                    text.push('\n');
-                }
-            } else if path_string.starts_with("-:") {
-                let Some(string_path) = path.to_str() else {
-                    println!("error: path cannot be empty");
-                    std::process::exit(1);
-                };
-                if io::stdin().is_terminal() {
-                    // Throws an error if it is in a terminal
-                    return Err(ImportError::NotFound(String::from(
-                        "cannot read stdin in an active terminal",
-                    )));
-                }
-                let path2 = &string_path[2..];
-                println!("Path: {}", path2);
-                text = self
-                    .read_file(&PathBuf::from(path2))
-                    .map_err(|e| ImportError::NotFound(e.to_string()))?;
-                let _ = io::stdin().lock();
-                for line in io::stdin().lines() {
-                    text.push_str(&line.unwrap());
-                    text.push('\n');
-                }
-            } else {
-                text = self
-                    .read_file(&path)
-                    .map_err(|e| ImportError::NotFound(e.to_string()))?;
-            }
-        } else {
-            text = self
-                .read_file(&path)
-                .map_err(|e| ImportError::NotFound(e.to_string()))?;
-        }
+        let text =
+            read_source_text(&path, |path| self.read_file(path)).map_err(ImportError::NotFound)?;
 
         // Give this module an id before parsing it, so that we can catch circular imports.
         // Prelude always gets ModuleId::PRELUDE. Other modules get subsequent IDs.
@@ -2321,35 +1945,24 @@ impl Project {
         };
         self.module_map.insert(descriptor.clone(), module_id);
 
-        let statements = match Self::parse_module_statements(&text, strict) {
-            Ok(statements) => statements,
+        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+            Ok(parsed) => parsed,
             Err(error) => {
                 self.modules[module_id.get() as usize].load_error(error);
                 return Ok(module_id);
             }
         };
-        if let Err(error) = Self::check_exported_declaration_limit(&statements) {
-            self.modules[module_id.get() as usize].load_error(error);
-            return Ok(module_id);
-        }
 
-        let current_module_name = match descriptor {
-            ModuleDescriptor::Name(parts) => Some(parts.join(".")),
-            ModuleDescriptor::Anonymous | ModuleDescriptor::File(_) => None,
-        };
-        let mut lib_dependency_names = BTreeSet::new();
-        for statement in &statements {
-            Self::collect_lib_dependencies_from_statement(statement, &mut lib_dependency_names);
-        }
         let mut lib_dependencies = vec![];
-        for module_name in lib_dependency_names {
+        let current_module_name = parsed.module_name();
+        for module_name in &parsed.implicit_lib_dependency_names {
             if current_module_name
                 .as_ref()
-                .is_some_and(|name| name == &module_name)
+                .is_some_and(|name| name == module_name)
             {
                 continue;
             }
-            if let Ok(dep_id) = self.load_module_by_name(&module_name) {
+            if let Ok(dep_id) = self.load_module_by_name(module_name) {
                 let full_name = module_name
                     .split('.')
                     .map(|part| part.to_string())
@@ -2358,55 +1971,25 @@ impl Project {
             }
         }
 
-        let mut env = Environment::new(module_id);
-        if !is_prelude {
-            let prelude_descriptor = ModuleDescriptor::name("prelude");
-            // Try to load prelude, but don't fail if it doesn't exist
-            if let Ok(prelude_id) = self.load_module(&prelude_descriptor, false) {
-                if let Some(prelude_bindings) = self.get_bindings(prelude_id) {
-                    // Silently ignore errors when importing prelude
-                    let _ = env.bindings.import_prelude(prelude_bindings, self);
-                    env.sync_current_binding_state();
-                }
-            }
-        }
-        for (dep_id, full_name) in lib_dependencies {
-            env.bindings.add_module_dependency(dep_id, full_name);
-        }
-        env.sync_current_binding_state();
-
-        for statement in statements {
-            if let Err(e) = env.add_statement(self, &statement) {
-                if e.circular.is_some() {
-                    let err = Err(ImportError::Circular(module_id));
+        let loaded =
+            match elaborate_and_lower_module(self, module_id, parsed, is_prelude, lib_dependencies)
+            {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    if e.circular.is_some() {
+                        let err = Err(ImportError::Circular(module_id));
+                        self.modules[module_id.get() as usize].load_error(e);
+                        return err;
+                    }
                     self.modules[module_id.get() as usize].load_error(e);
-                    return err;
+                    return Ok(module_id);
                 }
-                self.modules[module_id.get() as usize].load_error(e);
-                return Ok(module_id);
-            }
-        }
-
-        // Normalize all facts after elaboration.
-        // We ignore errors here since some facts may intentionally fail to normalize
-        // (e.g., exists over uninhabited types in test cases).
-        let lowering = env.run_lowering_pass(self);
-        if !self.config.usage_mode.keeps_ide_metadata() {
-            env.discard_ide_metadata();
-        }
-
-        let mut content_hasher = blake3::Hasher::new();
-        content_hasher.update(text.as_bytes());
-        let content_hash = content_hasher.finalize();
-        let bindings = env.bindings.clone();
-        let export = ModuleExport::from_lowered(bindings, &lowering.module, self.config.usage_mode);
-        let export = Arc::new(export);
-        let retained_env = self.config.usage_mode.keeps_ide_metadata().then_some(env);
+            };
         self.modules[module_id.get() as usize].load_ok(
-            export,
-            Some(lowering.module),
-            retained_env,
-            content_hash,
+            loaded.export,
+            Some(loaded.lowered),
+            loaded.retained_env,
+            loaded.content_hash,
         );
         Ok(module_id)
     }
