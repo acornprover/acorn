@@ -2,7 +2,7 @@ use super::*;
 impl Environment {
     pub(super) fn add_structure_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ss: &StructureStatement,
     ) -> error::Result<()> {
@@ -554,7 +554,7 @@ impl Environment {
 
     pub(super) fn add_inductive_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         is: &InductiveStatement,
     ) -> error::Result<()> {

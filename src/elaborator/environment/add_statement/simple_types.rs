@@ -27,7 +27,7 @@ impl Environment {
     /// Adds a type statement to the environment.
     pub(super) fn add_type_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ts: &TypeStatement,
     ) -> error::Result<()> {
@@ -115,7 +115,7 @@ impl Environment {
     /// Adds a numerals statement to the environment.
     pub(super) fn add_numerals_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ds: &NumeralsStatement,
     ) -> error::Result<()> {

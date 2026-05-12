@@ -3,7 +3,7 @@ use super::*;
 impl Environment {
     pub(super) fn add_attributes_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ats: &AttributesStatement,
     ) -> error::Result<()> {
@@ -24,7 +24,7 @@ impl Environment {
 
     fn add_type_attributes(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         ats: &AttributesStatement,
         potential: crate::elaborator::acorn_type::PotentialType,
     ) -> error::Result<()> {
@@ -284,7 +284,7 @@ impl Environment {
 
     fn add_typeclass_attributes(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         ats: &AttributesStatement,
         typeclass: crate::elaborator::acorn_type::Typeclass,
     ) -> error::Result<()> {

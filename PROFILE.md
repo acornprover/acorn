@@ -14,47 +14,47 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_check
 
-- Date: 2026-05-11
-- Git hash: `a1e4091c` plus local checkpoint-lifetime cleanup
+- Date: 2026-05-12
+- Git hash: `822de623` plus local parsed-dependency/ProjectLookup/cache-prioritized loader refactor
 - Command: `/usr/bin/time -v target/release/acorn check --jobs 20 --timing`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: full acornlib check completed successfully with `23.445s` measured time: `20.461s` target/module load, `23.389s` certificate checking, `19.101s` inside cached certificate checks, and `4.288s` other verification. The run verified `319` modules, checked `56,405` cached certificates, performed `0` searches, elaborated `7` pending goals in `5` modules, and peaked at `2,477,768 KB` max RSS (`2.36 GiB`). `/usr/bin/time` reported `0:23.63` wall, `100.76s` user, `1.18s` system, and `431%` CPU.
-- Summary: Check still requests all available worker threads by default. The useful fix was not adding duplicate work to raise CPU usage; it was removing repeated checker work and keeping the existing workers busier. The checker now skips repeated concrete clauses and re-expands repeated variable clauses only when new concrete facts have arrived. Check-mode exports are pre-normalized, active module processors retain newly visible imports, check scheduling includes local lowered step counts, and ordinary check mode no longer keeps eval-only processor checkpoints alive across `Rc::make_mut`. Compared with the previous local `--jobs 20` baseline (`0:48.94`, `2,527,464 KB` max RSS, `307%` CPU), wall time is down about `25.31s` (`51.7%`), peak RSS is down `49,696 KB` (`2.0%`), and CPU utilization is up to `431%`.
+- Timing: full acornlib check completed successfully with `24.821s` measured time: `24.198s` target/module load, `22.674s` certificate checking, `22.090s` inside cached certificate checks, and `583.3ms` other verification. The run verified `361` modules, checked `64,140` cached certificates, performed `0` searches, elaborated `7` pending goals in `5` modules, and peaked at `2,523,708 KB` max RSS (`2.41 GiB`). `/usr/bin/time` reported `0:25.04` wall, `118.10s` user, `1.23s` system, and `476%` CPU.
+- Summary: This baseline includes the parsed-dependency/ProjectLookup/cache-prioritized loader refactor: parsed dependencies keep source order, `Project::load_module` preloads explicit dependencies and the implicit prelude before elaboration, preload errors are retained for import diagnostics, `ProjectView` snapshots carry exports and preload errors, module elaboration/lowering only needs read-only `ProjectLookup`, and streaming check loads cached-heavy modules first using certificate/proof-step counts as the estimate. Compared with the previous parsed-dependency/ProjectLookup baseline (`0:27.75` wall, `27.503s` measured, `24.502s` target/module load, `2,629,872 KB` max RSS), wall time is down `2.71s` (`9.8%`), measured time is down `2.682s` (`9.8%`), target/module load is down `0.304s` (`1.2%`), and peak RSS is down `106,164 KB` (`4.0%`). A first run after the same binary rebuild was slightly faster (`0:24.35` wall, `24.128s` measured, `2,489,716 KB` max RSS); this entry records the more conservative warm rerun.
 - Breakdown:
 
 ```text
-Current Full Check Baseline (2026-05-11, checkpoint-lifetime cleanup)
-=====================================================================
+Current Full Check Baseline (2026-05-12, cache-prioritized streaming loader refactor)
+===================================================================================
 
 command: /usr/bin/time -v target/release/acorn check --jobs 20 --timing
-result: 319 modules, 56,405/56,405 certificates OK, 0 searches
-max RSS: 2,477,768 KB = 2.36 GiB
-total measured: 23.445s
-wall clock: 0:23.63
-user time: 100.76s
-system time: 1.18s
-CPU: 431%
-project setup: 19.5ms
-cache load: 19.5ms
-target/module load: 20.461s
+result: 361 modules, 64,140/64,140 certificates OK, 0 searches
+max RSS: 2,523,708 KB = 2.41 GiB
+total measured: 24.821s
+wall clock: 0:25.04
+user time: 118.10s
+system time: 1.23s
+CPU: 476%
+project setup: 15.8ms
+cache load: 15.8ms
+target/module load: 24.198s
 build loading phase: 0.0ms
-certificate checking: 23.389s
-cached cert checks: 19.101s
-other verification: 4.288s
-certificate throughput: 2412 certs/s
+certificate checking: 22.674s
+cached cert checks: 22.090s
+other verification: 583.3ms
+certificate throughput: 2829 certs/s
 
 Overlapped timing measurements:
-├── target/module load: 20.461s / 23.445s = 87.3%
-└── processing/checking: 23.389s / 23.445s = 99.8%
-    ├── cached cert check calls: 19.101s / 23.445s = 81.5%
-    └── other verification work: 4.288s / 23.445s = 18.3%
+├── target/module load: 24.198s / 24.821s = 97.5%
+└── processing/checking: 22.674s / 24.821s = 91.3%
+    ├── cached cert check calls: 22.090s / 24.821s = 89.0%
+    └── other verification work: 583.3ms / 24.821s = 2.4%
 
 Slowest rebuilt modules by total processing time:
-├── function_product_algebra: 5.566s total, 1.335s cert time
-├── finite_group: 3.776s total, 69.7ms cert time
-├── top100.theorem_071_order_of_a_subgroup: 3.034s total, 111.9ms cert time
-├── int.lattice: 1.922s total, 201.2ms cert time
-└── function_product_units: 1.360s total, 203.4ms cert time
+├── function_product_algebra: 5.684s total, 1.354s cert time
+├── finite_group: 4.442s total, 83.0ms cert time
+├── top100.theorem_071_order_of_a_subgroup: 3.542s total, 118.8ms cert time
+├── int.lattice: 1.899s total, 191.9ms cert time
+└── function_product_units: 1.560s total, 240.3ms cert time
 
 Perf top-down sample after the checker duplicate-expansion change (2026-05-11):
 ├── command: perf record -g --call-graph fp -o perf.data target/fastdev/profile_check

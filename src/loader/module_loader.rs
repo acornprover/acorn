@@ -5,7 +5,7 @@ use crate::elaborator::error;
 use crate::elaborator::lowered_module::{LoweredModule, ModuleExport};
 use crate::loader::parsed_module::ParsedModule;
 use crate::module::ModuleId;
-use crate::project::Project;
+use crate::project::{ProjectLookup, UsageMode};
 
 pub struct LoadedModuleParts {
     pub export: Arc<ModuleExport>,
@@ -15,7 +15,8 @@ pub struct LoadedModuleParts {
 }
 
 pub fn elaborate_and_lower_module(
-    project: &mut Project,
+    project: &dyn ProjectLookup,
+    usage_mode: UsageMode,
     module_id: ModuleId,
     parsed: ParsedModule,
     is_prelude: bool,
@@ -24,7 +25,7 @@ pub fn elaborate_and_lower_module(
     let mut env = Environment::new(module_id);
     if !is_prelude {
         // Try to load prelude, but don't fail if it doesn't exist.
-        if let Ok(prelude_id) = project.load_module_by_name("prelude") {
+        if let Ok(prelude_id) = project.get_loaded_module_id_by_name("prelude") {
             if let Some(prelude_bindings) = project.get_bindings(prelude_id) {
                 // Silently ignore errors when importing prelude.
                 let _ = env.bindings.import_prelude(prelude_bindings, project);
@@ -42,18 +43,14 @@ pub fn elaborate_and_lower_module(
     }
 
     let lowering = env.run_lowering_pass(project);
-    if !project.config.usage_mode.keeps_ide_metadata() {
+    if !usage_mode.keeps_ide_metadata() {
         env.discard_ide_metadata();
     }
 
     let bindings = env.bindings.clone();
-    let export = ModuleExport::from_lowered(bindings, &lowering.module, project.config.usage_mode);
+    let export = ModuleExport::from_lowered(bindings, &lowering.module, usage_mode);
     let export = Arc::new(export);
-    let retained_env = project
-        .config
-        .usage_mode
-        .keeps_ide_metadata()
-        .then_some(env);
+    let retained_env = usage_mode.keeps_ide_metadata().then_some(env);
 
     Ok(LoadedModuleParts {
         export,

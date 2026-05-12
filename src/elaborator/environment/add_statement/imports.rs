@@ -4,7 +4,7 @@ impl Environment {
     /// Adds an import statement to the environment.
     pub(super) fn add_import_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         is: &ImportStatement,
     ) -> error::Result<()> {
@@ -18,7 +18,7 @@ impl Environment {
 
         let full_name_vec: Vec<_> = is.components.iter().map(|t| t.text().to_string()).collect();
         let full_name = full_name_vec.join(".");
-        let module_id = match project.load_module_by_name(&full_name) {
+        let module_id = match project.get_loaded_module_id_by_name(&full_name) {
             Ok(module_id) => module_id,
             Err(ImportError::NotFound(message)) => {
                 return Err(statement.error(&message));

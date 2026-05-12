@@ -15,7 +15,7 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::atom::AtomId;
-use crate::project::Project;
+use crate::project::ProjectLookup;
 use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Body, StatementInfo};
 use crate::syntax::token::{Token, TokenType};
@@ -138,7 +138,7 @@ impl Block {
     /// statement that introduces the block (e.g., "if", "theorem", etc.). If you just want
     /// the range within braces, you should look at the "body" parameter.
     pub fn new(
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         env: &Environment,
         type_params: Vec<TypeParam>,
         args: Vec<(String, AcornType)>,

@@ -81,6 +81,11 @@ pub struct Project {
     // module_map maps from a module's descriptor to its id
     module_map: HashMap<ModuleDescriptor, ModuleId>,
 
+    // Errors from dependency preloading, keyed by the source import name.
+    // Import elaboration uses this to report the original load error at the import statement
+    // without recursively loading modules during elaboration.
+    dependency_load_errors: HashMap<String, ImportError>,
+
     // The module names that we want to build.
     pub targets: HashSet<ModuleDescriptor>,
 
@@ -103,8 +108,10 @@ pub struct Project {
 /// Read-only project operations needed while evaluating expressions and replaying certificates.
 pub trait ProjectLookup: Sync {
     fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap>;
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport>;
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor>;
     fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId>;
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError>;
 }
 
 #[derive(Clone)]
@@ -140,6 +147,7 @@ pub struct ProjectView {
     module_exports: Arc<HashMap<ModuleId, Arc<ModuleExport>>>,
     lowered_modules: Arc<HashMap<ModuleDescriptor, Arc<LoweredModule>>>,
     content_hashes: Arc<HashMap<ModuleId, blake3::Hash>>,
+    dependency_load_errors: Arc<HashMap<String, ImportError>>,
     open_file_paths: Arc<HashSet<PathBuf>>,
 }
 
@@ -196,6 +204,7 @@ impl ProjectView {
             module_exports: Arc::new(module_exports),
             lowered_modules: Arc::new(lowered_modules),
             content_hashes: Arc::new(content_hashes),
+            dependency_load_errors: Arc::new(project.dependency_load_errors.clone()),
             open_file_paths: Arc::new(project.open_files.keys().cloned().collect()),
         }
     }
@@ -408,6 +417,10 @@ impl ProjectLookup for ProjectView {
             .map(|export| &export.bindings)
     }
 
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        ProjectView::get_module_export(self, module_id)
+    }
+
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
         self.module_descriptors.get(&module_id)
     }
@@ -416,6 +429,38 @@ impl ProjectLookup for ProjectView {
         let descriptor = ModuleDescriptor::name(module_name);
         let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
         self.module_map.get(&canonical_descriptor).copied()
+    }
+
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        let Some(&module_id) = self.module_map.get(&canonical_descriptor) else {
+            if let Some(error) = self.dependency_load_errors.get(module_name) {
+                return Err(error.clone());
+            }
+            return Err(ImportError::NotFound(format!(
+                "module '{}' has not been loaded",
+                module_name
+            )));
+        };
+        match self.module_states.get(&canonical_descriptor) {
+            Some(ProjectViewModuleState::Loading) => Err(ImportError::Circular(module_id)),
+            Some(ProjectViewModuleState::Registered) | None => {
+                if let Some(error) = self.dependency_load_errors.get(module_name) {
+                    return Err(error.clone());
+                }
+                Err(ImportError::NotFound(format!(
+                    "module '{}' has not been loaded",
+                    module_name
+                )))
+            }
+            Some(ProjectViewModuleState::Error(error)) if error.circular.is_some() => {
+                Err(ImportError::Circular(module_id))
+            }
+            Some(ProjectViewModuleState::Error(_)) | Some(ProjectViewModuleState::Ok(_)) => {
+                Ok(module_id)
+            }
+        }
     }
 }
 
@@ -436,12 +481,20 @@ impl ProjectLookup for Project {
         Project::get_bindings(self, module_id)
     }
 
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        Project::get_module_export(self, module_id)
+    }
+
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
         Project::get_module_descriptor(self, module_id)
     }
 
     fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId> {
         Project::get_module_id_by_name(self, module_name)
+    }
+
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        Project::get_loaded_module_id_by_name(self, module_name)
     }
 }
 
@@ -517,6 +570,23 @@ mod tests {
         assert!(project.get_lowered_module(dep_id).is_none());
         assert!(project.get_module_export(dep_id).unwrap().fact_count() > 0);
     }
+
+    #[test]
+    fn project_view_preserves_dependency_preload_errors() {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", "from missing import thing\n");
+        let module_id = project.load_module_by_name("main").unwrap();
+        assert!(matches!(
+            project.get_module_by_id(module_id),
+            LoadState::Error(_)
+        ));
+
+        let view = ProjectView::new(&project);
+        let error = view.get_loaded_module_id_by_name("missing").unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("no mocked file for:"), "{error}");
+        assert!(error.contains("missing.ac"), "{error}");
+    }
 }
 
 /// Configuration options for the project.
@@ -577,7 +647,7 @@ impl From<ProjectError> for String {
 
 // Errors specific to importing modules.
 // Each string is a human-readable error message.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ImportError {
     // The module file doesn't exist (e.g., typo in import statement)
     NotFound(String),
@@ -675,6 +745,7 @@ impl Project {
             open_files: HashMap::new(),
             modules: vec![],
             module_map: HashMap::new(),
+            dependency_load_errors: HashMap::new(),
             targets: HashSet::new(),
             surface_check_targets: HashSet::new(),
             build_cache: Arc::new(build_cache),
@@ -816,6 +887,7 @@ impl Project {
     fn drop_modules(&mut self) {
         self.modules = vec![];
         self.module_map = HashMap::new();
+        self.dependency_load_errors = HashMap::new();
     }
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
@@ -1150,6 +1222,36 @@ impl Project {
         let descriptor = ModuleDescriptor::name(module_name);
         let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
         self.module_map.get(&canonical_descriptor).copied()
+    }
+
+    pub fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        let Some(&module_id) = self.module_map.get(&canonical_descriptor) else {
+            if let Some(error) = self.dependency_load_errors.get(module_name) {
+                return Err(error.clone());
+            }
+            return Err(ImportError::NotFound(format!(
+                "module '{}' has not been loaded",
+                module_name
+            )));
+        };
+        match self.get_module_by_id(module_id) {
+            LoadState::Loading => Err(ImportError::Circular(module_id)),
+            LoadState::None | LoadState::Registered => {
+                if let Some(error) = self.dependency_load_errors.get(module_name) {
+                    return Err(error.clone());
+                }
+                Err(ImportError::NotFound(format!(
+                    "module '{}' has not been loaded",
+                    module_name
+                )))
+            }
+            LoadState::Error(error) if error.circular.is_some() => {
+                Err(ImportError::Circular(module_id))
+            }
+            LoadState::Error(_) | LoadState::Ok(_) => Ok(module_id),
+        }
     }
 
     pub fn get_env_by_id(&self, module_id: ModuleId) -> Option<&Environment> {
@@ -1953,38 +2055,65 @@ impl Project {
             }
         };
 
-        let mut lib_dependencies = vec![];
         let current_module_name = parsed.module_name();
-        for module_name in &parsed.implicit_lib_dependency_names {
+        let dependency_names = parsed.dependency_names.clone();
+        let implicit_lib_dependency_names: HashSet<_> = parsed
+            .implicit_lib_dependency_names
+            .iter()
+            .cloned()
+            .collect();
+        let mut lib_dependencies = vec![];
+        for module_name in &dependency_names {
             if current_module_name
                 .as_ref()
                 .is_some_and(|name| name == module_name)
             {
                 continue;
             }
-            if let Ok(dep_id) = self.load_module_by_name(module_name) {
-                let full_name = module_name
-                    .split('.')
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>();
-                lib_dependencies.push((dep_id, full_name));
+            match self.load_module_by_name(module_name) {
+                Ok(dep_id) => {
+                    self.dependency_load_errors.remove(module_name);
+                    if implicit_lib_dependency_names.contains(module_name) {
+                        let full_name = module_name
+                            .split('.')
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>();
+                        lib_dependencies.push((dep_id, full_name));
+                    }
+                }
+                Err(error) => {
+                    self.dependency_load_errors
+                        .insert(module_name.clone(), error);
+                }
             }
         }
 
-        let loaded =
-            match elaborate_and_lower_module(self, module_id, parsed, is_prelude, lib_dependencies)
-            {
-                Ok(loaded) => loaded,
-                Err(e) => {
-                    if e.circular.is_some() {
-                        let err = Err(ImportError::Circular(module_id));
-                        self.modules[module_id.get() as usize].load_error(e);
-                        return err;
-                    }
+        if !is_prelude {
+            // The prelude is an implicit dependency for ordinary modules. Load it before
+            // elaboration so module processing only needs read-only project lookup.
+            let _ = self.load_module_by_name("prelude");
+        }
+        let usage_mode = self.config.usage_mode;
+
+        let loaded = match elaborate_and_lower_module(
+            self,
+            usage_mode,
+            module_id,
+            parsed,
+            is_prelude,
+            lib_dependencies,
+        ) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                if e.circular.is_some() {
+                    let err = Err(ImportError::Circular(module_id));
                     self.modules[module_id.get() as usize].load_error(e);
-                    return Ok(module_id);
+                    return err;
                 }
-            };
+                self.modules[module_id.get() as usize].load_error(e);
+                return Ok(module_id);
+            }
+        };
         self.modules[module_id.get() as usize].load_ok(
             loaded.export,
             Some(loaded.lowered),

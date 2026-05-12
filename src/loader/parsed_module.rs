@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use crate::elaborator::error::{self, ErrorContext};
 use crate::module::ModuleDescriptor;
@@ -23,18 +23,28 @@ pub struct ParsedModule {
 
 #[derive(Default)]
 struct DependencyCollector {
-    all: BTreeSet<String>,
-    implicit_lib: BTreeSet<String>,
+    all: Vec<String>,
+    seen_all: HashSet<String>,
+    implicit_lib: Vec<String>,
+    seen_implicit_lib: HashSet<String>,
 }
 
 impl DependencyCollector {
     fn add_explicit_import(&mut self, module_name: String) {
-        self.all.insert(module_name);
+        self.add_dependency(module_name);
     }
 
     fn add_implicit_lib(&mut self, module_name: String) {
-        self.implicit_lib.insert(module_name.clone());
-        self.all.insert(module_name);
+        if self.seen_implicit_lib.insert(module_name.clone()) {
+            self.implicit_lib.push(module_name.clone());
+        }
+        self.add_dependency(module_name);
+    }
+
+    fn add_dependency(&mut self, module_name: String) {
+        if self.seen_all.insert(module_name.clone()) {
+            self.all.push(module_name);
+        }
     }
 }
 
@@ -55,8 +65,8 @@ impl ParsedModule {
         Ok(Self {
             descriptor,
             statements,
-            dependency_names: dependencies.all.into_iter().collect(),
-            implicit_lib_dependency_names: dependencies.implicit_lib.into_iter().collect(),
+            dependency_names: dependencies.all,
+            implicit_lib_dependency_names: dependencies.implicit_lib,
             content_hash,
         })
     }
@@ -434,5 +444,17 @@ mod tests {
         let parsed = parse("theorem goal { lib(helper.mod).fact }\n");
         assert_eq!(parsed.dependency_names, vec!["helper.mod"]);
         assert_eq!(parsed.implicit_lib_dependency_names, vec!["helper.mod"]);
+    }
+
+    #[test]
+    fn dependencies_keep_first_seen_order() {
+        let parsed = parse(indoc::indoc! {"
+            from zed import z
+            theorem goal { lib(alpha).fact }
+            from alpha import a
+            from mid import m
+        "});
+        assert_eq!(parsed.dependency_names, vec!["zed", "alpha", "mid"]);
+        assert_eq!(parsed.implicit_lib_dependency_names, vec!["alpha"]);
     }
 }

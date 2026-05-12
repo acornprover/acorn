@@ -262,6 +262,20 @@ enum TargetSpec {
     Name(String),
 }
 
+fn cached_module_work_estimate(project: &Project, descriptor: &ModuleDescriptor) -> usize {
+    project
+        .build_cache
+        .get_certificates(descriptor)
+        .map(|store| {
+            store
+                .certs
+                .iter()
+                .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 /// The Verifier manages the run of a single build.
 /// It creates its own project.
 pub struct Verifier {
@@ -460,6 +474,11 @@ impl Verifier {
         targets.dedup();
         load_order.sort();
         load_order.dedup();
+        load_order.sort_by(|left, right| {
+            cached_module_work_estimate(project, right)
+                .cmp(&cached_module_work_estimate(project, left))
+                .then_with(|| left.cmp(right))
+        });
         Ok((targets, load_order))
     }
 
