@@ -2479,13 +2479,11 @@ impl<'a> Builder<'a> {
                     first_line,
                     last_line,
                 } => {
-                    let checkpoint_before_node = Rc::clone(processor);
                     if top_level {
                         self.log_verified(*first_line, *last_line);
                     }
                     Rc::make_mut(processor).add_lowered_fact(lowered.fact(*fact))?;
                     self.record_lowered_barrier(eval_skip_tail);
-                    drop(checkpoint_before_node);
                 }
                 LoweredItem::Claim { post_fact, .. } => {
                     let LoweredItem::Claim { goal, .. } = item else {
@@ -2494,7 +2492,11 @@ impl<'a> Builder<'a> {
                     let entry = lowered.goal(*goal);
                     *processor =
                         self.processor_with_imports(Rc::clone(processor), &entry.bindings)?;
-                    let checkpoint_before_node = Rc::clone(processor);
+                    let checkpoint_before_node = if self.eval_mode && self.eval_max_skip() > 0 {
+                        Some(Rc::clone(processor))
+                    } else {
+                        None
+                    };
                     self.verify_lowered_claim(
                         Rc::clone(processor),
                         lowered,
@@ -2505,12 +2507,14 @@ impl<'a> Builder<'a> {
                         eval_skip_tail,
                     )?;
                     Rc::make_mut(processor).add_lowered_fact(lowered.fact(*post_fact))?;
-                    let goal = &lowered.goal(*goal).lowered_goal.goal;
-                    self.update_eval_skip_tail_for_lowered_goal(
-                        eval_skip_tail,
-                        goal,
-                        checkpoint_before_node,
-                    );
+                    if let Some(checkpoint_before_node) = checkpoint_before_node {
+                        let goal = &lowered.goal(*goal).lowered_goal.goal;
+                        self.update_eval_skip_tail_for_lowered_goal(
+                            eval_skip_tail,
+                            goal,
+                            checkpoint_before_node,
+                        );
+                    }
                 }
                 LoweredItem::Block {
                     items,
@@ -2518,7 +2522,6 @@ impl<'a> Builder<'a> {
                     first_line,
                     last_line,
                 } => {
-                    let checkpoint_before_node = Rc::clone(processor);
                     if items.is_empty() && top_level {
                         self.log_verified(*first_line, *last_line);
                     } else {
@@ -2539,7 +2542,6 @@ impl<'a> Builder<'a> {
                         Rc::make_mut(processor).add_lowered_fact(lowered.fact(*fact))?;
                     }
                     self.record_lowered_barrier(eval_skip_tail);
-                    drop(checkpoint_before_node);
                 }
             }
 
