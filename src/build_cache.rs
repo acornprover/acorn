@@ -99,6 +99,19 @@ impl BuildCache {
         }
     }
 
+    /// Merge newly produced certificates and manifest entries from another cache.
+    ///
+    /// Parallel module workers produce independent cache fragments. The parent build
+    /// merges them in module order before the usual save/merge-with-old-cache step.
+    pub fn merge_updates_from(&mut self, other: BuildCache) {
+        for (descriptor, cert_store) in other.cache {
+            self.cache.insert(descriptor, cert_store);
+        }
+        for (module_name, hex_hash) in other.manifest.modules {
+            self.manifest.modules.insert(module_name, hex_hash);
+        }
+    }
+
     pub fn get_certificates_mut(
         &mut self,
         descriptor: &ModuleDescriptor,
