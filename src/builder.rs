@@ -309,7 +309,7 @@ pub struct Builder<'a> {
     /// `ShallowExplosion` or `ActivationCap`.
     pub activation_limit: i32,
 
-    /// Number of worker threads to use for full-module check and eval mode.
+    /// Number of worker threads to use for full-module batch work.
     pub check_jobs: usize,
 }
 
@@ -318,6 +318,8 @@ struct ModuleBuildResult {
     status: BuildStatus,
     metrics: BuildMetrics,
     module_timings: Vec<ModuleTiming>,
+    build_cache: Option<BuildCache>,
+    used_cert_counts: HashMap<ModuleDescriptor, usize>,
     events: Vec<BuildEvent>,
 }
 
@@ -859,6 +861,7 @@ impl BuildMetrics {
     }
 
     fn add_module_result(&mut self, result: &BuildMetrics) {
+        self.modules_cached += result.modules_cached;
         self.goals_done += result.goals_done;
         self.goals_success += result.goals_success;
         self.certs_cached += result.certs_cached;
@@ -1493,6 +1496,13 @@ impl<'a> Builder<'a> {
     fn merge_module_build_result(&mut self, result: ModuleBuildResult) {
         self.metrics.add_module_result(&result.metrics);
         self.module_timings.extend(result.module_timings);
+        if let Some(build_cache) = result.build_cache {
+            self.build_cache
+                .as_mut()
+                .expect("parallel module builds should have a parent build cache")
+                .merge_updates_from(build_cache);
+        }
+        self.used_cert_counts.extend(result.used_cert_counts);
         match result.status {
             BuildStatus::Error => self.status = BuildStatus::Error,
             BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
@@ -2660,7 +2670,11 @@ impl<'a> Builder<'a> {
     }
 
     fn can_build_modules_in_parallel(&self, target_count: usize) -> bool {
-        (self.check_mode || self.eval_mode)
+        let config = self.project().config();
+        let can_parallelize_read_only_mode = self.check_mode || self.eval_mode;
+        let can_parallelize_verify_mode = !self.check_mode && !self.eval_mode && !self.force_search;
+
+        (can_parallelize_read_only_mode || can_parallelize_verify_mode)
             && self.check_jobs > 1
             && target_count > 1
             && self.goal_filter.is_none()
@@ -2668,8 +2682,8 @@ impl<'a> Builder<'a> {
             && !self.print_proof
             && !self.print_found_proof
             && !self.exit_on_warning
-            && self.project().config().read_cache
-            && !self.project().config().write_cache
+            && config.read_cache
+            && (can_parallelize_verify_mode || !config.write_cache)
     }
 
     fn eval_module_search_estimate(&self, target: &ModuleDescriptor) -> usize {
@@ -2748,23 +2762,54 @@ impl<'a> Builder<'a> {
         builder.build_cache = Some(BuildCache::new(build_dir));
         builder.prepare_eval_mode();
 
-        let module_metrics_before = builder.metrics.clone();
-        let module_start = std::time::Instant::now();
-        let result = builder.verify_lowered_module(&target, lowered);
-        builder.record_module_timing(
-            target.clone(),
-            goal_count,
-            &module_metrics_before,
-            module_start.elapsed(),
-            false,
-        );
-        if let Err(e) = result {
-            builder.log_build_error(&e);
+        let skip_metrics_before = builder.metrics.clone();
+        let skip_start = std::time::Instant::now();
+        if builder.try_skip_unchanged_module(lowered.module_id, &target) {
+            builder.metrics.goals_done += goal_count;
+            builder.metrics.goals_success += goal_count;
+            builder.metrics.certs_cached += goal_count;
+            builder.metrics.modules_cached += 1;
+            builder.record_module_timing(
+                target.clone(),
+                goal_count,
+                &skip_metrics_before,
+                skip_start.elapsed(),
+                true,
+            );
+
+            let event = BuildEvent {
+                progress: Some((builder.metrics.goals_done, builder.metrics.goals_total)),
+                ..builder.default_event()
+            };
+            (builder.event_handler)(event);
+        } else {
+            if builder.goal_filter.is_none()
+                && !builder.project().config().read_cache
+                && !builder.check_mode
+            {
+                builder.log_global(format!("force-searching: {}", target));
+            }
+
+            let module_metrics_before = builder.metrics.clone();
+            let module_start = std::time::Instant::now();
+            let result = builder.verify_lowered_module(&target, lowered);
+            builder.record_module_timing(
+                target.clone(),
+                goal_count,
+                &module_metrics_before,
+                module_start.elapsed(),
+                false,
+            );
+            if let Err(e) = result {
+                builder.log_build_error(&e);
+            }
         }
 
         let status = builder.status;
         let metrics = builder.metrics.clone();
         let module_timings = builder.module_timings.clone();
+        let used_cert_counts = std::mem::take(&mut builder.used_cert_counts);
+        let build_cache = builder.take_build_cache();
         drop(builder);
 
         ModuleBuildResult {
@@ -2772,6 +2817,8 @@ impl<'a> Builder<'a> {
             status,
             metrics,
             module_timings,
+            build_cache,
+            used_cert_counts,
             events,
         }
     }

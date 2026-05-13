@@ -902,6 +902,75 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_parallel_cache_writes_preserve_manifest() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem foo_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("bar.ac")
+            .write_str(
+                r#"
+                theorem bar_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut initial = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        initial.builder.check_hashes = false;
+        let initial_output = initial.run().unwrap();
+        assert_eq!(initial_output.status, BuildStatus::Good);
+        assert_eq!(initial_output.metrics.searches_success, 2);
+
+        let manifest_file = build.child("manifest.json");
+        assert!(manifest_file.exists(), "manifest.json should exist");
+        let read_manifest = || {
+            let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
+            serde_json::from_str::<crate::manifest::Manifest>(&manifest_content).unwrap()
+        };
+        assert_eq!(read_manifest().modules.len(), 2);
+
+        let mut replay = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        replay.builder.check_hashes = false;
+        replay.builder.check_jobs = 2;
+        let replay_output = replay.run().unwrap();
+        assert_eq!(replay_output.status, BuildStatus::Good);
+        assert_eq!(replay_output.metrics.certs_cached, 2);
+        assert_eq!(replay_output.metrics.searches_total, 0);
+        assert_eq!(read_manifest().modules.len(), 2);
+
+        let mut skipped = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        skipped.builder.check_jobs = 2;
+        let skipped_output = skipped.run().unwrap();
+        assert_eq!(skipped_output.status, BuildStatus::Good);
+        assert_eq!(skipped_output.metrics.modules_cached, 2);
+        assert_eq!(read_manifest().modules.len(), 2);
+    }
+
+    #[test]
     fn test_check_surface_checks_pending_directory() {
         let (acornlib, _src, _build) = setup();
 

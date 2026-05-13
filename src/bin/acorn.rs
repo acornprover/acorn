@@ -443,6 +443,14 @@ enum Command {
         )]
         print_proof: bool,
 
+        /// Number of worker threads for whole-module verification
+        #[clap(
+            long = "jobs",
+            value_name = "N",
+            help = "Number of worker threads for whole-module verification."
+        )]
+        jobs: Option<usize>,
+
         /// Print phase timing information
         #[clap(
             long = "timing",
@@ -785,6 +793,7 @@ async fn main() {
             shallow,
             verbose,
             print_proof,
+            jobs,
             timing,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
@@ -836,6 +845,12 @@ async fn main() {
                 std::process::exit(1);
             }
 
+            let verify_jobs = jobs.unwrap_or_else(default_jobs);
+            if verify_jobs == 0 {
+                println!("Error: --jobs must be at least 1");
+                std::process::exit(1);
+            }
+
             let line_selection = match line_sel {
                 Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
                 Some(LineSelection::Range(start, end)) if force_search => {
@@ -875,6 +890,7 @@ async fn main() {
             verifier.builder.check_mode = false;
             verifier.builder.check_hashes = !force_search && !ignore_hash;
             verifier.builder.force_search = force_search;
+            verifier.builder.check_jobs = verify_jobs;
             verifier.builder.shallow_search = shallow;
             verifier.exit_on_warning = fail_fast;
             if let Some(t) = timeout {
@@ -1787,6 +1803,17 @@ mod tests {
 
         match args.command {
             Some(Command::Verify { timing, .. }) => assert!(timing),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_verify_accepts_jobs_flag() {
+        let args =
+            Args::try_parse_from(["acorn", "verify", "--jobs", "3"]).expect("flag should parse");
+
+        match args.command {
+            Some(Command::Verify { jobs, .. }) => assert_eq!(jobs, Some(3)),
             _ => panic!("unexpected command"),
         }
     }

@@ -14,49 +14,56 @@ Keep this file updated with the most recent profiling result for each profiling 
 
 ## profile_verify
 
-- Date: 2026-05-12
-- Git hash: `d8a5e0bb`
-- Command: `/usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --timing`
+- Date: 2026-05-13
+- Git hash: `bdbc9b47` plus local parallel verify cache-merge refactor
+- Command: `/usr/bin/time -v target/release/profile_verify`
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: full acornlib verify replay completed successfully with `190.575s` measured time: `20.953s` target/module load, `169.570s` verification/search, `21.927s` inside cached certificate checks, and `147.643s` other verification overhead. The run rebuilt `356` modules, checked `64,140` cached certificates, performed `0` searches, and peaked at `1,921,876 KB` max RSS (`1.83 GiB`). `/usr/bin/time` reported `3:10.77` wall, `188.54s` user, `2.21s` system, and `99%` CPU.
-- Summary: This is the cached-proof proxy for a broad downstream reverify without prover-search noise. The current verify command does not expose `--jobs`, and all-target `verify --ignore-hash --read-only` processes rebuilt modules sequentially. For comparison, the no-change hash-skipping command `/usr/bin/time -v target/release/acorn verify --read-only --timing` reported `21.512s` measured time, `20.661s` target/module load, `801.7ms` verification/search, `356/356` modules cached, `1,843,784 KB` max RSS (`1.76 GiB`), and `0:21.70` wall at `99%` CPU. So the current all-target verify floor is dominated by load/lowering even when everything skips, while ignore-hash replay is dominated by sequential module verification overhead rather than the certificate check calls themselves.
+- Timing: full acornlib cached verify replay completed successfully in `0:32.06` wall with `548.19s` user time, `13.50s` system time, `1751%` CPU, and `4,950,528 KB` max RSS (`4.72 GiB`). The run rebuilt `356` modules, checked `64,140` cached certificates, performed `0` searches, and reported `64,140/64,140 OK`. A matching CLI timing sample, `/usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --jobs 20 --timing`, reported `30.457s` measured time: `9.462s` target/module load, `30.213s` verification/search, and `61.701s` summed cached cert checks. The CLI sample peaked at `4,994,252 KB` max RSS (`4.76 GiB`) and `1806%` CPU.
+- Summary: This baseline includes parallel verify processing with per-worker build-cache deltas merged back into the parent build cache. Compared with the previous sequential cached replay baseline (`3:10.77` wall, `190.575s` measured, `1,921,876 KB` max RSS, `99%` CPU), wall time is down `158.71s` (`83.2%`) on `profile_verify`, CLI measured time is down `160.118s` (`84.0%`), and CPU utilization rises from about one core to about eighteen cores. Peak RSS increases by about `3,028,652 KB` (`157.6%`) for `profile_verify`, which is the main tradeoff. For comparison, the no-change hash-skipping command `/usr/bin/time -v target/release/acorn verify --read-only --jobs 20 --timing` reported `5.080s` measured time, `4.816s` target/module load, `4.854s` verification/search, `356/356` modules cached, `2,128,884 KB` max RSS (`2.03 GiB`), and `0:05.35` wall at `466%` CPU.
 - Breakdown:
 
 ```text
-Current Verify Ignore-Hash Baseline (2026-05-12)
-================================================
+Current Verify Ignore-Hash Baseline (2026-05-13, parallel verify cache merge)
+=============================================================================
 
-command: /usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --timing
-result: 356 modules rebuilt, 64,140/64,140 certificates OK, 0 searches
-max RSS: 1,921,876 KB = 1.83 GiB
-total measured: 190.575s
-wall clock: 3:10.77
-user time: 188.54s
-system time: 2.21s
-CPU: 99%
-project setup: 16.4ms
-cache load: 16.4ms
-target/module load: 20.953s
+profile command: /usr/bin/time -v target/release/profile_verify
+profile result: 356 modules rebuilt, 64,140/64,140 certificates OK, 0 searches
+profile max RSS: 4,950,528 KB = 4.72 GiB
+profile wall clock: 0:32.06
+profile user time: 548.19s
+profile system time: 13.50s
+profile CPU: 1751%
+
+timing command: /usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --jobs 20 --timing
+timing result: 356 modules rebuilt, 64,140/64,140 certificates OK, 0 searches
+timing max RSS: 4,994,252 KB = 4.76 GiB
+total measured: 30.457s
+wall clock: 0:30.75
+user time: 546.16s
+system time: 9.39s
+CPU: 1806%
+project setup: 17.5ms
+cache load: 17.5ms
+target/module load: 9.462s
 build loading phase: 0.0ms
-verification/search: 169.570s
-cached cert checks: 21.927s
-other verification: 147.643s
+verification/search: 30.213s
+cached cert checks: 61.701s summed worker time
 
 No-change verify comparison:
-├── command: /usr/bin/time -v target/release/acorn verify --read-only --timing
+├── command: /usr/bin/time -v target/release/acorn verify --read-only --jobs 20 --timing
 ├── result: 356/356 modules cached, 64,140 certificates cached, 0 searches
-├── max RSS: 1,843,784 KB = 1.76 GiB
-├── total measured: 21.512s
-├── wall clock: 0:21.70
-├── target/module load: 20.661s
-└── verification/search: 801.7ms
+├── max RSS: 2,128,884 KB = 2.03 GiB
+├── total measured: 5.080s
+├── wall clock: 0:05.35
+├── target/module load: 4.816s
+└── verification/search: 4.854s
 
 Slowest rebuilt modules by total processing time:
-├── function_product_algebra: 5.968s total, 1.385s cert time
-├── finite_group: 5.458s total, 79.4ms cert time
-├── top100.theorem_071_order_of_a_subgroup: 4.640s total, 128.4ms cert time
-├── set_lattice: 3.501s total, 544.4ms cert time
-└── int.lattice: 3.108s total, 191.9ms cert time
+├── set_lattice: 17.264s total, 1.685s cert time
+├── set: 15.221s total, 2.104s cert time
+├── function_product_algebra: 13.373s total, 3.654s cert time
+├── finite_group: 13.365s total, 254.4ms cert time
+└── quotient_algebra: 12.387s total, 1.221s cert time
 ```
 
 ## profile_check
