@@ -1,4 +1,7 @@
-use crate::tests::support::{verify_fails, verify_succeeds};
+use crate::builder::BuildStatus;
+use crate::project::{ProjectConfig, UsageMode};
+use crate::tests::support::verify_fails;
+use crate::verifier::{Verifier, VerifierOutput};
 use std::env;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10,8 +13,8 @@ const FILTER_ENV: &str = "ACORN_MDTEST_FILTER";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MdExpectation {
-    Succeeds,
-    Fails,
+    Success,
+    Fail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,10 +65,67 @@ fn parse_checkable_language(language: &str) -> Option<MdExpectation> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
     match parts.as_slice() {
-        ["ac" | "acorn"] => Some(MdExpectation::Succeeds),
-        ["ac" | "acorn", "fail" | "fails" | "should-fail"] => Some(MdExpectation::Fails),
+        ["ac" | "acorn"] | ["ac" | "acorn", "success" | "succeeds" | "should-succeed"] => {
+            Some(MdExpectation::Success)
+        }
+        ["ac" | "acorn", "fail" | "fails" | "should-fail"] => Some(MdExpectation::Fail),
         _ => None,
     }
+}
+
+fn log_text(output: &VerifierOutput) -> String {
+    output
+        .events
+        .iter()
+        .filter_map(|e| e.log_message.as_ref())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn verify_and_check_succeeds(source: &str) {
+    let temp = tempfile::TempDir::new().expect("temp project should be created");
+    let root = temp.path();
+    fs::write(root.join("acorn.toml"), "").expect("acorn.toml should be written");
+    fs::create_dir(root.join("src")).expect("src directory should be created");
+    fs::create_dir(root.join("build")).expect("build directory should be created");
+    fs::write(root.join("src/main.ac"), source).expect("main.ac should be written");
+
+    let verify_config = ProjectConfig {
+        usage_mode: UsageMode::Verify,
+        use_filesystem: true,
+        read_cache: false,
+        write_cache: true,
+    };
+    let mut verify = Verifier::new(root.to_path_buf(), verify_config, Some("main".to_string()))
+        .expect("verify should initialize");
+    verify.builder.check_hashes = false;
+    let verify_output = verify.run().expect("verify should run");
+    assert_eq!(
+        verify_output.status,
+        BuildStatus::Good,
+        "verify should succeed before check replay\n{}",
+        log_text(&verify_output)
+    );
+
+    let check_config = ProjectConfig {
+        usage_mode: UsageMode::Check,
+        use_filesystem: true,
+        read_cache: true,
+        write_cache: false,
+    };
+    let mut check =
+        Verifier::new_for_check(root.to_path_buf(), check_config, Some("main".to_string()))
+            .expect("check should initialize");
+    check.builder.check_hashes = false;
+    check.builder.check_mode = true;
+    let check_output = check.run().expect("check should run");
+    assert_eq!(
+        check_output.status,
+        BuildStatus::Good,
+        "check should replay the certificate written by verify\n{}",
+        log_text(&check_output)
+    );
 }
 
 fn build_case_id(relative_path: &Path, headings: &[(usize, String)]) -> String {
@@ -183,8 +243,8 @@ fn mdtests() {
 
             matched_cases += 1;
             let result = catch_unwind(AssertUnwindSafe(|| match case.expectation {
-                MdExpectation::Succeeds => verify_succeeds(&case.source),
-                MdExpectation::Fails => verify_fails(&case.source),
+                MdExpectation::Success => verify_and_check_succeeds(&case.source),
+                MdExpectation::Fail => verify_fails(&case.source),
             }));
             if let Err(payload) = result {
                 let message = panic_message(payload);
@@ -229,7 +289,7 @@ fn parses_root_case() {
             id: "smoke.md".to_string(),
             start_line: 2,
             source: "let a: Bool = axiom\ntheorem { a implies a }".to_string(),
-            expectation: MdExpectation::Succeeds,
+            expectation: MdExpectation::Success,
         }]
     );
 }
@@ -263,13 +323,13 @@ theorem {
                 id: "language/example.md :: Example".to_string(),
                 start_line: 6,
                 source: "let a: Bool = axiom".to_string(),
-                expectation: MdExpectation::Succeeds,
+                expectation: MdExpectation::Success,
             },
             MdCase {
                 id: "language/example.md :: Example".to_string(),
                 start_line: 12,
                 source: "theorem {\n    a implies a\n}".to_string(),
-                expectation: MdExpectation::Succeeds,
+                expectation: MdExpectation::Success,
             },
         ]
     );
@@ -295,7 +355,7 @@ theorem { true }
             id: "language/example.md :: Constraints / Easy".to_string(),
             start_line: 6,
             source: "theorem { true }".to_string(),
-            expectation: MdExpectation::Succeeds,
+            expectation: MdExpectation::Success,
         }]
     );
 }
@@ -313,7 +373,25 @@ fn parses_expected_failure_case() {
             id: "failure.md".to_string(),
             start_line: 2,
             source: "theorem nope { false }".to_string(),
-            expectation: MdExpectation::Fails,
+            expectation: MdExpectation::Fail,
+        }]
+    );
+}
+
+#[test]
+fn parses_explicit_success_case() {
+    let cases = parse_cases(
+        Path::new("success.md"),
+        "```acorn success\ntheorem { true }\n```",
+    )
+    .expect("markdown should parse");
+    assert_eq!(
+        cases,
+        vec![MdCase {
+            id: "success.md".to_string(),
+            start_line: 2,
+            source: "theorem { true }".to_string(),
+            expectation: MdExpectation::Success,
         }]
     );
 }
