@@ -1,8 +1,7 @@
 use core::panic;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::IsTerminal;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use std::{fmt, io};
 
@@ -17,7 +16,7 @@ use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
-use crate::elaborator::error::{self, ErrorContext};
+use crate::elaborator::error;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::lowered_module::{
@@ -27,15 +26,14 @@ use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::interfaces::{CitationInfo, GoalInfo, Location, Step};
 use crate::kernel::checker::StepReason;
+use crate::loader::module_loader::elaborate_and_lower_module;
+use crate::loader::parsed_module::ParsedModule;
+use crate::loader::source::read_source_text;
 use crate::module::{LoadState, LoadedModule, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
-use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
-use crate::syntax::statement::{Body, Statement, StatementInfo};
-use crate::syntax::token::{Token, TokenIter, TokenType};
+use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
-
-const MAX_EXPORTED_DECLARATIONS_PER_MODULE: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryCitation {
@@ -83,6 +81,11 @@ pub struct Project {
     // module_map maps from a module's descriptor to its id
     module_map: HashMap<ModuleDescriptor, ModuleId>,
 
+    // Errors from dependency preloading, keyed by the source import name.
+    // Import elaboration uses this to report the original load error at the import statement
+    // without recursively loading modules during elaboration.
+    dependency_load_errors: HashMap<String, ImportError>,
+
     // The module names that we want to build.
     pub targets: HashSet<ModuleDescriptor>,
 
@@ -102,11 +105,51 @@ pub struct Project {
     pub building: bool,
 }
 
+struct ParallelModuleLoadJob {
+    descriptor: ModuleDescriptor,
+    module_id: ModuleId,
+    parsed: Option<ParsedModule>,
+    is_prelude: bool,
+    dependencies: Vec<ModuleId>,
+    lib_dependencies: Vec<(ModuleId, Vec<String>)>,
+}
+
+struct ParallelModuleWorkerJob {
+    index: usize,
+    module_id: ModuleId,
+    parsed: ParsedModule,
+    is_prelude: bool,
+    lib_dependencies: Vec<(ModuleId, Vec<String>)>,
+    project: ProjectView,
+    usage_mode: UsageMode,
+}
+
+struct ParallelModuleLoadResult {
+    index: usize,
+    module_id: ModuleId,
+    loaded: Result<crate::loader::module_loader::LoadedModuleParts, error::Error>,
+}
+
+pub struct ParallelProjectLoader {
+    jobs: Vec<ParallelModuleLoadJob>,
+    remaining_dependencies: Vec<usize>,
+    dependents: Vec<Vec<usize>>,
+    ready: Vec<usize>,
+    job_tx: Option<mpsc::Sender<ParallelModuleWorkerJob>>,
+    result_rx: mpsc::Receiver<ParallelModuleLoadResult>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+    active_jobs: usize,
+    completed_jobs: usize,
+    worker_count: usize,
+}
+
 /// Read-only project operations needed while evaluating expressions and replaying certificates.
 pub trait ProjectLookup: Sync {
     fn get_bindings(&self, module_id: ModuleId) -> Option<&BindingMap>;
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport>;
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor>;
     fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId>;
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError>;
 }
 
 #[derive(Clone)]
@@ -142,6 +185,7 @@ pub struct ProjectView {
     module_exports: Arc<HashMap<ModuleId, Arc<ModuleExport>>>,
     lowered_modules: Arc<HashMap<ModuleDescriptor, Arc<LoweredModule>>>,
     content_hashes: Arc<HashMap<ModuleId, blake3::Hash>>,
+    dependency_load_errors: Arc<HashMap<String, ImportError>>,
     open_file_paths: Arc<HashSet<PathBuf>>,
 }
 
@@ -198,6 +242,7 @@ impl ProjectView {
             module_exports: Arc::new(module_exports),
             lowered_modules: Arc::new(lowered_modules),
             content_hashes: Arc::new(content_hashes),
+            dependency_load_errors: Arc::new(project.dependency_load_errors.clone()),
             open_file_paths: Arc::new(project.open_files.keys().cloned().collect()),
         }
     }
@@ -410,6 +455,10 @@ impl ProjectLookup for ProjectView {
             .map(|export| &export.bindings)
     }
 
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        ProjectView::get_module_export(self, module_id)
+    }
+
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
         self.module_descriptors.get(&module_id)
     }
@@ -418,6 +467,38 @@ impl ProjectLookup for ProjectView {
         let descriptor = ModuleDescriptor::name(module_name);
         let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
         self.module_map.get(&canonical_descriptor).copied()
+    }
+
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        let Some(&module_id) = self.module_map.get(&canonical_descriptor) else {
+            if let Some(error) = self.dependency_load_errors.get(module_name) {
+                return Err(error.clone());
+            }
+            return Err(ImportError::NotFound(format!(
+                "module '{}' has not been loaded",
+                module_name
+            )));
+        };
+        match self.module_states.get(&canonical_descriptor) {
+            Some(ProjectViewModuleState::Loading) => Err(ImportError::Circular(module_id)),
+            Some(ProjectViewModuleState::Registered) | None => {
+                if let Some(error) = self.dependency_load_errors.get(module_name) {
+                    return Err(error.clone());
+                }
+                Err(ImportError::NotFound(format!(
+                    "module '{}' has not been loaded",
+                    module_name
+                )))
+            }
+            Some(ProjectViewModuleState::Error(error)) if error.circular.is_some() => {
+                Err(ImportError::Circular(module_id))
+            }
+            Some(ProjectViewModuleState::Error(_)) | Some(ProjectViewModuleState::Ok(_)) => {
+                Ok(module_id)
+            }
+        }
     }
 }
 
@@ -438,12 +519,204 @@ impl ProjectLookup for Project {
         Project::get_bindings(self, module_id)
     }
 
+    fn get_module_export(&self, module_id: ModuleId) -> Option<&ModuleExport> {
+        Project::get_module_export(self, module_id)
+    }
+
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor> {
         Project::get_module_descriptor(self, module_id)
     }
 
     fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId> {
         Project::get_module_id_by_name(self, module_name)
+    }
+
+    fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        Project::get_loaded_module_id_by_name(self, module_name)
+    }
+}
+
+impl ParallelProjectLoader {
+    pub fn new(
+        project: &mut Project,
+        targets: &[ModuleDescriptor],
+        load_order: &[ModuleDescriptor],
+        worker_count: usize,
+    ) -> Result<Self, ImportError> {
+        project.register_all_modules();
+
+        let target_set: HashSet<_> = targets.iter().cloned().collect();
+        let mut jobs = Vec::new();
+        for descriptor in load_order {
+            if !target_set.contains(descriptor) {
+                continue;
+            }
+            if let Some(job) = project.prepare_parallel_module_load_job(descriptor, false)? {
+                jobs.push(job);
+            }
+        }
+
+        let module_to_job: HashMap<ModuleId, usize> = jobs
+            .iter()
+            .enumerate()
+            .map(|(index, job)| (job.module_id, index))
+            .collect();
+        let mut remaining_dependencies = vec![0usize; jobs.len()];
+        let mut dependents = vec![Vec::new(); jobs.len()];
+        for (job_index, job) in jobs.iter().enumerate() {
+            for dep_id in &job.dependencies {
+                if let Some(&dep_index) = module_to_job.get(dep_id) {
+                    remaining_dependencies[job_index] += 1;
+                    dependents[dep_index].push(job_index);
+                }
+            }
+        }
+
+        let ready = remaining_dependencies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &remaining)| (remaining == 0).then_some(index))
+            .collect::<Vec<_>>();
+        if !jobs.is_empty() && ready.is_empty() {
+            return Err(ImportError::Circular(jobs[0].module_id));
+        }
+
+        let worker_count = worker_count.min(jobs.len()).max(1);
+        let (job_tx, job_rx) = mpsc::channel();
+        let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut handles = Vec::new();
+
+        for _ in 0..worker_count {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            handles.push(std::thread::spawn(move || loop {
+                let job: ParallelModuleWorkerJob = {
+                    let receiver = job_rx.lock().expect("parallel load job receiver poisoned");
+                    match receiver.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    }
+                };
+                let loaded = elaborate_and_lower_module(
+                    &job.project,
+                    job.usage_mode,
+                    job.module_id,
+                    job.parsed,
+                    job.is_prelude,
+                    job.lib_dependencies,
+                );
+                if result_tx
+                    .send(ParallelModuleLoadResult {
+                        index: job.index,
+                        module_id: job.module_id,
+                        loaded,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }));
+        }
+        drop(result_tx);
+
+        let mut loader = Self {
+            jobs,
+            remaining_dependencies,
+            dependents,
+            ready,
+            job_tx: Some(job_tx),
+            result_rx,
+            handles,
+            active_jobs: 0,
+            completed_jobs: 0,
+            worker_count,
+        };
+        loader.enqueue_available(project);
+        Ok(loader)
+    }
+
+    fn enqueue_available(&mut self, project: &Project) {
+        while self.active_jobs < self.worker_count {
+            let Some(job_index) = project.pop_ready_parallel_load_job(&mut self.ready, &self.jobs)
+            else {
+                break;
+            };
+            let Some(sender) = &self.job_tx else {
+                break;
+            };
+            project.enqueue_parallel_load_job(&mut self.jobs, job_index, sender);
+            self.active_jobs += 1;
+        }
+    }
+
+    pub fn next_loaded_modules(
+        &mut self,
+        project: &mut Project,
+        targets: &[ModuleDescriptor],
+    ) -> Result<Option<Vec<(ModuleDescriptor, LoweredModule)>>, ImportError> {
+        loop {
+            if self.completed_jobs >= self.jobs.len() {
+                self.finish_workers();
+                return Ok(None);
+            }
+            if self.active_jobs == 0 && self.ready.is_empty() {
+                self.finish_workers();
+                let module_id = self
+                    .jobs
+                    .iter()
+                    .find(|job| job.parsed.is_some())
+                    .map(|job| job.module_id)
+                    .unwrap_or(self.jobs[0].module_id);
+                return Err(ImportError::Circular(module_id));
+            }
+
+            let result = self
+                .result_rx
+                .recv()
+                .expect("parallel load workers should return all active jobs");
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            self.completed_jobs += 1;
+            match result.loaded {
+                Ok(loaded) => {
+                    project.modules[result.module_id.get() as usize].load_ok(
+                        loaded.export,
+                        Some(loaded.lowered),
+                        loaded.retained_env,
+                        loaded.content_hash,
+                    );
+                }
+                Err(e) => {
+                    project.modules[result.module_id.get() as usize].load_error(e);
+                }
+            }
+
+            for dependent in &self.dependents[result.index] {
+                self.remaining_dependencies[*dependent] -= 1;
+                if self.remaining_dependencies[*dependent] == 0 {
+                    self.ready.push(*dependent);
+                }
+            }
+            self.enqueue_available(project);
+
+            let work = project.take_lowered_modules_for_targets(targets);
+            if !work.is_empty() {
+                return Ok(Some(work));
+            }
+        }
+    }
+
+    fn finish_workers(&mut self) {
+        self.job_tx.take();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ParallelProjectLoader {
+    fn drop(&mut self) {
+        self.finish_workers();
     }
 }
 
@@ -473,31 +746,6 @@ impl UsageMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn theorem_module(count: usize) -> String {
-        let mut text = String::new();
-        for i in 0..count {
-            text.push_str(&format!("theorem t{} {{ true }}\n", i));
-        }
-        text
-    }
-
-    #[test]
-    fn exported_declaration_limit_allows_500() {
-        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE);
-        let statements = Project::parse_module_statements(&text, false).unwrap();
-        Project::check_exported_declaration_limit(&statements).unwrap();
-    }
-
-    #[test]
-    fn exported_declaration_limit_rejects_501() {
-        let text = theorem_module(MAX_EXPORTED_DECLARATIONS_PER_MODULE + 1);
-        let statements = Project::parse_module_statements(&text, false).unwrap();
-        let error = Project::check_exported_declaration_limit(&statements).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("module has more than 500 exported declarations"));
-    }
 
     #[test]
     fn mock_verify_project_keeps_lowered_module_but_drops_environment() {
@@ -543,6 +791,23 @@ mod tests {
         assert!(project.get_lowered_module(main_id).is_none());
         assert!(project.get_lowered_module(dep_id).is_none());
         assert!(project.get_module_export(dep_id).unwrap().fact_count() > 0);
+    }
+
+    #[test]
+    fn project_view_preserves_dependency_preload_errors() {
+        let mut project = Project::new_mock();
+        project.mock("/mock/main.ac", "from missing import thing\n");
+        let module_id = project.load_module_by_name("main").unwrap();
+        assert!(matches!(
+            project.get_module_by_id(module_id),
+            LoadState::Error(_)
+        ));
+
+        let view = ProjectView::new(&project);
+        let error = view.get_loaded_module_id_by_name("missing").unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("no mocked file for:"), "{error}");
+        assert!(error.contains("missing.ac"), "{error}");
     }
 }
 
@@ -604,7 +869,7 @@ impl From<ProjectError> for String {
 
 // Errors specific to importing modules.
 // Each string is a human-readable error message.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ImportError {
     // The module file doesn't exist (e.g., typo in import statement)
     NotFound(String),
@@ -702,6 +967,7 @@ impl Project {
             open_files: HashMap::new(),
             modules: vec![],
             module_map: HashMap::new(),
+            dependency_load_errors: HashMap::new(),
             targets: HashSet::new(),
             surface_check_targets: HashSet::new(),
             build_cache: Arc::new(build_cache),
@@ -843,6 +1109,7 @@ impl Project {
     fn drop_modules(&mut self) {
         self.modules = vec![];
         self.module_map = HashMap::new();
+        self.dependency_load_errors = HashMap::new();
     }
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
@@ -964,312 +1231,6 @@ impl Project {
                 .push(Module::new_registered(descriptor.clone()));
             self.module_map.insert(descriptor, id);
         }
-    }
-
-    fn module_name_from_expression(expression: &Expression) -> Option<String> {
-        match expression {
-            Expression::Singleton(token) if token.token_type == TokenType::Identifier => {
-                Some(token.text().to_string())
-            }
-            Expression::Binary(left, token, right) if token.token_type == TokenType::Dot => {
-                let left_name = Self::module_name_from_expression(left)?;
-                let Expression::Singleton(token) = right.as_ref() else {
-                    return None;
-                };
-                if token.token_type != TokenType::Identifier {
-                    return None;
-                }
-                Some(format!("{}.{}", left_name, token.text()))
-            }
-            _ => None,
-        }
-    }
-
-    fn collect_lib_dependencies_from_type_param(
-        type_param: &TypeParamExpr,
-        output: &mut BTreeSet<String>,
-    ) {
-        if let Some(type_expr) = &type_param.type_expr {
-            Self::collect_lib_dependencies_from_expression(type_expr, output);
-        }
-        if let Some(typeclass) = &type_param.typeclass {
-            Self::collect_lib_dependencies_from_expression(typeclass, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_declaration(
-        declaration: &Declaration,
-        output: &mut BTreeSet<String>,
-    ) {
-        if let Declaration::Typed(_, type_expr) = declaration {
-            Self::collect_lib_dependencies_from_expression(type_expr, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_expression(
-        expression: &Expression,
-        output: &mut BTreeSet<String>,
-    ) {
-        match expression {
-            Expression::Singleton(_) => {}
-            Expression::Unary(_, subexpression) => {
-                Self::collect_lib_dependencies_from_expression(subexpression, output);
-            }
-            Expression::Binary(left, _, right) => {
-                Self::collect_lib_dependencies_from_expression(left, output);
-                Self::collect_lib_dependencies_from_expression(right, output);
-            }
-            Expression::Concatenation(left, right) => {
-                if let Expression::Singleton(token) = left.as_ref() {
-                    if token.token_type == TokenType::Lib {
-                        if let Expression::Grouping(_, module_expr, _) = right.as_ref() {
-                            if let Some(module_name) =
-                                Self::module_name_from_expression(module_expr)
-                            {
-                                output.insert(module_name);
-                            }
-                        }
-                    }
-                }
-                Self::collect_lib_dependencies_from_expression(left, output);
-                Self::collect_lib_dependencies_from_expression(right, output);
-            }
-            Expression::Grouping(_, inner, _) => {
-                Self::collect_lib_dependencies_from_expression(inner, output);
-            }
-            Expression::Binder(_, declarations, body, _) => {
-                for declaration in declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(body, output);
-            }
-            Expression::GenericBinder(_, type_params, declarations, body, _) => {
-                for type_param in type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(body, output);
-            }
-            Expression::IfThenElse(_, cond, if_block, else_block, _) => {
-                Self::collect_lib_dependencies_from_expression(cond, output);
-                Self::collect_lib_dependencies_from_expression(if_block, output);
-                if let Some(else_block) = else_block {
-                    Self::collect_lib_dependencies_from_expression(else_block, output);
-                }
-            }
-            Expression::Match(_, scrutinee, cases, _) => {
-                Self::collect_lib_dependencies_from_expression(scrutinee, output);
-                for (pattern, result) in cases {
-                    Self::collect_lib_dependencies_from_expression(pattern, output);
-                    Self::collect_lib_dependencies_from_expression(result, output);
-                }
-            }
-        }
-    }
-
-    fn collect_lib_dependencies_from_body(body: &Body, output: &mut BTreeSet<String>) {
-        for statement in &body.statements {
-            Self::collect_lib_dependencies_from_statement(statement, output);
-        }
-    }
-
-    fn collect_lib_dependencies_from_statement(
-        statement: &Statement,
-        output: &mut BTreeSet<String>,
-    ) {
-        match &statement.statement {
-            StatementInfo::Let(ls) => {
-                for type_param in &ls.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                if let Some(type_expr) = &ls.type_expr {
-                    Self::collect_lib_dependencies_from_expression(type_expr, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ls.value, output);
-            }
-            StatementInfo::Define(ds) => {
-                for type_param in &ds.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &ds.args {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ds.return_type, output);
-                Self::collect_lib_dependencies_from_expression(&ds.return_value, output);
-            }
-            StatementInfo::Theorem(ts) => {
-                for type_param in &ts.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &ts.args {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ts.claim, output);
-                if let Some(body) = &ts.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Claim(cs) => {
-                Self::collect_lib_dependencies_from_expression(&cs.claim, output);
-            }
-            StatementInfo::Type(ts) => {
-                for type_param in &ts.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&ts.type_expr, output);
-            }
-            StatementInfo::ForAll(fas) => {
-                for declaration in &fas.quantifiers {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_body(&fas.body, output);
-            }
-            StatementInfo::If(is) => {
-                Self::collect_lib_dependencies_from_expression(&is.condition, output);
-                Self::collect_lib_dependencies_from_body(&is.body, output);
-                if let Some(else_body) = &is.else_body {
-                    Self::collect_lib_dependencies_from_body(else_body, output);
-                }
-            }
-            StatementInfo::VariableSatisfy(vss) => {
-                for type_param in &vss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &vss.declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&vss.condition, output);
-            }
-            StatementInfo::FunctionSatisfy(fss) => {
-                for type_param in &fss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for declaration in &fss.declarations {
-                    Self::collect_lib_dependencies_from_declaration(declaration, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&fss.condition, output);
-                if let Some(body) = &fss.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Structure(ss) => {
-                for type_param in &ss.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for (_, field_type, _) in &ss.fields {
-                    Self::collect_lib_dependencies_from_expression(field_type, output);
-                }
-                if let Some(constraint) = &ss.constraint {
-                    Self::collect_lib_dependencies_from_expression(constraint, output);
-                }
-                if let Some(body) = &ss.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Inductive(is) => {
-                for type_param in &is.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                for (_, constructor, _) in &is.constructors {
-                    if let Some(constructor) = constructor {
-                        Self::collect_lib_dependencies_from_expression(constructor, output);
-                    }
-                }
-            }
-            StatementInfo::Import(_) => {}
-            StatementInfo::Attributes(as_) => {
-                for type_param in &as_.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_body(&as_.body, output);
-            }
-            StatementInfo::Numerals(ns) => {
-                Self::collect_lib_dependencies_from_expression(&ns.type_expr, output);
-            }
-            StatementInfo::Match(ms) => {
-                Self::collect_lib_dependencies_from_expression(&ms.scrutinee, output);
-                for (pattern, body) in &ms.cases {
-                    Self::collect_lib_dependencies_from_expression(pattern, output);
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Typeclass(ts) => {
-                for extend in &ts.extends {
-                    Self::collect_lib_dependencies_from_expression(extend, output);
-                }
-                for (_, constant_type, _) in &ts.constants {
-                    Self::collect_lib_dependencies_from_expression(constant_type, output);
-                }
-                for condition in &ts.conditions {
-                    for declaration in &condition.args {
-                        Self::collect_lib_dependencies_from_declaration(declaration, output);
-                    }
-                    Self::collect_lib_dependencies_from_expression(&condition.claim, output);
-                }
-            }
-            StatementInfo::Instance(is) => {
-                for type_param in &is.type_params {
-                    Self::collect_lib_dependencies_from_type_param(type_param, output);
-                }
-                Self::collect_lib_dependencies_from_expression(&is.typeclass, output);
-                if let Some(definitions) = &is.definitions {
-                    Self::collect_lib_dependencies_from_body(definitions, output);
-                }
-                if let Some(body) = &is.body {
-                    Self::collect_lib_dependencies_from_body(body, output);
-                }
-            }
-            StatementInfo::Destructuring(ds) => {
-                Self::collect_lib_dependencies_from_expression(&ds.function, output);
-                Self::collect_lib_dependencies_from_expression(&ds.value, output);
-            }
-            StatementInfo::DocComment(_) => {}
-        }
-    }
-
-    fn parse_module_statements(text: &str, strict: bool) -> error::Result<Vec<Statement>> {
-        let mut tokens = TokenIter::new(Token::scan(text));
-        let mut statements = vec![];
-        loop {
-            match Statement::parse(&mut tokens, false, strict) {
-                Ok((Some(statement), _)) => statements.push(statement),
-                Ok((None, _)) => return Ok(statements),
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn is_exported_declaration_statement(statement: &Statement) -> bool {
-        matches!(
-            statement.statement,
-            StatementInfo::Let(_)
-                | StatementInfo::Define(_)
-                | StatementInfo::Theorem(_)
-                | StatementInfo::Type(_)
-                | StatementInfo::Structure(_)
-                | StatementInfo::Inductive(_)
-                | StatementInfo::Typeclass(_)
-                | StatementInfo::Instance(_)
-        )
-    }
-
-    fn check_exported_declaration_limit(statements: &[Statement]) -> error::Result<()> {
-        let mut exported_declarations = 0;
-        for statement in statements {
-            if !Self::is_exported_declaration_statement(statement) {
-                continue;
-            }
-            exported_declarations += 1;
-            if exported_declarations > MAX_EXPORTED_DECLARATIONS_PER_MODULE {
-                return Err(statement.error(&format!(
-                    "module has more than {} exported declarations",
-                    MAX_EXPORTED_DECLARATIONS_PER_MODULE
-                )));
-            }
-        }
-        Ok(())
     }
 
     // Adds a target for all files in the 'src' directory.
@@ -1485,6 +1446,36 @@ impl Project {
         self.module_map.get(&canonical_descriptor).copied()
     }
 
+    pub fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
+        let descriptor = ModuleDescriptor::name(module_name);
+        let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+        let Some(&module_id) = self.module_map.get(&canonical_descriptor) else {
+            if let Some(error) = self.dependency_load_errors.get(module_name) {
+                return Err(error.clone());
+            }
+            return Err(ImportError::NotFound(format!(
+                "module '{}' has not been loaded",
+                module_name
+            )));
+        };
+        match self.get_module_by_id(module_id) {
+            LoadState::Loading => Err(ImportError::Circular(module_id)),
+            LoadState::None | LoadState::Registered => {
+                if let Some(error) = self.dependency_load_errors.get(module_name) {
+                    return Err(error.clone());
+                }
+                Err(ImportError::NotFound(format!(
+                    "module '{}' has not been loaded",
+                    module_name
+                )))
+            }
+            LoadState::Error(error) if error.circular.is_some() => {
+                Err(ImportError::Circular(module_id))
+            }
+            LoadState::Error(_) | LoadState::Ok(_) => Ok(module_id),
+        }
+    }
+
     pub fn get_env_by_id(&self, module_id: ModuleId) -> Option<&Environment> {
         if let LoadState::Ok(module) = self.get_module_by_id(module_id) {
             module.env()
@@ -1507,6 +1498,180 @@ impl Project {
 
     pub fn get_lowered_module(&self, module_id: ModuleId) -> Option<&LoweredModule> {
         self.get_loaded_module_by_id(module_id)?.lowered()
+    }
+
+    pub fn cached_module_work_estimate(&self, descriptor: &ModuleDescriptor) -> usize {
+        self.build_cache
+            .get_certificates(descriptor)
+            .map(|store| {
+                store
+                    .certs
+                    .iter()
+                    .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn prepare_parallel_module_load_job(
+        &mut self,
+        descriptor: &ModuleDescriptor,
+        strict: bool,
+    ) -> Result<Option<ParallelModuleLoadJob>, ImportError> {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        let descriptor = &canonical_descriptor;
+
+        let preassigned_id = if let Some(&module_id) = self.module_map.get(descriptor) {
+            match self.get_module_by_id(module_id) {
+                LoadState::Loading => return Err(ImportError::Circular(module_id)),
+                LoadState::Registered => Some(module_id),
+                LoadState::Ok(_) | LoadState::Error(_) | LoadState::None => return Ok(None),
+            }
+        } else {
+            None
+        };
+
+        let path = self.path_from_descriptor(descriptor)?;
+        let text =
+            read_source_text(&path, |path| self.read_file(path)).map_err(ImportError::NotFound)?;
+        let is_prelude = matches!(descriptor, ModuleDescriptor::Name(parts) if parts.len() == 1 && parts[0] == "prelude");
+
+        let module_id = if let Some(id) = preassigned_id {
+            self.modules[id.get() as usize] = Module::new(descriptor.clone());
+            id
+        } else if is_prelude {
+            if self.modules.is_empty() {
+                self.modules.push(Module::new(descriptor.clone()));
+            } else {
+                self.modules[ModuleId::PRELUDE.get() as usize] = Module::new(descriptor.clone());
+            }
+            ModuleId::PRELUDE
+        } else {
+            if self.modules.is_empty() {
+                self.modules.push(Module::anonymous());
+            }
+            let id = ModuleId(self.modules.len() as u16);
+            self.modules.push(Module::new(descriptor.clone()));
+            id
+        };
+        self.module_map.insert(descriptor.clone(), module_id);
+
+        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.modules[module_id.get() as usize].load_error(error);
+                return Ok(None);
+            }
+        };
+
+        let current_module_name = parsed.module_name();
+        let implicit_lib_dependency_names: HashSet<_> = parsed
+            .implicit_lib_dependency_names
+            .iter()
+            .cloned()
+            .collect();
+        let mut dependencies = Vec::new();
+        let mut seen_dependencies = HashSet::new();
+        let mut lib_dependencies = Vec::new();
+
+        for module_name in &parsed.dependency_names {
+            if current_module_name
+                .as_ref()
+                .is_some_and(|name| name == module_name)
+            {
+                continue;
+            }
+            match self.get_module_id_by_name(module_name) {
+                Some(dep_id) => {
+                    self.dependency_load_errors.remove(module_name);
+                    if dep_id != module_id && seen_dependencies.insert(dep_id) {
+                        dependencies.push(dep_id);
+                    }
+                    if implicit_lib_dependency_names.contains(module_name) {
+                        let full_name = module_name
+                            .split('.')
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>();
+                        lib_dependencies.push((dep_id, full_name));
+                    }
+                }
+                None => {
+                    let message = self
+                        .path_from_descriptor(&ModuleDescriptor::name(module_name))
+                        .and_then(|path| {
+                            read_source_text(&path, |path| self.read_file(path))
+                                .map(|_| path)
+                                .map_err(ImportError::NotFound)
+                        })
+                        .map(|path| {
+                            format!(
+                                "module '{}' has not been loaded from {}",
+                                module_name,
+                                path.display()
+                            )
+                        })
+                        .unwrap_or_else(|error| error.to_string());
+                    self.dependency_load_errors
+                        .insert(module_name.clone(), ImportError::NotFound(message));
+                }
+            }
+        }
+
+        if !is_prelude {
+            if let Some(prelude_id) = self.get_module_id_by_name("prelude") {
+                if prelude_id != module_id && seen_dependencies.insert(prelude_id) {
+                    dependencies.push(prelude_id);
+                }
+            }
+        }
+
+        Ok(Some(ParallelModuleLoadJob {
+            descriptor: descriptor.clone(),
+            module_id,
+            parsed: Some(parsed),
+            is_prelude,
+            dependencies,
+            lib_dependencies,
+        }))
+    }
+
+    fn pop_ready_parallel_load_job(
+        &self,
+        ready: &mut Vec<usize>,
+        jobs: &[ParallelModuleLoadJob],
+    ) -> Option<usize> {
+        let (ready_index, _) = ready.iter().enumerate().max_by(|(_, left), (_, right)| {
+            self.cached_module_work_estimate(&jobs[**left].descriptor)
+                .cmp(&self.cached_module_work_estimate(&jobs[**right].descriptor))
+                .then_with(|| jobs[**right].descriptor.cmp(&jobs[**left].descriptor))
+        })?;
+        Some(ready.swap_remove(ready_index))
+    }
+
+    fn enqueue_parallel_load_job(
+        &self,
+        jobs: &mut [ParallelModuleLoadJob],
+        job_index: usize,
+        sender: &mpsc::Sender<ParallelModuleWorkerJob>,
+    ) {
+        let project = ProjectView::new_without_lowered(self);
+        let job = &mut jobs[job_index];
+        let parsed = job
+            .parsed
+            .take()
+            .expect("parallel load job should only be enqueued once");
+        let worker_job = ParallelModuleWorkerJob {
+            index: job_index,
+            module_id: job.module_id,
+            parsed,
+            is_prelude: job.is_prelude,
+            lib_dependencies: job.lib_dependencies.clone(),
+            project,
+            usage_mode: self.config.usage_mode,
+        };
+        sender
+            .send(worker_job)
+            .expect("parallel load workers should still be receiving jobs");
     }
 
     pub fn take_lowered_modules_for_targets(
@@ -2014,7 +2179,7 @@ impl Project {
         citations
     }
 
-    pub fn read_file(&self, path: &PathBuf) -> Result<String, ProjectError> {
+    pub fn read_file(&self, path: &Path) -> Result<String, ProjectError> {
         if let Some((content, _)) = self.open_files.get(path) {
             return Ok(content.clone());
         }
@@ -2247,51 +2412,8 @@ impl Project {
         };
 
         let path = self.path_from_descriptor(descriptor)?;
-        let mut text = String::new();
-        if let Some(path_string) = path.to_str() {
-            if path_string == "<stdin>" {
-                if io::stdin().is_terminal() {
-                    // Throws an error if it is in a terminal
-                    return Err(ImportError::NotFound(String::from(
-                        "cannot read stdin in an active terminal",
-                    )));
-                }
-                let _ = io::stdin().lock();
-                for line in io::stdin().lines() {
-                    text.push_str(&line.unwrap());
-                    text.push('\n');
-                }
-            } else if path_string.starts_with("-:") {
-                let Some(string_path) = path.to_str() else {
-                    println!("error: path cannot be empty");
-                    std::process::exit(1);
-                };
-                if io::stdin().is_terminal() {
-                    // Throws an error if it is in a terminal
-                    return Err(ImportError::NotFound(String::from(
-                        "cannot read stdin in an active terminal",
-                    )));
-                }
-                let path2 = &string_path[2..];
-                println!("Path: {}", path2);
-                text = self
-                    .read_file(&PathBuf::from(path2))
-                    .map_err(|e| ImportError::NotFound(e.to_string()))?;
-                let _ = io::stdin().lock();
-                for line in io::stdin().lines() {
-                    text.push_str(&line.unwrap());
-                    text.push('\n');
-                }
-            } else {
-                text = self
-                    .read_file(&path)
-                    .map_err(|e| ImportError::NotFound(e.to_string()))?;
-            }
-        } else {
-            text = self
-                .read_file(&path)
-                .map_err(|e| ImportError::NotFound(e.to_string()))?;
-        }
+        let text =
+            read_source_text(&path, |path| self.read_file(path)).map_err(ImportError::NotFound)?;
 
         // Give this module an id before parsing it, so that we can catch circular imports.
         // Prelude always gets ModuleId::PRELUDE. Other modules get subsequent IDs.
@@ -2321,62 +2443,64 @@ impl Project {
         };
         self.module_map.insert(descriptor.clone(), module_id);
 
-        let statements = match Self::parse_module_statements(&text, strict) {
-            Ok(statements) => statements,
+        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+            Ok(parsed) => parsed,
             Err(error) => {
                 self.modules[module_id.get() as usize].load_error(error);
                 return Ok(module_id);
             }
         };
-        if let Err(error) = Self::check_exported_declaration_limit(&statements) {
-            self.modules[module_id.get() as usize].load_error(error);
-            return Ok(module_id);
-        }
 
-        let current_module_name = match descriptor {
-            ModuleDescriptor::Name(parts) => Some(parts.join(".")),
-            ModuleDescriptor::Anonymous | ModuleDescriptor::File(_) => None,
-        };
-        let mut lib_dependency_names = BTreeSet::new();
-        for statement in &statements {
-            Self::collect_lib_dependencies_from_statement(statement, &mut lib_dependency_names);
-        }
+        let current_module_name = parsed.module_name();
+        let dependency_names = parsed.dependency_names.clone();
+        let implicit_lib_dependency_names: HashSet<_> = parsed
+            .implicit_lib_dependency_names
+            .iter()
+            .cloned()
+            .collect();
         let mut lib_dependencies = vec![];
-        for module_name in lib_dependency_names {
+        for module_name in &dependency_names {
             if current_module_name
                 .as_ref()
-                .is_some_and(|name| name == &module_name)
+                .is_some_and(|name| name == module_name)
             {
                 continue;
             }
-            if let Ok(dep_id) = self.load_module_by_name(&module_name) {
-                let full_name = module_name
-                    .split('.')
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>();
-                lib_dependencies.push((dep_id, full_name));
-            }
-        }
-
-        let mut env = Environment::new(module_id);
-        if !is_prelude {
-            let prelude_descriptor = ModuleDescriptor::name("prelude");
-            // Try to load prelude, but don't fail if it doesn't exist
-            if let Ok(prelude_id) = self.load_module(&prelude_descriptor, false) {
-                if let Some(prelude_bindings) = self.get_bindings(prelude_id) {
-                    // Silently ignore errors when importing prelude
-                    let _ = env.bindings.import_prelude(prelude_bindings, self);
-                    env.sync_current_binding_state();
+            match self.load_module_by_name(module_name) {
+                Ok(dep_id) => {
+                    self.dependency_load_errors.remove(module_name);
+                    if implicit_lib_dependency_names.contains(module_name) {
+                        let full_name = module_name
+                            .split('.')
+                            .map(|part| part.to_string())
+                            .collect::<Vec<_>>();
+                        lib_dependencies.push((dep_id, full_name));
+                    }
+                }
+                Err(error) => {
+                    self.dependency_load_errors
+                        .insert(module_name.clone(), error);
                 }
             }
         }
-        for (dep_id, full_name) in lib_dependencies {
-            env.bindings.add_module_dependency(dep_id, full_name);
-        }
-        env.sync_current_binding_state();
 
-        for statement in statements {
-            if let Err(e) = env.add_statement(self, &statement) {
+        if !is_prelude {
+            // The prelude is an implicit dependency for ordinary modules. Load it before
+            // elaboration so module processing only needs read-only project lookup.
+            let _ = self.load_module_by_name("prelude");
+        }
+        let usage_mode = self.config.usage_mode;
+
+        let loaded = match elaborate_and_lower_module(
+            self,
+            usage_mode,
+            module_id,
+            parsed,
+            is_prelude,
+            lib_dependencies,
+        ) {
+            Ok(loaded) => loaded,
+            Err(e) => {
                 if e.circular.is_some() {
                     let err = Err(ImportError::Circular(module_id));
                     self.modules[module_id.get() as usize].load_error(e);
@@ -2385,28 +2509,12 @@ impl Project {
                 self.modules[module_id.get() as usize].load_error(e);
                 return Ok(module_id);
             }
-        }
-
-        // Normalize all facts after elaboration.
-        // We ignore errors here since some facts may intentionally fail to normalize
-        // (e.g., exists over uninhabited types in test cases).
-        let lowering = env.run_lowering_pass(self);
-        if !self.config.usage_mode.keeps_ide_metadata() {
-            env.discard_ide_metadata();
-        }
-
-        let mut content_hasher = blake3::Hasher::new();
-        content_hasher.update(text.as_bytes());
-        let content_hash = content_hasher.finalize();
-        let bindings = env.bindings.clone();
-        let export = ModuleExport::from_lowered(bindings, &lowering.module, self.config.usage_mode);
-        let export = Arc::new(export);
-        let retained_env = self.config.usage_mode.keeps_ide_metadata().then_some(env);
+        };
         self.modules[module_id.get() as usize].load_ok(
-            export,
-            Some(lowering.module),
-            retained_env,
-            content_hash,
+            loaded.export,
+            Some(loaded.lowered),
+            loaded.retained_env,
+            loaded.content_hash,
         );
         Ok(module_id)
     }

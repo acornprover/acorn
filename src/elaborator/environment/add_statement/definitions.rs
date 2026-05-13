@@ -88,7 +88,7 @@ fn quantify_over_explicit_value_params(
 impl Environment {
     fn evaluate_local_family_params(
         &mut self,
-        project: &Project,
+        project: &dyn ProjectLookup,
         exprs: &[TypeParamExpr],
     ) -> error::Result<LocalFamilyParams> {
         let family_params =
@@ -118,7 +118,7 @@ impl Environment {
     /// If this is in an attributes block, the datatype family parameters are provided.
     pub(super) fn add_let_statement(
         &mut self,
-        project: &Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: DefinedName,
         ls: &LetStatement,
@@ -332,7 +332,7 @@ impl Environment {
 
     pub(super) fn add_define_statement(
         &mut self,
-        project: &Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: DefinedName,
         self_type: Option<&AcornType>,
@@ -474,7 +474,7 @@ impl Environment {
 
     pub(super) fn add_theorem_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ts: &TheoremStatement,
     ) -> error::Result<()> {
@@ -615,7 +615,7 @@ impl Environment {
 
     pub(super) fn add_variable_satisfy_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         vss: &VariableSatisfyStatement,
     ) -> error::Result<()> {
@@ -627,7 +627,7 @@ impl Environment {
 
     pub(super) fn add_variable_satisfy_statement_named<F>(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         vss: &VariableSatisfyStatement,
         datatype_params: Option<&DatatypeFamilyScope>,
@@ -827,7 +827,7 @@ impl Environment {
 
     pub(super) fn add_function_satisfy_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         fss: &FunctionSatisfyStatement,
     ) -> error::Result<()> {
@@ -837,7 +837,7 @@ impl Environment {
 
     pub(super) fn add_function_satisfy_statement_named(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         fss: &FunctionSatisfyStatement,
         defined_name: DefinedName,
@@ -1022,7 +1022,7 @@ impl Environment {
     /// Adds a claim statement to the environment.
     pub(super) fn add_claim_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         cs: &ClaimStatement,
     ) -> error::Result<()> {
@@ -1059,7 +1059,7 @@ impl Environment {
 
     pub(super) fn add_destructuring_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ds: &DestructuringStatement,
     ) -> error::Result<()> {

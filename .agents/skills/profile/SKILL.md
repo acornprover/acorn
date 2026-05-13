@@ -12,8 +12,8 @@ Use this skill when the user asks to profile the Acorn prover or verifier. The g
 - Run all commands from the `acorn` repo root.
 - Use this skill for profiling, performance-breakdown requests, and performance-sensitive changes
   that need release-mode timing baselines.
-- If the target is not specified, ask whether to profile `profile_load`, `profile_check`, or
-  `profile_reprove`.
+- If the target is not specified, ask whether to profile `profile_load`, `profile_check`,
+  `profile_verify`, or `profile_reprove`.
 - In sandboxed Codex runs, if `perf`, `cargo install samply`, or profile recording is blocked, request escalated permissions instead of working around it.
 - After every successful profiling run, update `PROFILE.md` in the repo root.
 
@@ -83,8 +83,9 @@ When that happens:
 
 ## Available profiling targets
 
-- `profile_reprove`: reprove `real.double_sum`, a representative prover/search workload
 - `profile_check`: check-mode workload for existing cached certificates
+- `profile_verify`: verify-mode cached-proof replay for `verify --ignore-hash --read-only`
+- `profile_reprove`: reprove `real.double_sum`, a representative prover/search workload
 - `profile_load`: load `real.double_sum` and its dependencies without running build/check/search
 
 ## Recording results in `PROFILE.md`
@@ -95,6 +96,7 @@ The file should have a separate section for each profile script:
 
 - `profile_reprove`
 - `profile_check`
+- `profile_verify`
 - `profile_load`
 
 When you profile one target successfully, update that target's section with the latest run instead of leaving stale data in place.

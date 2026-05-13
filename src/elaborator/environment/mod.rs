@@ -20,7 +20,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::kernel_context::KernelContext;
 use crate::module::ModuleId;
-use crate::project::Project;
+use crate::project::{Project, ProjectLookup};
 use crate::syntax::statement::{Body, Statement};
 use crate::syntax::token::{Token, TokenIter};
 use crate::syntax::token_map::{TokenInfo, TokenKey, TokenMap};
@@ -274,7 +274,7 @@ impl Environment {
     }
 
     /// Returns an evaluator that modifies the token map.
-    pub fn evaluator<'a>(&'a mut self, project: &'a Project) -> Evaluator<'a> {
+    pub fn evaluator<'a>(&'a mut self, project: &'a dyn ProjectLookup) -> Evaluator<'a> {
         Evaluator::new(project, &self.bindings, Some(&mut self.token_map))
     }
 
@@ -444,7 +444,7 @@ impl Environment {
     /// Returns the last claim in the block, if we didn't have an if-claim to match against.
     pub fn add_conditional(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         condition: AcornValue,
         range: Range,
         first_token: &Token,
@@ -740,7 +740,7 @@ impl Environment {
     /// Used by the lowering pass since the module isn't in the project yet.
     fn collect_dependencies_from_bindings(
         bindings: &BindingMap,
-        project: &Project,
+        project: &dyn ProjectLookup,
         seen: &mut std::collections::HashSet<crate::module::ModuleId>,
         output: &mut Vec<crate::module::ModuleId>,
     ) {
@@ -758,33 +758,26 @@ impl Environment {
 
     fn merge_imported_modules(
         bindings: &BindingMap,
-        project: &Project,
+        project: &dyn ProjectLookup,
         imported_modules: &mut HashSet<ModuleId>,
         kernel_context: &mut KernelContext,
     ) {
-        let direct_dependencies = bindings.direct_dependencies();
-        if direct_dependencies
-            .iter()
-            .all(|dep_id| imported_modules.contains(dep_id))
-        {
+        let mut seen = imported_modules.clone();
+        let mut dependencies = Vec::new();
+        Self::collect_dependencies_from_bindings(bindings, project, &mut seen, &mut dependencies);
+        if dependencies.is_empty() {
             return;
         }
 
-        for dep_id in direct_dependencies {
-            for module_id in project
-                .all_dependencies(dep_id)
-                .into_iter()
-                .chain(std::iter::once(dep_id))
-            {
-                if !imported_modules.insert(module_id) {
-                    continue;
-                }
-                let dep_kernel_context = project
-                    .get_module_export(module_id)
-                    .map(|export| &export.final_kernel_context)
-                    .unwrap_or_else(|| panic!("Dependency {} not lowered", module_id.0));
-                kernel_context.merge_imports(dep_kernel_context);
+        for module_id in dependencies {
+            if !imported_modules.insert(module_id) {
+                continue;
             }
+            let dep_kernel_context = project
+                .get_module_export(module_id)
+                .map(|export| &export.final_kernel_context)
+                .unwrap_or_else(|| panic!("Dependency {} not lowered", module_id.0));
+            kernel_context.merge_imports(dep_kernel_context);
         }
     }
 
@@ -797,7 +790,7 @@ impl Environment {
     ///
     /// Returns the lowered module and the first lowering error, if any.
     /// Even on error, the final kernel context is set to what was achieved before the error.
-    pub fn run_lowering_pass(&mut self, project: &Project) -> LoweringResult {
+    pub fn run_lowering_pass(&mut self, project: &dyn ProjectLookup) -> LoweringResult {
         let mut kernel_context = KernelContext::new();
         let mut first_error: Option<String> = None;
         let mut imported_modules = HashSet::new();
@@ -867,7 +860,7 @@ impl Environment {
         binding_states: &[BindingMap],
         base_kernel_context: &KernelContext,
         initial_imported_modules: &HashSet<ModuleId>,
-        project: &Project,
+        project: &dyn ProjectLookup,
         first_error: &mut Option<String>,
         lowered_module: &mut LoweredModule,
         top_level: bool,

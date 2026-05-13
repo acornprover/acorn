@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::builder::{BuildStatus, Builder};
 use crate::elaborator::environment::LineType;
-use crate::module::{ModuleDescriptor, ModuleId};
+use crate::module::{LoadState, ModuleDescriptor, ModuleId};
 use crate::project::{localize_mock_filename, LibraryCitation, Project, ProjectConfig};
 use indoc::indoc;
 
@@ -187,6 +187,20 @@ fn test_indirect_import_nonexistent() {
     let mut p = Project::new_mock();
     p.mock("/mock/main.ac", "import nonexistent");
     p.expect_module_err("main");
+}
+
+#[test]
+fn test_missing_from_import_reports_preload_error_at_import() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/main.ac", "from missing import thing");
+    let module_id = p.load_module_by_name("main").expect("load failed");
+    let LoadState::Error(error) = p.get_module_by_id(module_id) else {
+        panic!("expected main to have an import error");
+    };
+    let error = error.to_string();
+    assert!(error.contains("no mocked file for:"), "{error}");
+    assert!(error.contains("missing.ac"), "{error}");
+    assert!(error.contains("from missing import thing"), "{error}");
 }
 
 #[test]

@@ -21,7 +21,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::{Source, SourceType};
 use crate::elaborator::stack::Stack;
 use crate::kernel::atom::AtomId;
-use crate::project::{ImportError, Project};
+use crate::project::{ImportError, ProjectLookup};
 use crate::syntax::expression::{Declaration, Expression};
 use crate::syntax::statement::{
     AttributesStatement, ClaimStatement, DefineStatement, DestructuringStatement, ForAllStatement,
@@ -107,7 +107,7 @@ impl Environment {
     /// If project is not provided, we won't be able to handle import statements.
     pub fn add_tokens(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         tokens: Vec<Token>,
         strict: bool,
     ) -> error::Result<()> {
@@ -130,7 +130,7 @@ impl Environment {
     /// to that sub-environment.
     pub fn add_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
     ) -> error::Result<()> {
         if self.includes_explicit_false {

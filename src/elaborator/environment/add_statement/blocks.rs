@@ -4,7 +4,7 @@ impl Environment {
     /// Adds a forall statement to the environment.
     pub(super) fn add_forall_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         fas: &ForAllStatement,
     ) -> error::Result<()> {
@@ -43,7 +43,7 @@ impl Environment {
     /// Adds an if statement to the environment.
     pub(super) fn add_if_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         is: &IfStatement,
     ) -> error::Result<()> {
@@ -77,7 +77,7 @@ impl Environment {
     /// Adds a match statement to the environment.
     pub(super) fn add_match_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ms: &MatchStatement,
     ) -> error::Result<()> {

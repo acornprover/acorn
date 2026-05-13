@@ -3,7 +3,7 @@ use super::*;
 impl Environment {
     pub(super) fn add_typeclass_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         ts: &TypeclassStatement,
     ) -> error::Result<()> {
@@ -189,7 +189,7 @@ impl Environment {
 
     pub(super) fn add_instance_statement(
         &mut self,
-        project: &mut Project,
+        project: &dyn ProjectLookup,
         statement: &Statement,
         is: &InstanceStatement,
     ) -> error::Result<()> {

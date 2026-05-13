@@ -10,7 +10,7 @@ use crate::elaborator::goal::Goal;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
-use crate::project::Project;
+use crate::project::ProjectLookup;
 
 /// Environments are structured into a tree of nodes. Environment nodes have access to everything
 /// in their parent environment, plus whatever facts are before them in the same environment.
@@ -51,13 +51,17 @@ impl fmt::Display for Node {
 }
 
 impl Node {
-    pub fn structural(project: &Project, env: &Environment, prop: Proposition) -> Node {
+    pub fn structural(project: &dyn ProjectLookup, env: &Environment, prop: Proposition) -> Node {
         let _ = project;
         let prop = env.bindings.canonicalize_proposition(prop);
         Node::Structural(Fact::Proposition(Arc::new(prop)))
     }
 
-    pub fn claim(project: &Project, env: &Environment, prop: Proposition) -> Result<Node, String> {
+    pub fn claim(
+        project: &dyn ProjectLookup,
+        env: &Environment,
+        prop: Proposition,
+    ) -> Result<Node, String> {
         let _ = project;
         let prop = env.bindings.canonicalize_proposition(prop);
         let prop = Arc::new(prop);
@@ -75,7 +79,7 @@ impl Node {
     /// The optional proposition is the claim that we can use externally once the block is proven.
     /// It is relative to the outside environment.
     pub fn block(
-        project: &Project,
+        project: &dyn ProjectLookup,
         env: &Environment,
         block: Block,
         prop: Option<Proposition>,

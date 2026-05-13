@@ -43,7 +43,7 @@ All commands are run from `~/acorn`.
    ./scripts/release.sh
    ```
 
-   This should locally build Linux and Mac, create a draft release, upload some files, and trigger a Windows release build. It pushes a new version file to GitHub, so if something goes wrong, you
+   This should bump the version in `VERSION`, `Cargo.toml`, `vscode/extension/package.json`, and `vscode/extension/package-lock.json`, locally build Linux and Mac, create a draft release, upload some files, and trigger a Windows release build. It pushes a new version commit to GitHub, so if something goes wrong, you
    will need to muck around to fix it.
 
    Check that the [GitHub Actions](https://github.com/acornprover/acorn/actions) succeed.
@@ -80,4 +80,4 @@ All commands are run from `~/acorn`.
    ./scripts/publish.sh
    ```
 
-   This makes the VS Code extension pick up the release.
+   This checks that the latest published GitHub release matches the local `VERSION`, so run it only after the draft release has been published by the successful GitHub Actions build. This makes the VS Code extension pick up the release.
