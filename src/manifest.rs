@@ -57,6 +57,10 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the build format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build.
+#[cfg(feature = "bfix")]
+const MANIFEST_VERSION: u32 = 22;
+
+#[cfg(not(feature = "bfix"))]
 const MANIFEST_VERSION: u32 = 21;
 
 /// A newtype wrapper for module names, created by joining parts with "."
@@ -132,6 +136,9 @@ impl Manifest {
 
     /// Check if an entry matches the given module and hash
     pub fn matches_entry(&self, parts: &[String], hash: blake3::Hash) -> bool {
+        if self.version != MANIFEST_VERSION {
+            return false;
+        }
         let module_name = ModuleName::new(parts);
         match self.modules.get(&module_name) {
             Some(stored_hash) => stored_hash == &HexHash::new(hash),

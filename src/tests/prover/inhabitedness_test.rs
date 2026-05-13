@@ -88,6 +88,39 @@ fn test_cannot_avoid_inhabitedness_through_resolution() {
 }
 
 #[test]
+fn test_self_inequality_does_not_discharge_arbitrary_type_domain() {
+    let text = r#"
+    let foo[T]: Bool = axiom
+
+    axiom ax[T](x: T) {
+        x != x or foo[T]
+    }
+
+    theorem bad[T] {
+        foo[T]
+    }
+    "#;
+    verify_fails(text);
+}
+
+#[test]
+fn test_self_inequality_does_not_discharge_opaque_type_domain() {
+    let text = r#"
+    type Empty: axiom
+    let foo: Bool = axiom
+
+    axiom ax(x: Empty) {
+        x != x or foo
+    }
+
+    theorem bad {
+        foo
+    }
+    "#;
+    verify_fails(text);
+}
+
+#[test]
 fn test_cannot_avoid_inhabitedness_through_resolution_with_concrete_uninhabited_type() {
     // This should be rejected: FiniteSet might be empty, so we cannot derive a
     // contradiction by instantiating forall(x: FiniteSet) clauses with a witness picked only

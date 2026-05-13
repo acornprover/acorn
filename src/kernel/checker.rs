@@ -1,4 +1,6 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
+#[cfg(not(feature = "bfix"))]
+use std::collections::VecDeque;
 
 use im::HashMap as ImHashMap;
 use im::HashSet as ImHashSet;
@@ -6,8 +8,11 @@ use im::Vector as ImVector;
 
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
+use crate::kernel::atom::AtomId;
 use crate::kernel::certificate_step::CertificateStep;
-use crate::kernel::clause::Clause;
+#[cfg(feature = "bfix")]
+use crate::kernel::clause::BooleanReductionKind;
+use crate::kernel::clause::{Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
@@ -150,14 +155,121 @@ impl Checker {
         }
     }
 
-    /// Boolean reduction preserves existing local slots, but the checker wants fully normalized
-    /// clauses for exact matching and loop detection.
+    /// A normalized derived clause is only sound when every variable erased by normalization
+    /// ranges over a type we can constructively prove inhabited.
+    fn eliminated_vars_inhabited(
+        trace: &NormalizedClauseTrace,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        for var_id in 0..trace.pre_norm_context.len() {
+            let var_id_atom = var_id as AtomId;
+            if trace.var_ids.contains(&var_id_atom) {
+                continue;
+            }
+            let Some(var_type) = trace.pre_norm_context.get_var_type(var_id) else {
+                continue;
+            };
+            if !kernel_context.provably_inhabited(var_type, Some(&trace.pre_norm_context)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn normalize_checker_trace(
+        trace: &NormalizedClauseTrace,
+        kernel_context: &KernelContext,
+    ) -> Option<Clause> {
+        if !Self::eliminated_vars_inhabited(trace, kernel_context) {
+            return None;
+        }
+
+        let subterm_normalized = normalize_clause_subterms(&trace.clause);
+        let subterm_context = subterm_normalized.get_local_context().clone();
+        let first = Clause::normalize_with_trace(subterm_normalized.literals, &subterm_context);
+        if !Self::eliminated_vars_inhabited(&first, kernel_context) {
+            return None;
+        }
+        let first_context = first.clause.get_local_context().clone();
+        let second = Clause::normalize_with_trace(first.clause.literals, &first_context);
+        if !Self::eliminated_vars_inhabited(&second, kernel_context) {
+            return None;
+        }
+        Some(second.clause)
+    }
+
+    #[cfg(not(feature = "bfix"))]
     fn checker_boolean_reductions(clause: &Clause, kernel_context: &KernelContext) -> Vec<Clause> {
         clause
             .boolean_reductions(kernel_context)
             .into_iter()
             .map(|clause| normalize_clause_subterms(&clause).normalized())
             .collect()
+    }
+
+    #[cfg(feature = "bfix")]
+    fn checker_boolean_reductions(clause: &Clause, kernel_context: &KernelContext) -> Vec<Clause> {
+        clause
+            .find_boolean_reduction_kinds_with_options(kernel_context, true)
+            .into_iter()
+            .filter_map(|(_kind, trace)| Self::normalize_checker_trace(&trace, kernel_context))
+            .collect()
+    }
+
+    #[cfg(feature = "bfix")]
+    fn checker_boolean_reduction_sets(
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Vec<Clause>> {
+        use BooleanReductionKind::*;
+
+        let reductions = clause.find_boolean_reduction_kinds_with_options(kernel_context, true);
+
+        let mut sets = Vec::new();
+        let mut index = 0;
+        while index < reductions.len() {
+            let (kind, trace) = &reductions[index];
+            let next = reductions.get(index + 1);
+            let paired = match (kind, next.map(|(kind, _)| kind)) {
+                (IteSplitLeftThenBranch, Some(IteSplitLeftElseBranch))
+                | (IteSplitRightThenBranch, Some(IteSplitRightElseBranch))
+                | (PositiveAndLeft, Some(PositiveAndRight))
+                | (NegativeOrLeft, Some(NegativeOrRight))
+                | (BooleanEqualityLeftOrNotRight, Some(BooleanEqualityNotLeftOrRight))
+                | (BooleanInequalityNotLeftOrNotRight, Some(BooleanInequalityLeftOrRight)) => true,
+                _ => false,
+            };
+
+            if paired {
+                let (_, next_trace) = &reductions[index + 1];
+                if let (Some(clause), Some(next_clause)) = (
+                    Self::normalize_checker_trace(trace, kernel_context),
+                    Self::normalize_checker_trace(next_trace, kernel_context),
+                ) {
+                    sets.push(vec![clause, next_clause]);
+                }
+                index += 2;
+                continue;
+            }
+
+            let is_second_half = matches!(
+                kind,
+                IteSplitLeftElseBranch
+                    | IteSplitRightElseBranch
+                    | PositiveAndRight
+                    | NegativeOrRight
+                    | BooleanEqualityNotLeftOrRight
+                    | BooleanInequalityLeftOrRight
+            );
+            if !is_second_half {
+                if let Some(clause) = Self::normalize_checker_trace(trace, kernel_context) {
+                    sets.push(vec![clause]);
+                }
+            }
+            index += 1;
+        }
+
+        sets
     }
 
     fn insert_clause_internal(
@@ -206,8 +318,17 @@ impl Checker {
 
             // We only need to do equality resolution for clauses with free variables,
             // because resolvable concrete literals would already have been simplified out.
-            for resolution in inference::equality_resolutions(clause, kernel_context) {
-                self.insert_clause(
+            for (literals, context, _) in
+                inference::find_equality_resolutions(clause, kernel_context)
+            {
+                let trace = Clause::normalize_with_trace(literals, &context);
+                let Some(resolution) = Self::normalize_checker_trace(&trace, kernel_context) else {
+                    continue;
+                };
+                if resolution.is_tautology() {
+                    continue;
+                }
+                self.insert_clause_internal(
                     &resolution,
                     StepReason::EqualityResolution(step_id),
                     kernel_context,
@@ -229,16 +350,30 @@ impl Checker {
                 .insert_clause(clause, StepId(step_id), kernel_context);
         }
 
-        for factoring in inference::equality_factorings(clause, kernel_context) {
-            self.insert_clause(
+        for (literals, context, _) in inference::find_equality_factorings(clause, kernel_context) {
+            let trace = Clause::normalize_with_trace(literals, &context);
+            let Some(factoring) = Self::normalize_checker_trace(&trace, kernel_context) else {
+                continue;
+            };
+            if factoring.is_tautology() {
+                continue;
+            }
+            self.insert_clause_internal(
                 &factoring,
                 StepReason::EqualityFactoring(step_id),
                 kernel_context,
             );
         }
 
-        for injectivity in clause.injectivities() {
-            self.insert_clause(
+        for literals in clause.find_injectivities() {
+            let trace = Clause::normalize_with_trace(literals, clause.get_local_context());
+            let Some(injectivity) = Self::normalize_checker_trace(&trace, kernel_context) else {
+                continue;
+            };
+            if injectivity.is_tautology() {
+                continue;
+            }
+            self.insert_clause_internal(
                 &injectivity,
                 StepReason::Injectivity(step_id),
                 kernel_context,
@@ -318,6 +453,7 @@ impl Checker {
         None
     }
 
+    #[cfg(not(feature = "bfix"))]
     fn check_clause_via_boolean_reductions(
         &mut self,
         clause: &Clause,
@@ -346,6 +482,61 @@ impl Checker {
                 if !seen.contains(&next) {
                     queue.push_back(next);
                 }
+            }
+        }
+
+        None
+    }
+
+    #[cfg(feature = "bfix")]
+    fn check_clause_via_boolean_reductions(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<StepReason> {
+        let mut seen = HashSet::new();
+        self.check_clause_via_boolean_reductions_inner(clause, kernel_context, &mut seen)
+    }
+
+    #[cfg(feature = "bfix")]
+    fn check_clause_via_boolean_reductions_inner(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+        seen: &mut HashSet<Clause>,
+    ) -> Option<StepReason> {
+        if clause.has_any_variable() || !seen.insert(clause.clone()) {
+            return None;
+        }
+
+        for reduction_set in Self::checker_boolean_reduction_sets(clause, kernel_context) {
+            let mut first_reason = None;
+            let mut set_seen = seen.clone();
+            let mut all_known = true;
+
+            for candidate in reduction_set {
+                let reason = self
+                    .check_clause_direct(&candidate, kernel_context)
+                    .or_else(|| {
+                        self.check_clause_via_boolean_reductions_inner(
+                            &candidate,
+                            kernel_context,
+                            &mut set_seen,
+                        )
+                    });
+
+                if let Some(reason) = reason {
+                    if first_reason.is_none() {
+                        first_reason = Some(reason);
+                    }
+                } else {
+                    all_known = false;
+                    break;
+                }
+            }
+
+            if all_known {
+                return first_reason.or(Some(StepReason::EqualityGraph));
             }
         }
 
@@ -943,6 +1134,125 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bfix")]
+    fn test_checker_requires_both_positive_and_branches() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+        use crate::kernel::term::Term;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+        let query = Clause::from_literals_unnormalized(
+            vec![Literal::positive(Term::and(c0.clone(), c1.clone()))],
+            &LocalContext::empty(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::positive(c0.clone())],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(
+            checker.check_clause(&query, &context).is_none(),
+            "knowing only c0 must not prove c0 and c1"
+        );
+
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::positive(c1)],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(
+            checker.check_clause(&query, &context).is_some(),
+            "knowing both branches should prove the conjunction"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "bfix")]
+    fn test_checker_requires_both_boolean_equality_branches() {
+        use crate::kernel::literal::Literal;
+        use crate::kernel::local_context::LocalContext;
+
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1"], "Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+        let query = Clause::from_literals_unnormalized(
+            vec![Literal::equals(c0.clone(), c1.clone())],
+            &LocalContext::empty(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::positive(c0.clone())],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(
+            checker.check_clause(&query, &context).is_none(),
+            "one boolean-equality branch must not prove c0 = c1"
+        );
+
+        checker.insert_clause(
+            &Clause::from_literals_unnormalized(
+                vec![Literal::positive(c1)],
+                &LocalContext::empty(),
+            ),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(
+            checker.check_clause(&query, &context).is_some(),
+            "true booleans on both sides should prove boolean equality"
+        );
+    }
+
+    #[test]
+    fn test_checker_does_not_resolve_self_inequality_over_arbitrary_type() {
+        let mut context = KernelContext::new();
+        context.parse_polymorphic_constant("c0", "T: Type", "Bool");
+
+        let clause = context.parse_clause("x1 != x1 or c0(x0)", &["Type", "x0"]);
+        let query = context.parse_clause("c0(x0)", &["Type"]);
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&clause, StepReason::Testing, &context);
+        assert!(
+            checker.check_clause(&query, &context).is_none(),
+            "x != x may only be resolved away when x's type is known inhabited"
+        );
+    }
+
+    #[test]
+    fn test_checker_resolves_self_inequality_over_inhabited_type() {
+        let mut context = KernelContext::new();
+        context.parse_constant("c0", "Bool");
+
+        let clause = context.parse_clause("x0 != x0 or c0", &["Bool"]);
+        let query = context.parse_clause("c0", &[]);
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&clause, StepReason::Testing, &context);
+        assert!(
+            checker.check_clause(&query, &context).is_some(),
+            "Bool is inhabited, so equality resolution may remove x != x"
+        );
+    }
+
+    #[test]
     fn test_checker_accepts_multi_step_unit_resolution_for_existential_formula_clause() {
         use crate::kernel::atom::Atom;
         use crate::kernel::literal::Literal;
@@ -1370,30 +1680,12 @@ mod tests {
         )
         .normalized();
 
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::new();
-        let start = normalize_clause_subterms(&assumption).normalized();
-        seen.insert(start.clone());
-        queue.push_back(start);
-        while let Some(clause) = queue.pop_front() {
-            for next in Checker::checker_boolean_reductions(&clause, &context) {
-                if seen.insert(next.clone()) {
-                    queue.push_back(next);
-                }
-            }
-        }
-        assert!(
-            seen.contains(&canonical_reduction),
-            "checker-normalized boolean-reduction closure should contain the canonical reduction; got {:?}",
-            seen
-        );
-
         let mut checker = Checker::new();
         checker.insert_clause(&assumption, StepReason::Testing, &context);
 
         assert!(
             checker.check_clause(&canonical_reduction, &context).is_some(),
-            "checker should know the canonical boolean-reduction clause after inserting the assumption",
+            "checker should prove the canonical boolean-reduction clause after inserting the assumption",
         );
     }
 }

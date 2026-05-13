@@ -953,47 +953,15 @@ impl ActiveSet {
     ) -> Vec<ProofStep> {
         let clause = &activated_step.clause;
         let mut answer = vec![];
-        let original_context = clause.get_local_context();
 
         // Use the new method to find all possible equality resolutions
         for (new_literals, context, input_var_map) in
             inference::find_equality_resolutions(clause, kernel_context)
         {
-            // Check inhabitedness for eliminated variables.
-            // We only need to check when a variable's type depends on other type variables
-            // (which might be uninhabited). For concrete types, the prover's standard
-            // behavior is correct.
-            // Variables in the original clause that don't appear in new_literals are eliminated.
-            let mut output_vars: HashSet<AtomId> = HashSet::new();
-            for literal in &new_literals {
-                for atom in literal.iter_atoms() {
-                    if let Atom::FreeVariable(id) = atom {
-                        output_vars.insert(*id);
-                    }
-                }
-            }
-
-            let mut skip = false;
-            for var_id in 0..original_context.len() {
-                if !output_vars.contains(&(var_id as AtomId)) {
-                    // This variable is eliminated - check if its type is provably inhabited
-                    if let Some(var_type) = original_context.get_var_type(var_id) {
-                        // Only check inhabitedness if the type contains free variables
-                        // (i.e., depends on type parameters that might be uninhabited)
-                        if var_type.has_any_variable()
-                            && !kernel_context.provably_inhabited(var_type, Some(original_context))
-                        {
-                            skip = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if skip {
+            let normalized = Clause::normalize_with_trace(new_literals, &context);
+            if !Self::boolean_reduction_is_sound(&normalized, kernel_context) {
                 continue;
             }
-
-            let normalized = Clause::normalize_with_trace(new_literals, &context);
 
             // Check if normalization resulted in a tautology
             if !normalized.clause.is_tautology() {
@@ -1038,41 +1006,10 @@ impl ActiveSet {
         let mut answer = vec![];
 
         for literals in clause.find_injectivities() {
-            // Check inhabitedness for eliminated variables.
-            // We only need to check when a variable's type depends on other type variables
-            // (which might be uninhabited). For concrete types, the prover's standard
-            // behavior is correct.
-            // Collect variables that appear in the new literals.
-            let mut output_vars: HashSet<AtomId> = HashSet::new();
-            for literal in &literals {
-                for atom in literal.iter_atoms() {
-                    if let Atom::FreeVariable(id) = atom {
-                        output_vars.insert(*id);
-                    }
-                }
-            }
-
-            let mut skip = false;
-            for var_id in 0..original_context.len() {
-                if !output_vars.contains(&(var_id as AtomId)) {
-                    // This variable is eliminated - check if its type is provably inhabited
-                    if let Some(var_type) = original_context.get_var_type(var_id) {
-                        // Only check inhabitedness if the type contains free variables
-                        // (i.e., depends on type parameters that might be uninhabited)
-                        if var_type.has_any_variable()
-                            && !kernel_context.provably_inhabited(var_type, Some(original_context))
-                        {
-                            skip = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if skip {
+            let normalized = Clause::normalize_with_trace(literals, original_context);
+            if !Self::boolean_reduction_is_sound(&normalized, kernel_context) {
                 continue;
             }
-
-            let normalized = Clause::normalize_with_trace(literals, original_context);
             let witness_map = Self::witness_map_for_eliminated_vars(
                 &normalized.pre_norm_context,
                 &normalized.var_ids,
@@ -1237,6 +1174,9 @@ impl ActiveSet {
         for (literals, output_context, input_var_map) in factorings {
             // Create the new clause using the unifier's output context
             let normalized = Clause::normalize_with_trace(literals, &output_context);
+            if !Self::boolean_reduction_is_sound(&normalized, kernel_context) {
+                continue;
+            }
 
             let premise_map = PremiseMap::new(
                 vec![input_var_map.clone()],

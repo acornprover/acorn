@@ -107,6 +107,13 @@ impl BooleanReductionKind {
 }
 
 impl Clause {
+    fn is_droppable_impossible_literal(lit: &Literal) -> bool {
+        // `x != x` is only false when x's type is inhabited. Clause normalization
+        // does not have a KernelContext, so it may only erase variable-free
+        // contradictions like `true != true` or `c != c`.
+        lit.is_impossible() && !lit.has_any_variable()
+    }
+
     fn normalize_with_var_ids_prefilled(
         literals: Vec<Literal>,
         context: &LocalContext,
@@ -118,7 +125,7 @@ impl Clause {
             .flat_map(Self::normalize_literals_for_clause)
             .enumerate()
             .filter_map(|(i, lit)| {
-                if lit.is_impossible() {
+                if Self::is_droppable_impossible_literal(&lit) {
                     None
                 } else {
                     Some((lit, i))
@@ -252,7 +259,8 @@ impl Clause {
             .drain(..)
             .flat_map(Self::normalize_literals_for_clause)
             .collect();
-        self.literals.retain(|lit| !lit.is_impossible());
+        self.literals
+            .retain(|lit| !Self::is_droppable_impossible_literal(lit));
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
@@ -264,7 +272,8 @@ impl Clause {
             .drain(..)
             .flat_map(Self::normalize_literals_for_clause)
             .collect();
-        self.literals.retain(|lit| !lit.is_impossible());
+        self.literals
+            .retain(|lit| !Self::is_droppable_impossible_literal(lit));
         self.literals.sort();
         self.literals.dedup();
         self.normalize_var_ids_with_pinned(pinned);
@@ -1955,6 +1964,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_normalize_keeps_variable_self_inequality() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_polymorphic_constant("c0", "T: Type", "Bool");
+
+        let clause = kctx.parse_clause("x1 != x1 or c0(x0)", &["Type", "x0"]);
+        assert_eq!(clause.literals.len(), 2);
+        assert!(
+            clause.literals.iter().any(Literal::is_impossible),
+            "x != x must stay in the clause when x may range over an empty type"
+        );
     }
 
     /// Test that validation catches applying a Bool to a Bool (c0(c1) where both are Bool).

@@ -383,6 +383,9 @@ impl PremiseMap {
 
     pub fn is_empty(&self) -> bool {
         self.raw_maps.is_empty()
+            && self.var_ids.is_empty()
+            && self.pre_norm_context.is_empty()
+            && self.witness_map.len() == 0
     }
 
     #[doc(hidden)]
