@@ -4,7 +4,9 @@ These fixtures are prover smoke tests written as readable Markdown.
 
 - Headings define test case names.
 - Each fenced `acorn` or `ac` code block is a separate test case.
-- By default, each case is checked with `verify_succeeds`.
+- By default, success cases run `verify`, write certificate cache files, and
+  then run `check` against that cache.
+- Use `acorn success` or `ac success` when you want to mark success explicitly.
 - Use `acorn fail` or `ac fail` for cases that should not verify.
 - Keep prose in the file when it helps explain what the proof is exercising.
 - Group cases by semantic topic, not by whether they were found as regressions.
