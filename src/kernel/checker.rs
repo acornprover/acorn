@@ -1,6 +1,4 @@
 use std::collections::HashSet;
-#[cfg(not(feature = "bfix"))]
-use std::collections::VecDeque;
 
 use im::HashMap as ImHashMap;
 use im::HashSet as ImHashSet;
@@ -10,7 +8,6 @@ use crate::code_generator::Error;
 use crate::elaborator::source::Source;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::CertificateStep;
-#[cfg(feature = "bfix")]
 use crate::kernel::clause::BooleanReductionKind;
 use crate::kernel::clause::{Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
@@ -195,14 +192,7 @@ impl Checker {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> bool {
-        #[cfg(feature = "bfix")]
-        {
-            kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
-        }
-        #[cfg(not(feature = "bfix"))]
-        {
-            kernel_context.provably_inhabited(var_type, local_context)
-        }
+        kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
     }
 
     /// A normalized derived clause is only sound when every variable erased by normalization
@@ -259,21 +249,6 @@ impl Checker {
         Some(second.clause)
     }
 
-    #[cfg(not(feature = "bfix"))]
-    fn checker_boolean_reductions(
-        &self,
-        clause: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Vec<Clause> {
-        let _ = self;
-        clause
-            .boolean_reductions(kernel_context)
-            .into_iter()
-            .map(|clause| normalize_clause_subterms(&clause).normalized())
-            .collect()
-    }
-
-    #[cfg(feature = "bfix")]
     fn checker_boolean_reductions(
         &self,
         clause: &Clause,
@@ -286,7 +261,6 @@ impl Checker {
             .collect()
     }
 
-    #[cfg(feature = "bfix")]
     fn checker_boolean_reduction_sets(
         &self,
         clause: &Clause,
@@ -580,42 +554,6 @@ impl Checker {
         None
     }
 
-    #[cfg(not(feature = "bfix"))]
-    fn check_clause_via_boolean_reductions(
-        &mut self,
-        clause: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Option<StepReason> {
-        if clause.has_any_variable() {
-            return None;
-        }
-
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::new();
-        for next in self.checker_boolean_reductions(clause, kernel_context) {
-            queue.push_back(next);
-        }
-
-        while let Some(candidate) = queue.pop_front() {
-            if !seen.insert(candidate.clone()) {
-                continue;
-            }
-
-            if let Some(reason) = self.check_clause_direct(&candidate, kernel_context) {
-                return Some(reason);
-            }
-
-            for next in self.checker_boolean_reductions(&candidate, kernel_context) {
-                if !seen.contains(&next) {
-                    queue.push_back(next);
-                }
-            }
-        }
-
-        None
-    }
-
-    #[cfg(feature = "bfix")]
     fn check_clause_via_boolean_reductions(
         &mut self,
         clause: &Clause,
@@ -625,7 +563,6 @@ impl Checker {
         self.check_clause_via_boolean_reductions_inner(clause, kernel_context, &mut seen)
     }
 
-    #[cfg(feature = "bfix")]
     fn check_clause_via_boolean_reductions_inner(
         &mut self,
         clause: &Clause,
@@ -1261,7 +1198,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "bfix")]
     fn test_checker_requires_both_positive_and_branches() {
         use crate::kernel::literal::Literal;
         use crate::kernel::local_context::LocalContext;
@@ -1305,7 +1241,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "bfix")]
     fn test_checker_requires_both_boolean_equality_branches() {
         use crate::kernel::literal::Literal;
         use crate::kernel::local_context::LocalContext;

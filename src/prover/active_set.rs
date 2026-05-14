@@ -293,14 +293,7 @@ impl ActiveSet {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> bool {
-        #[cfg(feature = "bfix")]
-        {
-            kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
-        }
-        #[cfg(not(feature = "bfix"))]
-        {
-            kernel_context.provably_inhabited(var_type, local_context)
-        }
+        kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
     }
 
     fn boolean_reduction_is_sound(
