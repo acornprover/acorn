@@ -1550,9 +1550,7 @@ impl<'a> Builder<'a> {
                 ProjectViewModule::None => {
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                ProjectViewModule::Loading | ProjectViewModule::Registered => {
-                    self.log_global(format!("error: module {} stuck in loading", target));
-                }
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {}
             }
         }
     }
@@ -3038,9 +3036,7 @@ impl<'a> Builder<'a> {
                 ProjectViewModule::None => {
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                ProjectViewModule::Loading | ProjectViewModule::Registered => {
-                    self.log_global(format!("error: module {} stuck in loading", target));
-                }
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {}
             }
         }
         self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
@@ -3281,11 +3277,7 @@ impl<'a> Builder<'a> {
                     // Targets are supposed to be loaded already.
                     self.log_global(format!("error: module {} is not loaded", target));
                 }
-                ProjectViewModule::Loading | ProjectViewModule::Registered => {
-                    // Happens if there's a circular import. A more localized error should
-                    // show up elsewhere, so let's just log.
-                    self.log_global(format!("error: module {} stuck in loading", target));
-                }
+                ProjectViewModule::Loading | ProjectViewModule::Registered => {}
             }
         }
         self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
