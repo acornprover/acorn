@@ -6,6 +6,7 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
+use acorn::prover::init_default_scorer;
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -727,6 +728,14 @@ async fn main() {
         .with(fmt::layer().with_ansi(false).without_time())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
         .init();
+
+    if let Err(e) = init_default_scorer() {
+        eprintln!("Failed to initialize the default scorer: {}", e);
+        eprintln!(
+            "This usually means the ONNX runtime shared library is missing or has the wrong ABI."
+        );
+        std::process::exit(1);
+    }
 
     let args = Args::parse();
 

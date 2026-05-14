@@ -12,7 +12,17 @@ pub trait Scorer {
 }
 
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
-    Box::new(ScoringModel::load().unwrap())
+    Box::new(ScoringModel::load().expect(
+        "ONNX scorer failed to load. \
+         Call init_default_scorer() at startup to surface this error cleanly.",
+    ))
+}
+
+/// Eagerly loads the default scorer so a misconfigured ONNX runtime surfaces
+/// here, at one well-known site, instead of as a panic inside the first prover
+/// construction. Intended to be called once from binary entry points.
+pub fn init_default_scorer() -> Result<(), Box<dyn Error>> {
+    ScoringModel::load().map(drop)
 }
 
 // Developed before I had any other framework for policies.
