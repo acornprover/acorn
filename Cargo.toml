@@ -76,6 +76,10 @@ name = "profile_load"
 test = false
 
 [[bin]]
+name = "profile_ide_save"
+test = false
+
+[[bin]]
 name = "profile_memory"
 test = false
 
