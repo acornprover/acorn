@@ -26,11 +26,13 @@ impl ProjectManager {
         src_dir: PathBuf,
         build_dir: PathBuf,
         config: ProjectConfig,
+        add_src_targets: bool,
     ) -> Result<Self, ProjectError> {
         let mut project = Project::new(src_dir, build_dir, config.clone())?;
-        // Add all targets so we build everything, not just open files
-        // (only if using filesystem)
-        if config.use_filesystem {
+        // Add all targets when the workspace is the library being edited. In packaged
+        // fallback mode, files opened by the user become targets and imports are loaded
+        // on demand; targeting the whole packaged acornlib makes every save slow.
+        if add_src_targets {
             project.add_src_targets();
         }
         Ok(ProjectManager {

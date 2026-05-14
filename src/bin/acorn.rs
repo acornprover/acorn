@@ -332,9 +332,9 @@ enum Command {
         #[clap(long)]
         workspace_root: Option<String>,
 
-        /// The root folder of the extension
+        /// Directory where the packaged acornlib can be extracted if no local acornlib is found
         #[clap(long)]
-        extension_root: String,
+        acornlib_cache_dir: Option<String>,
     },
 
     /// Generate documentation
@@ -745,11 +745,11 @@ async fn main() {
     match args.command {
         Some(Command::Serve {
             workspace_root,
-            extension_root,
+            acornlib_cache_dir,
         }) => {
             let server_args = ServerArgs {
                 workspace_root,
-                extension_root,
+                acornlib_cache_dir,
             };
             run_server(&server_args).await;
         }

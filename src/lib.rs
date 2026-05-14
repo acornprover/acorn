@@ -16,6 +16,7 @@ pub mod loader;
 pub mod manifest;
 pub mod module;
 pub mod ort_utils;
+pub mod packaged_acornlib;
 pub mod processor;
 pub mod project;
 pub mod proof_display;

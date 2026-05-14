@@ -20,6 +20,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::interfaces::{
     DocumentProgress, ProgressParams, ProgressResponse, SelectionParams, SelectionResponse,
 };
+use crate::packaged_acornlib;
 use crate::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
 
 // Trait abstracting the LSP client methods we need
@@ -50,8 +51,11 @@ pub struct ServerArgs {
     // The root folder the user has open
     pub workspace_root: Option<String>,
 
-    // The root folder of the extension
-    pub extension_root: String,
+    // Where the packaged acornlib should be extracted, if no local acornlib is found.
+    pub acornlib_cache_dir: Option<String>,
+
+    #[cfg(test)]
+    pub packaged_acornlib_override: Option<String>,
 }
 
 // These messages will show up in the "Acorn Language Server" channel in the output tab.
@@ -276,44 +280,55 @@ pub struct AcornLanguageServer {
 }
 
 // Finds the acorn library to use, given the root folder for the current workspace.
-// Falls back to the library bundled with the extension.
+// Falls back to the acornlib packaged into the binary.
 // Returns (src_dir, build_dir, cache_writable).
-// Panics if we can't find either.
-fn find_acorn_library(args: &ServerArgs) -> (PathBuf, PathBuf, bool) {
+fn find_acorn_library(args: &ServerArgs) -> Result<(PathBuf, PathBuf, bool), String> {
     // Check for a local library, near the code
     if let Some(workspace_root) = &args.workspace_root {
         let path = PathBuf::from(&workspace_root);
         if let Some((src_dir, build_dir)) = Project::find_local_acorn_library(&path) {
-            return (src_dir, build_dir, true);
+            return Ok((src_dir, build_dir, true));
         }
     }
 
-    // Use the bundled library.
-    let path = PathBuf::from(&args.extension_root).join("acornlib");
-    if !path.exists() {
-        panic!("packaging error: no acorn library at {}", path.display());
+    #[cfg(test)]
+    if let Some(path) = &args.packaged_acornlib_override {
+        let path = PathBuf::from(path);
+        return Project::find_local_acorn_library(&path)
+            .map(|(src_dir, build_dir)| (src_dir, build_dir, false))
+            .ok_or_else(|| {
+                format!(
+                    "test packaging error: find_local_acorn_library failed for {}",
+                    path.display()
+                )
+            });
     }
-    if let Some((src_dir, build_dir)) = Project::find_local_acorn_library(&path) {
-        (src_dir, build_dir, false)
-    } else {
-        panic!(
-            "packaging error: find_local_acorn_library failed for {}",
-            path.display()
-        );
-    }
+
+    let cache_dir = args.acornlib_cache_dir.as_ref().ok_or_else(|| {
+        "Could not find a local acornlib, and --acornlib-cache-dir was not provided.".to_string()
+    })?;
+    let path = packaged_acornlib::get_or_extract(&PathBuf::from(cache_dir))?;
+    Project::find_local_acorn_library(&path)
+        .map(|(src_dir, build_dir)| (src_dir, build_dir, false))
+        .ok_or_else(|| {
+            format!(
+                "packaging error: find_local_acorn_library failed for {}",
+                path.display()
+            )
+        })
 }
 
 impl AcornLanguageServer {
     // Creates a new backend.
     // Determines which library to use based on the root of the current workspace.
     // If we can't find one in a logical location based on the editor, we use
-    // the library bundled with the extension.
+    // the acornlib packaged into the binary.
     // Returns an error if the build cache manifest version is too new.
     pub fn new(
         client: Arc<dyn LspClient>,
         args: &ServerArgs,
     ) -> Result<AcornLanguageServer, String> {
-        let (src_dir, build_dir, write_cache) = find_acorn_library(&args);
+        let (src_dir, build_dir, write_cache) = find_acorn_library(&args)?;
 
         log(&format!(
             "using acorn server version {}",
@@ -327,8 +342,10 @@ impl AcornLanguageServer {
             write_cache,
             ..Default::default()
         };
-        let project_manager =
-            Arc::new(ProjectManager::new(src_dir, build_dir, config).map_err(|e| e.to_string())?);
+        let project_manager = Arc::new(
+            ProjectManager::new(src_dir, build_dir, config, write_cache)
+                .map_err(|e| e.to_string())?,
+        );
         Ok(AcornLanguageServer {
             project_manager,
             client,
