@@ -524,6 +524,45 @@ pub fn reconstruct_step<R: ProofResolver>(
             return Ok(());
         }
 
+        Rule::BooleanReduction(info)
+            if !info.inhabitance_source_ids.is_empty() && !step.premise_map.is_empty() =>
+        {
+            let source_id = ProofStepId::Active(info.id);
+            let source_clause = resolver.get_clause(source_id)?;
+            let concrete_premises = step.premise_map.concretize_premises(
+                &conclusion_map,
+                conclusion_map_context,
+                &[source_clause.get_local_context()],
+            );
+            if let Some((mut var_map, mut context)) = concrete_premises.into_iter().next() {
+                let mut next_var = context.len();
+                for var_id in 0..source_clause.get_local_context().len() {
+                    if !var_map.has_mapping(var_id as AtomId) {
+                        if let Some(var_type) =
+                            source_clause.get_local_context().get_var_type(var_id)
+                        {
+                            var_map.set(var_id as AtomId, Term::new_variable(next_var as AtomId));
+                            let remapped_type = apply_to_term(var_type.as_ref(), &var_map);
+                            context.set_type(next_var, remapped_type);
+                            next_var += 1;
+                        }
+                    }
+                }
+                add_var_map(resolver, source_id, var_map, context, concrete_steps);
+            }
+
+            for source_id in &info.inhabitance_source_ids {
+                add_var_map(
+                    resolver,
+                    ProofStepId::Active(*source_id),
+                    VariableMap::new(),
+                    LocalContext::empty(),
+                    concrete_steps,
+                );
+            }
+            return Ok(());
+        }
+
         Rule::EqualityResolution(_)
         | Rule::EqualityFactoring(_)
         | Rule::Injectivity(_)
@@ -914,6 +953,7 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveAndLeft,
+                inhabitance_source_ids: vec![],
             }),
             reduced_clause.clone(),
             PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
@@ -989,6 +1029,7 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                inhabitance_source_ids: vec![],
             }),
             reduction.clause,
             PremiseMap::new(
@@ -1096,6 +1137,7 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                inhabitance_source_ids: vec![],
             }),
             reduction.clause,
             PremiseMap::new(
@@ -1412,6 +1454,7 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::BooleanInequalityLeftOrRight,
+                inhabitance_source_ids: vec![],
             }),
             reduced_clause,
             PremiseMap::new(

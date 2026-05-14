@@ -8,14 +8,16 @@ use im::Vector as ImVector;
 
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
-use crate::kernel::atom::AtomId;
+use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::CertificateStep;
 #[cfg(feature = "bfix")]
 use crate::kernel::clause::BooleanReductionKind;
 use crate::kernel::clause::{Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::Rule;
+use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_clause_subterms;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
@@ -138,6 +140,9 @@ pub struct Checker {
     /// reduction can create cycles.
     past_boolean_reductions: ImHashSet<Clause>,
 
+    /// Types that previous certificate steps established as inhabited.
+    proven_inhabited: HashSet<(Term, LocalContext)>,
+
     /// The reason for each step. The step_id is the index in this vector.
     reasons: ImVector<StepReason>,
 }
@@ -151,13 +156,59 @@ impl Checker {
             variable_clause_generations: ImHashMap::new(),
             concrete_generation: 0,
             past_boolean_reductions: ImHashSet::new(),
+            proven_inhabited: HashSet::new(),
             reasons: ImVector::new(),
+        }
+    }
+
+    fn inhabited_type_key(var_type: &Term, context: &LocalContext) -> (Term, LocalContext) {
+        let mut normalized_type = var_type.clone();
+        let mut var_ids = Vec::new();
+        normalized_type.normalize_var_ids_with_context(&mut var_ids, context);
+        (normalized_type, context.remap(&var_ids))
+    }
+
+    fn inhabited_type_from_clause(
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<(Term, LocalContext)> {
+        let reduction = clause.positive_exists_reduction(kernel_context)?;
+        Some(Self::inhabited_type_key(
+            &reduction.binder_type,
+            clause.get_local_context(),
+        ))
+    }
+
+    fn mark_inhabited_from_clause(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let Some(key) = Self::inhabited_type_from_clause(clause, kernel_context) else {
+            return false;
+        };
+        self.proven_inhabited.insert(key)
+    }
+
+    fn provably_inhabited_for_elimination(
+        kernel_context: &KernelContext,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+    ) -> bool {
+        #[cfg(feature = "bfix")]
+        {
+            kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
+        }
+        #[cfg(not(feature = "bfix"))]
+        {
+            kernel_context.provably_inhabited(var_type, local_context)
         }
     }
 
     /// A normalized derived clause is only sound when every variable erased by normalization
     /// ranges over a type we can constructively prove inhabited.
     fn eliminated_vars_inhabited(
+        &self,
         trace: &NormalizedClauseTrace,
         kernel_context: &KernelContext,
     ) -> bool {
@@ -169,7 +220,16 @@ impl Checker {
             let Some(var_type) = trace.pre_norm_context.get_var_type(var_id) else {
                 continue;
             };
-            if !kernel_context.provably_inhabited(var_type, Some(&trace.pre_norm_context)) {
+            let proven_inhabited = self
+                .proven_inhabited
+                .contains(&Self::inhabited_type_key(var_type, &trace.pre_norm_context));
+            if !proven_inhabited
+                && !Self::provably_inhabited_for_elimination(
+                    kernel_context,
+                    var_type,
+                    Some(&trace.pre_norm_context),
+                )
+            {
                 return false;
             }
         }
@@ -177,29 +237,35 @@ impl Checker {
     }
 
     fn normalize_checker_trace(
+        &self,
         trace: &NormalizedClauseTrace,
         kernel_context: &KernelContext,
     ) -> Option<Clause> {
-        if !Self::eliminated_vars_inhabited(trace, kernel_context) {
+        if !self.eliminated_vars_inhabited(trace, kernel_context) {
             return None;
         }
 
         let subterm_normalized = normalize_clause_subterms(&trace.clause);
         let subterm_context = subterm_normalized.get_local_context().clone();
         let first = Clause::normalize_with_trace(subterm_normalized.literals, &subterm_context);
-        if !Self::eliminated_vars_inhabited(&first, kernel_context) {
+        if !self.eliminated_vars_inhabited(&first, kernel_context) {
             return None;
         }
         let first_context = first.clause.get_local_context().clone();
         let second = Clause::normalize_with_trace(first.clause.literals, &first_context);
-        if !Self::eliminated_vars_inhabited(&second, kernel_context) {
+        if !self.eliminated_vars_inhabited(&second, kernel_context) {
             return None;
         }
         Some(second.clause)
     }
 
     #[cfg(not(feature = "bfix"))]
-    fn checker_boolean_reductions(clause: &Clause, kernel_context: &KernelContext) -> Vec<Clause> {
+    fn checker_boolean_reductions(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Clause> {
+        let _ = self;
         clause
             .boolean_reductions(kernel_context)
             .into_iter()
@@ -208,16 +274,21 @@ impl Checker {
     }
 
     #[cfg(feature = "bfix")]
-    fn checker_boolean_reductions(clause: &Clause, kernel_context: &KernelContext) -> Vec<Clause> {
+    fn checker_boolean_reductions(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Clause> {
         clause
             .find_boolean_reduction_kinds_with_options(kernel_context, true)
             .into_iter()
-            .filter_map(|(_kind, trace)| Self::normalize_checker_trace(&trace, kernel_context))
+            .filter_map(|(_kind, trace)| self.normalize_checker_trace(&trace, kernel_context))
             .collect()
     }
 
     #[cfg(feature = "bfix")]
     fn checker_boolean_reduction_sets(
+        &self,
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Vec<Vec<Clause>> {
@@ -243,8 +314,8 @@ impl Checker {
             if paired {
                 let (_, next_trace) = &reductions[index + 1];
                 if let (Some(clause), Some(next_clause)) = (
-                    Self::normalize_checker_trace(trace, kernel_context),
-                    Self::normalize_checker_trace(next_trace, kernel_context),
+                    self.normalize_checker_trace(trace, kernel_context),
+                    self.normalize_checker_trace(next_trace, kernel_context),
                 ) {
                     sets.push(vec![clause, next_clause]);
                 }
@@ -262,7 +333,7 @@ impl Checker {
                     | BooleanInequalityLeftOrRight
             );
             if !is_second_half {
-                if let Some(clause) = Self::normalize_checker_trace(trace, kernel_context) {
+                if let Some(clause) = self.normalize_checker_trace(trace, kernel_context) {
                     sets.push(vec![clause]);
                 }
             }
@@ -270,6 +341,64 @@ impl Checker {
         }
 
         sets
+    }
+
+    fn insert_boolean_reductions_with_reason(
+        &mut self,
+        clause: &Clause,
+        step_id: usize,
+        kernel_context: &KernelContext,
+    ) {
+        if !Self::clause_symbols_available(clause, kernel_context) {
+            return;
+        }
+        for boolean_reduction in self.checker_boolean_reductions(clause, kernel_context) {
+            // Guard against infinite loops
+            if self.past_boolean_reductions.contains(&boolean_reduction) {
+                continue;
+            }
+            self.past_boolean_reductions
+                .insert(boolean_reduction.clone());
+            self.insert_clause_internal(
+                &boolean_reduction,
+                StepReason::BooleanReduction(step_id),
+                kernel_context,
+            );
+        }
+    }
+
+    fn reprocess_boolean_reductions(&mut self, kernel_context: &KernelContext) {
+        let clauses: Vec<(Clause, usize)> = self
+            .exact_clauses
+            .iter()
+            .map(|(clause, step_id)| (clause.clone(), *step_id))
+            .collect();
+        for (clause, step_id) in clauses {
+            self.insert_boolean_reductions_with_reason(&clause, step_id, kernel_context);
+        }
+    }
+
+    fn term_symbols_available(term: &Term, kernel_context: &KernelContext) -> bool {
+        term.iter_atoms().all(|atom| match atom {
+            Atom::Symbol(symbol) => kernel_context.symbol_table.contains_symbol(*symbol),
+            Atom::FreeVariable(_) | Atom::BoundVariable(_) => true,
+        })
+    }
+
+    fn clause_symbols_available(clause: &Clause, kernel_context: &KernelContext) -> bool {
+        clause
+            .get_local_context()
+            .get_var_types()
+            .iter()
+            .all(|var_type| {
+                var_type
+                    .as_ref()
+                    .is_none_or(|term| Self::term_symbols_available(term, kernel_context))
+            })
+            && clause.iter_atoms().all(|atom| match atom {
+                Atom::Symbol(symbol) => kernel_context.symbol_table.contains_symbol(*symbol),
+                Atom::FreeVariable(_) | Atom::BoundVariable(_) => true,
+            })
     }
 
     fn insert_clause_internal(
@@ -305,6 +434,16 @@ impl Checker {
 
         self.exact_clauses.entry(clause.clone()).or_insert(step_id);
 
+        let should_reprocess_for_inhabitedness = matches!(
+            &reason,
+            StepReason::PreviousClaim | StepReason::WitnessDeclaration | StepReason::Testing
+        );
+        if self.mark_inhabited_from_clause(clause, kernel_context)
+            && should_reprocess_for_inhabitedness
+        {
+            self.reprocess_boolean_reductions(kernel_context);
+        }
+
         if has_any_variable {
             if let Some(reduced_clause) =
                 self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
@@ -322,7 +461,7 @@ impl Checker {
                 inference::find_equality_resolutions(clause, kernel_context)
             {
                 let trace = Clause::normalize_with_trace(literals, &context);
-                let Some(resolution) = Self::normalize_checker_trace(&trace, kernel_context) else {
+                let Some(resolution) = self.normalize_checker_trace(&trace, kernel_context) else {
                     continue;
                 };
                 if resolution.is_tautology() {
@@ -352,7 +491,7 @@ impl Checker {
 
         for (literals, context, _) in inference::find_equality_factorings(clause, kernel_context) {
             let trace = Clause::normalize_with_trace(literals, &context);
-            let Some(factoring) = Self::normalize_checker_trace(&trace, kernel_context) else {
+            let Some(factoring) = self.normalize_checker_trace(&trace, kernel_context) else {
                 continue;
             };
             if factoring.is_tautology() {
@@ -367,7 +506,7 @@ impl Checker {
 
         for literals in clause.find_injectivities() {
             let trace = Clause::normalize_with_trace(literals, clause.get_local_context());
-            let Some(injectivity) = Self::normalize_checker_trace(&trace, kernel_context) else {
+            let Some(injectivity) = self.normalize_checker_trace(&trace, kernel_context) else {
                 continue;
             };
             if injectivity.is_tautology() {
@@ -380,19 +519,7 @@ impl Checker {
             );
         }
 
-        for boolean_reduction in Self::checker_boolean_reductions(clause, kernel_context) {
-            // Guard against infinite loops
-            if self.past_boolean_reductions.contains(&boolean_reduction) {
-                continue;
-            }
-            self.past_boolean_reductions
-                .insert(boolean_reduction.clone());
-            self.insert_clause_internal(
-                &boolean_reduction,
-                StepReason::BooleanReduction(step_id),
-                kernel_context,
-            );
-        }
+        self.insert_boolean_reductions_with_reason(clause, step_id, kernel_context);
     }
 
     /// Adds a true clause to the checker with a specific reason.
@@ -465,7 +592,7 @@ impl Checker {
 
         let mut seen = HashSet::new();
         let mut queue = VecDeque::new();
-        for next in Self::checker_boolean_reductions(clause, kernel_context) {
+        for next in self.checker_boolean_reductions(clause, kernel_context) {
             queue.push_back(next);
         }
 
@@ -478,7 +605,7 @@ impl Checker {
                 return Some(reason);
             }
 
-            for next in Self::checker_boolean_reductions(&candidate, kernel_context) {
+            for next in self.checker_boolean_reductions(&candidate, kernel_context) {
                 if !seen.contains(&next) {
                     queue.push_back(next);
                 }
@@ -509,7 +636,7 @@ impl Checker {
             return None;
         }
 
-        for reduction_set in Self::checker_boolean_reduction_sets(clause, kernel_context) {
+        for reduction_set in self.checker_boolean_reduction_sets(clause, kernel_context) {
             let mut first_reason = None;
             let mut set_seen = seen.clone();
             let mut all_known = true;

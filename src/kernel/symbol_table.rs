@@ -432,6 +432,30 @@ impl SymbolTable {
         }
     }
 
+    /// Return whether this table has enough metadata to typecheck the symbol.
+    pub fn contains_symbol(&self, symbol: Symbol) -> bool {
+        match symbol {
+            Symbol::True
+            | Symbol::False
+            | Symbol::Not
+            | Symbol::And
+            | Symbol::Or
+            | Symbol::Eq
+            | Symbol::Ite
+            | Symbol::Bool
+            | Symbol::Type0
+            | Symbol::Type(_)
+            | Symbol::Typeclass(_) => true,
+            Symbol::GlobalConstant(module_id, atom_id) => self
+                .global_constant_types
+                .get(module_id.get() as usize)
+                .is_some_and(|module| (atom_id as usize) < module.len()),
+            Symbol::ScopedConstant(atom_id) => {
+                (atom_id as usize) < self.scoped_constant_types.len()
+            }
+        }
+    }
+
     /// Get the type of a symbol, with proper kinds for type symbols.
     /// For Symbol::Type, this returns the proper kind based on arity (e.g., Type -> Type for List).
     pub fn get_symbol_type(&self, symbol: Symbol, type_store: &TypeStore) -> Term {

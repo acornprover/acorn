@@ -225,6 +225,9 @@ impl Prover {
             }
             Rule::BooleanReduction(info) => {
                 answer.push(("source".to_string(), ProofStepId::Active(info.id)));
+                for &id in &info.inhabitance_source_ids {
+                    answer.push(("inhabitedness".to_string(), ProofStepId::Active(id)));
+                }
             }
             Rule::Extensionality(info) => {
                 answer.push(("source".to_string(), ProofStepId::Active(info.id)));
@@ -1168,6 +1171,7 @@ mod tests {
             Rule::BooleanReduction(crate::kernel::proof_step::BooleanReductionInfo {
                 id: 0,
                 kind: crate::kernel::clause::BooleanReductionKind::PositiveExistsOpen,
+                inhabitance_source_ids: vec![],
             }),
             reduction.clause,
             PremiseMap::new(

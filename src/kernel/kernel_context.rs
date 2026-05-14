@@ -190,8 +190,27 @@ impl KernelContext {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> Option<Term> {
+        self.find_inhabitant_with_options(var_type, local_context, true)
+    }
+
+    /// Finds a concrete witness term without using proof-local scoped constants
+    /// that were merely registered as elements of their type.
+    pub fn find_inhabitant_without_local_elements(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+    ) -> Option<Term> {
+        self.find_inhabitant_with_options(var_type, local_context, false)
+    }
+
+    fn find_inhabitant_with_options(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+        allow_local_elements: bool,
+    ) -> Option<Term> {
         let mut seen = vec![];
-        self.find_inhabitant_with_seen(var_type, local_context, &mut seen)
+        self.find_inhabitant_with_seen(var_type, local_context, &mut seen, allow_local_elements)
     }
 
     fn find_inhabitant_with_seen(
@@ -199,6 +218,7 @@ impl KernelContext {
         var_type: &Term,
         local_context: Option<&LocalContext>,
         seen: &mut Vec<Term>,
+        allow_local_elements: bool,
     ) -> Option<Term> {
         if seen.iter().any(|t| t == var_type) {
             return None;
@@ -221,9 +241,12 @@ impl KernelContext {
             }
 
             // If codomain is inhabited, a constant function inhabits the Pi type.
-            if let Some(codomain_witness) =
-                self.find_inhabitant_with_seen(&shifted_codomain, local_context, seen)
-            {
+            if let Some(codomain_witness) = self.find_inhabitant_with_seen(
+                &shifted_codomain,
+                local_context,
+                seen,
+                allow_local_elements,
+            ) {
                 let result = Some(Term::lambda(
                     domain_term,
                     // Entering a lambda adds one binder depth.
@@ -267,9 +290,11 @@ impl KernelContext {
         }
 
         if let Some(symbol) = self.symbol_table.get_element_of_type(var_type) {
-            let result = Some(Term::atom(Atom::Symbol(symbol)));
-            seen.pop();
-            return result;
+            if allow_local_elements || !matches!(symbol, Symbol::ScopedConstant(_)) {
+                let result = Some(Term::atom(Atom::Symbol(symbol)));
+                seen.pop();
+                return result;
+            }
         }
 
         let result = match var_type.as_ref().get_head_atom() {
@@ -283,6 +308,7 @@ impl KernelContext {
                         var_type,
                         local_context,
                         seen,
+                        allow_local_elements,
                     ) {
                         Some(witness)
                     } else if let Some(tc_id) = self.type_store.get_arbitrary_typeclass(*ground_id)
@@ -337,6 +363,25 @@ impl KernelContext {
         var_type: &Term,
         local_context: Option<&LocalContext>,
     ) -> bool {
+        self.provably_inhabited_with_options(var_type, local_context, true)
+    }
+
+    /// Returns true when the type is inhabited without relying on scoped constants
+    /// introduced as local proof witnesses.
+    pub fn provably_inhabited_without_local_elements(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+    ) -> bool {
+        self.provably_inhabited_with_options(var_type, local_context, false)
+    }
+
+    fn provably_inhabited_with_options(
+        &self,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+        allow_local_elements: bool,
+    ) -> bool {
         fn resolve_typeclass_constraint(
             type_term: &Term,
             local_context: &LocalContext,
@@ -349,7 +394,10 @@ impl KernelContext {
             resolve_typeclass_constraint(var_type, local_context)
         }
 
-        if self.find_inhabitant(var_type, local_context).is_some() {
+        if self
+            .find_inhabitant_with_options(var_type, local_context, allow_local_elements)
+            .is_some()
+        {
             return true;
         }
 
@@ -362,7 +410,8 @@ impl KernelContext {
         let Some(type_witness) = self.find_type_witness_for_typeclass(tc_id) else {
             return false;
         };
-        self.find_inhabitant(&type_witness, None).is_some()
+        self.find_inhabitant_with_options(&type_witness, None, allow_local_elements)
+            .is_some()
     }
 
     fn instantiate_type_constructor_witness(
@@ -371,6 +420,7 @@ impl KernelContext {
         target_type: &Term,
         local_context: Option<&LocalContext>,
         seen: &mut Vec<Term>,
+        allow_local_elements: bool,
     ) -> Option<Term> {
         let mut witness = Term::atom(Atom::Symbol(provider));
         let mut witness_type = self
@@ -401,7 +451,12 @@ impl KernelContext {
             if input_type.as_ref().is_type_param_kind() {
                 return None;
             }
-            let arg = self.find_inhabitant_with_seen(&input_type, local_context, seen)?;
+            let arg = self.find_inhabitant_with_seen(
+                &input_type,
+                local_context,
+                seen,
+                allow_local_elements,
+            )?;
             witness = witness.apply(std::slice::from_ref(&arg));
             witness_type = witness_type.type_apply_with_arg(&arg)?;
 

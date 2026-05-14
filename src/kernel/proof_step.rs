@@ -167,13 +167,17 @@ pub struct SingleSourceInfo {
     pub id: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BooleanReductionInfo {
     /// The id of the source clause.
     pub id: usize,
 
     /// The specific boolean-reduction rule that fired.
     pub kind: BooleanReductionKind,
+
+    /// Extra active proof steps that demonstrate inhabitedness required by
+    /// variable-erasing reductions.
+    pub inhabitance_source_ids: Vec<usize>,
 }
 
 /// Information about a simplification step.
@@ -230,7 +234,16 @@ impl Rule {
             Rule::EqualityFactoring(info) => vec![ProofStepId::Active(info.id)],
             Rule::EqualityResolution(info) => vec![ProofStepId::Active(info.id)],
             Rule::Injectivity(info) => vec![ProofStepId::Active(info.id)],
-            Rule::BooleanReduction(info) => vec![ProofStepId::Active(info.id)],
+            Rule::BooleanReduction(info) => {
+                let mut premises = vec![ProofStepId::Active(info.id)];
+                premises.extend(
+                    info.inhabitance_source_ids
+                        .iter()
+                        .copied()
+                        .map(ProofStepId::Active),
+                );
+                premises
+            }
             Rule::Extensionality(info) => vec![ProofStepId::Active(info.id)],
             Rule::Specialization(info) => vec![ProofStepId::Active(info.pattern_id)],
             Rule::MultipleRewrite(multi_rewrite_info) => {
@@ -305,7 +318,7 @@ impl Rule {
 
     pub fn underlying_boolean_reduction(&self) -> Option<BooleanReductionInfo> {
         match self {
-            Rule::BooleanReduction(info) => Some(*info),
+            Rule::BooleanReduction(info) => Some(info.clone()),
             Rule::Simplification(info) => info.original.rule.underlying_boolean_reduction(),
             _ => None,
         }
@@ -808,6 +821,40 @@ impl ProofStep {
             depth,
             activated_step.shallow_status,
             activated_step.shallow_origin,
+            premise_map,
+        )
+    }
+
+    /// Construct a direct step that also depends on additional active proof
+    /// steps, for example inhabitedness witnesses needed by a variable-erasing
+    /// boolean reduction.
+    pub fn direct_with_extra_dependencies(
+        activated_step: &ProofStep,
+        extra_steps: &[&ProofStep],
+        rule: Rule,
+        clause: Clause,
+        premise_map: PremiseMap,
+    ) -> ProofStep {
+        let mut truthiness = activated_step.truthiness;
+        let mut proof_size = activated_step.proof_size + 1;
+        let mut depth = activated_step.depth;
+        for step in extra_steps {
+            truthiness = truthiness.combine(step.truthiness);
+            proof_size += step.proof_size;
+            depth = depth.max(step.depth);
+        }
+        let (shallow_status, shallow_origin) = Self::combine_shallow_sources(
+            std::iter::once(activated_step).chain(extra_steps.iter().copied()),
+        );
+
+        Self::new_with_normalized_clause(
+            clause,
+            truthiness,
+            rule,
+            proof_size,
+            depth,
+            shallow_status,
+            shallow_origin,
             premise_map,
         )
     }

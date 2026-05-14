@@ -18,6 +18,7 @@ use crate::kernel::pdt::LiteralSet;
 use crate::kernel::proof_step::{
     BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
 };
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{PathStep, Term};
 use crate::kernel::unifier::{Scope, Unifier};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
@@ -68,6 +69,10 @@ pub struct ActiveSet {
 
     // A data structure to do the mechanical rewriting of subterms.
     rewrite_tree: RewriteTree,
+
+    // Active proof steps that establish a type is inhabited. The key is the
+    // normalized type term together with the context needed to typecheck it.
+    inhabited_sources: HashMap<(Term, LocalContext), usize>,
 }
 
 /// A ResolutionTarget represents a literal that we could do resolution with.
@@ -243,6 +248,7 @@ impl ActiveSet {
             subterm_map: HashMap::new(),
             subterm_unifier: FingerprintUnifier::new(),
             rewrite_tree: RewriteTree::new(),
+            inhabited_sources: HashMap::new(),
         }
     }
 
@@ -282,6 +288,21 @@ impl ActiveSet {
         clause.literals.len() > 1 && self.long_clauses.contains(clause)
     }
 
+    fn provably_inhabited_for_elimination(
+        kernel_context: &KernelContext,
+        var_type: &Term,
+        local_context: Option<&LocalContext>,
+    ) -> bool {
+        #[cfg(feature = "bfix")]
+        {
+            kernel_context.provably_inhabited_without_local_elements(var_type, local_context)
+        }
+        #[cfg(not(feature = "bfix"))]
+        {
+            kernel_context.provably_inhabited(var_type, local_context)
+        }
+    }
+
     fn boolean_reduction_is_sound(
         reduction: &crate::kernel::clause::NormalizedClauseTrace,
         kernel_context: &KernelContext,
@@ -294,11 +315,158 @@ impl ActiveSet {
             let Some(var_type) = reduction.pre_norm_context.get_var_type(var_id as usize) else {
                 continue;
             };
-            if !kernel_context.provably_inhabited(var_type, Some(&reduction.pre_norm_context)) {
+            if !Self::provably_inhabited_for_elimination(
+                kernel_context,
+                var_type,
+                Some(&reduction.pre_norm_context),
+            ) {
                 return false;
             }
         }
         true
+    }
+
+    fn inhabited_type_key(var_type: &Term, context: &LocalContext) -> (Term, LocalContext) {
+        let mut normalized_type = var_type.clone();
+        let mut var_ids = Vec::new();
+        normalized_type.normalize_var_ids_with_context(&mut var_ids, context);
+        (normalized_type, context.remap(&var_ids))
+    }
+
+    fn type_needs_explicit_inhabitance_source(
+        var_type: &Term,
+        context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let constraint_type = match var_type.as_ref().get_head_atom() {
+            Atom::FreeVariable(id) | Atom::BoundVariable(id) => context.get_var_type(*id as usize),
+            Atom::Symbol(Symbol::ScopedConstant(id)) => Some(
+                kernel_context
+                    .symbol_table
+                    .get_type(Symbol::ScopedConstant(*id)),
+            ),
+            _ => None,
+        };
+        constraint_type.is_some_and(|t| t.as_ref().is_type0())
+    }
+
+    fn inhabited_type_from_step(
+        step: &ProofStep,
+        kernel_context: &KernelContext,
+    ) -> Option<(Term, LocalContext)> {
+        let reduction = step.clause.positive_exists_reduction(kernel_context)?;
+        Some(Self::inhabited_type_key(
+            &reduction.binder_type,
+            step.clause.get_local_context(),
+        ))
+    }
+
+    fn inhabitance_sources_for_reduction(
+        &self,
+        reduction: &crate::kernel::clause::NormalizedClauseTrace,
+        kernel_context: &KernelContext,
+        extra_source: Option<(&(Term, LocalContext), usize)>,
+    ) -> Option<Vec<usize>> {
+        let mut source_ids = Vec::new();
+        for var_id in 0..reduction.pre_norm_context.len() {
+            let var_id_atom = var_id as AtomId;
+            if reduction.var_ids.contains(&var_id_atom) {
+                continue;
+            }
+            let Some(var_type) = reduction.pre_norm_context.get_var_type(var_id) else {
+                continue;
+            };
+
+            let key = Self::inhabited_type_key(var_type, &reduction.pre_norm_context);
+            let source_id = extra_source
+                .and_then(|(extra_key, id)| (*extra_key == key).then_some(id))
+                .or_else(|| self.inhabited_sources.get(&key).copied());
+
+            if let Some(source_id) = source_id {
+                if !source_ids.contains(&source_id) {
+                    source_ids.push(source_id);
+                }
+                continue;
+            }
+
+            if Self::type_needs_explicit_inhabitance_source(
+                var_type,
+                &reduction.pre_norm_context,
+                kernel_context,
+            ) || !Self::provably_inhabited_for_elimination(
+                kernel_context,
+                var_type,
+                Some(&reduction.pre_norm_context),
+            ) {
+                return None;
+            }
+        }
+        Some(source_ids)
+    }
+
+    fn boolean_reduction_steps_for_source(
+        &self,
+        source_id: usize,
+        source_step: &ProofStep,
+        kernel_context: &KernelContext,
+        extra_source: Option<(&(Term, LocalContext), usize, &ProofStep)>,
+    ) -> Vec<ProofStep> {
+        let mut answer = Vec::new();
+        let extra_source_key_and_id = extra_source.map(|(key, id, _step)| (key, id));
+
+        for (kind, reduction) in source_step
+            .clause
+            .find_boolean_reduction_kinds_with_options(kernel_context, false)
+        {
+            let Some(inhabitance_source_ids) = self.inhabitance_sources_for_reduction(
+                &reduction,
+                kernel_context,
+                extra_source_key_and_id,
+            ) else {
+                continue;
+            };
+            let witness_map = Self::witness_map_for_eliminated_vars(
+                &reduction.pre_norm_context,
+                &reduction.var_ids,
+                kernel_context,
+            )
+            .unwrap_or_else(VariableMap::new);
+
+            let raw_maps = vec![VariableMap::new()];
+            let premise_map = PremiseMap::new_with_witnesses(
+                raw_maps,
+                reduction.var_ids,
+                reduction.pre_norm_context,
+                witness_map,
+            );
+            let mut extra_steps = Vec::new();
+            for inhabitance_source_id in &inhabitance_source_ids {
+                if *inhabitance_source_id == source_id {
+                    continue;
+                }
+                if let Some((_, extra_id, extra_step)) = extra_source {
+                    if *inhabitance_source_id == extra_id {
+                        extra_steps.push(extra_step);
+                        continue;
+                    }
+                }
+                extra_steps.push(self.get_step(*inhabitance_source_id));
+            }
+            let step = ProofStep::direct_with_extra_dependencies(
+                source_step,
+                &extra_steps,
+                Rule::BooleanReduction(BooleanReductionInfo {
+                    id: source_id,
+                    kind,
+                    inhabitance_source_ids,
+                }),
+                reduction.clause,
+                premise_map,
+            );
+            answer.push(step);
+        }
+
+        answer
     }
 
     fn witness_map_for_eliminated_vars(
@@ -534,9 +702,11 @@ impl ActiveSet {
                     if let Some(var_type) = context.get_var_type(var_id) {
                         // Translate the type to output scope for inhabitedness check.
                         let translated_type = unifier.apply(scope, var_type);
-                        if !kernel_context
-                            .provably_inhabited(&translated_type, Some(unifier.output_context()))
-                        {
+                        if !Self::provably_inhabited_for_elimination(
+                            kernel_context,
+                            &translated_type,
+                            Some(unifier.output_context()),
+                        ) {
                             return false;
                         }
                     }
@@ -1045,42 +1215,30 @@ impl ActiveSet {
         module_id: ModuleId,
     ) -> Vec<ProofStep> {
         let clause = &activated_step.clause;
-        let mut answer = vec![];
+        let activated_inhabited_key =
+            Self::inhabited_type_from_step(activated_step, kernel_context);
+        let mut answer = self.boolean_reduction_steps_for_source(
+            activated_id,
+            activated_step,
+            kernel_context,
+            None,
+        );
+
+        if let Some(key) = activated_inhabited_key.as_ref() {
+            for (source_id, source_step) in self.iter_steps() {
+                answer.extend(self.boolean_reduction_steps_for_source(
+                    source_id,
+                    source_step,
+                    kernel_context,
+                    Some((key, activated_id, activated_step)),
+                ));
+            }
+        }
 
         let make_boolean_reduction_step =
             |rule: Rule, clause: Clause, premise_map: PremiseMap| -> ProofStep {
                 ProofStep::direct(activated_step, rule, clause, premise_map)
             };
-
-        for (kind, reduction) in
-            clause.find_boolean_reduction_kinds_with_options(kernel_context, false)
-        {
-            if !Self::boolean_reduction_is_sound(&reduction, kernel_context) {
-                continue;
-            }
-            let witness_map = Self::witness_map_for_eliminated_vars(
-                &reduction.pre_norm_context,
-                &reduction.var_ids,
-                kernel_context,
-            )
-            .unwrap_or_else(VariableMap::new);
-
-            let premise_map = PremiseMap::new_with_witnesses(
-                vec![VariableMap::new()],
-                reduction.var_ids,
-                reduction.pre_norm_context,
-                witness_map,
-            );
-            let step = make_boolean_reduction_step(
-                Rule::BooleanReduction(BooleanReductionInfo {
-                    id: activated_id,
-                    kind,
-                }),
-                reduction.clause,
-                premise_map,
-            );
-            answer.push(step);
-        }
 
         // Positive existentials are the one boolean-reduction case where the prover now
         // introduces a named witness instead of opening a raw `choose(...)` term.
@@ -1111,6 +1269,7 @@ impl ActiveSet {
             let rule = Rule::BooleanReduction(BooleanReductionInfo {
                 id: activated_id,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                inhabitance_source_ids: vec![],
             });
             let step = make_boolean_reduction_step(rule, reduction.clause, premise_map);
             answer.push(step);
@@ -1381,7 +1540,11 @@ impl ActiveSet {
             if !output_vars.contains(&var_id_atom) {
                 // This variable was eliminated - check if its type is provably inhabited
                 if let Some(var_type) = local_context.get_var_type(var_id) {
-                    if !kernel_context.provably_inhabited(var_type, Some(&local_context)) {
+                    if !Self::provably_inhabited_for_elimination(
+                        kernel_context,
+                        var_type,
+                        Some(&local_context),
+                    ) {
                         return None; // Reject the simplification
                     }
                 }
@@ -1516,6 +1679,10 @@ impl ActiveSet {
         let step_index = self.next_id();
         let clause = &step.clause;
         let local_context = clause.get_local_context();
+
+        if let Some(key) = Self::inhabited_type_from_step(&step, kernel_context) {
+            self.inhabited_sources.entry(key).or_insert(step_index);
+        }
 
         // Add resolution targets for the new clause.
         for (i, literal) in clause.literals.iter().enumerate() {
