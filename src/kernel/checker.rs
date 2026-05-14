@@ -721,6 +721,7 @@ impl Checker {
     ) -> Result<(Vec<CheckedStep>, usize), Error> {
         let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
+        let mut witness_validation_context = kernel_context.clone();
 
         for (step_index, step) in cert_steps.iter().enumerate() {
             if self.has_contradiction() {
@@ -734,6 +735,10 @@ impl Checker {
 
             match step {
                 CertificateStep::Claim(claim) => {
+                    claim
+                        .validate_checker_payload(kernel_context)
+                        .map_err(Error::GeneratedBadCode)?;
+
                     let generic_clause = claim.normalized_generic_clause();
                     let clause = Self::instantiate_claim_clause(claim, kernel_context)?;
                     if !seen_claims.insert(clause.clone()) {
@@ -771,6 +776,9 @@ impl Checker {
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
                 }
                 CertificateStep::Satisfy(step) => {
+                    step.validate_checker_payload(&mut witness_validation_context)
+                        .map_err(Error::GeneratedBadCode)?;
+
                     let generic_clause = step.justification.normalized_generic_clause();
                     let justification_clause =
                         Self::instantiate_claim_clause(&step.justification, kernel_context)?;
@@ -1545,6 +1553,145 @@ mod tests {
             panic!("expected GeneratedBadCode");
         };
         assert!(msg.contains("only supports a single declaration"));
+    }
+
+    #[test]
+    fn test_check_cert_steps_rejects_tampered_witness_clauses() {
+        use crate::certificate::Certificate;
+        use crate::kernel::certificate_step::CertificateStep;
+        use crate::processor::Processor;
+        use crate::project::Project;
+        use std::borrow::Cow;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal(
+            r#"
+            theorem goal { true }
+            "#,
+        );
+
+        let project = Project::new_mock();
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Owned(normalized_goal.kernel_context.clone());
+
+        let mut satisfy_step = match Certificate::parse_code_line(
+            "let w: Bool satisfy { true }",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("valid satisfy step should parse")
+        {
+            CertificateStep::Satisfy(step) => step,
+            CertificateStep::Claim(_) => panic!("expected satisfy step"),
+        };
+
+        let kernel_context = kernel_context_cow.as_ref();
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &satisfy_step.justification.normalized_generic_clause(),
+            StepReason::Testing,
+            kernel_context,
+        );
+
+        satisfy_step.witness_clauses = vec![Clause::impossible()];
+        let err = checker
+            .check_cert_steps(
+                &[CertificateStep::Satisfy(satisfy_step)],
+                None,
+                kernel_context,
+            )
+            .expect_err("tampered witness clauses should be rejected");
+        assert!(
+            err.to_string().contains("witness clauses mismatch"),
+            "unexpected checker error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_cert_steps_rejects_tampered_witness_specialized_clause() {
+        use crate::certificate::Certificate;
+        use crate::kernel::certificate_step::CertificateStep;
+        use crate::processor::Processor;
+        use crate::project::Project;
+        use std::borrow::Cow;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal(
+            r#"
+            theorem goal { true }
+            "#,
+        );
+
+        let project = Project::new_mock();
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Owned(normalized_goal.kernel_context.clone());
+
+        let mut satisfy_step = match Certificate::parse_code_line(
+            "let w: Bool satisfy { true }",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("valid satisfy step should parse")
+        {
+            CertificateStep::Satisfy(step) => step,
+            CertificateStep::Claim(_) => panic!("expected satisfy step"),
+        };
+
+        let kernel_context = kernel_context_cow.as_ref();
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &satisfy_step.justification.normalized_generic_clause(),
+            StepReason::Testing,
+            kernel_context,
+        );
+
+        assert_ne!(satisfy_step.specialized_clause, Some(Clause::impossible()));
+        satisfy_step.specialized_clause = Some(Clause::impossible());
+        let err = checker
+            .check_cert_steps(
+                &[CertificateStep::Satisfy(satisfy_step)],
+                None,
+                kernel_context,
+            )
+            .expect_err("tampered specialized clause should be rejected");
+        assert!(
+            err.to_string()
+                .contains("witness specialized clause mismatch"),
+            "unexpected checker error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_cert_steps_rejects_ill_typed_claim_specialization_that_proves_false() {
+        use crate::kernel::certificate_step::{CertificateStep, Claim};
+        use crate::kernel::literal::Literal;
+        use crate::kernel::variable_map::VariableMap;
+
+        let mut context = KernelContext::new();
+        context.parse_type_constructor("Empty", 0);
+        let generic = Clause::new(
+            vec![Literal::new(
+                false,
+                Term::new_variable(0),
+                Term::new_variable(0),
+            )],
+            &LocalContext::from_types(vec![context.parse_type("Empty")]),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_true());
+        let claim = Claim::new(generic, var_map).expect("old constructor only checks scope");
+
+        let err = checker
+            .check_cert_steps(&[CertificateStep::Claim(claim)], None, &context)
+            .expect_err("ill-typed claim specialization should be rejected");
+        assert!(
+            err.to_string().contains("claim specialization"),
+            "unexpected checker error: {err}"
+        );
     }
 
     #[test]

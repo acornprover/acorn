@@ -215,6 +215,16 @@ fn test_substitute_bound_in_lambda_respects_binder() {
 }
 
 #[test]
+fn test_substitute_bound_avoids_capture_under_lambda() {
+    let lambda_outer = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
+    let replacement = Term::atom(Atom::BoundVariable(0));
+
+    let result = lambda_outer.substitute_bound(0, &replacement);
+
+    assert_eq!(format!("{}", result), "lambda(Bool => b1)");
+}
+
+#[test]
 fn test_substitute_bound_in_quantifier_respects_binder() {
     let forall = Term::forall(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
     let replacement = Term::parse("c0");
@@ -227,6 +237,16 @@ fn test_substitute_bound_in_quantifier_respects_binder() {
 }
 
 #[test]
+fn test_open_bound_avoids_capture_under_lambda() {
+    let body = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
+    let replacement = Term::atom(Atom::BoundVariable(0));
+
+    let result = body.open_bound(&replacement);
+
+    assert_eq!(format!("{}", result), "lambda(Bool => b1)");
+}
+
+#[test]
 fn test_shift_bound_simple() {
     let term = Term::parse("b0");
     let result = term.shift_bound(0, 1);
@@ -235,6 +255,12 @@ fn test_shift_bound_simple() {
     let term2 = Term::parse("b2");
     let result2 = term2.shift_bound(0, -1);
     assert_eq!(format!("{}", result2), "b1");
+}
+
+#[test]
+#[should_panic(expected = "shift_bound underflow/overflow")]
+fn test_shift_bound_rejects_underflow() {
+    let _ = Term::parse("b0").shift_bound(0, -1);
 }
 
 #[test]
@@ -253,6 +279,15 @@ fn test_shift_bound_in_compound() {
     let term = Term::parse("c0(b0, b1)");
     let result = term.shift_bound(0, 1);
     assert_eq!(format!("{}", result), "c0(b1, b2)");
+}
+
+#[test]
+fn test_references_bound_respects_inner_binders() {
+    let inner_reference = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(0)));
+    let outer_reference = Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1)));
+
+    assert!(!inner_reference.references_bound(0));
+    assert!(outer_reference.references_bound(0));
 }
 
 #[test]

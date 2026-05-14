@@ -17,7 +17,7 @@ use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::literal::Literal;
 use crate::kernel::symbol::Symbol;
-use crate::kernel::term::{Decomposition, Term, TermRef};
+use crate::kernel::term::{Decomposition, Term};
 
 fn split_symbol_application(term: &Term, symbol: Symbol, arity: usize) -> Option<Vec<Term>> {
     let (head, args) = term.as_ref().split_application_multi()?;
@@ -92,47 +92,6 @@ fn beta_reduce_term_children(term: &Term) -> Term {
     }
 }
 
-fn substitute_bound_capture_avoiding(
-    term: TermRef<'_>,
-    index: u16,
-    replacement: &Term,
-    depth: u16,
-) -> Term {
-    match term.decompose() {
-        Decomposition::Atom(Atom::BoundVariable(i)) if *i == index + depth => {
-            replacement.shift_bound(0, depth as i16)
-        }
-        Decomposition::Atom(_) => term.to_owned(),
-        Decomposition::Application(function, argument) => {
-            let function = substitute_bound_capture_avoiding(function, index, replacement, depth);
-            let argument = substitute_bound_capture_avoiding(argument, index, replacement, depth);
-            function.apply(&[argument])
-        }
-        Decomposition::Pi(input, output) => {
-            let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
-            let output = substitute_bound_capture_avoiding(output, index, replacement, depth + 1);
-            Term::pi(input, output)
-        }
-        Decomposition::Lambda(input, body) => {
-            let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
-            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-            Term::lambda(input, body)
-        }
-        Decomposition::ForAll(binder_type, body) => {
-            let binder_type =
-                substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
-            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-            Term::forall(binder_type, body)
-        }
-        Decomposition::Exists(binder_type, body) => {
-            let binder_type =
-                substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
-            let body = substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-            Term::exists(binder_type, body)
-        }
-    }
-}
-
 fn beta_reduce_head_lambda_application(term: &Term) -> Option<Term> {
     let Decomposition::Application(function, argument) = term.as_ref().decompose() else {
         return None;
@@ -141,38 +100,7 @@ fn beta_reduce_head_lambda_application(term: &Term) -> Option<Term> {
         return None;
     };
 
-    // Standard de Bruijn beta reduction:
-    // shift(-1, subst(0, shift(1, arg), body))
-    let lifted_argument = argument.to_owned().shift_bound(0, 1);
-    let substituted = substitute_bound_capture_avoiding(body, 0, &lifted_argument, 0);
-    Some(substituted.shift_bound(0, -1))
-}
-
-fn references_bound_range(term: TermRef<'_>, start: u16, end: u16, depth: u16) -> bool {
-    match term.decompose() {
-        Decomposition::Atom(Atom::BoundVariable(i)) => *i >= start + depth && *i < end + depth,
-        Decomposition::Atom(_) => false,
-        Decomposition::Application(function, argument) => {
-            references_bound_range(function, start, end, depth)
-                || references_bound_range(argument, start, end, depth)
-        }
-        Decomposition::Pi(input, output) => {
-            references_bound_range(input, start, end, depth)
-                || references_bound_range(output, start, end, depth + 1)
-        }
-        Decomposition::Lambda(input, body) => {
-            references_bound_range(input, start, end, depth)
-                || references_bound_range(body, start, end, depth + 1)
-        }
-        Decomposition::ForAll(binder_type, body) => {
-            references_bound_range(binder_type, start, end, depth)
-                || references_bound_range(body, start, end, depth + 1)
-        }
-        Decomposition::Exists(binder_type, body) => {
-            references_bound_range(binder_type, start, end, depth)
-                || references_bound_range(body, start, end, depth + 1)
-        }
-    }
+    Some(body.to_owned().open_bound(&argument.to_owned()))
 }
 
 fn eta_reduce_single_lambda(term: &Term) -> Option<Term> {
@@ -182,13 +110,10 @@ fn eta_reduce_single_lambda(term: &Term) -> Option<Term> {
     if *last_arg != Term::atom(Atom::BoundVariable(0)) {
         return None;
     }
-    if references_bound_range(function.as_ref(), 0, 1, 0) {
+    if function.references_bound(0) {
         return None;
     }
-    if prefix_args
-        .iter()
-        .any(|arg| references_bound_range(arg.as_ref(), 0, 1, 0))
-    {
+    if prefix_args.iter().any(|arg| arg.references_bound(0)) {
         return None;
     }
 

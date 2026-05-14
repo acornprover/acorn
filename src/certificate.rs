@@ -375,21 +375,14 @@ impl Certificate {
         local_context.push_type(witness.return_type.clone());
         let opened_body = witness
             .body
-            .substitute_bound(
-                0,
-                &Term::new_variable(witness.ambient_context.len() as AtomId),
-            )
-            .shift_bound(0, -1);
+            .open_bound(&Term::new_variable(witness.ambient_context.len() as AtomId));
         let general_condition = kernel_context
             .quote_term_with_context(&opened_body, &local_context, false)
             .bind_values(0, local_context.len() as AtomId, &type_param_placeholders);
-        let specialized_body = witness
-            .body
-            .substitute_bound(
-                0,
-                &witness_application(witness.symbol, &witness.ambient_context),
-            )
-            .shift_bound(0, -1);
+        let specialized_body = witness.body.open_bound(&witness_application(
+            witness.symbol,
+            &witness.ambient_context,
+        ));
         let specialized_condition = kernel_context
             .quote_term_with_context(&specialized_body, &witness.ambient_context, false)
             .bind_values(

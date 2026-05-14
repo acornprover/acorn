@@ -141,9 +141,7 @@ impl<'a> TermBridge<'a> {
                 ));
 
                 let fresh_var = current_context.push_type(current_input.clone()) as AtomId;
-                let opened_output = current_output
-                    .substitute_bound(0, &Term::new_variable(fresh_var))
-                    .shift_bound(0, -1);
+                let opened_output = current_output.open_bound(&Term::new_variable(fresh_var));
 
                 if let Some((next_input, next_output)) = opened_output.as_ref().split_pi() {
                     let next_input_owned = next_input.to_owned();
@@ -717,11 +715,9 @@ impl<'a> TermBridge<'a> {
 
             match term.as_ref().decompose() {
                 Decomposition::Application(func, arg) => match func.decompose() {
-                    Decomposition::Lambda(_, body) => Some(
-                        body.to_owned()
-                            .substitute_bound(0, &arg.to_owned())
-                            .shift_bound(0, -1),
-                    ),
+                    Decomposition::Lambda(_, body) => {
+                        Some(body.to_owned().open_bound(&arg.to_owned()))
+                    }
                     _ => reduce_head_lambda_application(&func.to_owned())
                         .map(|reduced_func| reduced_func.apply(&[arg.to_owned()])),
                 },
@@ -771,10 +767,7 @@ impl<'a> TermBridge<'a> {
                     extended
                 });
                 let next_var_remapping = next_var_remapping_storage.as_deref();
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(fresh_var))
-                    .shift_bound(0, -1);
+                let opened_body = body.to_owned().open_bound(&Term::new_variable(fresh_var));
                 let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
@@ -819,10 +812,7 @@ impl<'a> TermBridge<'a> {
                     extended
                 });
                 let next_var_remapping = next_var_remapping_storage.as_deref();
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(fresh_var))
-                    .shift_bound(0, -1);
+                let opened_body = body.to_owned().open_bound(&Term::new_variable(fresh_var));
                 let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
@@ -867,10 +857,7 @@ impl<'a> TermBridge<'a> {
                     extended
                 });
                 let next_var_remapping = next_var_remapping_storage.as_deref();
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(fresh_var))
-                    .shift_bound(0, -1);
+                let opened_body = body.to_owned().open_bound(&Term::new_variable(fresh_var));
                 let body_value = self.quote_term(
                     &opened_body,
                     &next_context,
@@ -1494,10 +1481,7 @@ impl<'a> TermBridge<'a> {
                     let next_index = mapping.iter().filter_map(|x| *x).max().map_or(0, |m| m + 1);
                     mapping[fresh_var as usize] = Some(next_index);
                 }
-                current_term = output
-                    .to_owned()
-                    .substitute_bound(0, &Term::new_variable(fresh_var))
-                    .shift_bound(0, -1);
+                current_term = output.to_owned().open_bound(&Term::new_variable(fresh_var));
             }
 
             let return_type = self.quote_type_with_context_remapped(

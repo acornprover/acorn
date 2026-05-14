@@ -1,10 +1,21 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
-use crate::elaborator::acorn_value::AcornValue;
+use crate::elaborator::acorn_value::{AcornValue, ConstantInstance};
+use crate::elaborator::names::ConstantName;
+use crate::elaborator::proposition::Proposition;
+use crate::elaborator::source::Source;
+use crate::elaborator::to_term::build_type_var_map;
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::literal::Literal;
+use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol_table::NewConstantType;
+use crate::kernel::term::Term;
 use crate::kernel::term_normalization::{normalize_clause_subterms, normalize_term};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
+use crate::module::ModuleId;
 
 /// A certificate claim line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +75,148 @@ impl Claim {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn specialized_replacement_context(&self) -> LocalContext {
+        let input_context = self.clause.get_local_context();
+        let mut output_context = self.var_map.build_output_context(input_context);
+        for i in 0..input_context.len() {
+            if self.var_map.get_mapping(i as AtomId).is_none() {
+                if let Some(var_type) = input_context.get_var_type(i) {
+                    output_context.set_type(i, var_type.clone());
+                }
+            }
+        }
+        output_context
+    }
+
+    fn term_has_expected_type(
+        term: &Term,
+        actual_type: &Term,
+        expected_type: &Term,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if let Some(required_tc) = expected_type.as_ref().as_typeclass() {
+            return actual_type.as_ref().is_type0()
+                || kernel_context.type_store.type_term_is_instance_of(
+                    term.as_ref(),
+                    local_context,
+                    required_tc,
+                );
+        }
+        if expected_type.as_ref().is_type0() && actual_type.as_ref().is_type_param_kind() {
+            return true;
+        }
+        actual_type == expected_type
+    }
+
+    fn validate_var_map_types(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        let input_context = self.clause.get_local_context();
+        let replacement_context = self.specialized_replacement_context();
+        for (var_id, term) in self.var_map.iter() {
+            let Some(expected_type) = input_context.get_var_type(var_id) else {
+                return Err(format!(
+                    "claim specialization binds variable x{} with no declared type",
+                    var_id
+                ));
+            };
+            let expected_type =
+                normalize_term(&apply_to_term(expected_type.as_ref(), &self.var_map));
+            let actual_type = normalize_term(
+                &term
+                    .checked_type_with_context(&replacement_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "claim specialization x{} is not well-typed: {}",
+                            var_id, err
+                        )
+                    })?,
+            );
+            if !Self::term_has_expected_type(
+                term,
+                &actual_type,
+                &expected_type,
+                &replacement_context,
+                kernel_context,
+            ) {
+                return Err(format!(
+                    "claim specialization x{} has type {}, but expected {}",
+                    var_id, actual_type, expected_type
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_clause_well_typed(
+        label: &str,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Result<(), String> {
+        let local_context = clause.get_local_context();
+        if !local_context.validate_variable_ordering() {
+            return Err(format!("{} has badly ordered variable types", label));
+        }
+        for (var_id, var_type) in local_context.get_var_types().iter().enumerate() {
+            let Some(var_type) = var_type else {
+                continue;
+            };
+            let var_type_kind = var_type
+                .checked_type_with_context(local_context, kernel_context)
+                .map_err(|err| {
+                    format!(
+                        "{} variable x{} has ill-typed type {}: {}",
+                        label, var_id, var_type, err
+                    )
+                })?;
+            if !var_type_kind.as_ref().is_type_param_kind() {
+                return Err(format!(
+                    "{} variable x{} has non-type type annotation {} with type {}",
+                    label, var_id, var_type, var_type_kind
+                ));
+            }
+        }
+        for literal in &clause.literals {
+            let left_type = normalize_term(
+                &literal
+                    .left
+                    .checked_type_with_context(local_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "{} has ill-typed left side {}: {}",
+                            label, literal.left, err
+                        )
+                    })?,
+            );
+            let right_type = normalize_term(
+                &literal
+                    .right
+                    .checked_type_with_context(local_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "{} has ill-typed right side {}: {}",
+                            label, literal.right, err
+                        )
+                    })?,
+            );
+            if left_type != right_type {
+                return Err(format!(
+                    "{} literal type mismatch: {} has type {}, but {} has type {}",
+                    label, literal.left, left_type, literal.right, right_type
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_checker_payload(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.validate_var_map_scope()?;
+        Self::validate_clause_well_typed("claim generic clause", &self.clause, kernel_context)?;
+        self.validate_var_map_types(kernel_context)?;
+        let specialized = self.normalized_specialized_clause(kernel_context)?;
+        Self::validate_clause_well_typed("claim specialized clause", &specialized, kernel_context)?;
         Ok(())
     }
 
@@ -163,6 +316,218 @@ impl SatisfyStep {
     /// Distinguish function witnesses from plain value witnesses.
     pub fn is_function(&self) -> bool {
         self.return_name.is_some()
+    }
+
+    fn type_var_map_for_params(
+        kernel_context: &mut KernelContext,
+        type_params: &[TypeParam],
+    ) -> Option<HashMap<String, (AtomId, Term)>> {
+        if type_params.is_empty() {
+            None
+        } else {
+            Some(build_type_var_map(kernel_context, type_params))
+        }
+    }
+
+    fn local_certificate_proposition(value: &AcornValue, type_params: &[TypeParam]) -> Proposition {
+        Proposition::new(
+            value.clone(),
+            type_params.to_vec(),
+            Source::anonymous(ModuleId::default(), Default::default(), 1),
+        )
+    }
+
+    fn claim_for_proposition(
+        kernel_context: &mut KernelContext,
+        value: &AcornValue,
+        type_params: &[TypeParam],
+    ) -> Result<Claim, String> {
+        let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
+        let clause = kernel_context.lower_clause(value, NewConstantType::Local, type_var_map)?;
+        Claim::new(clause, VariableMap::new())
+    }
+
+    fn exact_witness_clauses_for_proposition(
+        kernel_context: &mut KernelContext,
+        value: &AcornValue,
+        type_params: &[TypeParam],
+    ) -> Result<Vec<Clause>, String> {
+        let proposition = Self::local_certificate_proposition(value, type_params);
+        Ok(kernel_context
+            .lower_proposition_to_clauses(&proposition)?
+            .into_iter()
+            .map(|clause| clause.normalized())
+            .collect())
+    }
+
+    fn maybe_specialized_clause_for_proposition(
+        kernel_context: &mut KernelContext,
+        value: &AcornValue,
+        type_params: &[TypeParam],
+    ) -> Result<Option<Clause>, String> {
+        let type_var_map = Self::type_var_map_for_params(kernel_context, type_params);
+        let term =
+            kernel_context.lower_term(value, NewConstantType::Local, type_var_map.as_ref())?;
+        let term = normalize_term(&term);
+        let inline_literal_body =
+            match kernel_context.term_to_inline_literal_body(&term, type_var_map) {
+                Ok(term) => term,
+                Err(_) => return Ok(None),
+            };
+        Ok(Some(
+            Clause::from_literals_unnormalized(
+                vec![Literal::positive(inline_literal_body)],
+                &LocalContext::empty(),
+            )
+            .normalized(),
+        ))
+    }
+
+    fn constant_matches_name(constant: &ConstantInstance, name: &str) -> bool {
+        matches!(&constant.name, ConstantName::Unqualified(_, local_name) if local_name == name)
+    }
+
+    fn variable_witness_general_condition(&self) -> AcornValue {
+        let condition = self.condition.clone().insert_stack(0, 1);
+        condition.replace_constants(0, &|constant| {
+            if Self::constant_matches_name(constant, &self.name) {
+                Some(AcornValue::Variable(0, self.return_type.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn function_witness_constant_name(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Result<ConstantName, String> {
+        kernel_context
+            .symbol_table
+            .find_scoped_unqualified_name(&self.name)
+            .ok_or_else(|| format!("witness constant '{}' is not registered", self.name))
+    }
+
+    fn general_claim_value(&self) -> AcornValue {
+        if self.is_function() {
+            let arg_types = self
+                .arguments
+                .iter()
+                .map(|(_, arg_type)| arg_type.clone())
+                .collect();
+            AcornValue::ForAll(
+                arg_types,
+                Box::new(AcornValue::Exists(
+                    vec![self.return_type.clone()],
+                    Box::new(self.condition.clone()),
+                )),
+            )
+        } else {
+            AcornValue::Exists(
+                vec![self.return_type.clone()],
+                Box::new(self.variable_witness_general_condition()),
+            )
+        }
+    }
+
+    fn specialized_claim_value(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Result<AcornValue, String> {
+        if !self.is_function() {
+            return Ok(self.condition.clone());
+        }
+
+        let arg_types: Vec<AcornType> = self
+            .arguments
+            .iter()
+            .map(|(_, arg_type)| arg_type.clone())
+            .collect();
+        let function_type = AcornType::functional(arg_types.clone(), self.return_type.clone());
+        let function_constant = AcornValue::constant(
+            self.function_witness_constant_name(kernel_context)?,
+            vec![],
+            function_type.clone(),
+            function_type,
+            self.type_params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect(),
+            vec![],
+        );
+        let function_term = AcornValue::apply(
+            function_constant,
+            arg_types
+                .iter()
+                .enumerate()
+                .map(|(i, arg_type)| AcornValue::Variable(i as AtomId, arg_type.clone()))
+                .collect(),
+        );
+        let num_args = arg_types.len() as AtomId;
+        let specialized_condition =
+            self.condition
+                .clone()
+                .bind_values(num_args, num_args, &[function_term]);
+        Ok(AcornValue::ForAll(
+            arg_types,
+            Box::new(specialized_condition),
+        ))
+    }
+
+    fn same_clause_set(left: &[Clause], right: &[Clause]) -> bool {
+        let left: HashSet<_> = left.iter().collect();
+        let right: HashSet<_> = right.iter().collect();
+        left == right
+    }
+
+    /// Recompute the clauses that this witness declaration is allowed to introduce.
+    ///
+    /// `SatisfyStep` stores display-oriented clauses produced by parsing or certificate
+    /// generation. The checker validates them against the declaration payload before trusting
+    /// them as proof facts.
+    pub fn validate_checker_payload(
+        &self,
+        kernel_context: &mut KernelContext,
+    ) -> Result<(), String> {
+        let expected_justification = Self::claim_for_proposition(
+            kernel_context,
+            &self.general_claim_value(),
+            &self.type_params,
+        )?;
+        if self.justification != expected_justification {
+            return Err("witness justification does not match declaration".to_string());
+        }
+
+        let specialized_value = self.specialized_claim_value(kernel_context)?;
+        let expected_specialized_clause = Self::maybe_specialized_clause_for_proposition(
+            kernel_context,
+            &specialized_value,
+            &self.type_params,
+        )?;
+        if self.specialized_clause != expected_specialized_clause {
+            return Err(format!(
+                "witness specialized clause mismatch: expected {:?}, got {:?}",
+                expected_specialized_clause, self.specialized_clause
+            ));
+        }
+
+        let mut expected_witness_clauses = Self::exact_witness_clauses_for_proposition(
+            kernel_context,
+            &specialized_value,
+            &self.type_params,
+        )?;
+        if !self.is_function() {
+            expected_witness_clauses
+                .retain(|clause| expected_specialized_clause.as_ref() != Some(clause));
+        }
+        if !Self::same_clause_set(&self.witness_clauses, &expected_witness_clauses) {
+            return Err(format!(
+                "witness clauses mismatch: expected {:?}, got {:?}",
+                expected_witness_clauses, self.witness_clauses
+            ));
+        }
+
+        Ok(())
     }
 }
 

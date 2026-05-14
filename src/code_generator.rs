@@ -810,7 +810,7 @@ impl CodeGenerator<'_> {
 
     /// Open a binder body by substituting bound variable 0 and reducing binder depth by one.
     fn open_binder_body(body: &Term, replacement: &Term) -> Term {
-        body.substitute_bound(0, replacement).shift_bound(0, -1)
+        body.open_bound(replacement)
     }
 
     /// Abstract one free variable into a new outer bound variable.

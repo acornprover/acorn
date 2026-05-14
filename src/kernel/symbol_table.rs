@@ -340,6 +340,18 @@ impl SymbolTable {
         self.name_to_symbol.get(name).cloned()
     }
 
+    pub fn find_scoped_unqualified_name(&self, name: &str) -> Option<ConstantName> {
+        self.scoped_constants.iter().find_map(|constant_name| {
+            let constant_name = constant_name.as_ref()?;
+            match constant_name {
+                ConstantName::Unqualified(_, local_name) if local_name == name => {
+                    Some(constant_name.clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
     pub fn get_instance_alias_symbol(
         &self,
         constant: &crate::elaborator::acorn_value::ConstantInstance,
