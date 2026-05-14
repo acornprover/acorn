@@ -1604,6 +1604,60 @@ mod tests {
     }
 
     #[test]
+    fn test_check_cert_steps_rejects_tampered_witness_specialized_clause() {
+        use crate::certificate::Certificate;
+        use crate::kernel::certificate_step::CertificateStep;
+        use crate::processor::Processor;
+        use crate::project::Project;
+        use std::borrow::Cow;
+
+        let (_processor, bindings, normalized_goal) = Processor::test_goal(
+            r#"
+            theorem goal { true }
+            "#,
+        );
+
+        let project = Project::new_mock();
+        let mut bindings_cow = Cow::Borrowed(&bindings);
+        let mut kernel_context_cow = Cow::Owned(normalized_goal.kernel_context.clone());
+
+        let mut satisfy_step = match Certificate::parse_code_line(
+            "let w: Bool satisfy { true }",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("valid satisfy step should parse")
+        {
+            CertificateStep::Satisfy(step) => step,
+            CertificateStep::Claim(_) => panic!("expected satisfy step"),
+        };
+
+        let kernel_context = kernel_context_cow.as_ref();
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &satisfy_step.justification.normalized_generic_clause(),
+            StepReason::Testing,
+            kernel_context,
+        );
+
+        assert_ne!(satisfy_step.specialized_clause, Some(Clause::impossible()));
+        satisfy_step.specialized_clause = Some(Clause::impossible());
+        let err = checker
+            .check_cert_steps(
+                &[CertificateStep::Satisfy(satisfy_step)],
+                None,
+                kernel_context,
+            )
+            .expect_err("tampered specialized clause should be rejected");
+        assert!(
+            err.to_string()
+                .contains("witness specialized clause mismatch"),
+            "unexpected checker error: {err}"
+        );
+    }
+
+    #[test]
     fn test_instantiate_claim_clause_normalizes_lambda_valued_arguments() {
         use crate::kernel::atom::Atom;
         use crate::kernel::certificate_step::Claim;
