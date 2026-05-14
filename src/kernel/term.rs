@@ -574,6 +574,63 @@ impl<'a> TermRef<'a> {
         }
     }
 
+    /// Check if this term references a particular bound variable from its enclosing scope.
+    pub fn references_bound(&self, index: u16) -> bool {
+        self.references_bound_at_depth(index, 0)
+    }
+
+    fn references_bound_at_depth(&self, index: u16, depth: u16) -> bool {
+        match self.decompose() {
+            Decomposition::Atom(Atom::BoundVariable(i)) => {
+                let target = index
+                    .checked_add(depth)
+                    .expect("bound variable reference target overflow");
+                *i == target
+            }
+            Decomposition::Atom(_) => false,
+            Decomposition::Application(f, a) => {
+                f.references_bound_at_depth(index, depth)
+                    || a.references_bound_at_depth(index, depth)
+            }
+            Decomposition::Pi(input, output) => {
+                input.references_bound_at_depth(index, depth)
+                    || output.references_bound_at_depth(
+                        index,
+                        depth
+                            .checked_add(1)
+                            .expect("bound variable reference depth overflow"),
+                    )
+            }
+            Decomposition::Lambda(input, body) => {
+                input.references_bound_at_depth(index, depth)
+                    || body.references_bound_at_depth(
+                        index,
+                        depth
+                            .checked_add(1)
+                            .expect("bound variable reference depth overflow"),
+                    )
+            }
+            Decomposition::ForAll(binder_type, body) => {
+                binder_type.references_bound_at_depth(index, depth)
+                    || body.references_bound_at_depth(
+                        index,
+                        depth
+                            .checked_add(1)
+                            .expect("bound variable reference depth overflow"),
+                    )
+            }
+            Decomposition::Exists(binder_type, body) => {
+                binder_type.references_bound_at_depth(index, depth)
+                    || body.references_bound_at_depth(
+                        index,
+                        depth
+                            .checked_add(1)
+                            .expect("bound variable reference depth overflow"),
+                    )
+            }
+        }
+    }
+
     /// Returns true if this is the Bool type.
     pub fn is_bool_type(&self) -> bool {
         self.is_atomic() && matches!(self.get_head_atom(), Atom::Symbol(Symbol::Bool))
@@ -724,10 +781,7 @@ impl<'a> TermRef<'a> {
                 let mut nested_context = local_context.clone();
                 let fresh_var = nested_context.push_type(input_type.clone()) as AtomId;
                 let replacement = Term::new_variable(fresh_var);
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &replacement)
-                    .shift_bound(0, -1);
+                let opened_body = body.to_owned().open_bound(&replacement);
                 let body_type = opened_body.get_type_with_context(&nested_context, kernel_context);
                 let output_type = abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
                 Term::pi(input_type, output_type)
@@ -891,10 +945,7 @@ impl<'a> TermRef<'a> {
                 let mut nested_context = local_context.clone();
                 let fresh_var = nested_context.push_type(input_type.clone()) as AtomId;
                 let replacement = Term::new_variable(fresh_var);
-                let opened_body = body
-                    .to_owned()
-                    .substitute_bound(0, &replacement)
-                    .shift_bound(0, -1);
+                let opened_body = body.to_owned().open_bound(&replacement);
                 let body_type =
                     opened_body.checked_type_with_context(&nested_context, kernel_context)?;
                 let output_type = abstract_free_var_as_bound_at_depth(&body_type, fresh_var, 0);
@@ -1847,8 +1898,7 @@ impl Term {
             let output = output.to_owned();
             let result = if output.has_bound_variable() {
                 // Dependent type: substitute and shift
-                let substituted = output.substitute_bound(0, arg);
-                substituted.shift_bound(0, -1)
+                output.open_bound(arg)
             } else {
                 // Non-dependent type: just return output
                 output
@@ -2627,6 +2677,11 @@ impl Term {
         false
     }
 
+    /// Check if this term references a particular bound variable from its enclosing scope.
+    pub fn references_bound(&self, index: u16) -> bool {
+        self.as_ref().references_bound(index)
+    }
+
     /// Check if this term has any bound variables that escape their enclosing Pi type.
     /// A bound variable "escapes" if it references a binding outside the current term.
     /// For example, in `Pi(A, b0)`, b0 is properly bound (refers to the Pi's parameter).
@@ -2674,29 +2729,26 @@ impl Term {
         }
     }
 
-    /// Substitute a bound variable with a replacement term.
-    /// Replaces BoundVariable(index) with the given replacement term.
-    /// This is the core operation for applying a Pi type to an argument.
+    /// Substitute a bound variable with a replacement term, avoiding capture under binders.
+    ///
+    /// When substituting under an intervening binder, bound variables in the replacement are
+    /// shifted so they keep referring to the same outer binders instead of being captured.
     pub fn substitute_bound(&self, index: u16, replacement: &Term) -> Term {
-        // Special case: if this term IS the bound variable being replaced
-        if self.components.len() == 1 {
-            if let TermComponent::Atom(Atom::BoundVariable(i)) = self.components[0] {
-                if i == index {
-                    return replacement.clone();
-                }
-            }
-        }
-
-        self.substitute_bound_impl(index, replacement)
+        self.substitute_bound_impl(index, replacement, 0)
     }
 
     /// Helper for substitute_bound using decomposition.
-    fn substitute_bound_impl(&self, index: u16, replacement: &Term) -> Term {
+    fn substitute_bound_impl(&self, index: u16, replacement: &Term, depth: u16) -> Term {
         match self.as_ref().decompose() {
             Decomposition::Atom(atom) => {
                 if let Atom::BoundVariable(i) = atom {
-                    if *i == index {
-                        return replacement.clone();
+                    let target = index
+                        .checked_add(depth)
+                        .expect("substitute_bound target index overflow");
+                    if *i == target {
+                        let depth = i16::try_from(depth)
+                            .expect("substitute_bound depth exceeds shift range");
+                        return replacement.shift_bound(0, depth);
                     }
                 }
                 // Not the variable we're replacing
@@ -2706,8 +2758,8 @@ impl Term {
                 let func = func_ref.to_owned();
                 let arg = arg_ref.to_owned();
 
-                let new_func = func.substitute_bound_impl(index, replacement);
-                let new_arg = arg.substitute_bound_impl(index, replacement);
+                let new_func = func.substitute_bound_impl(index, replacement, depth);
+                let new_arg = arg.substitute_bound_impl(index, replacement, depth);
 
                 new_func.apply(&[new_arg])
             }
@@ -2716,9 +2768,15 @@ impl Term {
                 let output = output_ref.to_owned();
 
                 // Substitute in input type
-                let new_input = input.substitute_bound_impl(index, replacement);
-                // In the output type, bound variables are shifted by 1, so we substitute at index+1
-                let new_output = output.substitute_bound_impl(index + 1, replacement);
+                let new_input = input.substitute_bound_impl(index, replacement, depth);
+                // In the output type, references to the target are under one more binder.
+                let new_output = output.substitute_bound_impl(
+                    index,
+                    replacement,
+                    depth
+                        .checked_add(1)
+                        .expect("substitute_bound depth overflow"),
+                );
 
                 Term::pi(new_input, new_output)
             }
@@ -2727,9 +2785,15 @@ impl Term {
                 let body = body_ref.to_owned();
 
                 // Substitute in input type
-                let new_input = input.substitute_bound_impl(index, replacement);
-                // In the body, bound variables are shifted by 1 due to lambda binder
-                let new_body = body.substitute_bound_impl(index + 1, replacement);
+                let new_input = input.substitute_bound_impl(index, replacement, depth);
+                // In the body, references to the target are under one more binder.
+                let new_body = body.substitute_bound_impl(
+                    index,
+                    replacement,
+                    depth
+                        .checked_add(1)
+                        .expect("substitute_bound depth overflow"),
+                );
 
                 Term::lambda(new_input, new_body)
             }
@@ -2738,9 +2802,15 @@ impl Term {
                 let body = body_ref.to_owned();
 
                 // Substitute in binder type
-                let new_binder_type = binder_type.substitute_bound_impl(index, replacement);
-                // In the body, bound variables are shifted by 1 due to quantifier binder
-                let new_body = body.substitute_bound_impl(index + 1, replacement);
+                let new_binder_type = binder_type.substitute_bound_impl(index, replacement, depth);
+                // In the body, references to the target are under one more binder.
+                let new_body = body.substitute_bound_impl(
+                    index,
+                    replacement,
+                    depth
+                        .checked_add(1)
+                        .expect("substitute_bound depth overflow"),
+                );
 
                 Term::forall(new_binder_type, new_body)
             }
@@ -2749,13 +2819,29 @@ impl Term {
                 let body = body_ref.to_owned();
 
                 // Substitute in binder type
-                let new_binder_type = binder_type.substitute_bound_impl(index, replacement);
-                // In the body, bound variables are shifted by 1 due to quantifier binder
-                let new_body = body.substitute_bound_impl(index + 1, replacement);
+                let new_binder_type = binder_type.substitute_bound_impl(index, replacement, depth);
+                // In the body, references to the target are under one more binder.
+                let new_body = body.substitute_bound_impl(
+                    index,
+                    replacement,
+                    depth
+                        .checked_add(1)
+                        .expect("substitute_bound depth overflow"),
+                );
 
                 Term::exists(new_binder_type, new_body)
             }
         }
+    }
+
+    /// Open a binder body by replacing bound variable `0` with `replacement`.
+    ///
+    /// This performs the standard de Bruijn operation:
+    /// `shift(-1, substitute(0, shift(1, replacement), body))`.
+    pub fn open_bound(&self, replacement: &Term) -> Term {
+        let lifted_replacement = replacement.shift_bound(0, 1);
+        let substituted = self.substitute_bound(0, &lifted_replacement);
+        substituted.shift_bound(0, -1)
     }
 
     /// Shift bound variable indices.
@@ -2778,7 +2864,13 @@ impl Term {
             Decomposition::Atom(atom) => {
                 if let Atom::BoundVariable(i) = atom {
                     if *i >= cutoff {
-                        let new_i = (*i as i16 + amount) as u16;
+                        let new_i = (*i as i32) + (amount as i32);
+                        let new_i = u16::try_from(new_i).unwrap_or_else(|_| {
+                            panic!(
+                                "shift_bound underflow/overflow: b{} shifted by {} with cutoff {}",
+                                i, amount, cutoff
+                            )
+                        });
                         return Term::atom(Atom::BoundVariable(new_i));
                     }
                 }
@@ -2800,7 +2892,10 @@ impl Term {
                 // Shift in input type
                 let new_input = input.shift_bound_impl(cutoff, amount);
                 // In the output type, the cutoff increases by 1 (we're under a binder)
-                let new_output = output.shift_bound_impl(cutoff + 1, amount);
+                let new_output = output.shift_bound_impl(
+                    cutoff.checked_add(1).expect("shift_bound cutoff overflow"),
+                    amount,
+                );
 
                 Term::pi(new_input, new_output)
             }
@@ -2811,7 +2906,10 @@ impl Term {
                 // Shift in input type
                 let new_input = input.shift_bound_impl(cutoff, amount);
                 // In the body, the cutoff increases by 1 (we're under a binder)
-                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+                let new_body = body.shift_bound_impl(
+                    cutoff.checked_add(1).expect("shift_bound cutoff overflow"),
+                    amount,
+                );
 
                 Term::lambda(new_input, new_body)
             }
@@ -2822,7 +2920,10 @@ impl Term {
                 // Shift in binder type
                 let new_binder_type = binder_type.shift_bound_impl(cutoff, amount);
                 // In the body, the cutoff increases by 1 (we're under a binder)
-                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+                let new_body = body.shift_bound_impl(
+                    cutoff.checked_add(1).expect("shift_bound cutoff overflow"),
+                    amount,
+                );
 
                 Term::forall(new_binder_type, new_body)
             }
@@ -2833,7 +2934,10 @@ impl Term {
                 // Shift in binder type
                 let new_binder_type = binder_type.shift_bound_impl(cutoff, amount);
                 // In the body, the cutoff increases by 1 (we're under a binder)
-                let new_body = body.shift_bound_impl(cutoff + 1, amount);
+                let new_body = body.shift_bound_impl(
+                    cutoff.checked_add(1).expect("shift_bound cutoff overflow"),
+                    amount,
+                );
 
                 Term::exists(new_binder_type, new_body)
             }

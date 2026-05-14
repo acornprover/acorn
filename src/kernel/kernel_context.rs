@@ -227,8 +227,12 @@ impl KernelContext {
 
         if let Some((domain, codomain)) = var_type.as_ref().split_pi() {
             let codomain_term = codomain.to_owned();
-            let shifted_codomain = codomain_term.shift_bound(0, -1);
             let domain_term = domain.to_owned();
+            if codomain_term.references_bound(0) {
+                seen.pop();
+                return None;
+            }
+            let shifted_codomain = codomain_term.shift_bound(1, -1);
 
             if domain_term == shifted_codomain {
                 // Identity function inhabits T -> T.
@@ -1531,6 +1535,17 @@ mod tests {
             Term::atom(Atom::BoundVariable(0 as AtomId)),
         );
         assert_eq!(witness, expected);
+    }
+
+    #[test]
+    fn test_find_inhabitant_rejects_dependent_codomain_bound_to_argument() {
+        use crate::kernel::atom::Atom;
+
+        let ctx = KernelContext::new();
+        let dependent_type = Term::pi(Term::type_sort(), Term::atom(Atom::BoundVariable(0)));
+
+        assert!(ctx.find_inhabitant(&dependent_type, None).is_none());
+        assert!(!ctx.provably_inhabited(&dependent_type, None));
     }
 
     #[test]

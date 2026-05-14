@@ -956,7 +956,7 @@ impl Clause {
         if witness.has_bound_variable() {
             return None;
         }
-        let instantiated = body.substitute_bound(0, &witness).shift_bound(0, -1);
+        let instantiated = body.open_bound(&witness);
         Some((witness, instantiated))
     }
 
@@ -1000,59 +1000,8 @@ impl Clause {
     }
 
     fn simplify_ite_term(term: &Term) -> Term {
-        fn substitute_bound_capture_avoiding(
-            term: TermRef<'_>,
-            index: u16,
-            replacement: &Term,
-            depth: u16,
-        ) -> Term {
-            match term.decompose() {
-                Decomposition::Atom(Atom::BoundVariable(i)) if *i == index + depth => {
-                    replacement.shift_bound(0, depth as i16)
-                }
-                Decomposition::Atom(_) => term.to_owned(),
-                Decomposition::Application(function, argument) => {
-                    let function =
-                        substitute_bound_capture_avoiding(function, index, replacement, depth);
-                    let argument =
-                        substitute_bound_capture_avoiding(argument, index, replacement, depth);
-                    function.apply(&[argument])
-                }
-                Decomposition::Pi(input, output) => {
-                    let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
-                    let output =
-                        substitute_bound_capture_avoiding(output, index, replacement, depth + 1);
-                    Term::pi(input, output)
-                }
-                Decomposition::Lambda(input, body) => {
-                    let input = substitute_bound_capture_avoiding(input, index, replacement, depth);
-                    let body =
-                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-                    Term::lambda(input, body)
-                }
-                Decomposition::ForAll(binder_type, body) => {
-                    let binder_type =
-                        substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
-                    let body =
-                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-                    Term::forall(binder_type, body)
-                }
-                Decomposition::Exists(binder_type, body) => {
-                    let binder_type =
-                        substitute_bound_capture_avoiding(binder_type, index, replacement, depth);
-                    let body =
-                        substitute_bound_capture_avoiding(body, index, replacement, depth + 1);
-                    Term::exists(binder_type, body)
-                }
-            }
-        }
-
         fn beta_reduce_head_lambda(body: TermRef<'_>, argument: &Term) -> Term {
-            // Standard de Bruijn beta reduction:
-            // shift(-1, subst(0, shift(1, arg), body))
-            let lifted_argument = argument.shift_bound(0, 1);
-            let substituted = substitute_bound_capture_avoiding(body, 0, &lifted_argument, 0);
-            substituted.shift_bound(0, -1)
+            body.to_owned().open_bound(argument)
         }
 
         fn recurse(term: &Term) -> Term {
@@ -1164,10 +1113,7 @@ impl Clause {
         let mut output_context = context.clone();
         let fresh_var = output_context.push_type(binder_type.to_owned()) as AtomId;
         let replacement = Term::new_variable(fresh_var);
-        let reduced = body
-            .to_owned()
-            .substitute_bound(0, &replacement)
-            .shift_bound(0, -1);
+        let reduced = body.to_owned().open_bound(&replacement);
         Some((reduced, output_context))
     }
 
@@ -1176,10 +1122,7 @@ impl Clause {
         let mut output_context = context.clone();
         let fresh_var = output_context.push_type(binder_type.to_owned()) as AtomId;
         let replacement = Term::new_variable(fresh_var);
-        let reduced = body
-            .to_owned()
-            .substitute_bound(0, &replacement)
-            .shift_bound(0, -1);
+        let reduced = body.to_owned().open_bound(&replacement);
         Some((reduced, output_context))
     }
 
@@ -1224,10 +1167,11 @@ impl Clause {
         reduction: &PositiveExistsReduction,
         witness: Term,
     ) -> NormalizedClauseTrace {
-        let reduced = reduction
-            .body
-            .substitute_bound(0, &witness)
-            .shift_bound(0, -1);
+        assert!(
+            !witness.has_escaping_bound_variable(),
+            "positive exists witness contains escaping bound variables"
+        );
+        let reduced = reduction.body.open_bound(&witness);
         self.with_replaced_literal_and_context(
             reduction.literal_index,
             vec![vec![Literal::positive(reduced)]],

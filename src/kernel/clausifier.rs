@@ -543,7 +543,7 @@ impl<'a> Clausifier<'a> {
     ///
     /// This is the de Bruijn "open" operation: substitute first, then shift down.
     fn open_binder_body(&self, body: &Term, replacement: &Term) -> Term {
-        body.substitute_bound(0, replacement).shift_bound(0, -1)
+        body.open_bound(replacement)
     }
 
     /// Apply arguments by instantiating leading binders (lambda/forall/exists)
