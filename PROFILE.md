@@ -68,6 +68,48 @@ Slowest rebuilt modules by total processing time:
 
 ## profile_check
 
+### 2026-05-14 SatisfyStep Checker Validation
+
+- Date: 2026-05-14
+- Git hash: `c8f0ec23` plus local `SatisfyStep` checker-payload validation changes
+- Command: `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_check --profile=fastdev`, then `/usr/bin/time -f elapsed=%e perf record -g --call-graph fp -o /tmp/acorn-satisfy-after.data target/fastdev/profile_check`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
+- Timing: patched `profile_check` completed successfully in `286.52s` under `perf`, checking `66,544/66,544` cached certificates with `0` searches. The matched pre-change baseline from a detached `HEAD` worktree completed in `283.50s` under the same command shape and the same acornlib checkout. This is a `+3.02s` wall-time delta, about `+1.1%`.
+- Summary: Revalidating `SatisfyStep` checker payloads before trusting embedded witness clauses does not show up as a material check-mode hotspot. In the patched perf sample, `SatisfyStep::validate_checker_payload` appears under the certificate-checking path at roughly `0.18%` inclusive in the sampled call graph, with direct self-time rounded to `0.00%`. The main profile shape is still dominated by clause insertion, boolean reductions, and term normalization.
+- Breakdown:
+
+```text
+Before/after wall time under perf:
+├── baseline HEAD: 283.50s, 66,544/66,544 certificates OK, 0 searches
+├── patched tree: 286.52s, 66,544/66,544 certificates OK, 0 searches
+└── delta: +3.02s = +1.1%
+
+Patched profile_check top-down shape:
+├── 99.95%  Verifier::run
+│   └── 99.90%  Verifier::load_and_build_streaming
+│       └── 91.83%  Builder::process_module_work_batch
+│           └── 91.54%  Builder::verify_lowered_module
+│               ├── 76.75%  Builder::verify_lowered_items
+│               │   └── 67.23%  Builder::verify_goal
+│               │       └── 67.18%  Processor::check_cert_with_usage
+│               │           └── 65.72%  Certificate::check_with_usage
+│               │               └── 62.72%  Checker::check_cert_steps
+│               │                   ├── 68.14%  Checker::insert_clause
+│               │                   └── ~0.18%  SatisfyStep::validate_checker_payload
+│               └── 18.03%  Processor::add_imports_from_bindings
+├── 84.20%  Checker::insert_clause_internal
+├── 78.93%  Checker::insert_boolean_reductions_with_reason
+├── 47.40%  Clause::normalize_with_var_ids_prefilled
+├── 42.34%  Clause::find_boolean_reductions_with_kinds_with_options
+└── 38.70%  normalize_clause_term_with_polarity
+
+Hot direct self-time remains term splitting, term ownership, allocation/free,
+memmove, normalization, and hashing. The new SatisfyStep validation path is
+below the visible self-time threshold.
+```
+
+### 2026-05-12 Parallel Dependency-DAG Loader Baseline
+
 - Date: 2026-05-12
 - Git hash: `822de623` plus local parallel dependency-DAG loader refactor
 - Command: `/usr/bin/time -v target/release/acorn check --jobs 20 --timing`
