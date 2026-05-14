@@ -78,6 +78,148 @@ impl Claim {
         Ok(())
     }
 
+    fn specialized_replacement_context(&self) -> LocalContext {
+        let input_context = self.clause.get_local_context();
+        let mut output_context = self.var_map.build_output_context(input_context);
+        for i in 0..input_context.len() {
+            if self.var_map.get_mapping(i as AtomId).is_none() {
+                if let Some(var_type) = input_context.get_var_type(i) {
+                    output_context.set_type(i, var_type.clone());
+                }
+            }
+        }
+        output_context
+    }
+
+    fn term_has_expected_type(
+        term: &Term,
+        actual_type: &Term,
+        expected_type: &Term,
+        local_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if let Some(required_tc) = expected_type.as_ref().as_typeclass() {
+            return actual_type.as_ref().is_type0()
+                || kernel_context.type_store.type_term_is_instance_of(
+                    term.as_ref(),
+                    local_context,
+                    required_tc,
+                );
+        }
+        if expected_type.as_ref().is_type0() && actual_type.as_ref().is_type_param_kind() {
+            return true;
+        }
+        actual_type == expected_type
+    }
+
+    fn validate_var_map_types(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        let input_context = self.clause.get_local_context();
+        let replacement_context = self.specialized_replacement_context();
+        for (var_id, term) in self.var_map.iter() {
+            let Some(expected_type) = input_context.get_var_type(var_id) else {
+                return Err(format!(
+                    "claim specialization binds variable x{} with no declared type",
+                    var_id
+                ));
+            };
+            let expected_type =
+                normalize_term(&apply_to_term(expected_type.as_ref(), &self.var_map));
+            let actual_type = normalize_term(
+                &term
+                    .checked_type_with_context(&replacement_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "claim specialization x{} is not well-typed: {}",
+                            var_id, err
+                        )
+                    })?,
+            );
+            if !Self::term_has_expected_type(
+                term,
+                &actual_type,
+                &expected_type,
+                &replacement_context,
+                kernel_context,
+            ) {
+                return Err(format!(
+                    "claim specialization x{} has type {}, but expected {}",
+                    var_id, actual_type, expected_type
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_clause_well_typed(
+        label: &str,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Result<(), String> {
+        let local_context = clause.get_local_context();
+        if !local_context.validate_variable_ordering() {
+            return Err(format!("{} has badly ordered variable types", label));
+        }
+        for (var_id, var_type) in local_context.get_var_types().iter().enumerate() {
+            let Some(var_type) = var_type else {
+                continue;
+            };
+            let var_type_kind = var_type
+                .checked_type_with_context(local_context, kernel_context)
+                .map_err(|err| {
+                    format!(
+                        "{} variable x{} has ill-typed type {}: {}",
+                        label, var_id, var_type, err
+                    )
+                })?;
+            if !var_type_kind.as_ref().is_type_param_kind() {
+                return Err(format!(
+                    "{} variable x{} has non-type type annotation {} with type {}",
+                    label, var_id, var_type, var_type_kind
+                ));
+            }
+        }
+        for literal in &clause.literals {
+            let left_type = normalize_term(
+                &literal
+                    .left
+                    .checked_type_with_context(local_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "{} has ill-typed left side {}: {}",
+                            label, literal.left, err
+                        )
+                    })?,
+            );
+            let right_type = normalize_term(
+                &literal
+                    .right
+                    .checked_type_with_context(local_context, kernel_context)
+                    .map_err(|err| {
+                        format!(
+                            "{} has ill-typed right side {}: {}",
+                            label, literal.right, err
+                        )
+                    })?,
+            );
+            if left_type != right_type {
+                return Err(format!(
+                    "{} literal type mismatch: {} has type {}, but {} has type {}",
+                    label, literal.left, left_type, literal.right, right_type
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_checker_payload(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.validate_var_map_scope()?;
+        Self::validate_clause_well_typed("claim generic clause", &self.clause, kernel_context)?;
+        self.validate_var_map_types(kernel_context)?;
+        let specialized = self.normalized_specialized_clause(kernel_context)?;
+        Self::validate_clause_well_typed("claim specialized clause", &specialized, kernel_context)?;
+        Ok(())
+    }
+
     pub fn clause(&self) -> &Clause {
         &self.clause
     }

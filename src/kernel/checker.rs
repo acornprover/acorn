@@ -735,6 +735,10 @@ impl Checker {
 
             match step {
                 CertificateStep::Claim(claim) => {
+                    claim
+                        .validate_checker_payload(kernel_context)
+                        .map_err(Error::GeneratedBadCode)?;
+
                     let generic_clause = claim.normalized_generic_clause();
                     let clause = Self::instantiate_claim_clause(claim, kernel_context)?;
                     if !seen_claims.insert(clause.clone()) {
@@ -1653,6 +1657,39 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("witness specialized clause mismatch"),
+            "unexpected checker error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_cert_steps_rejects_ill_typed_claim_specialization_that_proves_false() {
+        use crate::kernel::certificate_step::{CertificateStep, Claim};
+        use crate::kernel::literal::Literal;
+        use crate::kernel::variable_map::VariableMap;
+
+        let mut context = KernelContext::new();
+        context.parse_type_constructor("Empty", 0);
+        let generic = Clause::new(
+            vec![Literal::new(
+                false,
+                Term::new_variable(0),
+                Term::new_variable(0),
+            )],
+            &LocalContext::from_types(vec![context.parse_type("Empty")]),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&generic, StepReason::Testing, &context);
+
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::new_true());
+        let claim = Claim::new(generic, var_map).expect("old constructor only checks scope");
+
+        let err = checker
+            .check_cert_steps(&[CertificateStep::Claim(claim)], None, &context)
+            .expect_err("ill-typed claim specialization should be rejected");
+        assert!(
+            err.to_string().contains("claim specialization"),
             "unexpected checker error: {err}"
         );
     }
