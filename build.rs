@@ -8,10 +8,7 @@ use tar::{Builder, Header};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let acornlib_dir = manifest_dir
-        .join("vscode")
-        .join("extension")
-        .join("acornlib");
+    let acornlib_dir = manifest_dir.join("acornlib");
     if !acornlib_dir.join("acorn.toml").is_file() || !acornlib_dir.join("src").is_dir() {
         panic!("missing acornlib checkout at {}", acornlib_dir.display());
     }
