@@ -768,6 +768,112 @@ mod tests {
             .join("\n")
     }
 
+    fn write_imported_dependent_structure_repro(src: &ChildPath) {
+        src.child("prelude.ac")
+            .write_str(
+                r#"
+                inductive Option[T] {
+                    none
+                    some(T)
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("tiny_fin_base.ac")
+            .write_str(
+                r#"
+                inductive Index {
+                    zero
+                    suc(Index)
+                }
+
+                inductive Value {
+                    value
+                }
+
+                define okay(value: Value, n: Index) -> Bool {
+                    true
+                }
+
+                structure TinyFin[n: Index] {
+                    value: Value
+                } constraint {
+                    okay(value, n)
+                }
+
+                let tiny_zero(n: Index) -> result: TinyFin[Index.suc(n)] satisfy {
+                    TinyFin[Index.suc(n)].new(Value.value) = Option.some(result)
+                } by {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("tiny_fin_constructor_user.ac")
+            .write_str(
+                r#"
+                from tiny_fin_base import Index, Value, TinyFin, tiny_zero
+
+                theorem tiny_zero_constructor_replay(n: Index) {
+                    TinyFin[Index.suc(n)].new(Value.value) = Option.some(tiny_zero(n))
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("tiny_fin_projection_user.ac")
+            .write_str(
+                r#"
+                from tiny_fin_base import Index, TinyFin, okay
+
+                theorem tiny_field_projection_replay(n: Index, x: TinyFin[n]) {
+                    okay(x.value, n)
+                }
+                "#,
+            )
+            .unwrap();
+    }
+
+    fn verify_then_strict_check(acornlib: &TempDir, target: &str) {
+        let mut verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some(target.to_string()),
+        )
+        .unwrap();
+        verify.builder.check_hashes = false;
+        let verify_output = verify.run().unwrap();
+        assert_eq!(
+            verify_output.status,
+            BuildStatus::Good,
+            "verify should write a certificate before strict replay\n{}",
+            log_text(&verify_output)
+        );
+        assert_eq!(verify_output.metrics.searches_success, 1);
+
+        let check_config = ProjectConfig {
+            usage_mode: UsageMode::Check,
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+        };
+        let mut check = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            check_config,
+            Some(target.to_string()),
+        )
+        .unwrap();
+        check.builder.check_mode = true;
+        check.builder.check_hashes = false;
+        check.builder.strict = true;
+        let check_output = check.run().unwrap();
+        assert_eq!(
+            check_output.status,
+            BuildStatus::Good,
+            "strict check should replay the certificate written by verify\n{}",
+            log_text(&check_output)
+        );
+    }
+
     #[test]
     fn test_verifier_rejects_real_acornlib_in_unit_tests() {
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -899,6 +1005,22 @@ mod tests {
         assert_eq!(output3.metrics.certs_unused, 0);
         // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_strict_replay_imported_dependent_constructor() {
+        let (acornlib, src, _build) = setup();
+        write_imported_dependent_structure_repro(&src);
+
+        verify_then_strict_check(&acornlib, "tiny_fin_constructor_user");
+    }
+
+    #[test]
+    fn test_strict_replay_imported_dependent_field_projection() {
+        let (acornlib, src, _build) = setup();
+        write_imported_dependent_structure_repro(&src);
+
+        verify_then_strict_check(&acornlib, "tiny_fin_projection_user");
     }
 
     #[test]
