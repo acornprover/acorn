@@ -20,7 +20,8 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::interfaces::{
     DocumentProgress, ProgressParams, ProgressResponse, SelectionParams, SelectionResponse,
 };
-use crate::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
+use crate::packaged_acornlib;
+use crate::project::{Project, ProjectConfig, ProjectView, SelectionInfo, UsageMode};
 
 // Trait abstracting the LSP client methods we need
 #[async_trait::async_trait]
@@ -50,8 +51,11 @@ pub struct ServerArgs {
     // The root folder the user has open
     pub workspace_root: Option<String>,
 
-    // The root folder of the extension
-    pub extension_root: String,
+    // Where the packaged acornlib should be extracted, if no local acornlib is found.
+    pub acornlib_cache_dir: Option<String>,
+
+    #[cfg(test)]
+    pub packaged_acornlib_override: Option<String>,
 }
 
 // These messages will show up in the "Acorn Language Server" channel in the output tab.
@@ -129,6 +133,10 @@ impl DocumentBuildInfo {
 
 // Information about the most recent build.
 struct BuildInfo {
+    // The project epoch that queued this build. Stale build tasks must not
+    // update progress after a newer save has queued another generation.
+    generation: Option<u64>,
+
     // An id for the build, unique per run of the language server.
     // If this is None, we do not intend to be showing information for any build.
     id: Option<u32>,
@@ -151,11 +159,19 @@ impl BuildInfo {
     // A placeholder representing no build.
     fn none() -> BuildInfo {
         BuildInfo {
+            generation: None,
             id: None,
             done: 0,
             total: 0,
             finished: false,
             docs: HashMap::new(),
+        }
+    }
+
+    fn queued(generation: u64) -> BuildInfo {
+        BuildInfo {
+            generation: Some(generation),
+            ..BuildInfo::none()
         }
     }
 
@@ -183,7 +199,10 @@ impl BuildInfo {
         }
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, generation: u64) {
+        if self.generation != Some(generation) {
+            return;
+        }
         self.finished = true;
     }
 
@@ -204,7 +223,16 @@ impl BuildInfo {
 
     // Clears everything in preparation for a new build.
     // Then sets docs for the open documents.
-    async fn reset(&mut self, project: &Project, client: &Arc<dyn LspClient>) {
+    async fn reset(
+        &mut self,
+        generation: u64,
+        project: &ProjectView,
+        client: &Arc<dyn LspClient>,
+    ) -> bool {
+        if self.generation != Some(generation) {
+            return false;
+        }
+
         // Clear the diagnostics for all the open documents.
         let mut new_docs = HashMap::new();
         for (url, version) in project.open_urls() {
@@ -219,16 +247,21 @@ impl BuildInfo {
                 client.publish_diagnostics(url.clone(), vec![], None).await;
             }
         }
-        *self = BuildInfo::none();
+        *self = BuildInfo::queued(generation);
         self.docs = new_docs;
+        true
     }
 
     async fn handle_event(
         &mut self,
-        project: &Project,
+        generation: u64,
+        project: &ProjectView,
         client: &Arc<dyn LspClient>,
         event: &BuildEvent,
     ) {
+        if self.generation != Some(generation) {
+            return;
+        }
         if Some(event.build_id) != self.id {
             if self.id.is_some() {
                 log("warning: a new build started without clearing the old one");
@@ -276,44 +309,55 @@ pub struct AcornLanguageServer {
 }
 
 // Finds the acorn library to use, given the root folder for the current workspace.
-// Falls back to the library bundled with the extension.
+// Falls back to the acornlib packaged into the binary.
 // Returns (src_dir, build_dir, cache_writable).
-// Panics if we can't find either.
-fn find_acorn_library(args: &ServerArgs) -> (PathBuf, PathBuf, bool) {
+fn find_acorn_library(args: &ServerArgs) -> Result<(PathBuf, PathBuf, bool), String> {
     // Check for a local library, near the code
     if let Some(workspace_root) = &args.workspace_root {
         let path = PathBuf::from(&workspace_root);
         if let Some((src_dir, build_dir)) = Project::find_local_acorn_library(&path) {
-            return (src_dir, build_dir, true);
+            return Ok((src_dir, build_dir, true));
         }
     }
 
-    // Use the bundled library.
-    let path = PathBuf::from(&args.extension_root).join("acornlib");
-    if !path.exists() {
-        panic!("packaging error: no acorn library at {}", path.display());
+    #[cfg(test)]
+    if let Some(path) = &args.packaged_acornlib_override {
+        let path = PathBuf::from(path);
+        return Project::find_local_acorn_library(&path)
+            .map(|(src_dir, build_dir)| (src_dir, build_dir, false))
+            .ok_or_else(|| {
+                format!(
+                    "test packaging error: find_local_acorn_library failed for {}",
+                    path.display()
+                )
+            });
     }
-    if let Some((src_dir, build_dir)) = Project::find_local_acorn_library(&path) {
-        (src_dir, build_dir, false)
-    } else {
-        panic!(
-            "packaging error: find_local_acorn_library failed for {}",
-            path.display()
-        );
-    }
+
+    let cache_dir = args.acornlib_cache_dir.as_ref().ok_or_else(|| {
+        "Could not find a local acornlib, and --acornlib-cache-dir was not provided.".to_string()
+    })?;
+    let path = packaged_acornlib::get_or_extract(&PathBuf::from(cache_dir))?;
+    Project::find_local_acorn_library(&path)
+        .map(|(src_dir, build_dir)| (src_dir, build_dir, false))
+        .ok_or_else(|| {
+            format!(
+                "packaging error: find_local_acorn_library failed for {}",
+                path.display()
+            )
+        })
 }
 
 impl AcornLanguageServer {
     // Creates a new backend.
     // Determines which library to use based on the root of the current workspace.
     // If we can't find one in a logical location based on the editor, we use
-    // the library bundled with the extension.
+    // the acornlib packaged into the binary.
     // Returns an error if the build cache manifest version is too new.
     pub fn new(
         client: Arc<dyn LspClient>,
         args: &ServerArgs,
     ) -> Result<AcornLanguageServer, String> {
-        let (src_dir, build_dir, write_cache) = find_acorn_library(&args);
+        let (src_dir, build_dir, write_cache) = find_acorn_library(&args)?;
 
         log(&format!(
             "using acorn server version {}",
@@ -327,8 +371,10 @@ impl AcornLanguageServer {
             write_cache,
             ..Default::default()
         };
-        let project_manager =
-            Arc::new(ProjectManager::new(src_dir, build_dir, config).map_err(|e| e.to_string())?);
+        let project_manager = Arc::new(
+            ProjectManager::new(src_dir, build_dir, config, write_cache)
+                .map_err(|e| e.to_string())?,
+        );
         Ok(AcornLanguageServer {
             project_manager,
             client,
@@ -337,18 +383,17 @@ impl AcornLanguageServer {
         })
     }
 
-    // Updates the project, then runs a build in a background thread.
-    // Both spawned threads hold a read lock on the project while doing their work.
-    // This ensures that the project doesn't change for the duration of the build.
+    // Updates the live document state, then reloads and builds in the background.
     async fn build(&self, path: PathBuf, text: &str, version: i32) {
         log("building...");
 
-        // Use mutate to update the file with automatic build cancellation
-        let result = self
+        // Keep the save request cheap: update the in-memory file and target set,
+        // but defer module reloads to the background build task.
+        let (result, update_epoch) = self
             .project_manager
-            .mutate(|project| {
+            .mutate_with_epoch(|project| {
                 project.building = true;
-                project.update_file(path, &text, version)
+                project.update_file_for_ide(path, &text, version)
             })
             .await;
 
@@ -357,20 +402,54 @@ impl AcornLanguageServer {
             Err(e) => log(&format!("update failed: {:?}", e)),
         }
 
+        // Clear previous progress immediately so clients do not mistake the last
+        // completed build for this newly queued one.
+        *self.build.write().await = BuildInfo::queued(update_epoch);
+
         let start_time = chrono::Local::now();
 
         // This channel passes the build events
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        // Spawn a thread to run the build.
         let project_manager = self.project_manager.clone();
-        tokio::spawn(async move {
-            let project = project_manager.read().await;
-            let epoch = project.epoch;
+        let build = self.build.clone();
+        let client = Arc::clone(&self.client);
 
-            let build_cache = tokio::task::block_in_place(move || {
-                let mut builder = Builder::new(&*project, project.cancel.clone(), move |event| {
-                    tx.send(event).unwrap();
+        tokio::spawn(async move {
+            let reload_result = project_manager
+                .mutate_if_epoch_with_epoch(update_epoch, |project| project.reload_targets())
+                .await;
+            let reload_epoch = match reload_result {
+                Ok(((), epoch)) => epoch,
+                Err(()) => {
+                    log("build skipped (project changed before reload)");
+                    return;
+                }
+            };
+
+            let project = project_manager.read().await;
+            if project.epoch != reload_epoch {
+                log("build skipped (project changed after reload)");
+                return;
+            }
+            let project_view = ProjectView::new(&project);
+            let cancel = project.cancel.clone();
+            drop(project);
+
+            let reset = build
+                .write()
+                .await
+                .reset(update_epoch, &project_view, &client)
+                .await;
+            if !reset {
+                log("build skipped (newer progress generation exists)");
+                return;
+            }
+
+            let builder_project = project_view.clone();
+            let build_handle = tokio::task::spawn_blocking(move || {
+                let mut builder = Builder::new_with_view(builder_project, cancel, move |event| {
+                    let _ = tx.send(event);
                 });
                 builder.check_hashes = true;
                 builder.build();
@@ -390,10 +469,28 @@ impl AcornLanguageServer {
                 builder.into_build_cache()
             });
 
+            while let Some(event) = rx.recv().await {
+                build
+                    .write()
+                    .await
+                    .handle_event(update_epoch, &project_view, &client, &event)
+                    .await;
+            }
+
+            build.write().await.finish(update_epoch);
+
+            let build_cache = match build_handle.await {
+                Ok(build_cache) => build_cache,
+                Err(e) => {
+                    log(&format!("build task failed: {}", e));
+                    None
+                }
+            };
+
             // Update the build cache if the build was successful and epoch hasn't changed.
             // Always mark building as false when done.
             let result = project_manager
-                .mutate_if_epoch(epoch, |project| {
+                .mutate_if_epoch(reload_epoch, |project| {
                     if let Some(new_cache) = build_cache {
                         // Server always does full builds of all targets, not partial builds
                         project.update_build_cache(new_cache, false);
@@ -406,25 +503,6 @@ impl AcornLanguageServer {
                 Ok(()) => log("build cache updated"),
                 Err(()) => log("build cache update skipped (project changed during build)"),
             }
-        });
-
-        // Spawn a thread to process the build events.
-        let project_manager = self.project_manager.clone();
-        let build = self.build.clone();
-        let client = Arc::clone(&self.client);
-        tokio::spawn(async move {
-            let project = project_manager.read().await;
-            build.write().await.reset(&*project, &client).await;
-
-            while let Some(event) = rx.recv().await {
-                build
-                    .write()
-                    .await
-                    .handle_event(&*project, &client, &event)
-                    .await;
-            }
-
-            build.write().await.finish();
         });
     }
 

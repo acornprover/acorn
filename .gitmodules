@@ -1,3 +1,3 @@
-[submodule "vscode/extension/acornlib"]
-	path = vscode/extension/acornlib
+[submodule "acornlib"]
+	path = acornlib
 	url = https://github.com/acornprover/acornlib

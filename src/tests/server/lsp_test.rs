@@ -87,7 +87,8 @@ impl TestFixture {
         // This is the "developing acornlib" setup
         let args = ServerArgs {
             workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
-            extension_root: String::new(),
+            acornlib_cache_dir: None,
+            packaged_acornlib_override: None,
         };
 
         let client = Arc::new(MockClient::new());
@@ -107,23 +108,23 @@ impl TestFixture {
     fn new_bundled() -> Self {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create a mock "bundled" acornlib in extension_root
-        // No acorn.toml in workspace means it will use extension_root's acornlib
-        let extension_root = temp_dir.child("extension");
-        let acornlib = extension_root.child("acornlib");
+        // Create a mock packaged acornlib.
+        // No acorn.toml in workspace means it will use the packaged fallback.
+        let acornlib = temp_dir.child("packaged").child("acornlib");
         acornlib.child("acorn.toml").write_str("").unwrap();
         let src_dir = acornlib.child("src");
         src_dir.create_dir_all().unwrap();
         let build_dir = acornlib.child("build");
         build_dir.create_dir_all().unwrap();
 
-        // workspace_root has no acorn.toml, so it falls back to extension_root
+        // workspace_root has no acorn.toml, so it falls back to the packaged acornlib.
         let workspace = temp_dir.child("workspace");
         workspace.create_dir_all().unwrap();
 
         let args = ServerArgs {
             workspace_root: Some(workspace.path().to_str().unwrap().to_string()),
-            extension_root: extension_root.path().to_str().unwrap().to_string(),
+            acornlib_cache_dir: None,
+            packaged_acornlib_override: Some(acornlib.path().to_str().unwrap().to_string()),
         };
 
         let client = Arc::new(MockClient::new());
@@ -318,7 +319,8 @@ async fn test_non_library_file_save_twice() {
     // Now create the server - it will pick up mylib.ac as a target
     let args = crate::server::ServerArgs {
         workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
-        extension_root: String::new(),
+        acornlib_cache_dir: None,
+        packaged_acornlib_override: None,
     };
     let client = Arc::new(MockClient::new());
     let server = AcornLanguageServer::new(client.clone(), &args).expect("server creation");
@@ -423,9 +425,8 @@ async fn test_bundled_mode_preserves_library_certs() {
     // Create temp directory structure for bundled mode
     let temp_dir = TempDir::new().unwrap();
 
-    // Create a mock "bundled" acornlib in extension_root
-    let extension_root = temp_dir.child("extension");
-    let acornlib = extension_root.child("acornlib");
+    // Create a mock packaged acornlib.
+    let acornlib = temp_dir.child("packaged").child("acornlib");
     acornlib.child("acorn.toml").write_str("").unwrap();
     let src_dir = acornlib.child("src");
     src_dir.create_dir_all().unwrap();
@@ -436,13 +437,14 @@ async fn test_bundled_mode_preserves_library_certs() {
     let lib_content = "theorem lib_theorem { true }";
     src_dir.child("mylib.ac").write_str(lib_content).unwrap();
 
-    // workspace_root has no acorn.toml, so it falls back to extension_root (bundled mode)
+    // workspace_root has no acorn.toml, so it falls back to packaged acornlib (bundled mode)
     let workspace = temp_dir.child("workspace");
     workspace.create_dir_all().unwrap();
 
     let args = crate::server::ServerArgs {
         workspace_root: Some(workspace.path().to_str().unwrap().to_string()),
-        extension_root: extension_root.path().to_str().unwrap().to_string(),
+        acornlib_cache_dir: None,
+        packaged_acornlib_override: Some(acornlib.path().to_str().unwrap().to_string()),
     };
 
     let client = Arc::new(MockClient::new());

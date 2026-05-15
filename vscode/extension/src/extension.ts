@@ -381,7 +381,11 @@ export async function activate(context: vscode.ExtensionContext) {
   let command = await getServerPath(context);
 
   // Build the serve subcommand arguments
-  let args = ["serve", "--extension-root", context.extensionPath];
+  let acornlibCacheDir = vscode.Uri.joinPath(
+    context.globalStorageUri,
+    "acornlib"
+  ).fsPath;
+  let args = ["serve", "--acornlib-cache-dir", acornlibCacheDir];
   if (
     vscode.workspace.workspaceFolders &&
     vscode.workspace.workspaceFolders.length > 0

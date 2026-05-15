@@ -187,6 +187,7 @@ pub struct ProjectView {
     content_hashes: Arc<HashMap<ModuleId, blake3::Hash>>,
     dependency_load_errors: Arc<HashMap<String, ImportError>>,
     open_file_paths: Arc<HashSet<PathBuf>>,
+    open_file_versions: Arc<HashMap<PathBuf, i32>>,
 }
 
 impl ProjectView {
@@ -244,6 +245,13 @@ impl ProjectView {
             content_hashes: Arc::new(content_hashes),
             dependency_load_errors: Arc::new(project.dependency_load_errors.clone()),
             open_file_paths: Arc::new(project.open_files.keys().cloned().collect()),
+            open_file_versions: Arc::new(
+                project
+                    .open_files
+                    .iter()
+                    .map(|(path, (_, version))| (path.clone(), *version))
+                    .collect(),
+            ),
         }
     }
 
@@ -307,6 +315,22 @@ impl ProjectView {
             },
             Err(_) => descriptor.to_string(),
         }
+    }
+
+    pub fn url_from_descriptor(&self, descriptor: &ModuleDescriptor) -> Option<Url> {
+        let path = self.path_from_descriptor(descriptor).ok()?;
+        Url::from_file_path(path).ok()
+    }
+
+    // Yields (url, version) for all open files.
+    pub fn open_urls(&self) -> impl Iterator<Item = (Url, i32)> + '_ {
+        self.open_file_versions
+            .iter()
+            .filter_map(|(path, version)| {
+                Url::from_file_path(path.clone())
+                    .ok()
+                    .map(|url| (url, *version))
+            })
     }
 
     pub fn descriptor_from_path(&self, path: &Path) -> Result<ModuleDescriptor, ImportError> {
@@ -1244,6 +1268,21 @@ impl Project {
         }
     }
 
+    // Adds all files in the 'src' directory as targets without loading them.
+    // This is useful for IDE startup: the project knows what should be built,
+    // but expensive parsing/elaboration is deferred until the background build.
+    pub fn add_unloaded_src_targets(&mut self) {
+        if !self.config.use_filesystem {
+            panic!("cannot add_unloaded_src_targets without filesystem access")
+        }
+        self.register_all_modules();
+        let mut descriptors = self.module_map.keys().cloned().collect::<Vec<_>>();
+        descriptors.sort();
+        for descriptor in descriptors {
+            self.add_unloaded_target_by_descriptor(&descriptor);
+        }
+    }
+
     pub fn src_target_paths(&mut self) -> Vec<PathBuf> {
         self.register_all_modules();
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -1352,6 +1391,37 @@ impl Project {
         self.modules[module_id.get() as usize].hash
     }
 
+    fn update_file_state(
+        &mut self,
+        path: PathBuf,
+        content: &str,
+        version: i32,
+    ) -> Result<bool, ImportError> {
+        if self.has_version(&path, version) {
+            return Ok(false);
+        }
+        let descriptor = self.descriptor_from_path(&path)?;
+
+        // This update might be invalidating current modules.
+        // For now, we just drop everything. The caller decides whether reloading
+        // targets happens synchronously or in a background build task.
+        // TODO: figure out precisely which ones are invalidated.
+        self.drop_modules();
+        self.open_files.insert(path, (content.to_string(), version));
+        self.add_unloaded_target_by_descriptor(&descriptor);
+        Ok(true)
+    }
+
+    // Reloads all current build targets. This is intentionally separate from
+    // updating open file contents so IDE saves can enqueue the expensive reload
+    // work in the background.
+    pub fn reload_targets(&mut self) {
+        let targets = self.targets.clone();
+        for target in targets {
+            let _ = self.add_target_by_descriptor(&target);
+        }
+    }
+
     // Updating a file makes us treat it as "open". When a file is open, we use the
     // content in memory for it, rather than the content on disk.
     // Updated files are also added as build targets.
@@ -1361,26 +1431,21 @@ impl Project {
         content: &str,
         version: i32,
     ) -> Result<(), ImportError> {
-        if self.has_version(&path, version) {
-            // No need to do anything
-            return Ok(());
+        if self.update_file_state(path, content, version)? {
+            self.reload_targets();
         }
-        let descriptor = self.descriptor_from_path(&path)?;
-        let mut reload_modules = vec![descriptor];
+        Ok(())
+    }
 
-        // This update might be invalidating current modules.
-        // For now, we just drop everything and reload the targets.
-        // TODO: figure out precisely which ones are invalidated.
-        self.drop_modules();
-        for target in &self.targets {
-            reload_modules.push(target.clone());
-        }
-
-        self.open_files.insert(path, (content.to_string(), version));
-        for descriptor in &reload_modules {
-            // Ignore errors when reloading
-            let _ = self.add_target_by_descriptor(descriptor);
-        }
+    // IDE saves should update visible document state quickly. The background
+    // build task calls reload_targets before verifying.
+    pub fn update_file_for_ide(
+        &mut self,
+        path: PathBuf,
+        content: &str,
+        version: i32,
+    ) -> Result<(), ImportError> {
+        self.update_file_state(path, content, version)?;
         Ok(())
     }
 

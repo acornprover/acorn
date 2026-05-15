@@ -15,16 +15,14 @@ If you are making changes to the Acorn language, its theorem prover, or to the U
 
 ## Installing acorn from source
 
-Fork this and `acornlib`, then clone them to your development machine.
+Fork this repository, then clone the fork to your local machine with submodules. These instructions
+will assume you have this repository cloned in `~/acorn`.
 
-These instructions will assume you have this repository cloned in `~/acorn` and the library cloned
-in `~/acornlib`.
-
-Fork this repository, then clone the fork to your local machine. Install rust and node, then verify tests
-pass locally:
+Install rust and node, then verify tests pass locally:
 
 ```bash
 cd ~/acorn
+git submodule update --init
 cargo test -q
 ```
 
@@ -43,7 +41,7 @@ npm install
 
 Open up this repository in VS Code. You can open this exact file, if you like, and keep reading from within VS Code. You'll use this instance of VS Code to make changes to the prover or the extension.
 
-Hit F5. This will open up a new VS Code window. This new window is called the "extension development host". Use it to open `~/acornlib`. This is where you'll test out your local changes.
+Hit F5. This will open up a new VS Code window. This new window is called the "extension development host". Use it to open `~/acorn/acornlib`, or another acornlib checkout. This is where you'll test out your local changes.
 
 ## Code Overview
 
