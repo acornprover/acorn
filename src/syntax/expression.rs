@@ -768,8 +768,11 @@ impl Expression {
         match &self {
             Expression::Singleton(token) => token.is_type_name(),
             Expression::Grouping(_, e, _) => e.is_type(),
-            Expression::Binary(left, token, _) => match token.token_type {
+            Expression::Binary(left, token, right) => match token.token_type {
                 TokenType::Comma | TokenType::RightArrow => left.is_type(),
+                // Module-qualified names like lib(foo).Bar are types when their final
+                // component is a type name.
+                TokenType::Dot => right.is_type(),
                 _ => false,
             },
             Expression::Concatenation(left, _) => left.is_type(),
