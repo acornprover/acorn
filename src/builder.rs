@@ -2883,21 +2883,7 @@ impl<'a> Builder<'a> {
         results.sort_by_key(|result| result.index);
 
         for result in results {
-            self.metrics.add_module_result(&result.metrics);
-            self.module_timings.extend(result.module_timings);
-            match result.status {
-                BuildStatus::Error => self.status = BuildStatus::Error,
-                BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
-                BuildStatus::Good | BuildStatus::Warning => {}
-            }
-
-            for mut event in result.events {
-                event.build_id = self.id;
-                if event.progress.is_some() {
-                    event.progress = Some((self.metrics.goals_done, self.metrics.goals_total));
-                }
-                (self.event_handler)(event);
-            }
+            self.merge_module_build_result(result);
         }
     }
 
@@ -2968,21 +2954,7 @@ impl<'a> Builder<'a> {
         results.sort_by_key(|result| result.index);
 
         for result in results {
-            self.metrics.add_module_result(&result.metrics);
-            self.module_timings.extend(result.module_timings);
-            match result.status {
-                BuildStatus::Error => self.status = BuildStatus::Error,
-                BuildStatus::Warning if self.status.is_good() => self.status = BuildStatus::Warning,
-                BuildStatus::Good | BuildStatus::Warning => {}
-            }
-
-            for mut event in result.events {
-                event.build_id = self.id;
-                if event.progress.is_some() {
-                    event.progress = Some((self.metrics.goals_done, self.metrics.goals_total));
-                }
-                (self.event_handler)(event);
-            }
+            self.merge_module_build_result(result);
         }
     }
 

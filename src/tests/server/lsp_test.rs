@@ -661,6 +661,79 @@ async fn test_library_save_builds_saved_target_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_library_save_builds_dependent_targets() {
+    let temp_dir = TempDir::new().unwrap();
+    temp_dir.child("acorn.toml").write_str("").unwrap();
+    let src_dir = temp_dir.child("src");
+    src_dir.create_dir_all().unwrap();
+    let build_dir = temp_dir.child("build");
+    build_dir.create_dir_all().unwrap();
+
+    let foo_content = indoc::indoc! {"
+        type Foo: axiom
+
+        theorem foo_goal {
+            true
+        }
+    "};
+    let bar_content = indoc::indoc! {"
+        from foo import Foo
+
+        theorem bar_goal {
+            true
+        }
+    "};
+    src_dir.child("foo.ac").write_str(foo_content).unwrap();
+    src_dir.child("bar.ac").write_str(bar_content).unwrap();
+    src_dir
+        .child("baz.ac")
+        .write_str("theorem baz_goal { true }")
+        .unwrap();
+
+    let args = ServerArgs {
+        workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
+        acornlib_cache_dir: None,
+        packaged_acornlib_override: None,
+    };
+    let client = Arc::new(MockClient::new());
+    let server = AcornLanguageServer::new(client.clone(), &args).expect("server creation");
+    let foo_url = Url::from_file_path(src_dir.child("foo.ac").path()).unwrap();
+
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: foo_url.clone(),
+                language_id: "acorn".to_string(),
+                version: 1,
+                text: foo_content.to_string(),
+            },
+        })
+        .await;
+    server
+        .did_save(DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: foo_url },
+            text: Some(foo_content.to_string()),
+        })
+        .await;
+
+    let fx = TestFixture {
+        _temp_dir: temp_dir,
+        src_dir,
+        build_dir,
+        client,
+        server,
+    };
+    fx.assert_build_completes().await;
+    fx.assert_build_file_will_exist("foo.jsonl").await;
+    fx.assert_build_file_will_exist("bar.jsonl").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !fx.build_dir.child("baz.jsonl").exists(),
+        "saving foo.ac should not build unrelated baz.ac"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_cancellation() {
     let fx = TestFixture::new();
 

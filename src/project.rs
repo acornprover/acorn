@@ -1182,12 +1182,140 @@ impl Project {
         self.load_module(&canonical_descriptor, false).map(|_| ())
     }
 
-    pub fn reload_target_by_path(&mut self, path: &Path) -> Result<ModuleDescriptor, ImportError> {
+    fn dependency_descriptors_for_target(
+        &self,
+        descriptor: &ModuleDescriptor,
+    ) -> Vec<ModuleDescriptor> {
+        let Ok(path) = self.path_from_descriptor(descriptor) else {
+            return Vec::new();
+        };
+        let Ok(text) = read_source_text(&path, |path| self.read_file(path)) else {
+            return Vec::new();
+        };
+        let Ok(parsed) = ParsedModule::parse(descriptor.clone(), text, false) else {
+            return Vec::new();
+        };
+
+        let current_module_name = parsed.module_name();
+        parsed
+            .dependency_names
+            .iter()
+            .filter(|module_name| {
+                !current_module_name
+                    .as_ref()
+                    .is_some_and(|current| current == *module_name)
+            })
+            .map(|module_name| {
+                self.canonicalize_name_descriptor(&ModuleDescriptor::name(module_name))
+            })
+            .collect()
+    }
+
+    fn dependent_target_closure(
+        &self,
+        roots: HashSet<ModuleDescriptor>,
+    ) -> HashSet<ModuleDescriptor> {
+        let mut reverse_dependencies: HashMap<ModuleDescriptor, Vec<ModuleDescriptor>> =
+            HashMap::new();
+        let prelude = ModuleDescriptor::name("prelude");
+
+        for target in &self.targets {
+            if target != &prelude {
+                reverse_dependencies
+                    .entry(prelude.clone())
+                    .or_default()
+                    .push(target.clone());
+            }
+            for dependency in self.dependency_descriptors_for_target(target) {
+                reverse_dependencies
+                    .entry(dependency)
+                    .or_default()
+                    .push(target.clone());
+            }
+        }
+
+        let mut closure = roots;
+        let mut queue = closure.iter().cloned().collect::<Vec<_>>();
+        while let Some(descriptor) = queue.pop() {
+            let Some(dependents) = reverse_dependencies.get(&descriptor) else {
+                continue;
+            };
+            for dependent in dependents {
+                if closure.insert(dependent.clone()) {
+                    queue.push(dependent.clone());
+                }
+            }
+        }
+        closure
+    }
+
+    fn target_dependency_closure(
+        &self,
+        roots: &HashSet<ModuleDescriptor>,
+    ) -> HashSet<ModuleDescriptor> {
+        let mut closure = roots.clone();
+        let mut queue = closure.iter().cloned().collect::<Vec<_>>();
+        let prelude = ModuleDescriptor::name("prelude");
+
+        while let Some(descriptor) = queue.pop() {
+            if descriptor != prelude
+                && self.module_map.contains_key(&prelude)
+                && closure.insert(prelude.clone())
+            {
+                queue.push(prelude.clone());
+            }
+
+            for dependency in self.dependency_descriptors_for_target(&descriptor) {
+                if !self.module_map.contains_key(&dependency) {
+                    continue;
+                }
+                if closure.insert(dependency.clone()) {
+                    queue.push(dependency);
+                }
+            }
+        }
+
+        closure
+    }
+
+    fn sorted_by_cached_work(
+        &self,
+        descriptors: &HashSet<ModuleDescriptor>,
+    ) -> Vec<ModuleDescriptor> {
+        let mut sorted = descriptors.iter().cloned().collect::<Vec<_>>();
+        sorted.sort_by(|left, right| {
+            self.cached_module_work_estimate(right)
+                .cmp(&self.cached_module_work_estimate(left))
+                .then_with(|| left.cmp(right))
+        });
+        sorted
+    }
+
+    pub fn reload_dependent_targets_by_path(
+        &mut self,
+        path: &Path,
+        jobs: usize,
+    ) -> Result<HashSet<ModuleDescriptor>, ImportError> {
         self.register_all_modules();
         let descriptor = self.descriptor_from_path(path)?;
         let canonical_descriptor = self.add_unloaded_target_by_descriptor(&descriptor);
-        self.load_target_by_descriptor(&canonical_descriptor)?;
-        Ok(canonical_descriptor)
+        let roots = HashSet::from([canonical_descriptor]);
+        let targets = self.dependent_target_closure(roots);
+        let load_targets = self.target_dependency_closure(&targets);
+        let load_order = self.sorted_by_cached_work(&load_targets);
+        let load_target_list = load_targets.iter().cloned().collect::<Vec<_>>();
+        let loader_jobs = (jobs / 4).max(1);
+        let mut loader =
+            ParallelProjectLoader::new(self, &load_target_list, &load_order, loader_jobs)?;
+        let no_build_targets = Vec::new();
+        while loader
+            .next_loaded_modules(self, &no_build_targets)?
+            .is_some()
+        {
+            // Keep lowered modules in the project so IDE selection and citation queries can
+            // inspect the fresh environments after the build.
+        }
+        Ok(targets)
     }
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
@@ -1760,16 +1888,17 @@ impl Project {
         let target_set: HashSet<_> = targets.iter().cloned().collect();
         let mut lowered = Vec::new();
         for module in &mut self.modules {
+            if !target_set.contains(&module.descriptor) {
+                continue;
+            }
             let LoadState::Ok(loaded) = &mut module.state else {
                 continue;
             };
             let Some(work) = loaded.lowered.take() else {
                 continue;
             };
-            if target_set.contains(&module.descriptor) {
-                let work = Arc::try_unwrap(work).unwrap_or_else(|work| (*work).clone());
-                lowered.push((module.descriptor.clone(), work));
-            }
+            let work = Arc::try_unwrap(work).unwrap_or_else(|work| (*work).clone());
+            lowered.push((module.descriptor.clone(), work));
         }
         lowered.sort_by(|(left, _), (right, _)| left.cmp(right));
         lowered

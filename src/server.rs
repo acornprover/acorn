@@ -2,7 +2,7 @@
 mod live_document;
 mod project_manager;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -79,6 +79,10 @@ fn to_path(url: &Url) -> Option<PathBuf> {
 fn log_with_url(url: &Url, version: i32, message: &str) {
     let versioned = format!("{} v{}: {}", url, version, message);
     log(&versioned);
+}
+
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |jobs| jobs.get())
 }
 
 // The part of the Build that is relevant to a single document.
@@ -415,15 +419,16 @@ impl AcornLanguageServer {
         let project_manager = self.project_manager.clone();
         let build = self.build.clone();
         let client = Arc::clone(&self.client);
+        let jobs = default_jobs();
 
         tokio::spawn(async move {
             let reload_result = project_manager
                 .mutate_if_epoch_with_epoch(update_epoch, |project| {
-                    project.reload_target_by_path(&build_path)
+                    project.reload_dependent_targets_by_path(&build_path, jobs)
                 })
                 .await;
-            let (build_target, reload_epoch) = match reload_result {
-                Ok((Ok(target), epoch)) => (target, epoch),
+            let (build_targets, reload_epoch) = match reload_result {
+                Ok((Ok(targets), epoch)) => (targets, epoch),
                 Ok((Err(error), epoch)) => {
                     log(&format!("reload failed: {}", error));
                     build.write().await.finish(update_epoch);
@@ -445,8 +450,7 @@ impl AcornLanguageServer {
                 log("build skipped (project changed after reload)");
                 return;
             }
-            let project_view =
-                ProjectView::new_for_targets(&project, HashSet::from([build_target]));
+            let project_view = ProjectView::new_for_targets(&project, build_targets);
             let cancel = project.cancel.clone();
             drop(project);
 
@@ -466,6 +470,7 @@ impl AcornLanguageServer {
                     let _ = tx.send(event);
                 });
                 builder.check_hashes = true;
+                builder.check_jobs = jobs;
                 builder.build();
 
                 let duration = chrono::Local::now() - start_time;
