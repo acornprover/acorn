@@ -116,6 +116,44 @@ fn test_update_file_preserves_module_ids() {
 }
 
 #[test]
+fn test_add_unloaded_src_targets_defers_loading() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir(&src_dir).unwrap();
+    fs::create_dir(&build_dir).unwrap();
+
+    fs::write(
+        src_dir.join("prelude.ac"),
+        "let prelude_true: Bool = true\n",
+    )
+    .unwrap();
+    fs::write(src_dir.join("main.ac"), "theorem main_goal { true }\n").unwrap();
+
+    let mut project =
+        Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+    project.add_unloaded_src_targets();
+
+    assert!(matches!(
+        project.get_module(&ModuleDescriptor::name("prelude")),
+        LoadState::Registered
+    ));
+    assert!(matches!(
+        project.get_module(&ModuleDescriptor::name("main")),
+        LoadState::Registered
+    ));
+
+    project.reload_targets();
+    assert!(matches!(
+        project.get_module(&ModuleDescriptor::name("main")),
+        LoadState::Ok(_)
+    ));
+}
+
+#[test]
 fn test_basic_import() {
     let mut p = Project::new_mock();
     p.mock("/mock/foo.ac", FOO_AC);

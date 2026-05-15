@@ -29,11 +29,11 @@ impl ProjectManager {
         add_src_targets: bool,
     ) -> Result<Self, ProjectError> {
         let mut project = Project::new(src_dir, build_dir, config.clone())?;
-        // Add all targets when the workspace is the library being edited. In packaged
-        // fallback mode, files opened by the user become targets and imports are loaded
-        // on demand; targeting the whole packaged acornlib makes every save slow.
+        // Target all source modules when the workspace is the library being edited, but
+        // defer loading them until the background build. In packaged fallback mode, files
+        // opened by the user become targets and imports are loaded on demand.
         if add_src_targets {
-            project.add_src_targets();
+            project.add_unloaded_src_targets();
         }
         Ok(ProjectManager {
             project: RwLock::new(project),
@@ -60,6 +60,14 @@ impl ProjectManager {
     where
         F: FnOnce(&mut Project) -> R,
     {
+        self.mutate_with_epoch(f).await.0
+    }
+
+    /// Mutates the project and returns the epoch produced by the mutation.
+    pub async fn mutate_with_epoch<F, R>(&self, f: F) -> (R, u64)
+    where
+        F: FnOnce(&mut Project) -> R,
+    {
         // First cancel any ongoing builds
         {
             let cancel = self.cancel.read().await;
@@ -73,7 +81,7 @@ impl ProjectManager {
         let result = f(&mut project);
 
         // Increment the epoch to invalidate all existing views
-        self.epoch.fetch_add(1, Ordering::SeqCst);
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Create a new cancellation token for future builds
         {
@@ -81,12 +89,22 @@ impl ProjectManager {
             *cancel = CancellationToken::new();
         }
 
-        result
+        (result, epoch)
     }
 
     /// Mutates the project only if the epoch matches
     /// Returns Ok(result) if the mutation succeeded, Err(()) if the epoch didn't match
     pub async fn mutate_if_epoch<F, R>(&self, epoch: u64, f: F) -> Result<R, ()>
+    where
+        F: FnOnce(&mut Project) -> R,
+    {
+        self.mutate_if_epoch_with_epoch(epoch, f)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Mutates the project only if the epoch matches, returning the new epoch.
+    pub async fn mutate_if_epoch_with_epoch<F, R>(&self, epoch: u64, f: F) -> Result<(R, u64), ()>
     where
         F: FnOnce(&mut Project) -> R,
     {
@@ -113,7 +131,7 @@ impl ProjectManager {
         let result = f(&mut project);
 
         // Increment the epoch to invalidate all existing views
-        self.epoch.fetch_add(1, Ordering::SeqCst);
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Create a new cancellation token for future builds
         {
@@ -121,7 +139,7 @@ impl ProjectManager {
             *cancel = CancellationToken::new();
         }
 
-        Ok(result)
+        Ok((result, epoch))
     }
 }
 
