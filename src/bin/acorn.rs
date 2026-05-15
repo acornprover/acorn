@@ -6,7 +6,7 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
-use acorn::prover::init_default_scorer;
+use acorn::prover::{init_default_scorer, set_default_scorer_kind, ScorerKind};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -576,6 +576,15 @@ enum Command {
             help = "Print phase timing information for this evaluation run."
         )]
         timing: bool,
+
+        /// Activation scorer policy: onnx (default), handcrafted, depthfirst
+        #[clap(
+            long = "scorer",
+            default_value = "onnx",
+            help = "Activation scorer policy: onnx, handcrafted, or depthfirst.",
+            value_name = "POLICY"
+        )]
+        scorer: String,
     },
 
     /// Compatibility alias for `verify --force-search`
@@ -1028,10 +1037,18 @@ async fn main() {
             jobs,
             skip,
             timing,
+            scorer,
         }) => {
             if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
+            }
+            match ScorerKind::parse(&scorer) {
+                Ok(kind) => set_default_scorer_kind(kind),
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
             let skip_modes = match parse_eval_skip_modes(Some(&skip)) {
                 Ok(modes) => modes,
@@ -1857,6 +1874,7 @@ mod tests {
                 jobs,
                 skip,
                 timing,
+                scorer,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
                 assert!(fail_fast);
@@ -1866,6 +1884,7 @@ mod tests {
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert!(timing);
+                assert_eq!(scorer, "onnx");
             }
             _ => panic!("unexpected command"),
         }
