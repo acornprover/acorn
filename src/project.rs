@@ -1211,9 +1211,23 @@ impl Project {
             .collect()
     }
 
+    fn cached_dependency_descriptors_for_target(
+        &self,
+        descriptor: &ModuleDescriptor,
+        cache: &mut HashMap<ModuleDescriptor, Vec<ModuleDescriptor>>,
+    ) -> Vec<ModuleDescriptor> {
+        if let Some(dependencies) = cache.get(descriptor) {
+            return dependencies.clone();
+        }
+        let dependencies = self.dependency_descriptors_for_target(descriptor);
+        cache.insert(descriptor.clone(), dependencies.clone());
+        dependencies
+    }
+
     fn dependent_target_closure(
         &self,
         roots: HashSet<ModuleDescriptor>,
+        dependency_cache: &mut HashMap<ModuleDescriptor, Vec<ModuleDescriptor>>,
     ) -> HashSet<ModuleDescriptor> {
         let mut reverse_dependencies: HashMap<ModuleDescriptor, Vec<ModuleDescriptor>> =
             HashMap::new();
@@ -1226,7 +1240,9 @@ impl Project {
                     .or_default()
                     .push(target.clone());
             }
-            for dependency in self.dependency_descriptors_for_target(target) {
+            for dependency in
+                self.cached_dependency_descriptors_for_target(target, dependency_cache)
+            {
                 reverse_dependencies
                     .entry(dependency)
                     .or_default()
@@ -1252,6 +1268,7 @@ impl Project {
     fn target_dependency_closure(
         &self,
         roots: &HashSet<ModuleDescriptor>,
+        dependency_cache: &mut HashMap<ModuleDescriptor, Vec<ModuleDescriptor>>,
     ) -> HashSet<ModuleDescriptor> {
         let mut closure = roots.clone();
         let mut queue = closure.iter().cloned().collect::<Vec<_>>();
@@ -1265,7 +1282,9 @@ impl Project {
                 queue.push(prelude.clone());
             }
 
-            for dependency in self.dependency_descriptors_for_target(&descriptor) {
+            for dependency in
+                self.cached_dependency_descriptors_for_target(&descriptor, dependency_cache)
+            {
                 if !self.module_map.contains_key(&dependency) {
                     continue;
                 }
@@ -1300,11 +1319,12 @@ impl Project {
         let descriptor = self.descriptor_from_path(path)?;
         let canonical_descriptor = self.add_unloaded_target_by_descriptor(&descriptor);
         let roots = HashSet::from([canonical_descriptor]);
-        let targets = self.dependent_target_closure(roots);
-        let load_targets = self.target_dependency_closure(&targets);
+        let mut dependency_cache = HashMap::new();
+        let targets = self.dependent_target_closure(roots, &mut dependency_cache);
+        let load_targets = self.target_dependency_closure(&targets, &mut dependency_cache);
         let load_order = self.sorted_by_cached_work(&load_targets);
         let load_target_list = load_targets.iter().cloned().collect::<Vec<_>>();
-        let loader_jobs = (jobs / 4).max(1);
+        let loader_jobs = (jobs / 2).max(1);
         let mut loader =
             ParallelProjectLoader::new(self, &load_target_list, &load_order, loader_jobs)?;
         let no_build_targets = Vec::new();

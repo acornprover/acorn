@@ -2712,8 +2712,31 @@ impl<'a> Builder<'a> {
         } else if self.check_mode {
             self.check_module_work_estimate(lowered)
         } else {
-            lowered.goal_count()
+            self.verify_module_work_estimate(target, lowered)
         }
+    }
+
+    fn verify_module_work_estimate(
+        &self,
+        target: &ModuleDescriptor,
+        lowered: &LoweredModule,
+    ) -> usize {
+        if !self.check_hashes || self.force_search {
+            return lowered.goal_count();
+        }
+
+        self.project()
+            .build_cache()
+            .get_certificates(target)
+            .map(|store| {
+                store
+                    .certs
+                    .iter()
+                    .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                    .sum::<usize>()
+            })
+            .filter(|estimate| *estimate > 0)
+            .unwrap_or_else(|| lowered.goal_count())
     }
 
     fn check_module_work_estimate(&self, lowered: &LoweredModule) -> usize {
