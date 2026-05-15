@@ -2,7 +2,7 @@
 mod live_document;
 mod project_manager;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -386,6 +386,7 @@ impl AcornLanguageServer {
     // Updates the live document state, then reloads and builds in the background.
     async fn build(&self, path: PathBuf, text: &str, version: i32) {
         log("building...");
+        let build_path = path.clone();
 
         // Keep the save request cheap: update the in-memory file and target set,
         // but defer module reloads to the background build task.
@@ -417,10 +418,22 @@ impl AcornLanguageServer {
 
         tokio::spawn(async move {
             let reload_result = project_manager
-                .mutate_if_epoch_with_epoch(update_epoch, |project| project.reload_targets())
+                .mutate_if_epoch_with_epoch(update_epoch, |project| {
+                    project.reload_target_by_path(&build_path)
+                })
                 .await;
-            let reload_epoch = match reload_result {
-                Ok(((), epoch)) => epoch,
+            let (build_target, reload_epoch) = match reload_result {
+                Ok((Ok(target), epoch)) => (target, epoch),
+                Ok((Err(error), epoch)) => {
+                    log(&format!("reload failed: {}", error));
+                    build.write().await.finish(update_epoch);
+                    let _ = project_manager
+                        .mutate_if_epoch(epoch, |project| {
+                            project.building = false;
+                        })
+                        .await;
+                    return;
+                }
                 Err(()) => {
                     log("build skipped (project changed before reload)");
                     return;
@@ -432,7 +445,8 @@ impl AcornLanguageServer {
                 log("build skipped (project changed after reload)");
                 return;
             }
-            let project_view = ProjectView::new(&project);
+            let project_view =
+                ProjectView::new_for_targets(&project, HashSet::from([build_target]));
             let cancel = project.cancel.clone();
             drop(project);
 
@@ -492,8 +506,7 @@ impl AcornLanguageServer {
             let result = project_manager
                 .mutate_if_epoch(reload_epoch, |project| {
                     if let Some(new_cache) = build_cache {
-                        // Server always does full builds of all targets, not partial builds
-                        project.update_build_cache(new_cache, false);
+                        project.update_build_cache(new_cache, true);
                     }
                     project.building = false;
                 })

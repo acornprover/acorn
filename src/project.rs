@@ -195,6 +195,12 @@ impl ProjectView {
         Self::new_internal(project, true)
     }
 
+    pub fn new_for_targets(project: &Project, targets: HashSet<ModuleDescriptor>) -> Self {
+        let mut view = Self::new(project);
+        view.targets = Arc::new(targets);
+        view
+    }
+
     pub fn new_without_lowered(project: &Project) -> Self {
         Self::new_internal(project, false)
     }
@@ -1174,6 +1180,14 @@ impl Project {
     ) -> Result<(), ImportError> {
         let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
         self.load_module(&canonical_descriptor, false).map(|_| ())
+    }
+
+    pub fn reload_target_by_path(&mut self, path: &Path) -> Result<ModuleDescriptor, ImportError> {
+        self.register_all_modules();
+        let descriptor = self.descriptor_from_path(path)?;
+        let canonical_descriptor = self.add_unloaded_target_by_descriptor(&descriptor);
+        self.load_target_by_descriptor(&canonical_descriptor)?;
+        Ok(canonical_descriptor)
     }
 
     // Returns Ok(()) if the module loaded successfully, or an ImportError if not.
