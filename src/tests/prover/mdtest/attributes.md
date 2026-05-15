@@ -338,6 +338,35 @@ Just testing that we can define something, then immediately prove the definition
     
 ```
 
+## Nested Type Argument Attribute Receiver
+
+A generic attribute receiver such as `Set[Set[K]]` should instantiate the
+method with the attribute's `K` bound to `Set[K]`, even when the theorem uses
+the same generic parameter name.
+
+```acorn
+    structure Set[K] {
+        contains: K -> Bool
+    }
+
+    attributes Set[K] {
+        define subset(self, other: Set[K]) -> Bool {
+            forall(x: K) {
+                self.contains(x) implies other.contains(x)
+            }
+        }
+
+        define superset(self, other: Set[K]) -> Bool {
+            other.subset(self)
+        }
+    }
+
+    theorem nested_subset_receiver[K](c1: Set[Set[K]], c2: Set[Set[K]]) {
+        c1.subset(c2) = c1.subset(c2)
+    }
+
+```
+
 ## Proving With Typeclass Constrained Attributes
 
 Test that we can define attributes with typeclass constraints (Foo[T: Bar] syntax)

@@ -423,6 +423,7 @@ impl Environment {
             } else {
                 fn_param_names
             };
+            let fn_type = fn_type.genericize(&params);
 
             self.define_constant(
                 defined_name,
@@ -456,6 +457,7 @@ impl Environment {
         } else {
             fn_param_names
         };
+        let new_axiom_type = new_axiom_type.genericize(&params);
         self.define_constant(
             defined_name,
             params,
