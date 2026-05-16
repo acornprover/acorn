@@ -5,7 +5,10 @@ use crate::kernel::proof_step::{ProofStep, Truthiness};
 
 pub mod active_set;
 pub mod dataset;
+pub mod depth_first_scorer;
 pub mod features;
+pub mod handcrafted_scorer;
+pub mod onnx_factual_penalty;
 pub mod passive_set;
 pub mod proof;
 mod prover;
@@ -17,6 +20,7 @@ pub(crate) mod synthetic;
 
 // Re-export the main public types
 pub use prover::Prover;
+pub use scorer::{init_default_scorer, set_default_scorer_kind, set_factual_penalty, ScorerKind};
 
 /// Instrumentation collected during one prover search.
 #[derive(Clone, Debug, Default)]

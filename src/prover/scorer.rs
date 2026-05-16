@@ -1,6 +1,10 @@
 use std::error::Error;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use super::depth_first_scorer::DepthFirstScorer;
 use super::features::Features;
+use super::handcrafted_scorer::HandcraftedScorer;
+use super::onnx_factual_penalty::OnnxFactualPenalty;
 use super::scoring_model::ScoringModel;
 
 pub trait Scorer {
@@ -11,72 +15,66 @@ pub trait Scorer {
     }
 }
 
-pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
-    Box::new(ScoringModel::load().unwrap())
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScorerKind {
+    Onnx = 0,
+    Handcrafted = 1,
+    DepthFirst = 2,
+    OnnxFactualPenalty = 3,
 }
 
-// Developed before I had any other framework for policies.
-pub struct HandcraftedScorer;
-
-impl Scorer for HandcraftedScorer {
-    // The first heuristic is like negative depth.
-    // It's bounded at -2 so after that we don't use depth for scoring any more.
-    //
-    // The second heuristic is an ordering by the type
-    //
-    //   Global facts, both explicit and deductions
-    //   The negated goal
-    //   Explicit hypotheses
-    //   Local deductions
-    //
-    // The third heuristic is a combination of a bunch of stuff, roughly to discourage
-    // complexity.
-    fn score(&self, features: &Features) -> Result<f32, Box<dyn Error>> {
-        // The first heuristic is 0 for zero depth, -1 for depth 1, -2 for anything deeper.
-        let heuristic1 = match features.depth {
-            0 => 0,
-            1 => -1,
-            _ => -2,
-        };
-
-        // The second heuristic is based on truthiness.
-        // Higher = more important.
-        let heuristic2 = if features.is_counterfactual {
-            if features.is_negated_goal {
-                3
-            } else {
-                1
-            }
-        } else if features.is_hypothetical {
-            if features.is_assumption {
-                2
-            } else {
-                1
-            }
-        } else {
-            4
-        };
-
-        // The third heuristic is a hodgepodge.
-        let mut heuristic3 = 0;
-        heuristic3 -= features.atom_count;
-        heuristic3 -= 2 * features.proof_size;
-        if features.is_hypothetical {
-            heuristic3 -= 3;
+impl ScorerKind {
+    pub fn parse(s: &str) -> Result<ScorerKind, String> {
+        match s {
+            "onnx" => Ok(ScorerKind::Onnx),
+            "handcrafted" => Ok(ScorerKind::Handcrafted),
+            "depthfirst" | "depth-first" => Ok(ScorerKind::DepthFirst),
+            "onnx-factual-penalty" | "factual-penalty" => Ok(ScorerKind::OnnxFactualPenalty),
+            _ => Err(format!(
+                "unknown scorer '{}'. Expected one of: onnx, handcrafted, depthfirst, onnx-factual-penalty",
+                s
+            )),
         }
-
-        // Essentially lexicographical
-        let score =
-            1000000.0 * (heuristic1 as f32) + 100000.0 * (heuristic2 as f32) + heuristic3 as f32;
-        Ok(score)
     }
 }
 
-pub struct DepthFirstScorer;
+static SCORER_KIND: AtomicU8 = AtomicU8::new(ScorerKind::Onnx as u8);
+static FACTUAL_PENALTY_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f800000); // 1.0_f32.to_bits()
 
-impl Scorer for DepthFirstScorer {
-    // Always scoring zero will make it do depth-first search.
-    fn score(&self, _features: &Features) -> Result<f32, Box<dyn Error>> {
-        Ok(0.0)
+pub fn set_default_scorer_kind(kind: ScorerKind) {
+    SCORER_KIND.store(kind as u8, Ordering::Relaxed);
+}
+
+pub fn set_factual_penalty(penalty: f32) {
+    FACTUAL_PENALTY_BITS.store(penalty.to_bits(), Ordering::Relaxed);
+}
+
+pub fn factual_penalty() -> f32 {
+    f32::from_bits(FACTUAL_PENALTY_BITS.load(Ordering::Relaxed))
+}
+
+pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
+    match SCORER_KIND.load(Ordering::Relaxed) {
+        x if x == ScorerKind::Handcrafted as u8 => Box::new(HandcraftedScorer),
+        x if x == ScorerKind::DepthFirst as u8 => Box::new(DepthFirstScorer),
+        x if x == ScorerKind::OnnxFactualPenalty as u8 => {
+            Box::new(OnnxFactualPenalty::new().expect(
+                "ONNX scorer failed to load. \
+                 Call init_default_scorer() at startup to surface this error cleanly.",
+            ))
+        }
+        _ => Box::new(ScoringModel::load().expect(
+            "ONNX scorer failed to load. \
+             Call init_default_scorer() at startup to surface this error cleanly.",
+        )),
     }
+}
+
+/// Eagerly loads the default scorer so a misconfigured ONNX runtime surfaces
+/// here, at one well-known site, instead of as a panic inside the first prover
+/// construction. Intended to be called once from binary entry points.
+pub fn init_default_scorer() -> Result<(), Box<dyn Error>> {
+    ScoringModel::load().map(drop)
 }

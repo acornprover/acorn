@@ -837,6 +837,11 @@ impl LanguageServer for AcornLanguageServer {
 }
 
 pub async fn run_server(args: &ServerArgs) {
+    if let Err(e) = crate::prover::init_default_scorer() {
+        eprintln!("Failed to initialize the default scorer: {}", e);
+        return;
+    }
+
     // By default the stack traces contain a bunch of incomprehensible framework stuff.
     // This tries to clean it up.
     BacktracePrinter::new()

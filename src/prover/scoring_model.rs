@@ -15,7 +15,7 @@ pub struct ScoringModel {
     session: Arc<Session>,
 }
 
-static SCORING_SESSION: OnceLock<Arc<Session>> = OnceLock::new();
+static SCORING_SESSION: OnceLock<Result<Arc<Session>, String>> = OnceLock::new();
 
 const MODEL_BYTES: &[u8] = include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx");
 
@@ -34,11 +34,14 @@ impl ScoringModel {
     // Loads a model from bytes.
     // The bytes are typically preloaded into the binary with include_bytes!.
     fn load_bytes(bytes: &[u8]) -> Result<Self, Box<dyn Error>> {
-        let session = SCORING_SESSION
-            .get_or_init(|| make_session(bytes).expect("Failed to initialize ORT session"));
-        Ok(ScoringModel {
-            session: Arc::clone(session),
-        })
+        let cached =
+            SCORING_SESSION.get_or_init(|| make_session(bytes).map_err(|err| err.to_string()));
+        match cached {
+            Ok(session) => Ok(ScoringModel {
+                session: Arc::clone(session),
+            }),
+            Err(message) => Err(message.clone().into()),
+        }
     }
 
     // Loads the hardcoded model.
@@ -120,5 +123,11 @@ mod tests {
         assert_eq!(scores.len(), 2);
         assert!((scores[0] - score1).abs() < 1e-6);
         assert!((scores[1] - score2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_make_session_rejects_invalid_bytes() {
+        let bad_bytes: &[u8] = b"not an onnx model";
+        assert!(make_session(bad_bytes).is_err());
     }
 }

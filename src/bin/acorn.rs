@@ -6,6 +6,9 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
+use acorn::prover::{
+    init_default_scorer, set_default_scorer_kind, set_factual_penalty, ScorerKind,
+};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -575,6 +578,25 @@ enum Command {
             help = "Print phase timing information for this evaluation run."
         )]
         timing: bool,
+
+        /// Activation scorer policy: onnx (default), handcrafted, depthfirst
+        #[clap(
+            long = "scorer",
+            default_value = "onnx",
+            help = "Activation scorer policy: onnx, handcrafted, or depthfirst.",
+            value_name = "POLICY"
+        )]
+        scorer: String,
+
+        /// Penalty subtracted from a factual-assumption step's score under
+        /// --scorer onnx-factual-penalty. Ignored for other scorers.
+        #[clap(
+            long = "penalty",
+            default_value_t = 1.0,
+            help = "Penalty for factual-assumption steps under onnx-factual-penalty.",
+            value_name = "FLOAT"
+        )]
+        penalty: f32,
     },
 
     /// Compatibility alias for `verify --force-search`
@@ -727,6 +749,14 @@ async fn main() {
         .with(fmt::layer().with_ansi(false).without_time())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
         .init();
+
+    if let Err(e) = init_default_scorer() {
+        eprintln!("Failed to initialize the default scorer: {}", e);
+        eprintln!(
+            "This usually means the ONNX runtime shared library is missing or has the wrong ABI."
+        );
+        std::process::exit(1);
+    }
 
     let args = Args::parse();
 
@@ -1019,11 +1049,21 @@ async fn main() {
             jobs,
             skip,
             timing,
+            scorer,
+            penalty,
         }) => {
             if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
+            match ScorerKind::parse(&scorer) {
+                Ok(kind) => set_default_scorer_kind(kind),
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            set_factual_penalty(penalty);
             let skip_modes = match parse_eval_skip_modes(Some(&skip)) {
                 Ok(modes) => modes,
                 Err(e) => {
@@ -1848,6 +1888,8 @@ mod tests {
                 jobs,
                 skip,
                 timing,
+                scorer,
+                penalty,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
                 assert!(fail_fast);
@@ -1857,6 +1899,8 @@ mod tests {
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert!(timing);
+                assert_eq!(scorer, "onnx");
+                assert_eq!(penalty, 1.0);
             }
             _ => panic!("unexpected command"),
         }
