@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
     Diagnostic, DidChangeTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
-    VersionedTextDocumentIdentifier,
+    InitializeParams, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    Url, VersionedTextDocumentIdentifier,
 };
 use tower_lsp::LanguageServer;
 
@@ -225,6 +225,40 @@ impl TestFixture {
 
         panic!("Build file did not exist within 5 seconds: {}", filename);
     }
+}
+
+#[tokio::test]
+async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
+    let temp_dir = TempDir::new().unwrap();
+    temp_dir.child("acorn.toml").write_str("").unwrap();
+    temp_dir.child("src").create_dir_all().unwrap();
+    let build_dir = temp_dir.child("build");
+    build_dir.create_dir_all().unwrap();
+    build_dir
+        .child("manifest.json")
+        .write_str(r#"{"version":23,"modules":{}}"#)
+        .unwrap();
+
+    let args = ServerArgs {
+        workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
+        acornlib_cache_dir: None,
+        packaged_acornlib_override: None,
+    };
+    let client = Arc::new(MockClient::new());
+    let error = match AcornLanguageServer::new(client.clone(), &args) {
+        Ok(_) => panic!("server creation should fail"),
+        Err(error) => error,
+    };
+    let expected = "This version of acornlib uses build format 23, but this version of the Acorn VS Code extension only supports up to build format 22. Please update the Acorn VS Code extension.";
+
+    assert_eq!(error, expected);
+
+    let server = AcornLanguageServer::from_initialization_error(client, error);
+    let init_error = server
+        .initialize(InitializeParams::default())
+        .await
+        .unwrap_err();
+    assert_eq!(init_error.message.as_ref(), expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]

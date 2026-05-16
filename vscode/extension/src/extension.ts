@@ -425,7 +425,16 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     initializationFailedHandler: (error) => {
       initFailed = true;
-      vscode.window.showErrorMessage("Acorn error: " + error.message);
+      let message = error.message;
+      let manifestMessageStart = message.indexOf(
+        "This version of acornlib uses build format "
+      );
+      if (manifestMessageStart >= 0) {
+        message = message.slice(manifestMessageStart);
+      } else {
+        message = "Acorn error: " + message;
+      }
+      vscode.window.showErrorMessage(message);
       // Prevent automatic restart
       return false;
     },

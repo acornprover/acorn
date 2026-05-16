@@ -5,7 +5,7 @@ use acorn::doc_generator::DocGenerator;
 use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
-use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
+use acorn::project::{Project, ProjectConfig, ProjectError, SelectionInfo, UsageMode};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -18,6 +18,15 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|threads| threads.get())
         .unwrap_or(1)
+}
+
+fn exit_project_load_error<T>(error: ProjectError) -> T {
+    if error.is_manifest_version_too_new() {
+        println!("{}", error.cli_message());
+    } else {
+        println!("Error loading project: {}", error.cli_message());
+    }
+    std::process::exit(1);
 }
 
 /// Represents a line selection: either a single line or a range.
@@ -154,7 +163,7 @@ fn resolve_print_proof_line_selection(
         read_cache: false,
         write_cache: false,
     };
-    let mut project = Project::new_local(start_path, config).map_err(|e| e.to_string())?;
+    let mut project = Project::new_local(start_path, config).map_err(|e| e.cli_message())?;
 
     let descriptor = if target.ends_with(".ac") {
         let path = resolve_target_path(start_path, target);
@@ -762,10 +771,7 @@ async fn main() {
                     ..ProjectConfig::default()
                 },
             )
-            .unwrap_or_else(|e| {
-                println!("Error loading project: {}", e);
-                std::process::exit(1);
-            });
+            .unwrap_or_else(exit_project_load_error);
             project.add_src_targets();
             match DocGenerator::new(&project).generate(&dir) {
                 Ok(count) => {
@@ -877,7 +883,7 @@ async fn main() {
             let mut verifier = match Verifier::new(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", e.cli_message());
                     std::process::exit(1);
                 }
             };
@@ -967,7 +973,7 @@ async fn main() {
             let mut verifier = match Verifier::new_for_check(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", e.cli_message());
                     std::process::exit(1);
                 }
             };
@@ -1047,7 +1053,7 @@ async fn main() {
             let mut verifier = match Verifier::new(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", e.cli_message());
                     std::process::exit(1);
                 }
             };
@@ -1150,7 +1156,7 @@ async fn main() {
             let mut verifier = match Verifier::new(current_dir, config, target) {
                 Ok(v) => v,
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", e.cli_message());
                     std::process::exit(1);
                 }
             };
@@ -1228,10 +1234,7 @@ async fn main() {
                     ..ProjectConfig::default()
                 },
             )
-            .unwrap_or_else(|e| {
-                println!("Error loading project: {}", e);
-                std::process::exit(1);
-            });
+            .unwrap_or_else(exit_project_load_error);
 
             // Add target and resolve path, same way as verify does
             let path = if module.ends_with(".ac") {
@@ -1367,10 +1370,7 @@ async fn main() {
                     write_cache: false,
                 },
             )
-            .unwrap_or_else(|e| {
-                println!("Error loading project: {}", e);
-                std::process::exit(1);
-            });
+            .unwrap_or_else(exit_project_load_error);
 
             project.add_src_targets();
             let errors = project.errors();
@@ -1418,10 +1418,7 @@ async fn main() {
                 });
 
             let project = Project::new(src_dir.clone(), build_dir, ProjectConfig::default())
-                .unwrap_or_else(|e| {
-                    println!("Error loading project: {}", e);
-                    std::process::exit(1);
-                });
+                .unwrap_or_else(exit_project_load_error);
 
             let mut module_names = Vec::new();
             for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
@@ -1462,10 +1459,7 @@ async fn main() {
                     write_cache: false,
                 },
             )
-            .unwrap_or_else(|e| {
-                println!("Error loading project: {}", e);
-                std::process::exit(1);
-            });
+            .unwrap_or_else(exit_project_load_error);
 
             match target {
                 Some(target) if target == "-" => {
@@ -1538,10 +1532,7 @@ async fn main() {
                     write_cache: false,
                 },
             )
-            .unwrap_or_else(|e| {
-                println!("Error loading project: {}", e);
-                std::process::exit(1);
-            });
+            .unwrap_or_else(exit_project_load_error);
 
             project.add_src_targets();
             let errors = project.errors();
@@ -1581,7 +1572,7 @@ async fn main() {
             let mut verifier = match Verifier::new(current_dir, ProjectConfig::default(), None) {
                 Ok(v) => v,
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", e.cli_message());
                     std::process::exit(1);
                 }
             };

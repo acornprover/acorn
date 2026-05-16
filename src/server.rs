@@ -303,7 +303,8 @@ pub struct AcornLanguageServer {
     client: Arc<dyn LspClient>,
 
     // The project we're working on
-    project_manager: Arc<ProjectManager>,
+    project_manager: Option<Arc<ProjectManager>>,
+    initialization_error: Option<String>,
 
     // Information about the most recent build to run.
     build: Arc<RwLock<BuildInfo>>,
@@ -377,25 +378,46 @@ impl AcornLanguageServer {
         };
         let project_manager = Arc::new(
             ProjectManager::new(src_dir, build_dir, config, write_cache)
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| e.vscode_message())?,
         );
         Ok(AcornLanguageServer {
-            project_manager,
+            project_manager: Some(project_manager),
+            initialization_error: None,
             client,
             build: Arc::new(RwLock::new(BuildInfo::none())),
             documents: DashMap::new(),
         })
     }
 
+    pub(crate) fn from_initialization_error(
+        client: Arc<dyn LspClient>,
+        error: String,
+    ) -> AcornLanguageServer {
+        AcornLanguageServer {
+            project_manager: None,
+            initialization_error: Some(error),
+            client,
+            build: Arc::new(RwLock::new(BuildInfo::none())),
+            documents: DashMap::new(),
+        }
+    }
+
+    fn project_manager(&self) -> Option<Arc<ProjectManager>> {
+        self.project_manager.clone()
+    }
+
     // Updates the live document state, then reloads and builds in the background.
     async fn build(&self, path: PathBuf, text: &str, version: i32) {
         log("building...");
         let build_path = path.clone();
+        let Some(project_manager) = self.project_manager() else {
+            log("build skipped because project initialization failed");
+            return;
+        };
 
         // Keep the save request cheap: update the in-memory file and target set,
         // but defer module reloads to the background build task.
-        let (result, update_epoch) = self
-            .project_manager
+        let (result, update_epoch) = project_manager
             .mutate_with_epoch(|project| {
                 project.building = true;
                 project.update_file_for_ide(path, &text, version)
@@ -416,7 +438,6 @@ impl AcornLanguageServer {
         // This channel passes the build events
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let project_manager = self.project_manager.clone();
         let build = self.build.clone();
         let client = Arc::clone(&self.client);
         let jobs = default_jobs();
@@ -538,7 +559,11 @@ impl AcornLanguageServer {
     ) -> jsonrpc::Result<SelectionResponse> {
         let mut response = SelectionResponse::new(params.clone());
 
-        let project = self.project_manager.read().await;
+        let Some(project_manager) = self.project_manager() else {
+            response.failure = self.initialization_error.clone();
+            return Ok(response);
+        };
+        let project = project_manager.read().await;
         response.building = project.building;
         let path = match to_path(&params.uri) {
             Some(path) => path,
@@ -614,6 +639,14 @@ impl AcornLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for AcornLanguageServer {
     async fn initialize(&self, _params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        if let Some(error) = &self.initialization_error {
+            return Err(jsonrpc::Error {
+                code: jsonrpc::ErrorCode::ServerError(-32000),
+                message: error.clone().into(),
+                data: None,
+            });
+        }
+
         let sync_options = TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
             open_close: Some(true),
             change: Some(TextDocumentSyncKind::INCREMENTAL),
@@ -705,7 +738,11 @@ impl LanguageServer for AcornLanguageServer {
             // Check if the project already has this document state.
             // If the update is a no-op, there's no need to stop the build.
             // This happens if you save without changing anything.
-            let project = self.project_manager.read().await;
+            let Some(project_manager) = self.project_manager() else {
+                log("save ignored because project initialization failed");
+                return;
+            };
+            let project = project_manager.read().await;
             if project.has_version(&path, version) {
                 return;
             }
@@ -728,8 +765,11 @@ impl LanguageServer for AcornLanguageServer {
             }
         };
         // Use mutate to close the file with automatic build cancellation
-        let result = self
-            .project_manager
+        let Some(project_manager) = self.project_manager() else {
+            log("close ignored because project initialization failed");
+            return;
+        };
+        let result = project_manager
             .mutate(|project| project.close_file(path))
             .await;
 
@@ -756,7 +796,11 @@ impl LanguageServer for AcornLanguageServer {
         let doc = doc.read().await;
         let env_line = doc.get_env_line(pos.line);
         let prefix = doc.get_prefix(pos.line, pos.character);
-        let project = self.project_manager.read().await;
+        let Some(project_manager) = self.project_manager() else {
+            log("completion unavailable because project initialization failed");
+            return Ok(None);
+        };
+        let project = project_manager.read().await;
         match project.get_completions(path.as_deref(), env_line, &prefix) {
             Some(items) => {
                 let response = CompletionResponse::List(CompletionList {
@@ -772,7 +816,11 @@ impl LanguageServer for AcornLanguageServer {
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        let project = self.project_manager.read().await;
+        let Some(project_manager) = self.project_manager() else {
+            log("hover unavailable because project initialization failed");
+            return Ok(None);
+        };
+        let project = project_manager.read().await;
 
         // We log something in the conditions that are unexpected
         let Some(path) = to_path(&uri) else {
@@ -808,7 +856,11 @@ impl LanguageServer for AcornLanguageServer {
     ) -> jsonrpc::Result<Option<GotoImplementationResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        let project = self.project_manager.read().await;
+        let Some(project_manager) = self.project_manager() else {
+            log("definition unavailable because project initialization failed");
+            return Ok(None);
+        };
+        let project = project_manager.read().await;
 
         // We log something in the conditions that are unexpected
         let Some(path) = to_path(&uri) else {
@@ -855,7 +907,9 @@ pub async fn run_server(args: &ServerArgs) {
     let stdout = tokio::io::stdout();
 
     let (service, socket) = LspService::build(move |client| {
-        AcornLanguageServer::new(Arc::new(client), args).expect("failed to create language server")
+        let client = Arc::new(client);
+        AcornLanguageServer::new(client.clone(), args)
+            .unwrap_or_else(|error| AcornLanguageServer::from_initialization_error(client, error))
     })
     .custom_method(
         "acorn/progress",

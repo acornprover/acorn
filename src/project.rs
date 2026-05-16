@@ -29,6 +29,7 @@ use crate::kernel::checker::StepReason;
 use crate::loader::module_loader::elaborate_and_lower_module;
 use crate::loader::parsed_module::ParsedModule;
 use crate::loader::source::read_source_text;
+use crate::manifest::ManifestError;
 use crate::module::{LoadState, LoadedModule, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
@@ -798,6 +799,23 @@ mod tests {
     }
 
     #[test]
+    fn project_error_formats_manifest_version_for_callers() {
+        let error = ProjectError::from(ManifestError::VersionTooNew {
+            found: 23,
+            supported: 22,
+        });
+
+        assert_eq!(
+            error.cli_message(),
+            "This version of acornlib uses build format 23, but this version of the acorn binary only supports up to build format 22. Please run `acorn --update`."
+        );
+        assert_eq!(
+            error.vscode_message(),
+            "This version of acornlib uses build format 23, but this version of the Acorn VS Code extension only supports up to build format 22. Please update the Acorn VS Code extension."
+        );
+    }
+
+    #[test]
     fn batch_drain_keeps_exports_and_drops_module_work() {
         let mut project = Project::new_mock();
         project.mock("/mock/dep.ac", "theorem dep_truth { true }\n");
@@ -871,29 +889,59 @@ impl Default for ProjectConfig {
 
 // General project-level errors (file operations, setup, etc.)
 #[derive(Debug)]
-pub struct ProjectError(pub String);
+pub enum ProjectError {
+    Message(String),
+    Manifest(ManifestError),
+}
 
-impl From<io::Error> for ProjectError {
-    fn from(error: io::Error) -> Self {
-        ProjectError(format!("{}", error))
+impl ProjectError {
+    pub fn message(message: impl Into<String>) -> Self {
+        Self::Message(message.into())
+    }
+
+    pub fn is_manifest_version_too_new(&self) -> bool {
+        matches!(self, Self::Manifest(ManifestError::VersionTooNew { .. }))
+    }
+
+    pub fn cli_message(&self) -> String {
+        match self {
+            Self::Manifest(ManifestError::VersionTooNew { found, supported }) => format!(
+                "This version of acornlib uses build format {}, but this version of the acorn binary only supports up to build format {}. Please run `acorn --update`.",
+                found, supported
+            ),
+            _ => self.to_string(),
+        }
+    }
+
+    pub fn vscode_message(&self) -> String {
+        match self {
+            Self::Manifest(ManifestError::VersionTooNew { found, supported }) => format!(
+                "This version of acornlib uses build format {}, but this version of the Acorn VS Code extension only supports up to build format {}. Please update the Acorn VS Code extension.",
+                found, supported
+            ),
+            _ => self.to_string(),
+        }
     }
 }
 
-impl From<crate::manifest::ManifestError> for ProjectError {
-    fn from(error: crate::manifest::ManifestError) -> Self {
-        ProjectError(format!("{}", error))
+impl From<io::Error> for ProjectError {
+    fn from(error: io::Error) -> Self {
+        ProjectError::message(format!("{}", error))
+    }
+}
+
+impl From<ManifestError> for ProjectError {
+    fn from(error: ManifestError) -> Self {
+        ProjectError::Manifest(error)
     }
 }
 
 impl fmt::Display for ProjectError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<ProjectError> for String {
-    fn from(error: ProjectError) -> Self {
-        error.0
+        match self {
+            ProjectError::Message(message) => write!(f, "{}", message),
+            ProjectError::Manifest(error) => write!(f, "{}", error),
+        }
     }
 }
 
@@ -1078,17 +1126,16 @@ impl Project {
     pub fn new_local(start_path: &Path, config: ProjectConfig) -> Result<Project, ProjectError> {
         let (src_dir, build_dir) =
             Project::find_local_acorn_library(start_path).ok_or_else(|| {
-                ProjectError(
+                ProjectError::message(
                     "Could not find acornlib.\n\
                 Please run this from within the acornlib directory.\n\
-                See https://github.com/acornprover/acornlib for details."
-                        .to_string(),
+                See https://github.com/acornprover/acornlib for details.",
                 )
             })?;
         #[cfg(test)]
         if config.use_filesystem && Self::is_real_acornlib_src_for_unit_tests(&src_dir) {
-            return Err(ProjectError(
-                "you should not use real acornlib during the unit tests".to_string(),
+            return Err(ProjectError::message(
+                "you should not use real acornlib during the unit tests",
             ));
         }
         Project::new(src_dir, build_dir, config)
@@ -2412,14 +2459,14 @@ impl Project {
             return Ok(content.clone());
         }
         if !self.config.use_filesystem {
-            return Err(ProjectError(format!(
+            return Err(ProjectError::message(format!(
                 "no mocked file for: {}",
                 path.display()
             )));
         }
         match std::fs::read_to_string(&path) {
             Ok(s) => Ok(s),
-            Err(e) => Err(ProjectError(format!(
+            Err(e) => Err(ProjectError::message(format!(
                 "error loading {}: {}",
                 path.display(),
                 e

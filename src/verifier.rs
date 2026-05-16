@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fmt;
 use std::io::BufRead;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -12,7 +13,10 @@ use crate::builder::{
     BuildEvent, BuildMetrics, BuildStatus, Builder, LoadedModuleWorkBatch, ModuleTiming,
 };
 use crate::module::ModuleDescriptor;
-use crate::project::{ParallelProjectLoader, Project, ProjectConfig, ProjectView, UsageMode};
+use crate::project::{
+    ImportError, ParallelProjectLoader, Project, ProjectConfig, ProjectError, ProjectView,
+    UsageMode,
+};
 
 fn resolve_target_path(start_path: &std::path::Path, target: &str) -> PathBuf {
     let path = PathBuf::from(target);
@@ -47,6 +51,48 @@ fn read_stdin_appended_target(
         text.push('\n');
     }
     Ok(text)
+}
+
+#[derive(Debug)]
+pub enum VerifierSetupError {
+    Message(String),
+    Project(ProjectError),
+}
+
+impl VerifierSetupError {
+    pub fn cli_message(&self) -> String {
+        match self {
+            Self::Message(message) => message.clone(),
+            Self::Project(error) => error.cli_message(),
+        }
+    }
+}
+
+impl From<String> for VerifierSetupError {
+    fn from(error: String) -> Self {
+        Self::Message(error)
+    }
+}
+
+impl From<ImportError> for VerifierSetupError {
+    fn from(error: ImportError) -> Self {
+        Self::Message(error.to_string())
+    }
+}
+
+impl From<ProjectError> for VerifierSetupError {
+    fn from(error: ProjectError) -> Self {
+        Self::Project(error)
+    }
+}
+
+impl fmt::Display for VerifierSetupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(message) => write!(f, "{}", message),
+            Self::Project(error) => write!(f, "{}", error),
+        }
+    }
 }
 
 /// Output from running the verifier
@@ -310,7 +356,7 @@ impl Verifier {
         start_path: PathBuf,
         config: ProjectConfig,
         target: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, VerifierSetupError> {
         Self::new_inner(start_path, config, target, None, false, false)
     }
 
@@ -318,7 +364,7 @@ impl Verifier {
         start_path: PathBuf,
         mut config: ProjectConfig,
         target: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, VerifierSetupError> {
         config.usage_mode = UsageMode::Check;
         Self::new_inner(start_path, config, target, None, true, true)
     }
@@ -330,7 +376,7 @@ impl Verifier {
         stdin_override: Option<&str>,
         include_pending_dir: bool,
         surface_check_pending_targets: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, VerifierSetupError> {
         let setup_start = std::time::Instant::now();
         let mut project = Project::new_local(&start_path, config.clone())?;
         let cache_load_time = project.cache_load_time;
@@ -401,7 +447,7 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
         stdin_override: Option<&str>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, VerifierSetupError> {
         Self::new_inner(start_path, config, target, stdin_override, false, false)
     }
 
@@ -885,6 +931,7 @@ mod tests {
             Ok(_) => panic!("verifier should reject the real acornlib in unit tests"),
             Err(err) => err,
         };
+        let err = err.to_string();
         assert!(
             err.contains("you should not use real acornlib during the unit tests"),
             "{err}"
