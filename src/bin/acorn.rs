@@ -6,7 +6,9 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, SelectionInfo, UsageMode};
-use acorn::prover::{init_default_scorer, set_default_scorer_kind, ScorerKind};
+use acorn::prover::{
+    init_default_scorer, set_default_scorer_kind, set_factual_penalty, ScorerKind,
+};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -585,6 +587,16 @@ enum Command {
             value_name = "POLICY"
         )]
         scorer: String,
+
+        /// Penalty subtracted from a factual-assumption step's score under
+        /// --scorer onnx-factual-penalty. Ignored for other scorers.
+        #[clap(
+            long = "penalty",
+            default_value_t = 1.0,
+            help = "Penalty for factual-assumption steps under onnx-factual-penalty.",
+            value_name = "FLOAT"
+        )]
+        penalty: f32,
     },
 
     /// Compatibility alias for `verify --force-search`
@@ -1038,6 +1050,7 @@ async fn main() {
             skip,
             timing,
             scorer,
+            penalty,
         }) => {
             if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
@@ -1050,6 +1063,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            set_factual_penalty(penalty);
             let skip_modes = match parse_eval_skip_modes(Some(&skip)) {
                 Ok(modes) => modes,
                 Err(e) => {
@@ -1875,6 +1889,7 @@ mod tests {
                 skip,
                 timing,
                 scorer,
+                penalty,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
                 assert!(fail_fast);
@@ -1885,6 +1900,7 @@ mod tests {
                 assert_eq!(skip, "01");
                 assert!(timing);
                 assert_eq!(scorer, "onnx");
+                assert_eq!(penalty, 1.0);
             }
             _ => panic!("unexpected command"),
         }

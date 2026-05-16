@@ -20,7 +20,7 @@ pub(crate) mod synthetic;
 
 // Re-export the main public types
 pub use prover::Prover;
-pub use scorer::{init_default_scorer, set_default_scorer_kind, ScorerKind};
+pub use scorer::{init_default_scorer, set_default_scorer_kind, set_factual_penalty, ScorerKind};
 
 /// Instrumentation collected during one prover search.
 #[derive(Clone, Debug, Default)]

@@ -40,9 +40,19 @@ impl ScorerKind {
 }
 
 static SCORER_KIND: AtomicU8 = AtomicU8::new(ScorerKind::Onnx as u8);
+static FACTUAL_PENALTY_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f800000); // 1.0_f32.to_bits()
 
 pub fn set_default_scorer_kind(kind: ScorerKind) {
     SCORER_KIND.store(kind as u8, Ordering::Relaxed);
+}
+
+pub fn set_factual_penalty(penalty: f32) {
+    FACTUAL_PENALTY_BITS.store(penalty.to_bits(), Ordering::Relaxed);
+}
+
+pub fn factual_penalty() -> f32 {
+    f32::from_bits(FACTUAL_PENALTY_BITS.load(Ordering::Relaxed))
 }
 
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
