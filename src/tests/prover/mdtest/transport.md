@@ -1,5 +1,37 @@
 # Transport
 
+## Exact Type
+
+```acorn
+type Item: axiom
+
+theorem exact_type(x: Item) {
+    true
+} by {
+    let y: Item = transport x
+    y = x
+}
+```
+
+## Indexed Structure
+
+```acorn
+type Nat: axiom
+
+structure Box[n: Nat] {
+    value: Nat
+}
+
+theorem indexed_structure(n: Nat, k: Nat, x: Box[n]) {
+    n = k implies true
+} by {
+    if n = k {
+        let y: Box[k] = transport x
+        y.value = x.value
+    }
+}
+```
+
 ## Function Over Indexed Structure
 
 ```acorn
