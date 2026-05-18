@@ -970,7 +970,7 @@ impl Prover {
                 timeout_secs,
                 activation_limit,
             } => (activation_limit, timeout_secs, true),
-            ProverMode::Test => (500, 0.3, true),
+            ProverMode::Test => (500, 0.5, true),
         };
         // Special test behavior: if we're in test mode and trying to prove "test_hang",
         // wait for cancellation instead of actually proving
