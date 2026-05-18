@@ -598,30 +598,24 @@ impl Environment {
         };
         let instance_fact = Fact::Instance(typeclass_instance.clone(), instance_source.clone());
 
-        let node = if conditions.is_empty() {
-            Node::Structural(instance_fact)
-        } else {
-            let range = Range {
-                start: statement.first_token.start_pos(),
-                end: if let Some(definitions) = &is.definitions {
-                    definitions.right_brace.end_pos()
-                } else {
-                    statement.last_token.end_pos()
-                },
-            };
-            let block_params = BlockParams::TypeRequirement(conditions, range);
-            let block = Block::new(
-                project,
-                &self,
-                family_scope.type_params().to_vec(),
-                family_scope.value_block_args(),
-                block_params,
-                &statement.first_token,
-                &statement.last_token,
-                is.body.as_ref(),
-            )?;
-            Node::Block(block, Some(instance_fact))
+        let range = Range {
+            start: statement.first_token.start_pos(),
+            end: if let Some(definitions) = &is.definitions {
+                definitions.right_brace.end_pos()
+            } else {
+                statement.last_token.end_pos()
+            },
         };
+        let node = self.requirement_backed_fact_node(
+            project,
+            statement,
+            family_scope.type_params().to_vec(),
+            family_scope.value_block_args(),
+            conditions,
+            range,
+            is.body.as_ref(),
+            instance_fact,
+        )?;
 
         for type_param in family_scope.type_params() {
             self.bindings.remove_type(&type_param.name);

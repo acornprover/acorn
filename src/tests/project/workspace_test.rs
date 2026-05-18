@@ -162,6 +162,36 @@ fn test_basic_import() {
 }
 
 #[test]
+fn test_imported_structure_fields_support_transport() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/base.ac",
+        indoc! {"
+            type Nat: axiom
+            type Item: axiom
+
+            structure Fin[n: Nat] {
+                value: Nat
+            }
+        "},
+    );
+    p.mock(
+        "/mock/main.ac",
+        indoc! {"
+            from base import Nat, Item, Fin
+
+            theorem imported_transport(n: Nat, k: Nat, v: Fin[n] -> Item) {
+                true
+            } by {
+                let w: Fin[k] -> Item = transport v
+                true
+            }
+        "},
+    );
+    p.expect_ok("main");
+}
+
+#[test]
 fn test_citation_statements_collect_nested_citations() {
     let mut p = Project::new_mock_ide();
     p.mock("/mock/base.ac", "theorem helper { true }\n");

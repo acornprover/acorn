@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Range;
 
 use crate::elaborator::acorn_type::{
-    AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, Telescope, TypeParam,
-    Typeclass, TypeclassInstance, ValueParam, Variance,
+    AcornType, Datatype, FamilyParam, FamilyParamKind, Telescope, TypeParam, Typeclass,
+    TypeclassInstance, ValueParam, Variance,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::ConstructorInfo;
@@ -95,8 +95,10 @@ mod attributes;
 mod blocks;
 mod datatypes;
 mod definitions;
+mod generated;
 mod imports;
 mod simple_types;
+mod transport;
 mod typeclasses;
 
 // This file generally contains the logic for creating an environment.

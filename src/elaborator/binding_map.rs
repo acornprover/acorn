@@ -2695,6 +2695,18 @@ impl DatatypeDefinition {
                 typename
             )));
         }
+        match (&self.structure_fields, &info.structure_fields) {
+            (None, Some(fields)) => {
+                self.structure_fields = Some(fields.clone());
+            }
+            (Some(existing), Some(imported)) if existing != imported => {
+                return Err(source.error(&format!(
+                    "datatype {} is imported with incompatible structure fields",
+                    typename
+                )));
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
