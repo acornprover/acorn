@@ -32,6 +32,34 @@ theorem indexed_structure(n: Nat, k: Nat, x: Box[n]) {
 }
 ```
 
+## Prove Predicate About Transported Structure
+
+```acorn
+type Nat: axiom
+let marked: Nat = axiom
+
+structure Packet[n: Nat] {
+    payload: Nat
+}
+
+define has_mark(n: Nat, p: Packet[n]) -> Bool {
+    p.payload = marked
+}
+
+theorem transported_packet_has_mark(n: Nat, k: Nat, x: Packet[n]) {
+    n = k implies has_mark(n, x) implies exists(y: Packet[k]) {
+        has_mark(k, y)
+    }
+} by {
+    if n = k {
+        if has_mark(n, x) {
+            let y: Packet[k] = transport x
+            has_mark(k, y)
+        }
+    }
+}
+```
+
 ## Function Over Indexed Structure
 
 ```acorn
