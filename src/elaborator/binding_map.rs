@@ -1526,6 +1526,18 @@ impl BindingMap {
             .map(|info| info.family_param_kinds.as_slice())
     }
 
+    pub fn set_datatype_structure_fields(&mut self, datatype: &Datatype, fields: Vec<String>) {
+        if let Some(info) = self.datatype_defs.get_mut(datatype) {
+            info.structure_fields = Some(fields);
+        }
+    }
+
+    pub fn get_datatype_structure_fields(&self, datatype: &Datatype) -> Option<&[String]> {
+        self.datatype_defs
+            .get(datatype)
+            .and_then(|info| info.structure_fields.as_deref())
+    }
+
     /// Get the doc comment for a typeclass.
     pub fn get_typeclass_doc_comments(&self, typeclass: &Typeclass) -> Option<&Vec<String>> {
         self.typeclass_defs.get(typeclass).and_then(|info| {
@@ -2615,6 +2627,9 @@ struct DatatypeDefinition {
 
     /// The declared parameter kinds for this datatype family.
     family_param_kinds: Vec<FamilyParamKind>,
+
+    /// The fields of this datatype, if it was introduced with `structure`.
+    structure_fields: Option<Vec<String>>,
 }
 
 impl DatatypeDefinition {
@@ -2630,6 +2645,7 @@ impl DatatypeDefinition {
             variances: None,
             arity: 0,
             family_param_kinds: vec![],
+            structure_fields: None,
         }
     }
 

@@ -361,6 +361,11 @@ mod tests {
     }
 
     #[test]
+    fn test_single_line_transport_let_statement() {
+        should_parse("let y: Nat = transport x");
+    }
+
+    #[test]
     fn test_single_line_variable_satisfy_multivar_statement() {
         should_parse("let (x: Nat, y: Nat) satisfy { x > y }");
     }

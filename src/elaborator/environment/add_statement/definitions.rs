@@ -85,7 +85,530 @@ fn quantify_over_explicit_value_params(
     }
 }
 
+fn transport_operand(expression: &Expression) -> Option<(&Token, &Expression)> {
+    match expression {
+        Expression::Unary(token, operand) if token.token_type == TokenType::Transport => {
+            Some((token, operand))
+        }
+        Expression::Grouping(_, inner, _) => transport_operand(inner),
+        _ => None,
+    }
+}
+
+fn conjoin(values: Vec<AcornValue>) -> AcornValue {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return AcornValue::Bool(true);
+    };
+    iter.fold(first, AcornValue::and)
+}
+
+fn datatype_args_for_type(acorn_type: &AcornType) -> Option<(Datatype, Vec<DependentTypeArg>)> {
+    match acorn_type {
+        AcornType::Data(datatype, type_args) => Some((
+            datatype.clone(),
+            type_args
+                .iter()
+                .cloned()
+                .map(DependentTypeArg::Type)
+                .collect(),
+        )),
+        AcornType::Family(datatype, args) => Some((datatype.clone(), args.clone())),
+        _ => None,
+    }
+}
+
+fn split_datatype_args(args: &[DependentTypeArg]) -> (Vec<AcornType>, Vec<AcornValue>) {
+    let mut type_args = vec![];
+    let mut value_args = vec![];
+    for arg in args {
+        match arg {
+            DependentTypeArg::Type(acorn_type) => type_args.push(acorn_type.clone()),
+            DependentTypeArg::Value(value) => value_args.push(value.clone()),
+        }
+    }
+    (type_args, value_args)
+}
+
 impl Environment {
+    fn apply_datatype_attr_for_transport(
+        &self,
+        project: &dyn ProjectLookup,
+        receiver_type: &AcornType,
+        receiver: AcornValue,
+        attr_name: &str,
+        source: &dyn ErrorContext,
+    ) -> error::Result<AcornValue> {
+        let Some((_, datatype_args)) = datatype_args_for_type(receiver_type) else {
+            return Err(source.error("transport attribute receiver is not a datatype"));
+        };
+        let (module_id, const_name) = self
+            .bindings
+            .resolve_datatype_attr_for_type(receiver_type, attr_name)
+            .map_err(|e| source.error(&e))?;
+        let attr_bindings = self.bindings.get_bindings(module_id, project);
+        let potential = attr_bindings
+            .get_constant_value(&DefinedName::Constant(const_name))
+            .map_err(|e| source.error(&e))?;
+        let (type_args, value_args) = split_datatype_args(&datatype_args);
+        let attr =
+            potential.resolve_constant_with_datatype_args(&type_args, &value_args, source)?;
+        self.bindings
+            .apply_potential(PotentialValue::Resolved(attr), vec![receiver], None, source)
+    }
+
+    fn transport_datatype_arg_conditions(
+        &self,
+        source_args: &[DependentTypeArg],
+        target_args: &[DependentTypeArg],
+        source: &dyn ErrorContext,
+    ) -> error::Result<Vec<AcornValue>> {
+        if source_args.len() != target_args.len() {
+            return Err(source.error("transport source and target types have different arity"));
+        }
+
+        let mut conditions = vec![];
+        for (source_arg, target_arg) in source_args.iter().zip(target_args) {
+            match (source_arg, target_arg) {
+                (DependentTypeArg::Type(source_type), DependentTypeArg::Type(target_type)) => {
+                    if source_type != target_type {
+                        return Err(source.error(&format!(
+                            "transport between different type parameters is not supported: {} vs {}",
+                            source_type, target_type
+                        )));
+                    }
+                }
+                (DependentTypeArg::Value(source_value), DependentTypeArg::Value(target_value)) => {
+                    let source_type = source_value.get_type();
+                    let target_type = target_value.get_type();
+                    if source_type != target_type {
+                        return Err(source.error(&format!(
+                            "transport index types differ: {} vs {}",
+                            source_type, target_type
+                        )));
+                    }
+                    if source_value != target_value {
+                        conditions.push(AcornValue::equals(
+                            source_value.clone(),
+                            target_value.clone(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(source
+                        .error("transport source and target types use different parameter kinds"))
+                }
+            }
+        }
+        Ok(conditions)
+    }
+
+    fn build_transport_relation(
+        &self,
+        project: &dyn ProjectLookup,
+        source_type: &AcornType,
+        target_type: &AcornType,
+        source_value: AcornValue,
+        target_value: AcornValue,
+        source: &dyn ErrorContext,
+        stack_size: AtomId,
+        depth: usize,
+    ) -> error::Result<AcornValue> {
+        if depth > 32 {
+            return Err(source.error("transport relation is too deeply recursive"));
+        }
+
+        if source_type == target_type {
+            return Ok(AcornValue::equals(target_value, source_value));
+        }
+
+        if let (AcornType::Function(source_fn), AcornType::Function(target_fn)) =
+            (source_type, target_type)
+        {
+            if source_fn.arg_types.len() != target_fn.arg_types.len() {
+                return Err(source.error(&format!(
+                    "cannot transport between functions with different arity: {} vs {}",
+                    source_type, target_type
+                )));
+            }
+
+            let arg_count = source_fn.arg_types.len() as AtomId;
+            let total_arg_count = arg_count * 2;
+            let body_stack_size = stack_size + total_arg_count;
+            let source_args = source_fn
+                .arg_types
+                .iter()
+                .enumerate()
+                .map(|(i, arg_type)| {
+                    AcornValue::Variable(stack_size + i as AtomId, arg_type.clone())
+                })
+                .collect::<Vec<_>>();
+            let target_args = target_fn
+                .arg_types
+                .iter()
+                .enumerate()
+                .map(|(i, arg_type)| {
+                    AcornValue::Variable(stack_size + arg_count + i as AtomId, arg_type.clone())
+                })
+                .collect::<Vec<_>>();
+
+            let mut premise_parts = vec![];
+            for ((source_arg_type, target_arg_type), (source_arg, target_arg)) in source_fn
+                .arg_types
+                .iter()
+                .zip(&target_fn.arg_types)
+                .zip(source_args.iter().zip(&target_args))
+            {
+                premise_parts.push(self.build_transport_relation(
+                    project,
+                    source_arg_type,
+                    target_arg_type,
+                    source_arg.clone(),
+                    target_arg.clone(),
+                    source,
+                    body_stack_size,
+                    depth + 1,
+                )?);
+            }
+
+            let source_application = source_value.check_apply(source_args.clone(), None, source)?;
+            let target_application = target_value.check_apply(target_args.clone(), None, source)?;
+            let return_relation = self.build_transport_relation(
+                project,
+                &source_application.get_type(),
+                &target_application.get_type(),
+                source_application,
+                target_application,
+                source,
+                body_stack_size,
+                depth + 1,
+            )?;
+            let premise = conjoin(premise_parts);
+            let body = if premise == AcornValue::Bool(true) {
+                return_relation
+            } else {
+                AcornValue::implies(premise, return_relation)
+            };
+            let mut quant_types = source_fn.arg_types.clone();
+            quant_types.extend(target_fn.arg_types.clone());
+            return Ok(AcornValue::ForAll(quant_types, Box::new(body)));
+        }
+
+        let Some((source_datatype, source_args)) = datatype_args_for_type(source_type) else {
+            return Err(source.error(&format!(
+                "cannot transport value of type {} to {}",
+                source_type, target_type
+            )));
+        };
+        let Some((target_datatype, target_args)) = datatype_args_for_type(target_type) else {
+            return Err(source.error(&format!(
+                "cannot transport value of type {} to {}",
+                source_type, target_type
+            )));
+        };
+        if source_datatype != target_datatype {
+            return Err(source.error(&format!(
+                "cannot transport between different datatypes: {} and {}",
+                source_datatype.name, target_datatype.name
+            )));
+        }
+
+        let fields = self
+            .bindings
+            .get_datatype_structure_fields(&source_datatype)
+            .ok_or_else(|| {
+                source.error(&format!(
+                    "transport is only supported for structures and functions, not {}",
+                    source_datatype.name
+                ))
+            })?
+            .to_vec();
+        let mut conditions =
+            self.transport_datatype_arg_conditions(&source_args, &target_args, source)?;
+        for field in fields {
+            let source_field = self.apply_datatype_attr_for_transport(
+                project,
+                source_type,
+                source_value.clone(),
+                &field,
+                source,
+            )?;
+            let target_field = self.apply_datatype_attr_for_transport(
+                project,
+                target_type,
+                target_value.clone(),
+                &field,
+                source,
+            )?;
+            conditions.push(self.build_transport_relation(
+                project,
+                &source_field.get_type(),
+                &target_field.get_type(),
+                source_field,
+                target_field,
+                source,
+                stack_size,
+                depth + 1,
+            )?);
+        }
+        Ok(conjoin(conditions))
+    }
+
+    fn build_transport_requirements(
+        &self,
+        source_type: &AcornType,
+        target_type: &AcornType,
+        source: &dyn ErrorContext,
+        depth: usize,
+    ) -> error::Result<Vec<AcornValue>> {
+        if depth > 32 {
+            return Err(source.error("transport requirements are too deeply recursive"));
+        }
+        if source_type == target_type {
+            return Ok(vec![]);
+        }
+        if let (AcornType::Function(source_fn), AcornType::Function(target_fn)) =
+            (source_type, target_type)
+        {
+            if source_fn.arg_types.len() != target_fn.arg_types.len() {
+                return Err(source.error(&format!(
+                    "cannot transport between functions with different arity: {} vs {}",
+                    source_type, target_type
+                )));
+            }
+            let mut requirements = vec![];
+            for (source_arg_type, target_arg_type) in
+                source_fn.arg_types.iter().zip(&target_fn.arg_types)
+            {
+                requirements.extend(self.build_transport_requirements(
+                    source_arg_type,
+                    target_arg_type,
+                    source,
+                    depth + 1,
+                )?);
+            }
+            requirements.extend(self.build_transport_requirements(
+                &source_fn.return_type,
+                &target_fn.return_type,
+                source,
+                depth + 1,
+            )?);
+            return Ok(requirements);
+        }
+
+        let Some((source_datatype, source_args)) = datatype_args_for_type(source_type) else {
+            return Err(source.error(&format!(
+                "cannot transport value of type {} to {}",
+                source_type, target_type
+            )));
+        };
+        let Some((target_datatype, target_args)) = datatype_args_for_type(target_type) else {
+            return Err(source.error(&format!(
+                "cannot transport value of type {} to {}",
+                source_type, target_type
+            )));
+        };
+        if source_datatype != target_datatype {
+            return Err(source.error(&format!(
+                "cannot transport between different datatypes: {} and {}",
+                source_datatype.name, target_datatype.name
+            )));
+        }
+        self.transport_datatype_arg_conditions(&source_args, &target_args, source)
+    }
+
+    fn add_transport_let_statement(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        defined_name: DefinedName,
+        ls: &LetStatement,
+        range: Range,
+        datatype_params: Option<&DatatypeFamilyScope>,
+        local_family_params: &LocalFamilyParams,
+        local_type_params: &[TypeParam],
+        target_type: AcornType,
+        source_expr: &Expression,
+        transport_token: &Token,
+    ) -> error::Result<()> {
+        if ls.name_token.token_type == TokenType::Numeral {
+            return Err(ls
+                .name_token
+                .error("transport cannot define numeric datatype members"));
+        }
+        let const_name = defined_name
+            .as_constant()
+            .ok_or_else(|| statement.error("transport cannot define instance attributes"))?
+            .clone();
+
+        let mut stack = Stack::new();
+        bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+        bind_datatype_value_params(&mut stack, datatype_params);
+        let source_value =
+            self.evaluator(project)
+                .evaluate_value_with_stack(&mut stack, source_expr, None)?;
+        let source_type = source_value.get_type();
+
+        let explicit_value_param_types =
+            explicit_value_param_types(&local_family_params.value_params);
+        let family_value_param_count = datatype_params
+            .map(|params| params.value_params().len() as AtomId)
+            .unwrap_or(0)
+            + local_family_params.value_params.len() as AtomId;
+        let target_variable = AcornValue::Variable(family_value_param_count, target_type.clone());
+        let general_relation = self.build_transport_relation(
+            project,
+            &source_type,
+            &target_type,
+            source_value.clone(),
+            target_variable,
+            transport_token,
+            family_value_param_count + 1,
+            0,
+        )?;
+        let relation_is_exact = source_type == target_type;
+        let general_claim = if relation_is_exact {
+            Some(AcornValue::Exists(
+                vec![target_type.clone()],
+                Box::new(general_relation.clone()),
+            ))
+        } else {
+            None
+        };
+        let transport_requirements = if relation_is_exact {
+            vec![]
+        } else {
+            self.build_transport_requirements(&source_type, &target_type, transport_token, 0)?
+        };
+
+        let definition_type_params = match datatype_params {
+            Some(p) => {
+                if !local_type_params.is_empty() {
+                    return Err(ls
+                        .name_token
+                        .error("datatype parameters and let parameters cannot be used together"));
+                }
+                p.type_params().to_vec()
+            }
+            None => local_type_params.to_vec(),
+        };
+        let mut block_args = explicit_value_block_args(&local_family_params.value_params);
+        block_args.extend(datatype_value_block_args(datatype_params));
+        let block = if let Some(general_claim) = general_claim {
+            Some(Block::new(
+                project,
+                &self,
+                vec![],
+                block_args,
+                BlockParams::VariableSatisfy(general_claim, ls.value.range()),
+                &statement.first_token,
+                &statement.last_token,
+                None,
+            )?)
+        } else if transport_requirements.is_empty() {
+            None
+        } else {
+            Some(Block::new(
+                project,
+                &self,
+                vec![],
+                block_args,
+                BlockParams::TypeRequirement(transport_requirements, ls.value.range()),
+                &statement.first_token,
+                &statement.last_token,
+                None,
+            )?)
+        };
+
+        let generic_value_type = target_type.clone().genericize(&definition_type_params);
+        let constant_type = if explicit_value_param_types.is_empty() {
+            generic_value_type.clone()
+        } else {
+            AcornType::functional_from_promoted_ambient(
+                explicit_value_param_types.clone(),
+                generic_value_type.clone(),
+            )
+        };
+        let def_str = statement.to_string();
+        let doc_comments = self.take_doc_comments();
+        self.bindings.add_defined_name(
+            &defined_name,
+            definition_type_params.clone(),
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types(datatype_params)
+            } else {
+                explicit_value_param_types.clone()
+            },
+            constant_type.clone(),
+            None,
+            None,
+            doc_comments,
+            Some(range),
+            Some(def_str),
+        );
+
+        let type_args: Vec<_> = definition_type_params
+            .iter()
+            .map(|p| AcornType::Arbitrary(p.clone()))
+            .collect();
+        let mut constant_value = AcornValue::constant(
+            const_name,
+            type_args,
+            constant_type.clone(),
+            constant_type,
+            vec![],
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types(datatype_params)
+            } else {
+                explicit_value_param_types.clone()
+            },
+        );
+        if explicit_value_param_types.is_empty() {
+            if let Some(datatype_params) = datatype_params {
+                let family_value_args = datatype_params
+                    .value_params()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value_param)| {
+                        AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                    })
+                    .collect::<Vec<_>>();
+                constant_value =
+                    constant_value.bind_value_params(&family_value_args, &ls.name_token)?;
+            }
+        } else {
+            let explicit_value_args = local_family_params
+                .value_params
+                .iter()
+                .enumerate()
+                .map(|(i, value_param)| {
+                    AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                })
+                .collect();
+            constant_value = AcornValue::apply(constant_value, explicit_value_args);
+        }
+
+        let specific_claim_value = general_relation.bind_values(
+            family_value_param_count,
+            family_value_param_count + 1,
+            &[constant_value],
+        );
+        let external_claim = quantify_over_explicit_value_params(
+            &local_family_params.value_params,
+            quantify_over_datatype_value_params(datatype_params, specific_claim_value),
+        )
+        .genericize(&definition_type_params);
+        let source = Source::anonymous(self.module_id, statement.range(), self.depth);
+        let specific_prop = Proposition::new(external_claim, definition_type_params, source);
+        let node = match block {
+            Some(block) => Node::block(project, self, block, Some(specific_prop)),
+            None => Node::structural(project, self, specific_prop),
+        };
+        let index = self.add_node(node);
+        self.add_node_lines(index, &statement.range());
+        Ok(())
+    }
+
     fn evaluate_local_family_params(
         &mut self,
         project: &dyn ProjectLookup,
@@ -205,6 +728,25 @@ impl Environment {
                         }
                     }
                 }
+                if let Some((transport_token, source_expr)) = transport_operand(&ls.value) {
+                    let result = self.add_transport_let_statement(
+                        project,
+                        statement,
+                        defined_name,
+                        ls,
+                        range,
+                        datatype_params,
+                        &local_family_params,
+                        &local_type_params,
+                        acorn_type,
+                        source_expr,
+                        transport_token,
+                    );
+                    for param in local_type_params.iter().rev() {
+                        self.bindings.remove_type(&param.name);
+                    }
+                    return result;
+                }
                 let value = if ls.value.is_axiom() {
                     None
                 } else {
@@ -235,6 +777,11 @@ impl Environment {
                 (acorn_type, value)
             }
             None => {
+                if let Some((transport_token, _)) = transport_operand(&ls.value) {
+                    return Err(
+                        transport_token.error("transport requires an explicit type annotation")
+                    );
+                }
                 if ls.value.is_axiom() {
                     return Err(ls
                         .value

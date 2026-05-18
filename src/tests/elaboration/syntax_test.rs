@@ -121,6 +121,72 @@ fn test_choose_not_allowed_in_surface_expression() {
 }
 
 #[test]
+fn test_transport_requires_explicit_let_type() {
+    let mut env = Environment::test();
+    env.add("let x: Bool = axiom");
+    let message = env.bad("let y = transport x");
+    assert!(message.contains("transport requires an explicit type annotation"));
+}
+
+#[test]
+fn test_transport_exact_type_elaborates() {
+    let mut env = Environment::test();
+    env.add("let x: Bool = axiom");
+    env.add("let y: Bool = transport x");
+    env.expect_type("y", "Bool");
+    env.add("theorem goal { y = x }");
+}
+
+#[test]
+fn test_transport_structure_family_elaborates() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add(
+        r#"
+        structure Box[n: Nat] {
+            value: Nat
+        }
+        "#,
+    );
+    env.add("let n: Nat = axiom");
+    env.add("let k: Nat = axiom");
+    env.add("let x: Box[n] = axiom");
+    env.add("let y: Box[k] = transport x");
+    env.expect_type("y", "Box[k]");
+}
+
+#[test]
+fn test_transport_function_over_structure_family_elaborates() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("type Item: axiom");
+    env.add(
+        r#"
+        structure Fin[n: Nat] {
+            value: Nat
+        }
+        "#,
+    );
+    env.add("let n: Nat = axiom");
+    env.add("let k: Nat = axiom");
+    env.add("let v: Fin[n] -> Item = axiom");
+    env.add("let w: Fin[k] -> Item = transport v");
+    env.expect_type("w", "Fin[k] -> Item");
+}
+
+#[test]
+fn test_transport_rejects_indexed_inductive_type() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("type Wrap[n: Nat]: axiom");
+    env.add("let n: Nat = axiom");
+    env.add("let k: Nat = axiom");
+    env.add("let x: Wrap[n] = axiom");
+    let message = env.bad("let y: Wrap[k] = transport x");
+    assert!(message.contains("transport is only supported for structures and functions"));
+}
+
+#[test]
 fn test_nothing_after_explicit_false() {
     let mut env = Environment::test();
     env.add("let b: Bool = axiom");

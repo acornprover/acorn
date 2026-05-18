@@ -186,6 +186,7 @@ impl TokenType {
         match self {
             TokenType::Not => true,
             TokenType::Minus => true,
+            TokenType::Transport => true,
             _ => false,
         }
     }
@@ -287,6 +288,7 @@ impl TokenType {
         match self {
             TokenType::Not => 6,
             TokenType::Minus => 13,
+            TokenType::Transport => 6,
             _ => 0,
         }
     }

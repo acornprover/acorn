@@ -117,6 +117,13 @@ impl Environment {
             Some(ss.name_token.range()),
             definition_string,
         );
+        self.bindings.set_datatype_structure_fields(
+            &datatype,
+            ss.fields
+                .iter()
+                .map(|(field_name, _, _)| field_name.text().to_string())
+                .collect(),
+        );
         self.bindings.set_datatype_variances(&datatype, variances);
         let struct_type = potential_type.resolve_args(family_args, &ss.name_token)?;
         let quantify_over_value_params = |value: AcornValue| -> AcornValue {

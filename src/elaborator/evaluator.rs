@@ -1620,6 +1620,11 @@ impl<'a> Evaluator<'a> {
 
                     AcornValue::Try(Box::new(inner_value), unwrapped_type)
                 }
+                TokenType::Transport => {
+                    return Err(token.error(
+                        "transport can only be used as the value of an explicitly typed let",
+                    ))
+                }
                 token_type => match token_type.to_prefix_magic_method_name() {
                     Some(name) => {
                         let subvalue = self.evaluate_value_with_stack(stack, expr, None)?;
