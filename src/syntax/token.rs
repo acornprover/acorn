@@ -68,6 +68,7 @@ pub enum TokenType {
     Extends,
     DocComment,
     Lib,
+    Transport,
     Union,
     Intersection,
     Backslash,
@@ -122,6 +123,7 @@ pub fn keyword_map() -> &'static BTreeMap<&'static str, TokenType> {
             ("extends", TokenType::Extends),
             ("iff", TokenType::Iff),
             ("lib", TokenType::Lib),
+            ("transport", TokenType::Transport),
         ])
     })
 }
@@ -445,6 +447,7 @@ impl TokenType {
             TokenType::Extends => "extends",
             TokenType::DocComment => "///",
             TokenType::Lib => "lib",
+            TokenType::Transport => "transport",
             TokenType::Union => "∪",
             TokenType::Intersection => "∩",
             TokenType::Backslash => "∖",
@@ -530,6 +533,7 @@ impl Token {
             || name == "induction"
             || name == "constraint"
             || name == "choose"
+            || name == "transport"
     }
 
     /// Checks if this token is a reserved name.
@@ -672,7 +676,8 @@ impl Token {
             | TokenType::Typeclass
             | TokenType::Instance
             | TokenType::Extends
-            | TokenType::Lib => Some(SemanticTokenType::KEYWORD),
+            | TokenType::Lib
+            | TokenType::Transport => Some(SemanticTokenType::KEYWORD),
 
             TokenType::NewLine => {
                 // Regular comments are encoded as newlines because they act like newlines.
@@ -1043,5 +1048,14 @@ mod tests {
         let tokens = Token::scan("choose");
         assert_eq!(tokens[0].token_type, TokenType::Choose);
         assert!(Token::is_reserved_name("choose"));
+    }
+
+    #[test]
+    fn test_transport_is_keyword_and_reserved_name() {
+        let tokens = Token::scan("transport relation_transport transported");
+        assert_eq!(tokens[0].token_type, TokenType::Transport);
+        assert_eq!(tokens[1].token_type, TokenType::Identifier);
+        assert_eq!(tokens[2].token_type, TokenType::Identifier);
+        assert!(Token::is_reserved_name("transport"));
     }
 }
