@@ -702,6 +702,50 @@ fn test_match_value_no_repeating_variables() {
 }
 
 #[test]
+fn test_match_value_rejects_invalid_pattern_name() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            inductive Foo {
+                bar(Bool)
+            }
+            "#,
+    );
+    let message = env.bad(
+        r#"
+            define foo(f: Foo) -> Bool {
+                match f {
+                    Foo.bar(Upper) {
+                        true
+                    }
+                }
+            }
+            "#,
+    );
+    assert!(message.contains("invalid variable name"), "{message}");
+}
+
+#[test]
+fn test_match_value_allows_wildcard_pattern_name() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            inductive Foo {
+                bar(Bool)
+            }
+
+            define foo(f: Foo) -> Bool {
+                match f {
+                    Foo.bar(_) {
+                        true
+                    }
+                }
+            }
+            "#,
+    );
+}
+
+#[test]
 fn test_match_statement_no_repeating_variables() {
     let mut env = Environment::test();
     env.add(
@@ -1138,6 +1182,28 @@ fn test_local_destructuring_rejects_outer_name_collision() {
         "#,
     );
     assert!(message.contains("zero is already in use"), "{message}");
+}
+
+#[test]
+fn test_local_destructuring_rejects_invalid_arg_name() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        inductive Option[T] {
+            some(T)
+            none
+        }
+        "#,
+    );
+    let message = env.bad(
+        r#"
+        define bad(opt: Option[Bool]) -> Bool {
+            let Option.some(Upper) = opt
+            true
+        }
+        "#,
+    );
+    assert!(message.contains("invalid variable name"), "{message}");
 }
 
 #[test]

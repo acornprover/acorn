@@ -362,6 +362,14 @@ impl<'a> Evaluator<'a> {
         (hidden_name, hidden_type, value)
     }
 
+    fn validate_pattern_arg_name(name_token: &Token) -> error::Result<()> {
+        if name_token.token_type == TokenType::Identifier && name_token.text() == "_" {
+            Ok(())
+        } else {
+            Expression::validate_local_let_name(name_token)
+        }
+    }
+
     pub(crate) fn take_local_obligations(&mut self) -> Vec<LocalObligation> {
         std::mem::take(&mut self.local_obligations)
     }
@@ -794,13 +802,13 @@ impl<'a> Evaluator<'a> {
         expected_type: Option<&AcornType>,
     ) -> error::Result<AcornValue> {
         let obligation_count = self.local_obligations.len();
-        let value = self.evaluate_value_with_stack(stack, expression, expected_type)?;
+        let value = self.evaluate_value_with_stack(stack, expression, expected_type);
         if self.local_obligations.len() != obligation_count {
             self.local_obligations.truncate(obligation_count);
             return Err(expression
                 .error("local lets that require proofs are not supported in type arguments"));
         }
-        Ok(value)
+        value
     }
 
     /// Evaluates an expression that either represents a type, or represents a type that still needs params.
@@ -1037,49 +1045,56 @@ impl<'a> Evaluator<'a> {
     {
         let mut names = Vec::new();
         let mut types = Vec::new();
-        for (i, declaration) in declarations.into_iter().enumerate() {
-            if datatype_type.is_some() && i == 0 {
-                match declaration {
-                    Declaration::SelfToken(_) => {
-                        let self_type = datatype_type.unwrap().clone();
-                        names.push("self".to_string());
-                        types.push(self_type.clone());
-                        stack.insert("self".to_string(), self_type);
-                        continue;
-                    }
-                    _ => {
-                        return Err(declaration
-                            .token()
-                            .error("first argument of a member function must be 'self'"));
+        let result = (|| {
+            for (i, declaration) in declarations.into_iter().enumerate() {
+                if datatype_type.is_some() && i == 0 {
+                    match declaration {
+                        Declaration::SelfToken(_) => {
+                            let self_type = datatype_type.unwrap().clone();
+                            names.push("self".to_string());
+                            types.push(self_type.clone());
+                            stack.insert("self".to_string(), self_type);
+                            continue;
+                        }
+                        _ => {
+                            return Err(declaration
+                                .token()
+                                .error("first argument of a member function must be 'self'"));
+                        }
                     }
                 }
-            }
-            let (name, acorn_type) = match declaration {
-                Declaration::Typed(name_token, type_expr) => (
-                    name_token.to_string(),
-                    self.evaluate_type_with_stack(stack, type_expr)?,
-                ),
-                Declaration::SelfToken(name_token) => {
-                    return Err(name_token.error("cannot use 'self' as an argument here"));
+                let (name, acorn_type) = match declaration {
+                    Declaration::Typed(name_token, type_expr) => (
+                        name_token.to_string(),
+                        self.evaluate_type_with_stack(stack, type_expr)?,
+                    ),
+                    Declaration::SelfToken(name_token) => {
+                        return Err(name_token.error("cannot use 'self' as an argument here"));
+                    }
+                };
+                if !allow_shadowing {
+                    self.bindings
+                        .check_unqualified_name_available(&name, declaration.token())?;
                 }
-            };
-            if !allow_shadowing {
-                self.bindings
-                    .check_unqualified_name_available(&name, declaration.token())?;
+                if names.contains(&name) {
+                    return Err(declaration
+                        .token()
+                        .error("cannot declare a name twice in one argument list"));
+                }
+                if stack.get(&name).is_some() {
+                    return Err(declaration
+                        .token()
+                        .error(&format!("name '{}' is already bound", name)));
+                }
+                names.push(name.clone());
+                types.push(acorn_type.clone());
+                stack.insert(name, acorn_type);
             }
-            if stack.get(&name).is_some() {
-                return Err(declaration
-                    .token()
-                    .error(&format!("name '{}' is already bound", name)));
-            }
-            if names.contains(&name) {
-                return Err(declaration
-                    .token()
-                    .error("cannot declare a name twice in one argument list"));
-            }
-            names.push(name.clone());
-            types.push(acorn_type.clone());
-            stack.insert(name, acorn_type);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            stack.remove_all(&names);
+            return Err(e);
         }
         Ok((names, types))
     }
@@ -1116,7 +1131,15 @@ impl<'a> Evaluator<'a> {
         pattern: &Expression,
     ) -> error::Result<(AcornValue, Vec<(String, AcornType)>, usize, usize)> {
         let (fn_exp, args) = match pattern {
-            Expression::Concatenation(function, args) if !args.is_type() => (function, args),
+            Expression::Concatenation(function, args)
+                if matches!(
+                    args.as_ref(),
+                    Expression::Grouping(opening, _, _)
+                        if opening.token_type == TokenType::LeftParen
+                ) =>
+            {
+                (function, args)
+            }
             _ => {
                 // This can only be a no-argument constructor.
                 let mut no_token_evaluator = self.fork(self.bindings, None);
@@ -1166,7 +1189,10 @@ impl<'a> Evaluator<'a> {
         let mut args = vec![];
         for (name_exp, arg_type) in name_exps.into_iter().zip(f.arg_types.into_iter()) {
             let name = match name_exp {
-                Expression::Singleton(token) => token.text().to_string(),
+                Expression::Singleton(token) => {
+                    Self::validate_pattern_arg_name(token)?;
+                    token.text().to_string()
+                }
                 _ => return Err(name_exp.error("expected a simple name in pattern")),
             };
             self.bindings
@@ -1829,6 +1855,7 @@ impl<'a> Evaluator<'a> {
     ) -> error::Result<()> {
         let mut arg_names = vec![];
         for arg_token in &local_destructuring.args {
+            Self::validate_pattern_arg_name(arg_token)?;
             let arg_name = arg_token.text().to_string();
             if arg_names.contains(&arg_name) {
                 return Err(arg_token.error(&format!(
@@ -1989,11 +2016,18 @@ impl<'a> Evaluator<'a> {
         expression: &Expression,
         expected_type: Option<&AcornType>,
     ) -> error::Result<AcornValue> {
-        let potential = self.evaluate_potential_value(stack, expression, expected_type)?;
-        let resolved =
-            self.inference()
-                .maybe_resolve_value(potential, expected_type, expression)?;
-        resolved.as_value(expression)
+        let obligation_count = self.local_obligations.len();
+        let result = (|| {
+            let potential = self.evaluate_potential_value(stack, expression, expected_type)?;
+            let resolved =
+                self.inference()
+                    .maybe_resolve_value(potential, expected_type, expression)?;
+            resolved.as_value(expression)
+        })();
+        if result.is_err() {
+            self.local_obligations.truncate(obligation_count);
+        }
+        result
     }
 
     /// Evaluates an expression as a generic value, converting unresolved constants
@@ -2004,11 +2038,18 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         expression: &Expression,
     ) -> error::Result<AcornValue> {
-        if let Some(token) = Self::operator_ref_token(expression) {
-            return self.operator_ref_value(token, stack.len(), None, true);
+        let obligation_count = self.local_obligations.len();
+        let result = (|| {
+            if let Some(token) = Self::operator_ref_token(expression) {
+                return self.operator_ref_value(token, stack.len(), None, true);
+            }
+            let potential = self.evaluate_potential_value(stack, expression, None)?;
+            Ok(potential.to_generic_value())
+        })();
+        if result.is_err() {
+            self.local_obligations.truncate(obligation_count);
         }
-        let potential = self.evaluate_potential_value(stack, expression, None)?;
-        Ok(potential.to_generic_value())
+        result
     }
 
     /// Evaluates operands for equality or not-equals expressions.
@@ -2356,9 +2397,16 @@ impl<'a> Evaluator<'a> {
                     // Evaluate as a regular Lambda.
                     // Generic lambdas may omit value args entirely in type-only claim syntax.
                     let (arg_names, arg_types) = evaluator.bind_args(stack, decls, None)?;
-                    let body_val = evaluator.evaluate_value_with_stack(stack, body, None)?;
+                    let body_val = match evaluator.evaluate_value_with_stack(stack, body, None) {
+                        Ok(body_val) => body_val,
+                        Err(e) => {
+                            stack.remove_all(&arg_names);
+                            return Err(e);
+                        }
+                    };
                     let local_obligations = evaluator.take_local_obligations();
                     if !local_obligations.is_empty() {
+                        stack.remove_all(&arg_names);
                         return Err(body.error(
                             "local lets that require proofs are not supported inside generic function expressions",
                         ));
@@ -2601,19 +2649,37 @@ impl<'a> Evaluator<'a> {
                 for (pattern_exp, result_exp) in case_exps {
                     let (_, args, i, total) =
                         self.evaluate_pattern(&scrutinee_type, pattern_exp)?;
-                    for (name, arg_type) in &args {
-                        stack.insert(name.clone(), arg_type.clone());
-                    }
                     if indices.contains(&i) {
                         return Err(pattern_exp
                             .error("cannot have multiple cases for the same constructor"));
+                    }
+                    for (name, _) in &args {
+                        if stack.get(name).is_some() || self.has_local_alias(name) {
+                            return Err(
+                                pattern_exp.error(&format!("name '{}' is already bound", name))
+                            );
+                        }
+                    }
+                    for (name, arg_type) in &args {
+                        stack.insert(name.clone(), arg_type.clone());
                     }
                     indices.push(i);
                     if total == indices.len() {
                         all_cases = true;
                     }
-                    let pattern =
-                        self.evaluate_value_with_stack(stack, pattern_exp, Some(&scrutinee_type))?;
+                    let pattern = match self.evaluate_value_with_stack(
+                        stack,
+                        pattern_exp,
+                        Some(&scrutinee_type),
+                    ) {
+                        Ok(pattern) => pattern,
+                        Err(e) => {
+                            for (name, _) in &args {
+                                stack.remove(name);
+                            }
+                            return Err(e);
+                        }
+                    };
                     let match_fact_count = self.local_match_facts.len();
                     self.local_match_facts.push(LocalMatchFact {
                         value: scrutinee.clone(),
@@ -2629,15 +2695,17 @@ impl<'a> Evaluator<'a> {
                         self.evaluate_value_with_stack(stack, result_exp, expected_type.as_ref());
                     self.local_premises.truncate(premise_count);
                     self.local_match_facts.truncate(match_fact_count);
-                    let result = result?;
                     if expected_type.is_none() {
-                        expected_type = Some(result.get_type());
+                        if let Ok(result) = &result {
+                            expected_type = Some(result.get_type());
+                        }
                     }
                     let mut arg_types = vec![];
                     for (name, arg_type) in args {
                         stack.remove(&name);
                         arg_types.push(arg_type);
                     }
+                    let result = result?;
                     let constructor_index = u16::try_from(i).map_err(|_| {
                         expression.error("too many datatype constructors for match metadata")
                     })?;
@@ -2936,6 +3004,55 @@ mod tests {
         }
     }
 
+    fn add_nat_datatype(bindings: &mut BindingMap) -> AcornType {
+        let nat_type = bindings.add_data_type("Nat", vec![], None, None);
+        let nat_datatype = match &nat_type {
+            AcornType::Data(datatype, params) => {
+                assert!(params.is_empty());
+                datatype.clone()
+            }
+            _ => panic!("Nat should be a datatype"),
+        };
+        bindings.add_datatype_attribute(
+            &nat_datatype,
+            "zero",
+            vec![],
+            vec![],
+            nat_type.clone(),
+            None,
+            Some(crate::elaborator::binding_map::ConstructorInfo {
+                datatype: nat_datatype.clone(),
+                index: 0,
+                total: 2,
+            }),
+            vec![],
+            "zero".to_string(),
+        );
+        bindings.add_datatype_attribute(
+            &nat_datatype,
+            "succ",
+            vec![],
+            vec![],
+            AcornType::functional(vec![nat_type.clone()], nat_type.clone()),
+            None,
+            Some(crate::elaborator::binding_map::ConstructorInfo {
+                datatype: nat_datatype.clone(),
+                index: 1,
+                total: 2,
+            }),
+            vec![],
+            "succ".to_string(),
+        );
+        nat_type
+    }
+
+    fn parse_value_block(input: &str) -> Expression {
+        let tokens = Token::scan(input);
+        let mut tokens = TokenIter::new(tokens);
+        let (expression, _) = Expression::parse_value_block(&mut tokens).unwrap();
+        expression
+    }
+
     #[test]
     fn test_evaluator_types() {
         let p = Project::new_mock();
@@ -3144,6 +3261,172 @@ mod tests {
         Evaluator::new(&project, &bindings, None)
             .evaluate_value(&expression, Some(&AcornType::Bool))
             .expect("later argument type should be specialized by earlier visible arguments");
+    }
+
+    #[test]
+    fn test_failed_match_result_removes_pattern_args_from_stack() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let expression = Expression::expect_value(
+            r#"match n {
+                Nat.succ(k) {
+                    missing
+                }
+                Nat.zero {
+                    Nat.zero
+                }
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("n".to_string(), nat_type.clone());
+
+        let error = Evaluator::new(&project, &bindings, None)
+            .evaluate_value_with_stack(&mut stack, &expression, Some(&nat_type))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
+        assert!(stack.get("n").is_some());
+        assert!(stack.get("k").is_none());
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn test_match_pattern_rejects_stack_variable_shadowing() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let expression = Expression::expect_value(
+            r#"match n {
+                Nat.succ(n) {
+                    n
+                }
+                Nat.zero {
+                    Nat.zero
+                }
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("n".to_string(), nat_type.clone());
+
+        let error = Evaluator::new(&project, &bindings, None)
+            .evaluate_value_with_stack(&mut stack, &expression, Some(&nat_type))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("name 'n' is already bound"));
+        assert!(stack.get("n").is_some());
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn test_bind_args_failure_removes_args_from_stack() {
+        let project = Project::new_mock();
+        let bindings = BindingMap::new(ModuleId(0));
+        let expression =
+            Expression::parse_value_string("function(x: Bool, x: Bool) { true }").unwrap();
+        let mut stack = Stack::new();
+
+        let error = Evaluator::new(&project, &bindings, None)
+            .evaluate_value_with_stack(&mut stack, &expression, None)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot declare a name twice in one argument list"));
+        assert!(stack.get("x").is_none());
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn test_failed_generic_function_body_removes_args_from_stack() {
+        let project = Project::new_mock();
+        let bindings = BindingMap::new(ModuleId(0));
+        let expression =
+            Expression::parse_value_string("function[T](x: T) { missing }[Bool]").unwrap();
+        let mut stack = Stack::new();
+
+        let error = Evaluator::new(&project, &bindings, None)
+            .evaluate_value_with_stack(&mut stack, &expression, None)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
+        assert!(stack.get("x").is_none());
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn test_failed_value_expression_clears_local_obligations() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let expression = parse_value_block(
+            r#"
+                let y: Bool = transport x
+                missing
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("x".to_string(), nat_type);
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+
+        let error = evaluator
+            .evaluate_value_with_stack(&mut stack, &expression, None)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
+        assert!(evaluator.local_obligations.is_empty());
+        assert!(stack.get("x").is_some());
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn test_failed_generic_value_clears_local_obligations() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let expression = parse_value_block(
+            r#"
+                let y: Bool = transport x
+                missing
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("x".to_string(), nat_type);
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+
+        let error = evaluator
+            .evaluate_as_generic_value(&mut stack, &expression)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
+        assert!(evaluator.local_obligations.is_empty());
+        assert!(stack.get("x").is_some());
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn test_value_type_arg_clears_local_obligations_on_error() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let expression = parse_value_block(
+            r#"
+                let y: Bool = transport x
+                missing
+            }"#,
+        );
+        let mut stack = Stack::new();
+        stack.insert("x".to_string(), nat_type);
+        let mut evaluator = Evaluator::new(&project, &bindings, None);
+
+        let error = evaluator
+            .evaluate_value_type_arg_with_stack(&mut stack, &expression, None)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing"));
+        assert!(evaluator.local_obligations.is_empty());
+        assert!(stack.get("x").is_some());
+        assert_eq!(stack.len(), 1);
     }
 
     #[test]

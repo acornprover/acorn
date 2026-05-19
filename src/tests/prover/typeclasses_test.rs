@@ -86,8 +86,8 @@ fn test_proving_with_parameterized_inductive() {
             List.nil {
                 false
             }
-            List.cons(b, bs) {
-                b or any(bs)
+            List.cons(b, rest) {
+                b or any(rest)
             }
         }
     }

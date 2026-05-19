@@ -863,7 +863,7 @@ impl Expression {
         }
     }
 
-    fn validate_local_let_name(name_token: &Token) -> Result<()> {
+    pub(crate) fn validate_local_let_name(name_token: &Token) -> Result<()> {
         match name_token.token_type {
             TokenType::SelfToken => {
                 return Err(name_token.error("cannot use 'self' as a local let name"));
