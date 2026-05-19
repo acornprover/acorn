@@ -2248,6 +2248,13 @@ impl BindingMap {
         // We might have types parameterized on this function, or they might be parameterized on the
         // datatype definition. We only want to genericize the parameters that we created.
         if type_params.is_empty() {
+            let local_obligations = match datatype_type_params {
+                Some(datatype_type_params) if !datatype_type_params.is_empty() => local_obligations
+                    .into_iter()
+                    .map(|obligation| obligation.genericize(datatype_type_params))
+                    .collect(),
+                _ => local_obligations,
+            };
             // Just keep the types as they are.
             Ok((
                 type_params,

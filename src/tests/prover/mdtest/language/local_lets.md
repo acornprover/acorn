@@ -207,6 +207,30 @@ theorem local_satisfy_with_proof_reduces(n: Nat) {
 }
 ```
 
+## Let Satisfy In Parameterized Attribute
+
+```acorn
+structure Box[T] {
+    value: T
+}
+
+attributes Box[T] {
+    define get(self) -> T {
+        let x: T satisfy {
+            x = self.value
+        }
+        x
+    }
+}
+
+type Nat: axiom
+let n: Nat = axiom
+
+theorem attribute_local_satisfy_reduces {
+    Box.get(Box.new(n)) = n
+}
+```
+
 ## Let Satisfy In If Branch
 
 ```acorn

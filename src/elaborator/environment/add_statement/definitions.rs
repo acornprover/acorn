@@ -1316,9 +1316,11 @@ impl Environment {
         let value_type = value.get_type();
 
         let mut empty_stack = Stack::new();
-        let mut function = self
-            .evaluator(project)
-            .evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
+        let mut function_evaluator = self.evaluator(project);
+        let mut function =
+            function_evaluator.evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
+        let local_obligations = function_evaluator.take_local_obligations();
+        self.add_local_obligations(project, statement, &[], local_obligations)?;
 
         let function_type_before = function.get_type();
         let function_ftype_before = match &function_type_before {

@@ -2355,8 +2355,12 @@ impl<'a> Evaluator<'a> {
                     // Generic lambdas may omit value args entirely in type-only claim syntax.
                     let (arg_names, arg_types) = evaluator.bind_args(stack, decls, None)?;
                     let body_val = evaluator.evaluate_value_with_stack(stack, body, None)?;
-                    self.local_obligations
-                        .extend(evaluator.take_local_obligations());
+                    let local_obligations = evaluator.take_local_obligations();
+                    if !local_obligations.is_empty() {
+                        return Err(body.error(
+                            "local lets that require proofs are not supported inside generic function expressions",
+                        ));
+                    }
                     let lambda = AcornValue::Lambda(arg_types, Box::new(body_val));
                     stack.remove_all(&arg_names);
 

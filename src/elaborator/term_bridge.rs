@@ -1340,13 +1340,6 @@ impl<'a> TermBridge<'a> {
                         .map(|_| i as AtomId)
                 })
                 .collect();
-            assert_eq!(
-                type_var_ids.len(),
-                names.len(),
-                "quote_clause received {} type-param names for {} local type params",
-                names.len(),
-                type_var_ids.len()
-            );
             type_var_ids
                 .into_iter()
                 .zip(names.iter().cloned())
@@ -1706,6 +1699,15 @@ mod tests {
                 typeclass: Some(group),
             })
         );
+    }
+
+    #[test]
+    fn test_quote_clause_ignores_extra_type_param_names() {
+        let kernel_context = KernelContext::new();
+        let clause = kernel_context.parse_clause("true = true", &[]);
+        let type_param_names = ["T".to_string()];
+
+        let _ = kernel_context.quote_clause(&clause, None, Some(&type_param_names), false);
     }
 
     #[test]

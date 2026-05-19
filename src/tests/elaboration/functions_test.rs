@@ -637,3 +637,24 @@ fn test_generic_lambda_standalone_error() {
     // Should fail: generic lambda without type instantiation
     env.bad("let f: Bool -> Bool = function[T](x: T) { x }");
 }
+
+#[test]
+fn test_generic_lambda_rejects_local_proof_lets() {
+    let mut env = Environment::test();
+    env.add("type Empty: axiom");
+    env.add("type Nat: axiom");
+    env.bad(
+        r#"
+        let f: Nat -> Nat = function[T](x: T) {
+            if true {
+                let y: Empty satisfy {
+                    true
+                }
+                x
+            } else {
+                x
+            }
+        }[Nat]
+        "#,
+    );
+}

@@ -2020,6 +2020,40 @@ instance Nat: Two
     }
 
     #[test]
+    fn test_single_line_verifies_prior_witness_obligation() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"
+                type Empty: axiom
+
+                let x: Empty satisfy {
+                    true
+                }
+
+                theorem bad {
+                    x = x
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("test".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(8));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert!(output.metrics.goals_success < output.metrics.goals_done);
+    }
+
+    #[test]
     fn test_verifier_stdin_append_target_uses_resolved_cache_path() {
         let (acornlib, src, build) = setup();
 

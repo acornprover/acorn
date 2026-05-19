@@ -543,7 +543,10 @@ impl ClaimCodec {
     }
 
     /// Pick a stable in-scope type when a quoted type parameter needs a concrete instantiation.
-    fn infer_in_scope_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
+    pub(crate) fn infer_in_scope_type_arg(
+        kind: &AcornType,
+        bindings: &BindingMap,
+    ) -> Option<AcornType> {
         let mut candidates = vec![];
         for (name, potential_type) in bindings.iter_types() {
             let PotentialType::Resolved(AcornType::Arbitrary(type_param)) = potential_type else {

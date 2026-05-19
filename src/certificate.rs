@@ -9,8 +9,8 @@ use std::borrow::Cow;
 
 use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
-use crate::elaborator::acorn_type::AcornType;
 use crate::elaborator::acorn_type::TypeParam;
+use crate::elaborator::acorn_type::{AcornType, DependentTypeArg};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
@@ -135,6 +135,190 @@ impl Certificate {
             .var_map()
             .iter()
             .any(|(_, term)| Self::references_value_local(term.as_ref(), local_context))
+    }
+
+    fn push_type_param(params: &mut Vec<TypeParam>, param: &TypeParam) {
+        if !params.iter().any(|p| p.name == param.name) {
+            params.push(param.clone());
+        }
+    }
+
+    fn collect_type_params(acorn_type: &AcornType, params: &mut Vec<TypeParam>) {
+        match acorn_type {
+            AcornType::Variable(param) | AcornType::Arbitrary(param) => {
+                Self::push_type_param(params, param);
+            }
+            AcornType::Data(_, type_args) => {
+                for type_arg in type_args {
+                    Self::collect_type_params(type_arg, params);
+                }
+            }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            Self::collect_type_params(acorn_type, params);
+                        }
+                        DependentTypeArg::Value(value) => {
+                            Self::collect_value_type_params(value, params);
+                        }
+                    }
+                }
+            }
+            AcornType::Function(function_type) => {
+                for arg_type in &function_type.arg_types {
+                    Self::collect_type_params(arg_type, params);
+                }
+                Self::collect_type_params(&function_type.return_type, params);
+            }
+            AcornType::Bool | AcornType::Type0 | AcornType::TypeclassConstraint(_) => {}
+        }
+    }
+
+    fn collect_value_type_params(value: &AcornValue, params: &mut Vec<TypeParam>) {
+        match value {
+            AcornValue::Variable(_, var_type) => Self::collect_type_params(var_type, params),
+            AcornValue::Application(app) => {
+                Self::collect_value_type_params(&app.function, params);
+                for arg in &app.args {
+                    Self::collect_value_type_params(arg, params);
+                }
+            }
+            AcornValue::TypeApplication(app) => {
+                Self::collect_value_type_params(&app.function, params);
+                for type_arg in &app.type_args {
+                    Self::collect_type_params(type_arg, params);
+                }
+            }
+            AcornValue::Lambda(arg_types, value)
+            | AcornValue::ForAll(arg_types, value)
+            | AcornValue::Exists(arg_types, value) => {
+                for arg_type in arg_types {
+                    Self::collect_type_params(arg_type, params);
+                }
+                Self::collect_value_type_params(value, params);
+            }
+            AcornValue::Grouping(value) | AcornValue::Not(value) => {
+                Self::collect_value_type_params(value, params);
+            }
+            AcornValue::Binary(_, left, right) => {
+                Self::collect_value_type_params(left, params);
+                Self::collect_value_type_params(right, params);
+            }
+            AcornValue::IfThenElse(condition, if_value, else_value) => {
+                Self::collect_value_type_params(condition, params);
+                Self::collect_value_type_params(if_value, params);
+                Self::collect_value_type_params(else_value, params);
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                Self::collect_value_type_params(scrutinee, params);
+                for case in cases {
+                    for var_type in &case.new_vars {
+                        Self::collect_type_params(var_type, params);
+                    }
+                    Self::collect_value_type_params(&case.pattern, params);
+                    Self::collect_value_type_params(&case.result, params);
+                }
+            }
+            AcornValue::Try(value, try_type) => {
+                Self::collect_value_type_params(value, params);
+                Self::collect_type_params(try_type, params);
+            }
+            AcornValue::Constant(constant) => {
+                for param in &constant.params {
+                    Self::collect_type_params(param, params);
+                }
+                Self::collect_type_params(&constant.instance_type, params);
+                Self::collect_type_params(&constant.generic_type, params);
+                for value_param_type in &constant.value_param_types {
+                    Self::collect_type_params(value_param_type, params);
+                }
+                for bound_value_arg in &constant.bound_value_args {
+                    Self::collect_value_type_params(bound_value_arg, params);
+                }
+            }
+            AcornValue::Bool(_) => {}
+        }
+    }
+
+    fn serialize_closed_generic_claim_step(
+        claim: &Claim,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<String, CodeGenError> {
+        let specialized_clause = claim
+            .normalized_specialized_clause(kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        if !specialized_clause.get_local_context().is_empty() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "closed generic claim fallback requires a closed clause".to_string(),
+            ));
+        }
+
+        let value = kernel_context.quote_clause(&specialized_clause, None, None, true);
+        let mut type_params = vec![];
+        Self::collect_value_type_params(&value, &mut type_params);
+        type_params.sort_by(|a, b| a.name.cmp(&b.name));
+        if type_params.is_empty() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "closed generic claim has no type parameters".to_string(),
+            ));
+        }
+
+        let generic_value = value.genericize(&type_params);
+        let mut generator = CodeGenerator::new_for_certificate(bindings);
+        let generic_code = generator.value_to_code(&generic_value)?;
+        let mut type_param_decl_codes = vec![];
+        let mut type_arg_codes = vec![];
+        for param in &type_params {
+            let kind = match &param.typeclass {
+                Some(typeclass) => AcornType::TypeclassConstraint(typeclass.clone()),
+                None => AcornType::Type0,
+            };
+            let decl_code = match &kind {
+                AcornType::Type0 => param.name.clone(),
+                _ => format!("{}: {}", param.name, generator.type_to_expr(&kind)?),
+            };
+            type_param_decl_codes.push(decl_code);
+
+            let Some(type_arg) = Self::infer_closed_claim_type_arg(&kind, bindings) else {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "could not infer an in-scope type argument for closed generic claim parameter {}",
+                    param.name
+                )));
+            };
+            type_arg_codes.push(generator.type_to_expr(&type_arg)?.to_string());
+        }
+
+        Ok(format!(
+            "function[{}] {{ {} }}[{}]",
+            type_param_decl_codes.join(", "),
+            generic_code,
+            type_arg_codes.join(", ")
+        ))
+    }
+
+    fn infer_closed_claim_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
+        if let Some(type_arg) = ClaimCodec::infer_in_scope_type_arg(kind, bindings) {
+            return Some(type_arg);
+        }
+        if !matches!(kind, AcornType::Type0) {
+            return None;
+        }
+
+        let mut candidates = vec![];
+        for (name, potential_type) in bindings.iter_types() {
+            let crate::elaborator::acorn_type::PotentialType::Resolved(acorn_type) = potential_type
+            else {
+                continue;
+            };
+            if acorn_type.has_generic() || acorn_type.has_arbitrary() {
+                continue;
+            }
+            candidates.push((name.clone(), acorn_type.clone()));
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.into_iter().next().map(|(_, ty)| ty)
     }
 
     /// Create a new certificate with proof steps
@@ -511,7 +695,47 @@ impl Certificate {
             {
                 Self::serialize_claim_step(claim, kernel_context, bindings)?
             }
-            _ => generator
+            CertificateStep::Claim(claim) if claim.clause().get_local_context().is_empty() => {
+                let specialized_clause = claim
+                    .normalized_specialized_clause(kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                let value = kernel_context.quote_clause(&specialized_clause, None, None, true);
+                let mut type_params = vec![];
+                Self::collect_value_type_params(&value, &mut type_params);
+                let any_type_param_in_scope = type_params
+                    .iter()
+                    .any(|param| bindings.get_type_for_typename(&param.name).is_some());
+                if type_params.is_empty() || any_type_param_in_scope {
+                    generator
+                        .certificate_step_to_code(step, kernel_context)
+                        .map_err(|err| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "{} [while serializing certificate step]",
+                                err
+                            ))
+                        })?
+                } else {
+                    Self::serialize_closed_generic_claim_step(claim, kernel_context, bindings)
+                        .map_err(|fallback| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "closed generic certificate step serialization failed: {}",
+                                fallback
+                            ))
+                        })?
+                }
+            }
+            CertificateStep::Claim(_) => {
+                match generator.certificate_step_to_code(step, kernel_context) {
+                    Ok(line) => line,
+                    Err(err) => {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "{} [while serializing certificate step]",
+                            err
+                        )));
+                    }
+                }
+            }
+            CertificateStep::Satisfy(_) => generator
                 .certificate_step_to_code(step, kernel_context)
                 .map_err(|err| {
                     CodeGenError::GeneratedBadCode(format!(

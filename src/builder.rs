@@ -2365,6 +2365,17 @@ impl<'a> Builder<'a> {
         matches!(goal.proposition.source.source_type, SourceType::Anonymous)
     }
 
+    fn is_required_line_filter_prerequisite(goal: &Goal, filter: &GoalFilter) -> bool {
+        if !matches!(goal.proposition.source.source_type, SourceType::BlockGoal) {
+            return false;
+        }
+
+        match filter {
+            GoalFilter::SingleLine { line, .. } => goal.first_line < *line,
+            GoalFilter::LineRange { start, .. } => goal.first_line < *start,
+        }
+    }
+
     fn update_eval_skip_tail_for_lowered_goal(
         &self,
         tail: &mut EvalSkipTail<Rc<Processor>>,
@@ -2422,7 +2433,7 @@ impl<'a> Builder<'a> {
                     goal.first_line >= *start && goal.first_line <= *end
                 }
             };
-            if !matches {
+            if !matches && !Self::is_required_line_filter_prerequisite(goal, filter) {
                 return Ok(());
             }
         }
