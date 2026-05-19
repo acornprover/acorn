@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, PotentialType, Telescope,
     TypeParam, Typeclass, ValueParam,
@@ -19,6 +21,7 @@ use crate::project::ProjectLookup;
 use crate::syntax::expression::{
     Declaration, Expression, LocalBlockItem, LocalDestructuringLet, LocalLet, TypeParamExpr,
 };
+use crate::syntax::statement::Body;
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
 
@@ -56,13 +59,37 @@ struct LocalMatchFact {
 }
 
 #[derive(Clone, Debug)]
+struct LocalPremise {
+    value: AcornValue,
+    stack_size: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum LocalObligationKind {
+    ExistsWitness {
+        existence: AcornValue,
+        witness: AcornValue,
+    },
+    Transport {
+        source_type: AcornType,
+        target_type: AcornType,
+        source_value: AcornValue,
+        target_value: AcornValue,
+        premises: Vec<AcornValue>,
+        transport_token: Token,
+    },
+}
+
+#[derive(Clone)]
 pub struct LocalObligation {
     pub arg_names: Vec<String>,
     pub arg_types: Vec<AcornType>,
     pub hidden_constants: Vec<(String, AcornType)>,
-    pub existence: AcornValue,
-    pub witness: AcornValue,
+    pub kind: LocalObligationKind,
     pub range: tower_lsp::lsp_types::Range,
+    pub first_token: Token,
+    pub last_token: Token,
+    pub body: Option<Arc<Body>>,
 }
 
 /// The Evaluator turns expressions into types and values, and other things of that nature.
@@ -90,6 +117,8 @@ pub struct Evaluator<'a> {
 
     local_match_facts: Vec<LocalMatchFact>,
 
+    local_premises: Vec<LocalPremise>,
+
     local_obligations: Vec<LocalObligation>,
 }
 
@@ -107,6 +136,7 @@ impl<'a> Evaluator<'a> {
             current_instance_context: None,
             local_aliases: vec![],
             local_match_facts: vec![],
+            local_premises: vec![],
             local_obligations: vec![],
         }
     }
@@ -129,6 +159,7 @@ impl<'a> Evaluator<'a> {
             }),
             local_aliases: vec![],
             local_match_facts: vec![],
+            local_premises: vec![],
             local_obligations: vec![],
         }
     }
@@ -203,6 +234,20 @@ impl<'a> Evaluator<'a> {
             }
         }
         None
+    }
+
+    fn local_premises_for_stack(&self, stack_size: usize) -> Vec<AcornValue> {
+        self.local_premises
+            .iter()
+            .map(|premise| {
+                debug_assert!(stack_size >= premise.stack_size);
+                let increment = stack_size.saturating_sub(premise.stack_size) as AtomId;
+                premise
+                    .value
+                    .clone()
+                    .insert_stack(premise.stack_size as AtomId, increment)
+            })
+            .collect()
     }
 
     pub(crate) fn take_local_obligations(&mut self) -> Vec<LocalObligation> {
@@ -351,6 +396,7 @@ impl<'a> Evaluator<'a> {
             current_instance_context: self.current_instance_context.clone(),
             local_aliases: self.local_aliases.clone(),
             local_match_facts: self.local_match_facts.clone(),
+            local_premises: self.local_premises.clone(),
             local_obligations: vec![],
         }
     }
@@ -1539,11 +1585,78 @@ impl<'a> Evaluator<'a> {
                 return Err(transport_token.error("transport requires an explicit type annotation"));
             };
             let source_value = self.evaluate_value_with_stack(stack, source_expr, None)?;
-            source_value
-                .get_type()
-                .check_eq(Some(expected_type), transport_token)?;
-            source_value
+            let source_type = source_value.get_type();
+            if source_type == *expected_type {
+                if local_let.body.is_some() {
+                    return Err(transport_token.error(
+                        "this transport is definitionally equal and does not need a proof block",
+                    ));
+                }
+                source_value
+            } else {
+                let stack_entries = stack.entries();
+                let stack_names: Vec<_> =
+                    stack_entries.iter().map(|(name, _)| name.clone()).collect();
+                let stack_types: Vec<_> = stack_entries
+                    .iter()
+                    .map(|(_, acorn_type)| acorn_type.clone())
+                    .collect();
+                let stack_values: Vec<_> = stack_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+                    .collect();
+                let hidden_name = format!(
+                    "__local_transport_{}_{}_{}",
+                    transport_token.line_number, transport_token.start, name
+                );
+                let constant_name =
+                    ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
+                let hidden_function_type =
+                    AcornType::functional(stack_types.clone(), expected_type.clone());
+                let hidden_function = AcornValue::constant(
+                    constant_name,
+                    vec![],
+                    hidden_function_type.clone(),
+                    hidden_function_type.clone(),
+                    vec![],
+                    vec![],
+                );
+                let target_value = AcornValue::apply(hidden_function, stack_values);
+                self.local_aliases.push(LocalAlias {
+                    name,
+                    value: target_value.clone(),
+                    stack_size: stack.len(),
+                });
+                self.local_obligations.push(LocalObligation {
+                    arg_names: stack_names,
+                    arg_types: stack_types,
+                    hidden_constants: vec![(hidden_name, hidden_function_type)],
+                    kind: LocalObligationKind::Transport {
+                        source_type,
+                        target_type: expected_type.clone(),
+                        source_value,
+                        target_value,
+                        premises: self.local_premises_for_stack(stack.len()),
+                        transport_token: transport_token.clone(),
+                    },
+                    range: local_let.value.range(),
+                    first_token: local_let.let_token.clone(),
+                    last_token: local_let
+                        .body
+                        .as_ref()
+                        .map(|body| body.right_brace.clone())
+                        .unwrap_or_else(|| local_let.value.last_token().clone()),
+                    body: local_let.body.clone(),
+                });
+                return Ok(());
+            }
         } else {
+            if local_let.body.is_some() {
+                return Err(local_let
+                    .let_token
+                    .error("proof blocks on local value lets are only supported for transport"));
+            }
             self.evaluate_value_with_stack(stack, &local_let.value, expected_type.as_ref())?
         };
         let value_type = expected_type.unwrap_or_else(|| value.get_type());
@@ -1696,9 +1809,15 @@ impl<'a> Evaluator<'a> {
             arg_names: stack_names,
             arg_types: stack_types,
             hidden_constants,
-            existence,
-            witness,
+            kind: LocalObligationKind::ExistsWitness { existence, witness },
             range: local_destructuring.value.range(),
+            first_token: local_destructuring.let_token.clone(),
+            last_token: local_destructuring
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
+            body: local_destructuring.body.clone(),
         });
         Ok(())
     }
@@ -2288,16 +2407,30 @@ impl<'a> Evaluator<'a> {
             Expression::IfThenElse(_, cond_exp, if_exp, else_exp, _) => {
                 let cond =
                     self.evaluate_value_with_stack(stack, cond_exp, Some(&AcornType::Bool))?;
-                let if_value = self.evaluate_value_with_stack(stack, if_exp, expected_type)?;
+                let premise_count = self.local_premises.len();
+                self.local_premises.push(LocalPremise {
+                    value: cond.clone(),
+                    stack_size: stack.len(),
+                });
+                let if_value = self.evaluate_value_with_stack(stack, if_exp, expected_type);
+                self.local_premises.truncate(premise_count);
+                let if_value = if_value?;
 
                 match else_exp {
                     Some(else_exp) => {
                         // Traditional if-then-else
+                        let premise_count = self.local_premises.len();
+                        self.local_premises.push(LocalPremise {
+                            value: AcornValue::Not(Box::new(cond.clone())),
+                            stack_size: stack.len(),
+                        });
                         let else_value = self.evaluate_value_with_stack(
                             stack,
                             else_exp,
                             Some(&if_value.get_type()),
-                        )?;
+                        );
+                        self.local_premises.truncate(premise_count);
+                        let else_value = else_value?;
                         AcornValue::IfThenElse(
                             Box::new(cond),
                             Box::new(if_value),
@@ -2345,8 +2478,14 @@ impl<'a> Evaluator<'a> {
                         pattern: pattern.clone(),
                         stack_size: stack.len(),
                     });
+                    let premise_count = self.local_premises.len();
+                    self.local_premises.push(LocalPremise {
+                        value: AcornValue::equals(scrutinee.clone(), pattern.clone()),
+                        stack_size: stack.len(),
+                    });
                     let result =
                         self.evaluate_value_with_stack(stack, result_exp, expected_type.as_ref());
+                    self.local_premises.truncate(premise_count);
                     self.local_match_facts.truncate(match_fact_count);
                     let result = result?;
                     if expected_type.is_none() {
@@ -2438,6 +2577,7 @@ impl<'a> Evaluator<'a> {
                         current_instance_context: current_instance_context.clone(),
                         local_aliases: self.local_aliases.clone(),
                         local_match_facts: self.local_match_facts.clone(),
+                        local_premises: self.local_premises.clone(),
                         local_obligations: vec![],
                     }
                     .evaluate_typeclass(annotation)?;
@@ -2457,6 +2597,7 @@ impl<'a> Evaluator<'a> {
                         current_instance_context: current_instance_context.clone(),
                         local_aliases: self.local_aliases.clone(),
                         local_match_facts: self.local_match_facts.clone(),
+                        local_premises: self.local_premises.clone(),
                         local_obligations: vec![],
                     }
                     .evaluate_type_with_stack(&mut scoped_stack, annotation)?;

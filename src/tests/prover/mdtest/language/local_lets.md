@@ -196,6 +196,34 @@ theorem local_unwrap_or_some(x: Nat, fallback: Nat) {
 }
 ```
 
+## Destructuring With Explicit Proof
+
+```acorn
+type Nat: axiom
+
+inductive Option[T] {
+    none
+    some(T)
+}
+
+axiom every_option_some(y: Option[Nat]) {
+    exists(x: Nat) {
+        Option.some(x) = y
+    }
+}
+
+define local_unwrap_with_proof(y: Option[Nat]) -> Nat {
+    let Option.some(x) = y by {
+        every_option_some(y)
+    }
+    x
+}
+
+theorem local_unwrap_with_proof_some(n: Nat) {
+    local_unwrap_with_proof(Option.some(n)) = n
+}
+```
+
 ## Destructuring Structure
 
 ```acorn

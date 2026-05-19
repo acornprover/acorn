@@ -1,9 +1,10 @@
-use std::{collections::VecDeque, fmt};
+use std::{collections::VecDeque, fmt, sync::Arc};
 
 use pretty::{DocAllocator, DocBuilder, Pretty};
 use tower_lsp::lsp_types::Range;
 
 use crate::elaborator::error::{Error, ErrorContext, Result};
+use crate::syntax::statement::{parse_body_after_left_brace, Body};
 use crate::syntax::token::{Token, TokenIter, TokenType};
 
 /// There are two main sorts of expressions.
@@ -108,21 +109,47 @@ impl LocalBlockItem {
 }
 
 /// A local value let inside a value-producing expression block.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalLet {
     pub let_token: Token,
     pub name_token: Token,
     pub type_expr: Option<Expression>,
     pub value: Expression,
+    pub body: Option<Arc<Body>>,
 }
 
 /// A local destructuring let inside a value-producing expression block.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalDestructuringLet {
     pub let_token: Token,
     pub function: Expression,
     pub args: Vec<Token>,
     pub value: Expression,
+    pub body: Option<Arc<Body>>,
+}
+
+impl fmt::Debug for LocalLet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("LocalLet")
+            .field("let_token", &self.let_token)
+            .field("name_token", &self.name_token)
+            .field("type_expr", &self.type_expr)
+            .field("value", &self.value)
+            .field("has_body", &self.body.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LocalDestructuringLet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("LocalDestructuringLet")
+            .field("let_token", &self.let_token)
+            .field("function", &self.function)
+            .field("args", &self.args)
+            .field("value", &self.value)
+            .field("has_body", &self.body.is_some())
+            .finish()
+    }
 }
 
 impl fmt::Display for Expression {
@@ -820,6 +847,20 @@ impl Expression {
         Ok(())
     }
 
+    fn parse_local_proof_body(
+        tokens: &mut TokenIter,
+        end_token: Token,
+    ) -> Result<Option<Arc<Body>>> {
+        if end_token.token_type != TokenType::By {
+            return Ok(None);
+        }
+
+        let left_brace = tokens.expect_type(TokenType::LeftBrace)?;
+        Ok(Some(Arc::new(parse_body_after_left_brace(
+            left_brace, tokens,
+        )?)))
+    }
+
     fn parse_local_block_item(tokens: &mut TokenIter) -> Result<LocalBlockItem> {
         let let_token = tokens.expect_type(TokenType::Let)?;
         let first_token = tokens.expect_token()?;
@@ -867,12 +908,15 @@ impl Expression {
 
             tokens.expect_type(TokenType::Equals)?;
             tokens.skip_newlines();
-            let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
+            let (value, end_token) =
+                Expression::parse_value(tokens, Terminator::Or(TokenType::NewLine, TokenType::By))?;
+            let body = Expression::parse_local_proof_body(tokens, end_token)?;
             return Ok(LocalBlockItem::Destructuring(LocalDestructuringLet {
                 let_token,
                 function: function_expr,
                 args,
                 value,
+                body,
             }));
         }
 
@@ -894,12 +938,15 @@ impl Expression {
             }
             _ => return Err(next_token.error("expected ':' or '='")),
         };
-        let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
+        let (value, end_token) =
+            Expression::parse_value(tokens, Terminator::Or(TokenType::NewLine, TokenType::By))?;
+        let body = Expression::parse_local_proof_body(tokens, end_token)?;
         Ok(LocalBlockItem::Let(LocalLet {
             let_token,
             name_token,
             type_expr,
             value,
+            body,
         }))
     }
 
@@ -1606,6 +1653,24 @@ where
     }
 }
 
+fn local_proof_body_doc<'a, D, A>(allocator: &'a D, body: &'a Body) -> DocBuilder<'a, D, A>
+where
+    A: 'a,
+    D: DocAllocator<'a, A>,
+{
+    let mut inner = allocator.nil();
+    for statement in &body.statements {
+        inner = inner
+            .append(allocator.hardline())
+            .append(statement.pretty(allocator));
+    }
+    allocator
+        .text(" by {")
+        .append(inner.nest(4))
+        .append(allocator.hardline())
+        .append(allocator.text("}"))
+}
+
 impl Expression {
     pub fn pretty_ref<'a, D, A>(&'a self, allocator: &'a D, flat: bool) -> DocBuilder<'a, D, A>
     where
@@ -1797,11 +1862,15 @@ impl Expression {
                                     .append(allocator.text(": "))
                                     .append(type_expr.pretty_ref(allocator, flat));
                             }
-                            let_doc
+                            let_doc = let_doc
                                 .append(allocator.space())
                                 .append(allocator.text("="))
                                 .append(allocator.space())
-                                .append(local_let.value.pretty_ref(allocator, flat))
+                                .append(local_let.value.pretty_ref(allocator, flat));
+                            if let Some(body) = &local_let.body {
+                                let_doc = let_doc.append(local_proof_body_doc(allocator, body));
+                            }
+                            let_doc
                         }
                         LocalBlockItem::Destructuring(local_destructuring) => {
                             let mut let_doc = allocator
@@ -1815,12 +1884,16 @@ impl Expression {
                                 }
                                 let_doc = let_doc.append(allocator.text(arg.text()));
                             }
-                            let_doc
+                            let_doc = let_doc
                                 .append(allocator.text(")"))
                                 .append(allocator.space())
                                 .append(allocator.text("="))
                                 .append(allocator.space())
-                                .append(local_destructuring.value.pretty_ref(allocator, flat))
+                                .append(local_destructuring.value.pretty_ref(allocator, flat));
+                            if let Some(body) = &local_destructuring.body {
+                                let_doc = let_doc.append(local_proof_body_doc(allocator, body));
+                            }
+                            let_doc
                         }
                     };
                     doc = doc.append(let_doc).append(allocator.hardline());

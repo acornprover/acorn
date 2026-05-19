@@ -197,3 +197,84 @@ theorem bad(n: Nat, k: Nat, v: Fin[n] -> Item) {
     let w: Fin[k] -> Item = transport v
 }
 ```
+
+## Local Let In If Expression
+
+```acorn
+type Nat: axiom
+
+structure Box[n: Nat] {
+    value: Nat
+}
+
+define local_transport_value(n: Nat, k: Nat, box: Box[n], fallback: Nat) -> Nat {
+    if n = k {
+        let y: Box[k] = transport box
+        y.value
+    } else {
+        fallback
+    }
+}
+
+theorem local_transport_value_then(n: Nat, k: Nat, box: Box[n], fallback: Nat) {
+    n = k implies local_transport_value(n, k, box, fallback) = box.value
+}
+```
+
+## Local Let With Explicit Proof
+
+```acorn
+type Nat: axiom
+
+structure Box[n: Nat] {
+    value: Nat
+}
+
+axiom all_equal(n: Nat, k: Nat) {
+    n = k
+}
+
+define local_transport_with_proof(n: Nat, k: Nat, box: Box[n]) -> Nat {
+    let y: Box[k] = transport box by {
+        all_equal(n, k)
+    }
+    y.value
+}
+
+theorem local_transport_with_proof_value(n: Nat, k: Nat, box: Box[n]) {
+    local_transport_with_proof(n, k, box) = box.value
+}
+```
+
+## Local Let In Match Branch
+
+```acorn
+inductive Nat {
+    zero
+    suc(Nat)
+}
+
+structure Box[n: Nat] {
+    value: Nat
+}
+
+define use_successor_box(n: Nat, box: Box[Nat.suc(n)]) -> Nat {
+    box.value
+}
+
+define match_refines_index(n: Nat, box: Box[n]) -> Nat {
+    match n {
+        Nat.zero {
+            box.value
+        }
+        Nat.suc(k) {
+            let alt_box: Box[Nat.suc(k)] = transport box
+            use_successor_box(k, alt_box)
+        }
+    }
+}
+
+theorem match_refines_index_suc(k: Nat, box: Box[Nat.suc(k)]) {
+    match_refines_index(Nat.suc(k), box) = box.value
+}
+```

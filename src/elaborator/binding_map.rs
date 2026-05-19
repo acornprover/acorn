@@ -14,7 +14,7 @@ use crate::elaborator::acorn_type::{
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
-use crate::elaborator::evaluator::{Evaluator, LocalObligation};
+use crate::elaborator::evaluator::{Evaluator, LocalObligation, LocalObligationKind};
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;
@@ -2311,11 +2311,36 @@ impl BindingMap {
                             (name, acorn_type.genericize(&local_obligation_type_params))
                         })
                         .collect(),
-                    existence: obligation
-                        .existence
-                        .genericize(&local_obligation_type_params),
-                    witness: obligation.witness.genericize(&local_obligation_type_params),
+                    kind: match obligation.kind {
+                        LocalObligationKind::ExistsWitness { existence, witness } => {
+                            LocalObligationKind::ExistsWitness {
+                                existence: existence.genericize(&local_obligation_type_params),
+                                witness: witness.genericize(&local_obligation_type_params),
+                            }
+                        }
+                        LocalObligationKind::Transport {
+                            source_type,
+                            target_type,
+                            source_value,
+                            target_value,
+                            premises,
+                            transport_token,
+                        } => LocalObligationKind::Transport {
+                            source_type: source_type.genericize(&local_obligation_type_params),
+                            target_type: target_type.genericize(&local_obligation_type_params),
+                            source_value: source_value.genericize(&local_obligation_type_params),
+                            target_value: target_value.genericize(&local_obligation_type_params),
+                            premises: premises
+                                .into_iter()
+                                .map(|premise| premise.genericize(&local_obligation_type_params))
+                                .collect(),
+                            transport_token,
+                        },
+                    },
                     range: obligation.range,
+                    first_token: obligation.first_token,
+                    last_token: obligation.last_token,
+                    body: obligation.body,
                 })
                 .collect();
 

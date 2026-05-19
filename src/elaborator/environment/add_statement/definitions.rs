@@ -1,6 +1,6 @@
 use super::transport::{transport_operand, TransportBuilder};
 use super::*;
-use crate::elaborator::evaluator::LocalObligation;
+use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind};
 use crate::syntax::expression::TypeParamExpr;
 
 #[derive(Default)]
@@ -87,6 +87,22 @@ fn quantify_over_explicit_value_params(
     }
 }
 
+fn conjoin_values(values: Vec<AcornValue>) -> AcornValue {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return AcornValue::Bool(true);
+    };
+    iter.fold(first, AcornValue::and)
+}
+
+fn imply_premises(premises: Vec<AcornValue>, conclusion: AcornValue) -> AcornValue {
+    if premises.is_empty() {
+        conclusion
+    } else {
+        AcornValue::implies(conjoin_values(premises), conclusion)
+    }
+}
+
 impl Environment {
     fn add_local_obligations(
         &mut self,
@@ -96,6 +112,62 @@ impl Environment {
         local_obligations: Vec<LocalObligation>,
     ) -> error::Result<()> {
         for obligation in local_obligations {
+            let arg_count = obligation.arg_types.len();
+            let block_args: Vec<_> = obligation
+                .arg_names
+                .iter()
+                .cloned()
+                .zip(obligation.arg_types.iter().cloned())
+                .collect();
+            let range = obligation.range.clone();
+            let first_token = obligation.first_token.clone();
+            let last_token = obligation.last_token.clone();
+            let body = obligation.body.clone();
+
+            enum PreparedLocalObligation {
+                ExistsWitness {
+                    existence: AcornValue,
+                    witness: AcornValue,
+                },
+                RequirementBackedFact {
+                    requirements: Vec<AcornValue>,
+                    fact: AcornValue,
+                },
+            }
+
+            let prepared = match obligation.kind {
+                LocalObligationKind::ExistsWitness { existence, witness } => {
+                    PreparedLocalObligation::ExistsWitness { existence, witness }
+                }
+                LocalObligationKind::Transport {
+                    source_type,
+                    target_type,
+                    source_value,
+                    target_value,
+                    premises,
+                    transport_token,
+                } => {
+                    let transport = TransportBuilder::new(self, project);
+                    let relation = transport.relation(
+                        &source_type,
+                        &target_type,
+                        source_value,
+                        target_value,
+                        &transport_token,
+                        obligation.arg_types.len() as AtomId,
+                    )?;
+                    let requirements = transport
+                        .requirements(&source_type, &target_type, &transport_token)?
+                        .into_iter()
+                        .map(|requirement| imply_premises(premises.clone(), requirement))
+                        .collect();
+                    PreparedLocalObligation::RequirementBackedFact {
+                        requirements,
+                        fact: imply_premises(premises, relation),
+                    }
+                }
+            };
+
             for (name, hidden_type) in &obligation.hidden_constants {
                 let defined_name = DefinedName::unqualified(self.module_id, name);
                 if self.bindings.constant_name_in_use(&defined_name) {
@@ -117,36 +189,55 @@ impl Environment {
                 );
             }
 
-            let arg_count = obligation.arg_types.len();
-            let block_args = obligation
-                .arg_names
-                .iter()
-                .cloned()
-                .zip(obligation.arg_types.iter().cloned())
-                .collect();
-            let range = obligation.range.clone();
-            let block = Block::new(
-                project,
-                self,
-                type_params.to_vec(),
-                block_args,
-                BlockParams::VariableSatisfy(obligation.existence.clone(), range.clone()),
-                &statement.first_token,
-                &statement.last_token,
-                None,
-            )?;
-            let existence = AcornValue::forall(obligation.arg_types.clone(), obligation.existence);
-            let source = Source::anonymous(self.module_id, range.clone(), self.depth);
-            let prop =
-                Proposition::new(existence, type_params.to_vec(), source).with_arg_count(arg_count);
-            let index = self.add_node(Node::block(project, self, block, Some(prop)));
-            self.add_node_lines(index, &range);
+            match prepared {
+                PreparedLocalObligation::ExistsWitness { existence, witness } => {
+                    let block = Block::new(
+                        project,
+                        self,
+                        type_params.to_vec(),
+                        block_args,
+                        BlockParams::VariableSatisfy(existence.clone(), range.clone()),
+                        &first_token,
+                        &last_token,
+                        body.as_deref(),
+                    )?;
+                    let existence = AcornValue::forall(obligation.arg_types.clone(), existence);
+                    let source = Source::anonymous(self.module_id, range.clone(), self.depth);
+                    let prop = Proposition::new(existence, type_params.to_vec(), source)
+                        .with_arg_count(arg_count);
+                    let index = self.add_node(Node::block(project, self, block, Some(prop)));
+                    self.add_node_lines(index, &range);
 
-            let witness = AcornValue::forall(obligation.arg_types, obligation.witness);
-            let source = Source::anonymous(self.module_id, range, self.depth);
-            let prop =
-                Proposition::new(witness, type_params.to_vec(), source).with_arg_count(arg_count);
-            self.add_node(Node::structural(project, self, prop));
+                    let witness = AcornValue::forall(obligation.arg_types, witness);
+                    let source = Source::anonymous(self.module_id, range, self.depth);
+                    let prop = Proposition::new(witness, type_params.to_vec(), source)
+                        .with_arg_count(arg_count);
+                    self.add_node(Node::structural(project, self, prop));
+                }
+                PreparedLocalObligation::RequirementBackedFact { requirements, fact } => {
+                    let external_fact = AcornValue::forall(obligation.arg_types, fact);
+                    let source = Source::anonymous(self.module_id, range.clone(), self.depth);
+                    let prop = Proposition::new(external_fact, type_params.to_vec(), source)
+                        .with_arg_count(arg_count);
+                    let node = if requirements.is_empty() && body.is_none() {
+                        Node::structural(project, self, prop)
+                    } else {
+                        let block = Block::new(
+                            project,
+                            self,
+                            type_params.to_vec(),
+                            block_args,
+                            BlockParams::TypeRequirement(requirements, range.clone()),
+                            &first_token,
+                            &last_token,
+                            body.as_deref(),
+                        )?;
+                        Node::block(project, self, block, Some(prop))
+                    };
+                    let index = self.add_node(node);
+                    self.add_node_lines(index, &range);
+                }
+            }
         }
         Ok(())
     }

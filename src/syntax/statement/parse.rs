@@ -4,7 +4,7 @@ use super::*;
 /// Parses a block (a list of statements) where the left brace has already been consumed.
 /// Returns the statements along with the token for the final right brace.
 /// Consumes the right brace, but nothing after that.
-fn parse_block(tokens: &mut TokenIter, strict: bool) -> Result<(Vec<Statement>, Token)> {
+pub(super) fn parse_block(tokens: &mut TokenIter, strict: bool) -> Result<(Vec<Statement>, Token)> {
     let mut body = Vec::new();
     loop {
         match Statement::parse(tokens, true, strict)? {
