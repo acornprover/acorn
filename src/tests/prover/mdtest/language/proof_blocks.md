@@ -36,3 +36,28 @@ forall(x: Thing, y: Thing) {
     }
 }
 ```
+
+## Proof Inside Destructuring Let
+
+```acorn
+type Nat: axiom
+
+inductive Option[T] {
+    none
+    some(T)
+}
+
+let y: Option[Nat] = axiom
+
+let Option.some(x) = y by {
+    let witness: Nat = axiom
+    axiom witness_eq {
+        Option.some(witness) = y
+    }
+    witness_eq
+}
+
+theorem destructured_value {
+    Option.some(x) = y
+}
+```

@@ -43,11 +43,24 @@ fn parse_args(tokens: &mut TokenIter, terminator: TokenType) -> Result<(Vec<Decl
     Ok((declarations, terminator))
 }
 
-/// Parses a by block if that's the next thing in the token stream.
-/// Takes the right brace that ended the previous expression.
+/// Parses a by block if the previous token is `by`, or if `by` is the next
+/// non-newline token in the stream.
 /// Returns the last token parsed.
 /// Consumes newlines in any case.
-fn parse_by_block(right_brace: Token, tokens: &mut TokenIter) -> Result<(Option<Body>, Token)> {
+fn parse_by_block(previous_token: Token, tokens: &mut TokenIter) -> Result<(Option<Body>, Token)> {
+    if previous_token.token_type == TokenType::By {
+        let left_brace = tokens.expect_type(TokenType::LeftBrace)?;
+        let (statements, right_brace) = parse_block(tokens, false)?;
+        return Ok((
+            Some(Body {
+                left_brace,
+                statements,
+                right_brace: right_brace.clone(),
+            }),
+            right_brace,
+        ));
+    }
+
     loop {
         match tokens.peek() {
             Some(token) => {
@@ -73,7 +86,7 @@ fn parse_by_block(right_brace: Token, tokens: &mut TokenIter) -> Result<(Option<
             None => break,
         }
     }
-    Ok((None, right_brace))
+    Ok((None, previous_token))
 }
 
 /// Parses a theorem where the keyword identifier (axiom or theorem) has already been found.
@@ -226,20 +239,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                         Terminator::Or(TokenType::NewLine, TokenType::By),
                     )?;
 
-                    let (body, last_token) = if value_end_token.token_type == TokenType::By {
-                        let left_brace = tokens.expect_type(TokenType::LeftBrace)?;
-                        let (statements, right_brace) = parse_block(tokens, false)?;
-                        (
-                            Some(Body {
-                                left_brace,
-                                statements,
-                                right_brace: right_brace.clone(),
-                            }),
-                            right_brace,
-                        )
-                    } else {
-                        (None, value_end_token)
-                    };
+                    let (body, last_token) = parse_by_block(value_end_token, tokens)?;
 
                     let ds = DestructuringStatement {
                         function: function_expr,

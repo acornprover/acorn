@@ -97,6 +97,7 @@ mod datatypes;
 mod definitions;
 mod generated;
 mod imports;
+mod local_obligations;
 mod simple_types;
 mod transport;
 mod typeclasses;

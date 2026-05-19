@@ -66,6 +66,34 @@ struct LocalPremise {
 }
 
 #[derive(Clone, Debug)]
+struct LocalStackContext {
+    names: Vec<String>,
+    types: Vec<AcornType>,
+    values: Vec<AcornValue>,
+}
+
+impl LocalStackContext {
+    fn from_stack(stack: &Stack) -> LocalStackContext {
+        let entries = stack.entries();
+        let names = entries.iter().map(|(name, _)| name.clone()).collect();
+        let types: Vec<_> = entries
+            .iter()
+            .map(|(_, acorn_type)| acorn_type.clone())
+            .collect();
+        let values = types
+            .iter()
+            .enumerate()
+            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+            .collect();
+        LocalStackContext {
+            names,
+            types,
+            values,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum LocalObligationKind {
     ExistsWitness {
         existence: AcornValue,
@@ -250,6 +278,34 @@ impl<'a> Evaluator<'a> {
                     .insert_stack(premise.stack_size as AtomId, increment)
             })
             .collect()
+    }
+
+    fn push_local_alias(&mut self, name: String, value: AcornValue, stack_size: usize) {
+        self.local_aliases.push(LocalAlias {
+            name,
+            value,
+            stack_size,
+        });
+    }
+
+    fn local_hidden_value(
+        &self,
+        hidden_name: String,
+        return_type: AcornType,
+        context: &LocalStackContext,
+    ) -> (String, AcornType, AcornValue) {
+        let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
+        let hidden_type = AcornType::functional(context.types.clone(), return_type);
+        let hidden_function = AcornValue::constant(
+            constant_name,
+            vec![],
+            hidden_type.clone(),
+            hidden_type.clone(),
+            vec![],
+            vec![],
+        );
+        let value = AcornValue::apply(hidden_function, context.values.clone());
+        (hidden_name, hidden_type, value)
     }
 
     pub(crate) fn take_local_obligations(&mut self) -> Vec<LocalObligation> {
@@ -1596,44 +1652,18 @@ impl<'a> Evaluator<'a> {
                 }
                 source_value
             } else {
-                let stack_entries = stack.entries();
-                let stack_names: Vec<_> =
-                    stack_entries.iter().map(|(name, _)| name.clone()).collect();
-                let stack_types: Vec<_> = stack_entries
-                    .iter()
-                    .map(|(_, acorn_type)| acorn_type.clone())
-                    .collect();
-                let stack_values: Vec<_> = stack_types
-                    .iter()
-                    .enumerate()
-                    .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
-                    .collect();
+                let context = LocalStackContext::from_stack(stack);
                 let hidden_name = format!(
                     "__local_transport_{}_{}_{}",
                     transport_token.line_number, transport_token.start, name
                 );
-                let constant_name =
-                    ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
-                let hidden_function_type =
-                    AcornType::functional(stack_types.clone(), expected_type.clone());
-                let hidden_function = AcornValue::constant(
-                    constant_name,
-                    vec![],
-                    hidden_function_type.clone(),
-                    hidden_function_type.clone(),
-                    vec![],
-                    vec![],
-                );
-                let target_value = AcornValue::apply(hidden_function, stack_values);
-                self.local_aliases.push(LocalAlias {
-                    name,
-                    value: target_value.clone(),
-                    stack_size: stack.len(),
-                });
+                let (hidden_name, hidden_type, target_value) =
+                    self.local_hidden_value(hidden_name, expected_type.clone(), &context);
+                self.push_local_alias(name, target_value.clone(), stack.len());
                 self.local_obligations.push(LocalObligation {
-                    arg_names: stack_names,
-                    arg_types: stack_types,
-                    hidden_constants: vec![(hidden_name, hidden_function_type)],
+                    arg_names: context.names,
+                    arg_types: context.types,
+                    hidden_constants: vec![(hidden_name, hidden_type)],
                     kind: LocalObligationKind::Transport {
                         source_type,
                         target_type: expected_type.clone(),
@@ -1663,11 +1693,7 @@ impl<'a> Evaluator<'a> {
         };
         let value_type = expected_type.unwrap_or_else(|| value.get_type());
         value.check_type(Some(&value_type), &local_let.value)?;
-        self.local_aliases.push(LocalAlias {
-            name,
-            value,
-            stack_size: stack.len(),
-        });
+        self.push_local_alias(name, value, stack.len());
         Ok(())
     }
 
@@ -1685,17 +1711,7 @@ impl<'a> Evaluator<'a> {
         self.bindings
             .check_unqualified_name_available(&name, &local_satisfy.name_token)?;
 
-        let stack_entries = stack.entries();
-        let stack_names: Vec<_> = stack_entries.iter().map(|(name, _)| name.clone()).collect();
-        let stack_types: Vec<_> = stack_entries
-            .iter()
-            .map(|(_, acorn_type)| acorn_type.clone())
-            .collect();
-        let stack_values: Vec<_> = stack_types
-            .iter()
-            .enumerate()
-            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
-            .collect();
+        let context = LocalStackContext::from_stack(stack);
 
         let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
         stack.insert(name.clone(), arg_type.clone());
@@ -1708,30 +1724,17 @@ impl<'a> Evaluator<'a> {
             "__local_satisfy_{}_{}_{}",
             local_satisfy.let_token.line_number, local_satisfy.let_token.start, name
         );
-        let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
-        let hidden_function_type = AcornType::functional(stack_types.clone(), arg_type.clone());
-        let hidden_function = AcornValue::constant(
-            constant_name,
-            vec![],
-            hidden_function_type.clone(),
-            hidden_function_type.clone(),
-            vec![],
-            vec![],
-        );
-        let witness_value = AcornValue::apply(hidden_function, stack_values);
-        self.local_aliases.push(LocalAlias {
-            name,
-            value: witness_value.clone(),
-            stack_size: stack.len(),
-        });
+        let (hidden_name, hidden_type, witness_value) =
+            self.local_hidden_value(hidden_name, arg_type.clone(), &context);
+        self.push_local_alias(name, witness_value.clone(), stack.len());
 
         let stack_size = stack.len() as AtomId;
         let existence = AcornValue::exists(vec![arg_type], condition.clone());
         let witness = condition.bind_values(stack_size, stack_size + 1, &[witness_value]);
         self.local_obligations.push(LocalObligation {
-            arg_names: stack_names,
-            arg_types: stack_types,
-            hidden_constants: vec![(hidden_name, hidden_function_type)],
+            arg_names: context.names,
+            arg_types: context.types,
+            hidden_constants: vec![(hidden_name, hidden_type)],
             kind: LocalObligationKind::ExistsWitness {
                 existence,
                 witness,
@@ -1826,17 +1829,7 @@ impl<'a> Evaluator<'a> {
                 .error("could not infer all argument types for destructuring pattern"));
         }
 
-        let stack_entries = stack.entries();
-        let stack_names: Vec<_> = stack_entries.iter().map(|(name, _)| name.clone()).collect();
-        let stack_types: Vec<_> = stack_entries
-            .iter()
-            .map(|(_, acorn_type)| acorn_type.clone())
-            .collect();
-        let stack_values: Vec<_> = stack_types
-            .iter()
-            .enumerate()
-            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
-            .collect();
+        let context = LocalStackContext::from_stack(stack);
 
         let stack_size = stack.len() as AtomId;
         let general_arg_values: Vec<_> = arg_types
@@ -1862,32 +1855,18 @@ impl<'a> Evaluator<'a> {
                 i,
                 arg_name
             );
-            let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
-            let hidden_function_type =
-                AcornType::functional_from_flat_context(stack_types.clone(), arg_type.clone());
-            let hidden_function = AcornValue::constant(
-                constant_name,
-                vec![],
-                hidden_function_type.clone(),
-                hidden_function_type.clone(),
-                vec![],
-                vec![],
-            );
-            let witness_value = AcornValue::apply(hidden_function, stack_values.clone());
-            hidden_constants.push((hidden_name, hidden_function_type));
-            self.local_aliases.push(LocalAlias {
-                name: arg_name.clone(),
-                value: witness_value.clone(),
-                stack_size: stack.len(),
-            });
+            let (hidden_name, hidden_type, witness_value) =
+                self.local_hidden_value(hidden_name, arg_type.clone(), &context);
+            hidden_constants.push((hidden_name, hidden_type));
+            self.push_local_alias(arg_name.clone(), witness_value.clone(), stack.len());
             witness_args.push(witness_value);
         }
 
         let witness_applied = AcornValue::apply(function, witness_args);
         let witness = AcornValue::equals(witness_applied, obligation_value);
         self.local_obligations.push(LocalObligation {
-            arg_names: stack_names,
-            arg_types: stack_types,
+            arg_names: context.names,
+            arg_types: context.types,
             hidden_constants,
             kind: LocalObligationKind::ExistsWitness {
                 existence,
