@@ -183,6 +183,15 @@ fn collect_dependencies_from_expression(expression: &Expression, output: &mut De
                 collect_dependencies_from_expression(result, output);
             }
         }
+        Expression::Block(local_lets, body, _) => {
+            for local_let in local_lets {
+                if let Some(type_expr) = &local_let.type_expr {
+                    collect_dependencies_from_expression(type_expr, output);
+                }
+                collect_dependencies_from_expression(&local_let.value, output);
+            }
+            collect_dependencies_from_expression(body, output);
+        }
     }
 }
 

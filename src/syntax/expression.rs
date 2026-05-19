@@ -85,6 +85,19 @@ pub enum Expression {
     /// For the pair (exp1, exp2) where exp1 matches the scrutinee, the value of our expression is exp2.
     /// The last token is the closing brace.
     Match(Token, Box<Expression>, Vec<(Expression, Expression)>, Token),
+
+    /// A value-producing block with local lets followed by a final expression.
+    /// The surrounding braces are stored by the expression that owns the block.
+    Block(Vec<LocalLet>, Box<Expression>, Token),
+}
+
+/// A local let inside a value-producing expression block.
+#[derive(Debug, Clone)]
+pub struct LocalLet {
+    pub let_token: Token,
+    pub name_token: Token,
+    pub type_expr: Option<Expression>,
+    pub value: Expression,
 }
 
 impl fmt::Display for Expression {
@@ -366,6 +379,10 @@ impl Expression {
             Expression::GenericBinder(token, _, _, _, _) => token,
             Expression::IfThenElse(token, _, _, _, _) => token,
             Expression::Match(token, _, _, _) => token,
+            Expression::Block(local_lets, body, _) => local_lets
+                .first()
+                .map(|local_let| &local_let.let_token)
+                .unwrap_or_else(|| body.first_token()),
         }
     }
 
@@ -386,6 +403,7 @@ impl Expression {
             Expression::GenericBinder(_, _, _, _, right_brace) => right_brace,
             Expression::IfThenElse(_, _, _, _, right_brace) => right_brace,
             Expression::Match(_, _, _, right_brace) => right_brace,
+            Expression::Block(_, _, right_brace) => right_brace,
         }
     }
 
@@ -393,6 +411,16 @@ impl Expression {
         match self {
             Expression::Singleton(token) => token.token_type == TokenType::Axiom,
             _ => false,
+        }
+    }
+
+    pub fn transport_operand(&self) -> Option<(&Token, &Expression)> {
+        match self {
+            Expression::Unary(token, operand) if token.token_type == TokenType::Transport => {
+                Some((token, operand))
+            }
+            Expression::Grouping(_, inner, _) => inner.transport_operand(),
+            _ => None,
         }
     }
 
@@ -456,6 +484,13 @@ impl Expression {
                 for (pat, exp) in cases {
                     println!("  case: {} => {}", pat, exp);
                 }
+            }
+            Expression::Block(local_lets, body, _) => {
+                println!("Block:");
+                for local_let in local_lets {
+                    println!("  let {} = {}", local_let.name_token, local_let.value);
+                }
+                println!("  body: {}", body);
             }
         }
     }
@@ -611,6 +646,7 @@ impl Expression {
             | Expression::Binder(..)
             | Expression::GenericBinder(..)
             | Expression::IfThenElse(..)
+            | Expression::Block(..)
             | Expression::Match(..) => {
                 // These expressions never need to be parenthesized.
                 i8::MAX
@@ -706,6 +742,59 @@ impl Expression {
         Expression::parse(tokens, ExpressionType::Value, terminator)
     }
 
+    /// Parse the contents of a value-producing brace block.
+    ///
+    /// This accepts zero or more local lets, each terminated by a newline, followed by the final
+    /// value expression terminated by the closing brace.
+    pub fn parse_value_block(tokens: &mut TokenIter) -> Result<(Expression, Token)> {
+        let mut local_lets = vec![];
+        loop {
+            tokens.skip_newlines();
+            if tokens.peek_type() != Some(TokenType::Let) {
+                break;
+            }
+
+            let let_token = tokens.next().unwrap();
+            let name_token = tokens.expect_variable_name(false)?;
+            if name_token.token_type == TokenType::SelfToken {
+                return Err(name_token.error("cannot use 'self' as a local let name"));
+            }
+            let next_token = tokens.expect_token()?;
+            let type_expr = match next_token.token_type {
+                TokenType::Colon => {
+                    let (type_expr, _) =
+                        Expression::parse_type(tokens, Terminator::Is(TokenType::Equals))?;
+                    tokens.skip_newlines();
+                    Some(type_expr)
+                }
+                TokenType::Equals => {
+                    tokens.skip_newlines();
+                    None
+                }
+                _ => return Err(next_token.error("expected ':' or '='")),
+            };
+            let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
+            local_lets.push(LocalLet {
+                let_token,
+                name_token,
+                type_expr,
+                value,
+            });
+        }
+
+        tokens.skip_newlines();
+        let (body, right_brace) =
+            Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+        if local_lets.is_empty() {
+            Ok((body, right_brace))
+        } else {
+            Ok((
+                Expression::Block(local_lets, Box::new(body), right_brace.clone()),
+                right_brace,
+            ))
+        }
+    }
+
     // Parse an expression that should represent a type, or part of a type.
     // Consumes the terminating token and returns it.
     pub fn parse_type(
@@ -779,6 +868,7 @@ impl Expression {
             Expression::Binder(..)
             | Expression::GenericBinder(..)
             | Expression::Unary(..)
+            | Expression::Block(..)
             | Expression::Match(..)
             | Expression::IfThenElse(..) => false,
         }
@@ -1018,11 +1108,7 @@ fn parse_partial_expressions(
                     Declaration::parse_list(tokens)?
                 };
                 tokens.expect_type(TokenType::LeftBrace)?;
-                let (subexpression, right_brace) = Expression::parse(
-                    tokens,
-                    ExpressionType::Value,
-                    Terminator::Is(TokenType::RightBrace),
-                )?;
+                let (subexpression, right_brace) = Expression::parse_value_block(tokens)?;
                 let binder = if type_params.is_empty() {
                     Expression::Binder(token, args, Box::new(subexpression), right_brace)
                 } else {
@@ -1043,15 +1129,13 @@ fn parse_partial_expressions(
                 }
                 let (condition, _) =
                     Expression::parse_value(tokens, Terminator::Is(TokenType::LeftBrace))?;
-                let (if_block, last_right_brace) =
-                    Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+                let (if_block, last_right_brace) = Expression::parse_value_block(tokens)?;
 
                 // Check if there's an else clause
                 let (else_block, final_brace) = if tokens.peek_type() == Some(TokenType::Else) {
                     tokens.next(); // consume the else token
                     tokens.expect_type(TokenType::LeftBrace)?;
-                    let (else_expr, else_brace) =
-                        Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+                    let (else_expr, else_brace) = Expression::parse_value_block(tokens)?;
                     (Some(Box::new(else_expr)), else_brace)
                 } else {
                     (None, last_right_brace)
@@ -1101,8 +1185,7 @@ fn parse_partial_expressions(
 
                     let (pattern, _) =
                         Expression::parse_value(tokens, Terminator::Is(TokenType::LeftBrace))?;
-                    let (exp, _) =
-                        Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+                    let (exp, _) = Expression::parse_value_block(tokens)?;
                     cases.push((pattern, exp));
                 };
                 if cases.is_empty() {
@@ -1592,6 +1675,27 @@ impl Expression {
                     .append(allocator.text("}"))
                     .group()
             }
+            Expression::Block(local_lets, body, _) => {
+                let mut doc = allocator.nil();
+                for local_let in local_lets {
+                    let mut let_doc = allocator
+                        .text(local_let.let_token.text())
+                        .append(allocator.space())
+                        .append(allocator.text(local_let.name_token.text()));
+                    if let Some(type_expr) = &local_let.type_expr {
+                        let_doc = let_doc
+                            .append(allocator.text(": "))
+                            .append(type_expr.pretty_ref(allocator, flat));
+                    }
+                    let_doc = let_doc
+                        .append(allocator.space())
+                        .append(allocator.text("="))
+                        .append(allocator.space())
+                        .append(local_let.value.pretty_ref(allocator, flat));
+                    doc = doc.append(let_doc).append(allocator.hardline());
+                }
+                doc.append(body.pretty_ref(allocator, flat)).group()
+            }
         }
     }
 
@@ -1749,6 +1853,20 @@ mod tests {
     #[test]
     fn test_blocks() {
         check_value("forall(x: Nat) { x = x }");
+        Expression::expect_value(
+            "function(x: Nat) {
+                let y = x
+                y
+            }",
+        );
+        Expression::expect_value(
+            "if p {
+                let q = p
+                q
+            } else {
+                p
+            }",
+        );
     }
 
     #[test]

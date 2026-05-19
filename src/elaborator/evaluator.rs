@@ -16,7 +16,7 @@ use crate::module::ModuleId;
 #[cfg(test)]
 use crate::project::Project;
 use crate::project::ProjectLookup;
-use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
+use crate::syntax::expression::{Declaration, Expression, LocalLet, TypeParamExpr};
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
 
@@ -39,6 +39,13 @@ struct CurrentInstanceContext {
     current_attr: String,
 }
 
+#[derive(Clone, Debug)]
+struct LocalAlias {
+    name: String,
+    value: AcornValue,
+    stack_size: usize,
+}
+
 /// The Evaluator turns expressions into types and values, and other things of that nature.
 pub struct Evaluator<'a> {
     /// The bindings to use for evaluation.
@@ -57,6 +64,10 @@ pub struct Evaluator<'a> {
     /// slot, not to the public typeclass constant. This context is only set for that temporary,
     /// in-progress instance-body elaboration path.
     current_instance_context: Option<CurrentInstanceContext>,
+
+    /// Local expression-block aliases. These are source-level `let` bindings in function-like
+    /// expression blocks, elaborated by inlining their values wherever the name is used.
+    local_aliases: Vec<LocalAlias>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -71,6 +82,7 @@ impl<'a> Evaluator<'a> {
             bindings,
             token_map,
             current_instance_context: None,
+            local_aliases: vec![],
         }
     }
 
@@ -90,6 +102,7 @@ impl<'a> Evaluator<'a> {
                 datatype: instance_name.datatype.clone(),
                 current_attr: instance_name.attribute.clone(),
             }),
+            local_aliases: vec![],
         }
     }
 
@@ -120,6 +133,26 @@ impl<'a> Evaluator<'a> {
             }
             _ => None,
         }
+    }
+
+    fn has_local_alias(&self, name: &str) -> bool {
+        self.local_aliases.iter().any(|alias| alias.name == name)
+    }
+
+    fn local_alias_value(&self, name: &str, stack_size: usize) -> Option<AcornValue> {
+        let alias = self
+            .local_aliases
+            .iter()
+            .rev()
+            .find(|alias| alias.name == name)?;
+        debug_assert!(stack_size >= alias.stack_size);
+        let increment = stack_size.saturating_sub(alias.stack_size) as AtomId;
+        Some(
+            alias
+                .value
+                .clone()
+                .insert_stack(alias.stack_size as AtomId, increment),
+        )
     }
 
     fn equality_operator_arg_type(
@@ -262,6 +295,7 @@ impl<'a> Evaluator<'a> {
             bindings,
             token_map,
             current_instance_context: self.current_instance_context.clone(),
+            local_aliases: self.local_aliases.clone(),
         }
     }
 
@@ -688,7 +722,8 @@ impl<'a> Evaluator<'a> {
             Expression::Grouping(_, e, _) => self.evaluate_potential_type_with_stack(stack, e),
             Expression::Binder(token, _, _, _)
             | Expression::GenericBinder(token, _, _, _, _)
-            | Expression::IfThenElse(token, _, _, _, _) => {
+            | Expression::IfThenElse(token, _, _, _, _)
+            | Expression::Block(_, _, token) => {
                 Err(token.error("unexpected token in type expression"))
             }
             Expression::Match(token, _, _, _) => {
@@ -1198,6 +1233,8 @@ impl<'a> Evaluator<'a> {
                         } else if let Some((i, t)) = stack.get(name) {
                             // This is a stack variable
                             NamedEntity::Value(AcornValue::Variable(*i, t.clone()))
+                        } else if let Some(value) = self.local_alias_value(name, stack.len()) {
+                            NamedEntity::Value(value)
                         } else {
                             let constant_name =
                                 DefinedName::unqualified(self.bindings.module_id(), name);
@@ -1419,6 +1456,68 @@ impl<'a> Evaluator<'a> {
     /// This must resolve to a completed value, with all types inferred.
     /// If the result is an unresolved constant and we have an expected type, we'll try to
     /// use type inference to resolve it.
+    fn evaluate_local_let(&mut self, stack: &mut Stack, local_let: &LocalLet) -> error::Result<()> {
+        let name = local_let.name_token.text().to_string();
+        if stack.get(&name).is_some() || self.has_local_alias(&name) {
+            return Err(local_let
+                .name_token
+                .error(&format!("name '{}' is already bound", name)));
+        }
+        self.bindings
+            .check_unqualified_name_available(&name, &local_let.name_token)?;
+        if local_let.value.is_axiom() {
+            return Err(local_let
+                .value
+                .first_token()
+                .error("axiom is not allowed in a local let"));
+        }
+
+        let expected_type = match &local_let.type_expr {
+            Some(type_expr) => Some(self.evaluate_type_with_stack(stack, type_expr)?),
+            None => None,
+        };
+        let value = if let Some((transport_token, source_expr)) =
+            local_let.value.transport_operand()
+        {
+            let Some(expected_type) = &expected_type else {
+                return Err(transport_token.error("transport requires an explicit type annotation"));
+            };
+            let source_value = self.evaluate_value_with_stack(stack, source_expr, None)?;
+            source_value
+                .get_type()
+                .check_eq(Some(expected_type), transport_token)?;
+            source_value
+        } else {
+            self.evaluate_value_with_stack(stack, &local_let.value, expected_type.as_ref())?
+        };
+        let value_type = expected_type.unwrap_or_else(|| value.get_type());
+        value.check_type(Some(&value_type), &local_let.value)?;
+        self.local_aliases.push(LocalAlias {
+            name,
+            value,
+            stack_size: stack.len(),
+        });
+        Ok(())
+    }
+
+    fn evaluate_value_block_with_stack(
+        &mut self,
+        stack: &mut Stack,
+        local_lets: &[LocalLet],
+        body: &Expression,
+        expected_type: Option<&AcornType>,
+    ) -> error::Result<AcornValue> {
+        let alias_count = self.local_aliases.len();
+        let result = (|| {
+            for local_let in local_lets {
+                self.evaluate_local_let(stack, local_let)?;
+            }
+            self.evaluate_value_with_stack(stack, body, expected_type)
+        })();
+        self.local_aliases.truncate(alias_count);
+        result
+    }
+
     pub fn evaluate_value_with_stack(
         &mut self,
         stack: &mut Stack,
@@ -1935,6 +2034,9 @@ impl<'a> Evaluator<'a> {
                     self.evaluate_value_with_stack(stack, e, expected_type)?
                 }
             }
+            Expression::Block(local_lets, body, _) => {
+                self.evaluate_value_block_with_stack(stack, local_lets, body, expected_type)?
+            }
             Expression::Binder(token, args, body, _) => {
                 if token.token_type == TokenType::Choose {
                     return Err(token.error("choose expressions are not supported"));
@@ -2116,6 +2218,7 @@ impl<'a> Evaluator<'a> {
                         bindings: &scoped_bindings,
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
+                        local_aliases: self.local_aliases.clone(),
                     }
                     .evaluate_typeclass(annotation)?;
                     FamilyParam::Type(TypeParam {
@@ -2132,6 +2235,7 @@ impl<'a> Evaluator<'a> {
                         bindings: &scoped_bindings,
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
+                        local_aliases: self.local_aliases.clone(),
                     }
                     .evaluate_type_with_stack(&mut scoped_stack, annotation)?;
                     FamilyParam::Value(ValueParam {

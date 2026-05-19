@@ -364,8 +364,7 @@ fn parse_define_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
         return Err(name_token.error("Functions must have at least one argument. Use 'let' to declare values that aren't functions."));
     }
     let (return_type, _) = Expression::parse_type(tokens, Terminator::Is(TokenType::LeftBrace))?;
-    let (return_value, last_token) =
-        Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+    let (return_value, last_token) = Expression::parse_value_block(tokens)?;
     let ds = DefineStatement {
         name_token,
         type_params,

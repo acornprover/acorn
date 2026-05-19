@@ -7,16 +7,10 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::kernel::atom::AtomId;
 use crate::project::ProjectLookup;
 use crate::syntax::expression::Expression;
-use crate::syntax::token::{Token, TokenType};
+use crate::syntax::token::Token;
 
 pub(super) fn transport_operand(expression: &Expression) -> Option<(&Token, &Expression)> {
-    match expression {
-        Expression::Unary(token, operand) if token.token_type == TokenType::Transport => {
-            Some((token, operand))
-        }
-        Expression::Grouping(_, inner, _) => transport_operand(inner),
-        _ => None,
-    }
+    expression.transport_operand()
 }
 
 fn conjoin(values: Vec<AcornValue>) -> AcornValue {
