@@ -421,6 +421,43 @@ fn test_parse_code_line_accepts_claim_with_args_shape() {
 }
 
 #[test]
+fn test_parse_code_line_rejects_local_proof_let_claim() {
+    let code = r#"
+        type Empty: axiom
+
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+
+    let err = Certificate::parse_code_line(
+        r#"
+        true and if true {
+            let x: Empty satisfy {
+                true
+            }
+            x = x
+        } else {
+            true
+        }
+        "#,
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect_err("certificate claims should not allow proof-requiring local lets");
+
+    assert!(
+        err.to_string().contains("local lets that require proofs"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
 fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
     use crate::kernel::checker::{Checker, StepReason};
     use crate::kernel::term::Term;

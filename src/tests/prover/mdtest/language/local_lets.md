@@ -306,3 +306,84 @@ theorem local_pair_rebuild_reduces(a: Nat, b: Nat) {
     local_pair_rebuild(a, b) = Pair.new(a, b)
 }
 ```
+
+## Local Satisfy Obligations In Let RHS
+
+Local witnesses inside expression branches must still create proof obligations before the outer
+`let` can use them.
+
+```acorn
+type Nat: axiom
+let seed: Nat = axiom
+
+let picked: Nat = if true {
+    let x: Nat satisfy {
+        x = seed
+    }
+    x
+} else {
+    seed
+}
+
+theorem picked_is_seed {
+    picked = seed
+}
+```
+
+## Local Satisfy Cannot Inhabit Empty Let RHS
+
+```acorn,fail
+type Empty: axiom
+
+let bad: Empty = if true {
+    let x: Empty satisfy {
+        true
+    }
+    x
+} else {
+    let y: Empty satisfy {
+        true
+    }
+    y
+}
+
+theorem impossible {
+    exists(x: Empty) {
+        x = x
+    }
+}
+```
+
+## Local Satisfy Obligations In Typeclass Conditions
+
+Typeclass condition claims are elaborated through the same scoped-value path as theorem claims, so
+local witnesses there must not become free facts.
+
+```acorn,fail
+type Empty: axiom
+
+typeclass B: Bad {
+    bogus {
+        if true {
+            let x: Empty satisfy {
+                true
+            }
+            x = x
+        } else {
+            true
+        }
+    }
+}
+
+inductive Unit {
+    unit
+}
+
+instance Unit: Bad {}
+
+theorem impossible {
+    exists(x: Empty) {
+        x = x
+    }
+}
+```

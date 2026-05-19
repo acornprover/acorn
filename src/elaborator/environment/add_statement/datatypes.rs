@@ -87,10 +87,18 @@ impl Environment {
             for ((name_token, _, _), t) in ss.fields.iter().zip(&field_types) {
                 stack.insert(name_token.to_string(), t.clone());
             }
-            let unbound = self.evaluator(project).evaluate_value_with_stack(
+            let mut evaluator = self.evaluator(project);
+            let unbound = evaluator.evaluate_value_with_stack(
                 &mut stack,
                 constraint,
                 Some(&AcornType::Bool),
+            )?;
+            let local_obligations = evaluator.take_local_obligations();
+            self.add_genericized_local_obligations(
+                project,
+                statement,
+                &type_params,
+                local_obligations,
             )?;
             // Constrained structures may be empty, so any optional proof body is
             // parsed for source compatibility but does not elaborate into a block.

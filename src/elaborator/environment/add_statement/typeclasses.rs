@@ -122,7 +122,7 @@ impl Environment {
                 self.bindings
                     .check_defined_name_available(&defined_name, &condition.name_token)?;
 
-                let (bad_params, _, arg_types, unbound_claim, _, _) =
+                let (bad_params, _, arg_types, unbound_claim, _, local_obligations) =
                     self.bindings.evaluate_scoped_value(
                         &[],
                         &condition.args,
@@ -148,6 +148,12 @@ impl Environment {
                 if let Err(message) = external_claim.validate() {
                     return Err(condition.claim.error(&message));
                 }
+                self.add_genericized_local_obligations(
+                    project,
+                    statement,
+                    &type_params,
+                    local_obligations,
+                )?;
                 let lambda_claim = AcornValue::lambda(arg_types.clone(), unbound_claim.clone())
                     .genericize(&type_params);
                 let theorem_type = lambda_claim.get_type();

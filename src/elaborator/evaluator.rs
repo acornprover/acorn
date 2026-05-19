@@ -122,6 +122,60 @@ pub struct LocalObligation {
     pub body: Option<Arc<Body>>,
 }
 
+impl LocalObligation {
+    pub(crate) fn genericize(self, type_params: &[TypeParam]) -> LocalObligation {
+        LocalObligation {
+            arg_names: self.arg_names,
+            arg_types: self
+                .arg_types
+                .into_iter()
+                .map(|arg_type| arg_type.genericize(type_params))
+                .collect(),
+            hidden_constants: self
+                .hidden_constants
+                .into_iter()
+                .map(|(name, acorn_type)| (name, acorn_type.genericize(type_params)))
+                .collect(),
+            kind: match self.kind {
+                LocalObligationKind::ExistsWitness {
+                    existence,
+                    witness,
+                    premises,
+                } => LocalObligationKind::ExistsWitness {
+                    existence: existence.genericize(type_params),
+                    witness: witness.genericize(type_params),
+                    premises: premises
+                        .into_iter()
+                        .map(|premise| premise.genericize(type_params))
+                        .collect(),
+                },
+                LocalObligationKind::Transport {
+                    source_type,
+                    target_type,
+                    source_value,
+                    target_value,
+                    premises,
+                    transport_token,
+                } => LocalObligationKind::Transport {
+                    source_type: source_type.genericize(type_params),
+                    target_type: target_type.genericize(type_params),
+                    source_value: source_value.genericize(type_params),
+                    target_value: target_value.genericize(type_params),
+                    premises: premises
+                        .into_iter()
+                        .map(|premise| premise.genericize(type_params))
+                        .collect(),
+                    transport_token,
+                },
+            },
+            range: self.range,
+            first_token: self.first_token,
+            last_token: self.last_token,
+            body: self.body,
+        }
+    }
+}
+
 /// The Evaluator turns expressions into types and values, and other things of that nature.
 pub struct Evaluator<'a> {
     /// The bindings to use for evaluation.
@@ -733,6 +787,22 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn evaluate_value_type_arg_with_stack(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        expected_type: Option<&AcornType>,
+    ) -> error::Result<AcornValue> {
+        let obligation_count = self.local_obligations.len();
+        let value = self.evaluate_value_with_stack(stack, expression, expected_type)?;
+        if self.local_obligations.len() != obligation_count {
+            self.local_obligations.truncate(obligation_count);
+            return Err(expression
+                .error("local lets that require proofs are not supported in type arguments"));
+        }
+        Ok(value)
+    }
+
     /// Evaluates an expression that either represents a type, or represents a type that still needs params.
     pub fn evaluate_potential_type(
         &mut self,
@@ -839,7 +909,7 @@ impl<'a> Evaluator<'a> {
                                 let expected_type = value_type
                                     .instantiate(&type_replacements)
                                     .bind_value_params(&value_args);
-                                let value = self.evaluate_value_with_stack(
+                                let value = self.evaluate_value_type_arg_with_stack(
                                     stack,
                                     param_expr,
                                     Some(&expected_type),

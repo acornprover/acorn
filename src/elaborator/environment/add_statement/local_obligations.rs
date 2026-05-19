@@ -107,6 +107,20 @@ fn prepare_local_obligation(
 }
 
 impl Environment {
+    pub(super) fn add_genericized_local_obligations(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        type_params: &[TypeParam],
+        local_obligations: Vec<LocalObligation>,
+    ) -> error::Result<()> {
+        let local_obligations = local_obligations
+            .into_iter()
+            .map(|obligation| obligation.genericize(type_params))
+            .collect();
+        self.add_local_obligations(project, statement, type_params, local_obligations)
+    }
+
     pub(super) fn add_local_obligations(
         &mut self,
         project: &dyn ProjectLookup,
@@ -117,11 +131,6 @@ impl Environment {
         for obligation in local_obligations {
             let frame = LocalObligationFrame::from_obligation(&obligation);
             let prepared = prepare_local_obligation(self, project, &obligation)?;
-            self.declare_local_hidden_constants(
-                statement,
-                type_params,
-                &obligation.hidden_constants,
-            )?;
 
             match prepared {
                 PreparedLocalObligation::ExistsWitness {
@@ -131,8 +140,10 @@ impl Environment {
                 } => {
                     self.add_local_witness_obligation(
                         project,
+                        statement,
                         type_params,
                         frame,
+                        obligation.hidden_constants,
                         existence,
                         witness,
                         premises,
@@ -141,8 +152,10 @@ impl Environment {
                 PreparedLocalObligation::RequirementBackedFact { requirements, fact } => {
                     self.add_local_requirement_obligation(
                         project,
+                        statement,
                         type_params,
                         frame,
+                        obligation.hidden_constants,
                         requirements,
                         fact,
                     )?;
@@ -184,8 +197,10 @@ impl Environment {
     fn add_local_witness_obligation(
         &mut self,
         project: &dyn ProjectLookup,
+        statement: &Statement,
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
+        hidden_constants: Vec<(String, AcornType)>,
         existence: AcornValue,
         witness: AcornValue,
         premises: Vec<AcornValue>,
@@ -211,6 +226,8 @@ impl Environment {
         let index = self.add_node(Node::block(project, self, block, Some(prop)));
         self.add_node_lines(index, &frame.range);
 
+        self.declare_local_hidden_constants(statement, type_params, &hidden_constants)?;
+
         let witness = AcornValue::forall(frame.arg_types, imply_premises(premises, witness));
         let source = Source::anonymous(self.module_id, frame.range, self.depth);
         let prop =
@@ -222,19 +239,17 @@ impl Environment {
     fn add_local_requirement_obligation(
         &mut self,
         project: &dyn ProjectLookup,
+        statement: &Statement,
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
+        hidden_constants: Vec<(String, AcornType)>,
         requirements: Vec<AcornValue>,
         fact: AcornValue,
     ) -> error::Result<()> {
-        let external_fact = AcornValue::forall(frame.arg_types, fact);
-        let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
-        let prop = Proposition::new(external_fact, type_params.to_vec(), source)
-            .with_arg_count(frame.arg_count);
-        let node = if requirements.is_empty() && frame.body.is_none() {
-            Node::structural(project, self, prop)
+        let block = if requirements.is_empty() && frame.body.is_none() {
+            None
         } else {
-            let block = Block::new(
+            Some(Block::new(
                 project,
                 self,
                 type_params.to_vec(),
@@ -243,8 +258,18 @@ impl Environment {
                 &frame.first_token,
                 &frame.last_token,
                 frame.body.as_deref(),
-            )?;
-            Node::block(project, self, block, Some(prop))
+            )?)
+        };
+
+        self.declare_local_hidden_constants(statement, type_params, &hidden_constants)?;
+
+        let external_fact = AcornValue::forall(frame.arg_types, fact);
+        let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
+        let prop = Proposition::new(external_fact, type_params.to_vec(), source)
+            .with_arg_count(frame.arg_count);
+        let node = match block {
+            None => Node::structural(project, self, prop),
+            Some(block) => Node::block(project, self, block, Some(prop)),
         };
         let index = self.add_node(node);
         self.add_node_lines(index, &frame.range);

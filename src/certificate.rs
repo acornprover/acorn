@@ -613,6 +613,9 @@ impl Certificate {
                     return Ok(CertificateStep::Claim(claim));
                 }
                 let value = evaluator.evaluate_value(expr, Some(&AcornType::Bool))?;
+                Self::reject_certificate_local_obligations(
+                    evaluator.take_local_obligations().len(),
+                )?;
                 Ok(CertificateStep::Claim(Self::claim_from_clause_value(
                     kernel_context.to_mut(),
                     &value,
@@ -632,6 +635,16 @@ impl Certificate {
                 "Expected a claim or let...satisfy statement, got: {}",
                 code
             ))),
+        }
+    }
+
+    fn reject_certificate_local_obligations(count: usize) -> Result<(), CodeGenError> {
+        if count == 0 {
+            Ok(())
+        } else {
+            Err(CodeGenError::GeneratedBadCode(
+                "certificate steps cannot contain local lets that require proofs".to_string(),
+            ))
         }
     }
 
@@ -865,6 +878,9 @@ impl Certificate {
             &vss.condition,
             Some(&AcornType::Bool),
         )?;
+        Self::reject_certificate_local_obligations(
+            general_evaluator.take_local_obligations().len(),
+        )?;
         let name = quant_names
             .first()
             .cloned()
@@ -881,6 +897,9 @@ impl Certificate {
         let mut specific_evaluator = Evaluator::new(project, bindings, None);
         let specific_condition =
             specific_evaluator.evaluate_value(&vss.condition, Some(&AcornType::Bool))?;
+        Self::reject_certificate_local_obligations(
+            specific_evaluator.take_local_obligations().len(),
+        )?;
 
         let general_claim = AcornValue::Exists(quant_types, Box::new(general_condition));
         let justification =
@@ -946,8 +965,15 @@ impl Certificate {
             project,
             None,
         )?;
-        let (type_params, mut arg_names, mut arg_types, condition, _condition_type, _) =
-            scoped_value;
+        let (
+            type_params,
+            mut arg_names,
+            mut arg_types,
+            condition,
+            _condition_type,
+            local_obligations,
+        ) = scoped_value;
+        Self::reject_certificate_local_obligations(local_obligations.len())?;
         let condition = condition.ok_or_else(|| {
             CodeGenError::GeneratedBadCode("missing function-satisfy condition".to_string())
         })?;

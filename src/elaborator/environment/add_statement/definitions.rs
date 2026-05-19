@@ -190,12 +190,24 @@ impl Environment {
                 .error("transport cannot define numeric datatype members"));
         }
 
+        let definition_type_params = match datatype_params {
+            Some(p) => {
+                if !local_type_params.is_empty() {
+                    return Err(ls
+                        .name_token
+                        .error("datatype parameters and let parameters cannot be used together"));
+                }
+                p.type_params().to_vec()
+            }
+            None => local_type_params.to_vec(),
+        };
+
         let mut stack = Stack::new();
         bind_explicit_value_params(&mut stack, &local_family_params.value_params);
         bind_datatype_value_params(&mut stack, datatype_params);
-        let source_value =
-            self.evaluator(project)
-                .evaluate_value_with_stack(&mut stack, source_expr, None)?;
+        let mut evaluator = self.evaluator(project);
+        let source_value = evaluator.evaluate_value_with_stack(&mut stack, source_expr, None)?;
+        let local_obligations = evaluator.take_local_obligations();
         let source_type = source_value.get_type();
 
         let family_value_param_count = datatype_params
@@ -226,18 +238,13 @@ impl Environment {
         } else {
             transport.requirements(&source_type, &target_type, transport_token)?
         };
+        self.add_genericized_local_obligations(
+            project,
+            statement,
+            &definition_type_params,
+            local_obligations,
+        )?;
 
-        let definition_type_params = match datatype_params {
-            Some(p) => {
-                if !local_type_params.is_empty() {
-                    return Err(ls
-                        .name_token
-                        .error("datatype parameters and let parameters cannot be used together"));
-                }
-                p.type_params().to_vec()
-            }
-            None => local_type_params.to_vec(),
-        };
         let mut block_args = explicit_value_block_args(&local_family_params.value_params);
         block_args.extend(datatype_value_block_args(datatype_params));
         let block = if let Some(general_claim) = general_claim {
@@ -374,7 +381,7 @@ impl Environment {
         let datatype_value_param_types = datatype_value_param_types(datatype_params);
         let explicit_value_param_types =
             explicit_value_param_types(&local_family_params.value_params);
-        let (acorn_type, value) = match &ls.type_expr {
+        let (acorn_type, value, local_obligations) = match &ls.type_expr {
             Some(type_expr) => {
                 let mut stack = Stack::new();
                 bind_explicit_value_params(&mut stack, &local_family_params.value_params);
@@ -438,34 +445,31 @@ impl Environment {
                     }
                     return result;
                 }
-                let value = if ls.value.is_axiom() {
-                    None
+                let (value, local_obligations) = if ls.value.is_axiom() {
+                    (None, vec![])
                 } else {
                     let mut stack = Stack::new();
                     bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                     bind_datatype_value_params(&mut stack, datatype_params);
-                    let v = if let Some(instance_name) = defined_name.as_instance() {
+                    let mut evaluator = if let Some(instance_name) = defined_name.as_instance() {
                         Evaluator::new_for_instance_member(
                             project,
                             &self.bindings,
                             Some(&mut self.token_map),
                             instance_name,
                         )
-                        .evaluate_value_with_stack(
-                            &mut stack,
-                            &ls.value,
-                            Some(&acorn_type),
-                        )?
                     } else {
-                        self.evaluator(project).evaluate_value_with_stack(
-                            &mut stack,
-                            &ls.value,
-                            Some(&acorn_type),
-                        )?
+                        self.evaluator(project)
                     };
-                    Some(v)
+                    let value = evaluator.evaluate_value_with_stack(
+                        &mut stack,
+                        &ls.value,
+                        Some(&acorn_type),
+                    )?;
+                    let local_obligations = evaluator.take_local_obligations();
+                    (Some(value), local_obligations)
                 };
-                (acorn_type, value)
+                (acorn_type, value, local_obligations)
             }
             None => {
                 if let Some((transport_token, _)) = transport_operand(&ls.value) {
@@ -482,20 +486,20 @@ impl Environment {
                 let mut stack = Stack::new();
                 bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                 bind_datatype_value_params(&mut stack, datatype_params);
-                let value = if let Some(instance_name) = defined_name.as_instance() {
+                let mut evaluator = if let Some(instance_name) = defined_name.as_instance() {
                     Evaluator::new_for_instance_member(
                         project,
                         &self.bindings,
                         Some(&mut self.token_map),
                         instance_name,
                     )
-                    .evaluate_value_with_stack(&mut stack, &ls.value, None)?
                 } else {
                     self.evaluator(project)
-                        .evaluate_value_with_stack(&mut stack, &ls.value, None)?
                 };
+                let value = evaluator.evaluate_value_with_stack(&mut stack, &ls.value, None)?;
+                let local_obligations = evaluator.take_local_obligations();
                 let acorn_type = value.get_type();
-                (acorn_type, Some(value))
+                (acorn_type, Some(value), local_obligations)
             }
         };
         let acorn_type = if explicit_value_param_types.is_empty() {
@@ -530,6 +534,12 @@ impl Environment {
         };
         let acorn_type = acorn_type.genericize(&type_params);
         let value = value.map(|v| v.genericize(&type_params));
+        self.add_genericized_local_obligations(
+            project,
+            statement,
+            &type_params,
+            local_obligations,
+        )?;
         let def_str = statement.to_string();
 
         if datatype_value_param_types.is_empty() && explicit_value_param_types.is_empty() {
@@ -946,6 +956,7 @@ impl Environment {
             &vss.condition,
             Some(&AcornType::Bool),
         )?;
+        let local_obligations = no_token_evaluator.take_local_obligations();
         let general_claim =
             AcornValue::Exists(quant_types.clone(), Box::new(general_claim_value.clone()));
         let definition_type_params = match datatype_params {
@@ -959,6 +970,12 @@ impl Environment {
             }
             None => local_type_params.clone(),
         };
+        self.add_genericized_local_obligations(
+            project,
+            statement,
+            &definition_type_params,
+            local_obligations,
+        )?;
         let mut block_args = explicit_value_block_args(&local_family_params.value_params);
         block_args.extend(datatype_value_block_args(datatype_params));
         let block = Block::new(
@@ -1237,9 +1254,10 @@ impl Environment {
         statement: &Statement,
         cs: &ClaimStatement,
     ) -> error::Result<()> {
-        let claim = self
-            .evaluator(project)
-            .evaluate_value(&cs.claim, Some(&AcornType::Bool))?;
+        let mut evaluator = self.evaluator(project);
+        let claim = evaluator.evaluate_value(&cs.claim, Some(&AcornType::Bool))?;
+        let local_obligations = evaluator.take_local_obligations();
+        self.add_local_obligations(project, statement, &[], local_obligations)?;
         if claim == AcornValue::Bool(false) {
             self.includes_explicit_false = true;
         }
@@ -1291,7 +1309,10 @@ impl Environment {
                 .check_unqualified_name_available(&arg_name, arg_token)?;
         }
 
-        let value = self.evaluator(project).evaluate_value(&ds.value, None)?;
+        let mut value_evaluator = self.evaluator(project);
+        let value = value_evaluator.evaluate_value(&ds.value, None)?;
+        let local_obligations = value_evaluator.take_local_obligations();
+        self.add_local_obligations(project, statement, &[], local_obligations)?;
         let value_type = value.get_type();
 
         let mut empty_stack = Stack::new();
