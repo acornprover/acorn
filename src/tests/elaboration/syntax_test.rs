@@ -1116,6 +1116,31 @@ fn test_env_destructuring_no_duplicate_names() {
 }
 
 #[test]
+fn test_local_destructuring_rejects_outer_name_collision() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+        type Nat: axiom
+        let zero: Nat = axiom
+
+        inductive Option[T] {
+            some(T)
+            none
+        }
+        "#,
+    );
+    let message = env.bad(
+        r#"
+        define bad(opt: Option[Nat]) -> Nat {
+            let Option.some(zero) = opt
+            zero
+        }
+        "#,
+    );
+    assert!(message.contains("zero is already in use"), "{message}");
+}
+
+#[test]
 fn test_env_destructuring_with_attribute() {
     let mut env = Environment::test();
     env.add(

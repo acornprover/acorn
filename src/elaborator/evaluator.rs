@@ -1839,6 +1839,8 @@ impl<'a> Evaluator<'a> {
             if stack.get(&arg_name).is_some() || self.has_local_alias(&arg_name) {
                 return Err(arg_token.error(&format!("name '{}' is already bound", arg_name)));
             }
+            self.bindings
+                .check_unqualified_name_available(&arg_name, arg_token)?;
             arg_names.push(arg_name);
         }
 

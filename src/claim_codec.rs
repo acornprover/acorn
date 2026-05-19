@@ -752,6 +752,7 @@ impl ClaimCodec {
         let (arg_names, arg_types) = evaluator.bind_args(&mut stack, shape.declarations, None)?;
         let body =
             evaluator.evaluate_value_with_stack(&mut stack, shape.body, Some(&AcornType::Bool))?;
+        Self::reject_local_obligations(evaluator.take_local_obligations().len())?;
 
         if shape.value_args.len() != arg_types.len() {
             return Err(CodeGenError::GeneratedBadCode(
@@ -780,6 +781,7 @@ impl ClaimCodec {
                 expr,
                 Some(&expected_type),
             )?;
+            Self::reject_local_obligations(evaluator.take_local_obligations().len())?;
             args.push(value);
         }
         stack.remove_all(&arg_names);
@@ -795,6 +797,15 @@ impl ClaimCodec {
             body,
         };
         Ok((function_value, args))
+    }
+
+    fn reject_local_obligations(count: usize) -> Result<(), CodeGenError> {
+        if count == 0 {
+            return Ok(());
+        }
+        Err(CodeGenError::GeneratedBadCode(
+            "certificate claims cannot contain local lets that require proofs".to_string(),
+        ))
     }
 
     /// Build the lowering map that turns type parameter names into free type variables.

@@ -118,13 +118,15 @@ fn print_displayed_proof(
 /// Line numbers are internal (0-based).
 #[derive(Clone, Debug)]
 pub enum GoalFilter {
-    /// Verify only the goal at this exact line.
+    /// Select the goal at this exact line.
+    /// Earlier goals in the same module are also verified as prerequisites.
     SingleLine {
         module: ModuleDescriptor,
         line: u32,
         goal_index: Option<usize>,
     },
-    /// Verify goals whose first_line falls within [start, end] (inclusive).
+    /// Select goals whose first_line falls within [start, end] (inclusive).
+    /// Earlier goals in the same module are also verified as prerequisites.
     LineRange {
         module: ModuleDescriptor,
         start: u32,
@@ -1947,7 +1949,8 @@ impl<'a> Builder<'a> {
 
     /// Sets the builder to only build goals within a line range.
     /// Takes a target module name and external line numbers (1-based), inclusive.
-    /// Verifies goals whose first_line falls within [start, end].
+    /// Selects goals whose first_line falls within [start, end].
+    /// Earlier goals in the same module are also verified as prerequisites.
     /// Requires that the target module is already loaded.
     pub fn set_goal_range(
         &mut self,
@@ -2365,14 +2368,29 @@ impl<'a> Builder<'a> {
         matches!(goal.proposition.source.source_type, SourceType::Anonymous)
     }
 
-    fn is_required_line_filter_prerequisite(goal: &Goal, filter: &GoalFilter) -> bool {
-        if !matches!(goal.proposition.source.source_type, SourceType::BlockGoal) {
-            return false;
-        }
-
+    fn should_verify_for_line_filter(
+        single_line_goal_count: &mut usize,
+        goal: &Goal,
+        filter: &GoalFilter,
+    ) -> bool {
         match filter {
-            GoalFilter::SingleLine { line, .. } => goal.first_line < *line,
-            GoalFilter::LineRange { start, .. } => goal.first_line < *start,
+            GoalFilter::SingleLine {
+                line, goal_index, ..
+            } => {
+                if goal.first_line < *line {
+                    return true;
+                }
+                if goal.first_line > *line {
+                    return false;
+                }
+
+                *single_line_goal_count += 1;
+                match goal_index {
+                    Some(index) => *single_line_goal_count <= *index,
+                    None => true,
+                }
+            }
+            GoalFilter::LineRange { end, .. } => goal.first_line <= *end,
         }
     }
 
@@ -2415,25 +2433,8 @@ impl<'a> Builder<'a> {
         let normalized_goal = &entry.lowered_goal;
         let goal = &normalized_goal.goal;
         if let Some(ref filter) = self.goal_filter {
-            let matches = match filter {
-                GoalFilter::SingleLine {
-                    line, goal_index, ..
-                } => {
-                    if goal.first_line != *line {
-                        false
-                    } else {
-                        self.single_line_goal_count += 1;
-                        match goal_index {
-                            Some(index) => self.single_line_goal_count == *index,
-                            None => true,
-                        }
-                    }
-                }
-                GoalFilter::LineRange { start, end, .. } => {
-                    goal.first_line >= *start && goal.first_line <= *end
-                }
-            };
-            if !matches && !Self::is_required_line_filter_prerequisite(goal, filter) {
+            if !Self::should_verify_for_line_filter(&mut self.single_line_goal_count, goal, filter)
+            {
                 return Ok(());
             }
         }

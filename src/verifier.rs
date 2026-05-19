@@ -1914,7 +1914,7 @@ instance Nat: Two
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.goals_total, 2);
-        assert_eq!(output.metrics.goals_success, 1);
+        assert_eq!(output.metrics.goals_success, 2);
     }
 
     #[test]
@@ -1977,7 +1977,7 @@ instance Nat: Two
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.goals_total, 2);
-        assert_eq!(output.metrics.goals_success, 1);
+        assert_eq!(output.metrics.goals_success, 2);
     }
 
     #[test]
@@ -2014,8 +2014,8 @@ instance Nat: Two
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.goals_total, 2);
-        assert_eq!(output.metrics.goals_success, 1);
-        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.goals_success, 2);
+        assert_eq!(output.metrics.searches_total, 2);
         assert!(!build.child("nested").child("test.jsonl").exists());
     }
 
@@ -2051,6 +2051,117 @@ instance Nat: Two
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Warning);
         assert!(output.metrics.goals_success < output.metrics.goals_done);
+    }
+
+    #[test]
+    fn test_single_line_verifies_prior_theorem() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"let p: Bool = axiom
+
+theorem bad {
+    p
+}
+
+theorem later {
+    p
+}
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("test".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(7));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.goals_total, 2);
+        assert_eq!(output.metrics.goals_done, 2);
+        assert_eq!(output.metrics.goals_success, 1);
+    }
+
+    #[test]
+    fn test_line_range_verifies_prior_theorem() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("test.ac")
+            .write_str(
+                r#"let p: Bool = axiom
+
+theorem bad {
+    p
+}
+
+theorem later {
+    p
+}
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("test".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Range(7, 9));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.goals_total, 2);
+        assert_eq!(output.metrics.goals_done, 2);
+        assert_eq!(output.metrics.goals_success, 1);
+    }
+
+    #[test]
+    fn test_single_line_does_not_assume_unverified_imported_theorem() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("a.ac")
+            .write_str(
+                r#"let p: Bool = axiom
+
+theorem bad {
+    p
+}
+"#,
+            )
+            .unwrap();
+        src.child("b.ac")
+            .write_str(
+                r#"from a import bad
+
+theorem later {
+    bad and true
+}
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("b".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(3));
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.goals_total, 1);
+        assert_eq!(output.metrics.goals_done, 1);
+        assert_eq!(output.metrics.goals_success, 0);
     }
 
     #[test]
