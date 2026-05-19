@@ -191,10 +191,23 @@ fn collect_dependencies_from_expression(expression: &Expression, output: &mut De
                             collect_dependencies_from_expression(type_expr, output);
                         }
                         collect_dependencies_from_expression(&local_let.value, output);
+                        if let Some(body) = &local_let.body {
+                            collect_dependencies_from_body(body, output);
+                        }
+                    }
+                    LocalBlockItem::Satisfy(local_satisfy) => {
+                        collect_dependencies_from_expression(&local_satisfy.type_expr, output);
+                        collect_dependencies_from_expression(&local_satisfy.condition, output);
+                        if let Some(body) = &local_satisfy.body {
+                            collect_dependencies_from_body(body, output);
+                        }
                     }
                     LocalBlockItem::Destructuring(local_destructuring) => {
                         collect_dependencies_from_expression(&local_destructuring.function, output);
                         collect_dependencies_from_expression(&local_destructuring.value, output);
+                        if let Some(body) = &local_destructuring.body {
+                            collect_dependencies_from_body(body, output);
+                        }
                     }
                 }
             }

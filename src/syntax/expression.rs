@@ -96,6 +96,7 @@ pub enum Expression {
 #[derive(Debug, Clone)]
 pub enum LocalBlockItem {
     Let(LocalLet),
+    Satisfy(LocalSatisfyLet),
     Destructuring(LocalDestructuringLet),
 }
 
@@ -103,6 +104,7 @@ impl LocalBlockItem {
     pub fn let_token(&self) -> &Token {
         match self {
             LocalBlockItem::Let(local_let) => &local_let.let_token,
+            LocalBlockItem::Satisfy(local_satisfy) => &local_satisfy.let_token,
             LocalBlockItem::Destructuring(local_destructuring) => &local_destructuring.let_token,
         }
     }
@@ -115,6 +117,17 @@ pub struct LocalLet {
     pub name_token: Token,
     pub type_expr: Option<Expression>,
     pub value: Expression,
+    pub body: Option<Arc<Body>>,
+}
+
+/// A local let-satisfy inside a value-producing expression block.
+#[derive(Clone)]
+pub struct LocalSatisfyLet {
+    pub let_token: Token,
+    pub name_token: Token,
+    pub type_expr: Expression,
+    pub condition: Expression,
+    pub condition_right_brace: Token,
     pub body: Option<Arc<Body>>,
 }
 
@@ -135,6 +148,18 @@ impl fmt::Debug for LocalLet {
             .field("name_token", &self.name_token)
             .field("type_expr", &self.type_expr)
             .field("value", &self.value)
+            .field("has_body", &self.body.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for LocalSatisfyLet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("LocalSatisfyLet")
+            .field("let_token", &self.let_token)
+            .field("name_token", &self.name_token)
+            .field("type_expr", &self.type_expr)
+            .field("condition", &self.condition)
             .field("has_body", &self.body.is_some())
             .finish()
     }
@@ -544,6 +569,12 @@ impl Expression {
                         LocalBlockItem::Let(local_let) => {
                             println!("  let {} = {}", local_let.name_token, local_let.value);
                         }
+                        LocalBlockItem::Satisfy(local_satisfy) => {
+                            println!(
+                                "  let {} satisfy {}",
+                                local_satisfy.name_token, local_satisfy.condition
+                            );
+                        }
                         LocalBlockItem::Destructuring(local_destructuring) => {
                             println!(
                                 "  let {}(...) = {}",
@@ -861,6 +892,23 @@ impl Expression {
         )?)))
     }
 
+    fn parse_local_satisfy_body(
+        tokens: &mut TokenIter,
+    ) -> Result<(Expression, Token, Option<Arc<Body>>)> {
+        tokens.expect_type(TokenType::LeftBrace)?;
+        let (condition, right_brace) =
+            Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
+        tokens.skip_newlines();
+        let body = if tokens.peek_type() == Some(TokenType::By) {
+            tokens.next();
+            let left_brace = tokens.expect_type(TokenType::LeftBrace)?;
+            Some(Arc::new(parse_body_after_left_brace(left_brace, tokens)?))
+        } else {
+            None
+        };
+        Ok((condition, right_brace, body))
+    }
+
     fn parse_local_block_item(tokens: &mut TokenIter) -> Result<LocalBlockItem> {
         let let_token = tokens.expect_type(TokenType::Let)?;
         let first_token = tokens.expect_token()?;
@@ -927,8 +975,22 @@ impl Expression {
         let next_token = tokens.expect_token()?;
         let type_expr = match next_token.token_type {
             TokenType::Colon => {
-                let (type_expr, _) =
-                    Expression::parse_type(tokens, Terminator::Is(TokenType::Equals))?;
+                let (type_expr, middle_token) = Expression::parse_type(
+                    tokens,
+                    Terminator::Or(TokenType::Equals, TokenType::Satisfy),
+                )?;
+                if middle_token.token_type == TokenType::Satisfy {
+                    let (condition, condition_right_brace, body) =
+                        Expression::parse_local_satisfy_body(tokens)?;
+                    return Ok(LocalBlockItem::Satisfy(LocalSatisfyLet {
+                        let_token,
+                        name_token,
+                        type_expr,
+                        condition,
+                        condition_right_brace,
+                        body,
+                    }));
+                }
                 tokens.skip_newlines();
                 Some(type_expr)
             }
@@ -1868,6 +1930,26 @@ impl Expression {
                                 .append(allocator.space())
                                 .append(local_let.value.pretty_ref(allocator, flat));
                             if let Some(body) = &local_let.body {
+                                let_doc = let_doc.append(local_proof_body_doc(allocator, body));
+                            }
+                            let_doc
+                        }
+                        LocalBlockItem::Satisfy(local_satisfy) => {
+                            let mut let_doc = allocator
+                                .text(local_satisfy.let_token.text())
+                                .append(allocator.space())
+                                .append(allocator.text(local_satisfy.name_token.text()))
+                                .append(allocator.text(": "))
+                                .append(local_satisfy.type_expr.pretty_ref(allocator, flat))
+                                .append(allocator.text(" satisfy {"))
+                                .append(
+                                    line()
+                                        .append(local_satisfy.condition.pretty_ref(allocator, flat))
+                                        .nest(4),
+                                )
+                                .append(line())
+                                .append(allocator.text("}"));
+                            if let Some(body) = &local_satisfy.body {
                                 let_doc = let_doc.append(local_proof_body_doc(allocator, body));
                             }
                             let_doc

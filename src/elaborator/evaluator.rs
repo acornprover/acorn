@@ -19,7 +19,8 @@ use crate::module::ModuleId;
 use crate::project::Project;
 use crate::project::ProjectLookup;
 use crate::syntax::expression::{
-    Declaration, Expression, LocalBlockItem, LocalDestructuringLet, LocalLet, TypeParamExpr,
+    Declaration, Expression, LocalBlockItem, LocalDestructuringLet, LocalLet, LocalSatisfyLet,
+    TypeParamExpr,
 };
 use crate::syntax::statement::Body;
 use crate::syntax::token::{Token, TokenType};
@@ -69,6 +70,7 @@ pub enum LocalObligationKind {
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
+        premises: Vec<AcornValue>,
     },
     Transport {
         source_type: AcornType,
@@ -1669,6 +1671,84 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    fn evaluate_local_satisfy_let(
+        &mut self,
+        stack: &mut Stack,
+        local_satisfy: &LocalSatisfyLet,
+    ) -> error::Result<()> {
+        let name = local_satisfy.name_token.text().to_string();
+        if stack.get(&name).is_some() || self.has_local_alias(&name) {
+            return Err(local_satisfy
+                .name_token
+                .error(&format!("name '{}' is already bound", name)));
+        }
+        self.bindings
+            .check_unqualified_name_available(&name, &local_satisfy.name_token)?;
+
+        let stack_entries = stack.entries();
+        let stack_names: Vec<_> = stack_entries.iter().map(|(name, _)| name.clone()).collect();
+        let stack_types: Vec<_> = stack_entries
+            .iter()
+            .map(|(_, acorn_type)| acorn_type.clone())
+            .collect();
+        let stack_values: Vec<_> = stack_types
+            .iter()
+            .enumerate()
+            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+            .collect();
+
+        let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
+        stack.insert(name.clone(), arg_type.clone());
+        let condition_result =
+            self.evaluate_value_with_stack(stack, &local_satisfy.condition, Some(&AcornType::Bool));
+        stack.remove(&name);
+        let condition = condition_result?;
+
+        let hidden_name = format!(
+            "__local_satisfy_{}_{}_{}",
+            local_satisfy.let_token.line_number, local_satisfy.let_token.start, name
+        );
+        let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
+        let hidden_function_type = AcornType::functional(stack_types.clone(), arg_type.clone());
+        let hidden_function = AcornValue::constant(
+            constant_name,
+            vec![],
+            hidden_function_type.clone(),
+            hidden_function_type.clone(),
+            vec![],
+            vec![],
+        );
+        let witness_value = AcornValue::apply(hidden_function, stack_values);
+        self.local_aliases.push(LocalAlias {
+            name,
+            value: witness_value.clone(),
+            stack_size: stack.len(),
+        });
+
+        let stack_size = stack.len() as AtomId;
+        let existence = AcornValue::exists(vec![arg_type], condition.clone());
+        let witness = condition.bind_values(stack_size, stack_size + 1, &[witness_value]);
+        self.local_obligations.push(LocalObligation {
+            arg_names: stack_names,
+            arg_types: stack_types,
+            hidden_constants: vec![(hidden_name, hidden_function_type)],
+            kind: LocalObligationKind::ExistsWitness {
+                existence,
+                witness,
+                premises: self.local_premises_for_stack(stack.len()),
+            },
+            range: local_satisfy.condition.range(),
+            first_token: local_satisfy.let_token.clone(),
+            last_token: local_satisfy
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_satisfy.condition_right_brace.clone()),
+            body: local_satisfy.body.clone(),
+        });
+        Ok(())
+    }
+
     fn evaluate_local_destructuring_let(
         &mut self,
         stack: &mut Stack,
@@ -1809,7 +1889,11 @@ impl<'a> Evaluator<'a> {
             arg_names: stack_names,
             arg_types: stack_types,
             hidden_constants,
-            kind: LocalObligationKind::ExistsWitness { existence, witness },
+            kind: LocalObligationKind::ExistsWitness {
+                existence,
+                witness,
+                premises: self.local_premises_for_stack(stack.len()),
+            },
             range: local_destructuring.value.range(),
             first_token: local_destructuring.let_token.clone(),
             last_token: local_destructuring
@@ -1834,6 +1918,9 @@ impl<'a> Evaluator<'a> {
             for local_let in local_lets {
                 match local_let {
                     LocalBlockItem::Let(local_let) => self.evaluate_local_let(stack, local_let)?,
+                    LocalBlockItem::Satisfy(local_satisfy) => {
+                        self.evaluate_local_satisfy_let(stack, local_satisfy)?
+                    }
                     LocalBlockItem::Destructuring(local_destructuring) => {
                         self.evaluate_local_destructuring_let(stack, local_destructuring)?
                     }

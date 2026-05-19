@@ -2312,12 +2312,18 @@ impl BindingMap {
                         })
                         .collect(),
                     kind: match obligation.kind {
-                        LocalObligationKind::ExistsWitness { existence, witness } => {
-                            LocalObligationKind::ExistsWitness {
-                                existence: existence.genericize(&local_obligation_type_params),
-                                witness: witness.genericize(&local_obligation_type_params),
-                            }
-                        }
+                        LocalObligationKind::ExistsWitness {
+                            existence,
+                            witness,
+                            premises,
+                        } => LocalObligationKind::ExistsWitness {
+                            existence: existence.genericize(&local_obligation_type_params),
+                            witness: witness.genericize(&local_obligation_type_params),
+                            premises: premises
+                                .into_iter()
+                                .map(|premise| premise.genericize(&local_obligation_type_params))
+                                .collect(),
+                        },
                         LocalObligationKind::Transport {
                             source_type,
                             target_type,

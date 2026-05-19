@@ -128,6 +128,7 @@ impl Environment {
                 ExistsWitness {
                     existence: AcornValue,
                     witness: AcornValue,
+                    premises: Vec<AcornValue>,
                 },
                 RequirementBackedFact {
                     requirements: Vec<AcornValue>,
@@ -136,9 +137,15 @@ impl Environment {
             }
 
             let prepared = match obligation.kind {
-                LocalObligationKind::ExistsWitness { existence, witness } => {
-                    PreparedLocalObligation::ExistsWitness { existence, witness }
-                }
+                LocalObligationKind::ExistsWitness {
+                    existence,
+                    witness,
+                    premises,
+                } => PreparedLocalObligation::ExistsWitness {
+                    existence,
+                    witness,
+                    premises,
+                },
                 LocalObligationKind::Transport {
                     source_type,
                     target_type,
@@ -190,25 +197,34 @@ impl Environment {
             }
 
             match prepared {
-                PreparedLocalObligation::ExistsWitness { existence, witness } => {
+                PreparedLocalObligation::ExistsWitness {
+                    existence,
+                    witness,
+                    premises,
+                } => {
+                    let existence_goal = imply_premises(premises.clone(), existence.clone());
                     let block = Block::new(
                         project,
                         self,
                         type_params.to_vec(),
                         block_args,
-                        BlockParams::VariableSatisfy(existence.clone(), range.clone()),
+                        BlockParams::VariableSatisfy(existence_goal, range.clone()),
                         &first_token,
                         &last_token,
                         body.as_deref(),
                     )?;
-                    let existence = AcornValue::forall(obligation.arg_types.clone(), existence);
+                    let existence = AcornValue::forall(
+                        obligation.arg_types.clone(),
+                        imply_premises(premises.clone(), existence),
+                    );
                     let source = Source::anonymous(self.module_id, range.clone(), self.depth);
                     let prop = Proposition::new(existence, type_params.to_vec(), source)
                         .with_arg_count(arg_count);
                     let index = self.add_node(Node::block(project, self, block, Some(prop)));
                     self.add_node_lines(index, &range);
 
-                    let witness = AcornValue::forall(obligation.arg_types, witness);
+                    let witness =
+                        AcornValue::forall(obligation.arg_types, imply_premises(premises, witness));
                     let source = Source::anonymous(self.module_id, range, self.depth);
                     let prop = Proposition::new(witness, type_params.to_vec(), source)
                         .with_arg_count(arg_count);

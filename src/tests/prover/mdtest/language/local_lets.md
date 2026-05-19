@@ -165,6 +165,69 @@ theorem local_generic_rebuild_reduces[T](value: T) {
 }
 ```
 
+## Let Satisfy
+
+```acorn
+type Nat: axiom
+
+define local_satisfy_identity(n: Nat) -> Nat {
+    let x: Nat satisfy {
+        x = n
+    }
+    x
+}
+
+theorem local_satisfy_identity_reduces(n: Nat) {
+    local_satisfy_identity(n) = n
+}
+```
+
+## Let Satisfy With Explicit Proof
+
+```acorn
+type Nat: axiom
+
+axiom equal_witness_exists(n: Nat) {
+    exists(x: Nat) {
+        x = n
+    }
+}
+
+define local_satisfy_with_proof(n: Nat) -> Nat {
+    let x: Nat satisfy {
+        x = n
+    } by {
+        equal_witness_exists(n)
+    }
+    x
+}
+
+theorem local_satisfy_with_proof_reduces(n: Nat) {
+    local_satisfy_with_proof(n) = n
+}
+```
+
+## Let Satisfy In If Branch
+
+```acorn
+type Nat: axiom
+
+define local_satisfy_if(p: Bool, n: Nat, fallback: Nat) -> Nat {
+    if p {
+        let x: Nat satisfy {
+            p and x = n
+        }
+        x
+    } else {
+        fallback
+    }
+}
+
+theorem local_satisfy_if_then(p: Bool, n: Nat, fallback: Nat) {
+    p implies local_satisfy_if(p, n, fallback) = n
+}
+```
+
 ## Destructuring In Match Branch
 
 ```acorn
