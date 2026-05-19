@@ -33,6 +33,14 @@ impl Stack {
         answer
     }
 
+    pub fn entries(&self) -> Vec<(String, AcornType)> {
+        let mut answer: Vec<Option<(String, AcornType)>> = vec![None; self.vars.len()];
+        for (name, (i, acorn_type)) in &self.vars {
+            answer[*i as usize] = Some((name.clone(), acorn_type.clone()));
+        }
+        answer.into_iter().map(Option::unwrap).collect()
+    }
+
     pub fn insert(&mut self, name: String, acorn_type: AcornType) -> AtomId {
         let i = self.vars.len() as AtomId;
         self.vars.insert(name, (i, acorn_type));

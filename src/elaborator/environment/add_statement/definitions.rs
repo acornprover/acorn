@@ -1,5 +1,6 @@
 use super::transport::{transport_operand, TransportBuilder};
 use super::*;
+use crate::elaborator::evaluator::LocalObligation;
 use crate::syntax::expression::TypeParamExpr;
 
 #[derive(Default)]
@@ -87,6 +88,69 @@ fn quantify_over_explicit_value_params(
 }
 
 impl Environment {
+    fn add_local_obligations(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        type_params: &[TypeParam],
+        local_obligations: Vec<LocalObligation>,
+    ) -> error::Result<()> {
+        for obligation in local_obligations {
+            for (name, hidden_type) in &obligation.hidden_constants {
+                let defined_name = DefinedName::unqualified(self.module_id, name);
+                if self.bindings.constant_name_in_use(&defined_name) {
+                    return Err(statement.error(&format!(
+                        "generated local destructuring name '{}' is already in use",
+                        name
+                    )));
+                }
+                self.bindings.add_unqualified_constant(
+                    name,
+                    type_params.to_vec(),
+                    vec![],
+                    hidden_type.clone(),
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    format!("{}: {}", name, hidden_type),
+                );
+            }
+
+            let arg_count = obligation.arg_types.len();
+            let block_args = obligation
+                .arg_names
+                .iter()
+                .cloned()
+                .zip(obligation.arg_types.iter().cloned())
+                .collect();
+            let range = obligation.range.clone();
+            let block = Block::new(
+                project,
+                self,
+                type_params.to_vec(),
+                block_args,
+                BlockParams::VariableSatisfy(obligation.existence.clone(), range.clone()),
+                &statement.first_token,
+                &statement.last_token,
+                None,
+            )?;
+            let existence = AcornValue::forall(obligation.arg_types.clone(), obligation.existence);
+            let source = Source::anonymous(self.module_id, range.clone(), self.depth);
+            let prop =
+                Proposition::new(existence, type_params.to_vec(), source).with_arg_count(arg_count);
+            let index = self.add_node(Node::block(project, self, block, Some(prop)));
+            self.add_node_lines(index, &range);
+
+            let witness = AcornValue::forall(obligation.arg_types, obligation.witness);
+            let source = Source::anonymous(self.module_id, range, self.depth);
+            let prop =
+                Proposition::new(witness, type_params.to_vec(), source).with_arg_count(arg_count);
+            self.add_node(Node::structural(project, self, prop));
+        }
+        Ok(())
+    }
+
     fn declare_witness_constant(
         &mut self,
         defined_name: &DefinedName,
@@ -605,7 +669,7 @@ impl Environment {
                 explicit_value_param_types(&local_family_params.value_params),
             )
         };
-        let (fn_param_names, _, arg_types, unbound_value, value_type) =
+        let (fn_param_names, _, arg_types, unbound_value, value_type, local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
                 &args,
@@ -638,6 +702,24 @@ impl Environment {
             }
         }
 
+        let definition_type_params = if let Some(datatype_params) = datatype_params {
+            if !fn_param_names.is_empty() {
+                let mut combined_params = datatype_params.type_params().to_vec();
+                combined_params.extend(fn_param_names.clone());
+                combined_params
+            } else {
+                datatype_params.type_params().to_vec()
+            }
+        } else {
+            fn_param_names.clone()
+        };
+        self.add_local_obligations(
+            project,
+            statement,
+            &definition_type_params,
+            local_obligations,
+        )?;
+
         if let Some(v) = unbound_value {
             let fn_type = AcornType::functional_from_scoped_context(
                 arg_types.clone(),
@@ -653,13 +735,13 @@ impl Environment {
                 if !fn_param_names.is_empty() {
                     fn_value = fn_value.genericize(&fn_param_names);
                     let mut combined_params = datatype_params.type_params().to_vec();
-                    combined_params.extend(fn_param_names);
+                    combined_params.extend(fn_param_names.clone());
                     combined_params
                 } else {
                     datatype_params.type_params().to_vec()
                 }
             } else {
-                fn_param_names
+                fn_param_names.clone()
             };
             let fn_type = fn_type.genericize(&params);
 
@@ -687,13 +769,13 @@ impl Environment {
         let params = if let Some(datatype_params) = datatype_params {
             if !fn_param_names.is_empty() {
                 let mut combined_params = datatype_params.type_params().to_vec();
-                combined_params.extend(fn_param_names);
+                combined_params.extend(fn_param_names.clone());
                 combined_params
             } else {
                 datatype_params.type_params().to_vec()
             }
         } else {
-            fn_param_names
+            fn_param_names.clone()
         };
         let new_axiom_type = new_axiom_type.genericize(&params);
         self.define_constant(
@@ -731,19 +813,20 @@ impl Environment {
         let local_family_params = self.evaluate_local_family_params(project, &ts.type_params)?;
         let mut args = local_family_params.value_declarations;
         args.extend(ts.args.clone());
-        let (type_params, arg_names, arg_types, value, _) = self.bindings.evaluate_scoped_value(
-            &local_family_params.type_param_exprs,
-            &args,
-            None,
-            &ts.claim,
-            None,
-            None,
-            None,
-            None,
-            None,
-            project,
-            Some(&mut self.token_map),
-        )?;
+        let (type_params, arg_names, arg_types, value, _, local_obligations) =
+            self.bindings.evaluate_scoped_value(
+                &local_family_params.type_param_exprs,
+                &args,
+                None,
+                &ts.claim,
+                None,
+                None,
+                None,
+                None,
+                None,
+                project,
+                Some(&mut self.token_map),
+            )?;
 
         let unbound_claim = value.ok_or_else(|| ts.claim.error("theorems must have values"))?;
         unbound_claim.check_type(Some(&AcornType::Bool), &ts.claim)?;
@@ -774,6 +857,7 @@ impl Environment {
         if let Err(message) = external_claim.validate_constants(&self.bindings) {
             return Err(ts.claim.error(&message));
         }
+        self.add_local_obligations(project, statement, &type_params, local_obligations)?;
 
         let (premise, goal) = match &unbound_claim {
             AcornValue::Binary(BinaryOp::Implies, left, right) => {
@@ -1068,7 +1152,7 @@ impl Environment {
         let mut declarations = local_family_params.value_declarations.clone();
         declarations.extend(fss.declarations.clone());
         let type_param_exprs = local_family_params.type_param_exprs.clone();
-        let (fn_type_params, mut arg_names, mut arg_types, condition, _) =
+        let (fn_type_params, mut arg_names, mut arg_types, condition, _, local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
                 &declarations,
@@ -1099,6 +1183,11 @@ impl Environment {
         let mut block_args = datatype_value_block_args(datatype_params);
         block_args.extend(arg_names.iter().cloned().zip(arg_types.iter().cloned()));
         let return_index = family_value_param_count + arg_types.len() as AtomId;
+        let mut all_type_params = datatype_params
+            .map(|params| params.type_params().to_vec())
+            .unwrap_or_default();
+        all_type_params.extend(fn_type_params.clone());
+        self.add_local_obligations(project, statement, &all_type_params, local_obligations)?;
 
         let block = Block::new(
             project,
@@ -1120,10 +1209,6 @@ impl Environment {
             return_type,
             family_value_param_count,
         );
-        let mut all_type_params = datatype_params
-            .map(|params| params.type_params().to_vec())
-            .unwrap_or_default();
-        all_type_params.extend(fn_type_params);
         let generic_function_type = function_type.clone().genericize(&all_type_params);
         let doc_comments = self.take_doc_comments();
         self.bindings.add_defined_name(

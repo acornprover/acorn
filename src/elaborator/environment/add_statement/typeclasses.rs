@@ -122,7 +122,7 @@ impl Environment {
                 self.bindings
                     .check_defined_name_available(&defined_name, &condition.name_token)?;
 
-                let (bad_params, _, arg_types, unbound_claim, _) =
+                let (bad_params, _, arg_types, unbound_claim, _, _) =
                     self.bindings.evaluate_scoped_value(
                         &[],
                         &condition.args,

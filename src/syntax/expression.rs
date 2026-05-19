@@ -88,15 +88,40 @@ pub enum Expression {
 
     /// A value-producing block with local lets followed by a final expression.
     /// The surrounding braces are stored by the expression that owns the block.
-    Block(Vec<LocalLet>, Box<Expression>, Token),
+    Block(Vec<LocalBlockItem>, Box<Expression>, Token),
 }
 
-/// A local let inside a value-producing expression block.
+/// A local item inside a value-producing expression block.
+#[derive(Debug, Clone)]
+pub enum LocalBlockItem {
+    Let(LocalLet),
+    Destructuring(LocalDestructuringLet),
+}
+
+impl LocalBlockItem {
+    pub fn let_token(&self) -> &Token {
+        match self {
+            LocalBlockItem::Let(local_let) => &local_let.let_token,
+            LocalBlockItem::Destructuring(local_destructuring) => &local_destructuring.let_token,
+        }
+    }
+}
+
+/// A local value let inside a value-producing expression block.
 #[derive(Debug, Clone)]
 pub struct LocalLet {
     pub let_token: Token,
     pub name_token: Token,
     pub type_expr: Option<Expression>,
+    pub value: Expression,
+}
+
+/// A local destructuring let inside a value-producing expression block.
+#[derive(Debug, Clone)]
+pub struct LocalDestructuringLet {
+    pub let_token: Token,
+    pub function: Expression,
+    pub args: Vec<Token>,
     pub value: Expression,
 }
 
@@ -381,7 +406,7 @@ impl Expression {
             Expression::Match(token, _, _, _) => token,
             Expression::Block(local_lets, body, _) => local_lets
                 .first()
-                .map(|local_let| &local_let.let_token)
+                .map(LocalBlockItem::let_token)
                 .unwrap_or_else(|| body.first_token()),
         }
     }
@@ -487,8 +512,18 @@ impl Expression {
             }
             Expression::Block(local_lets, body, _) => {
                 println!("Block:");
-                for local_let in local_lets {
-                    println!("  let {} = {}", local_let.name_token, local_let.value);
+                for local_item in local_lets {
+                    match local_item {
+                        LocalBlockItem::Let(local_let) => {
+                            println!("  let {} = {}", local_let.name_token, local_let.value);
+                        }
+                        LocalBlockItem::Destructuring(local_destructuring) => {
+                            println!(
+                                "  let {}(...) = {}",
+                                local_destructuring.function, local_destructuring.value
+                            );
+                        }
+                    }
                 }
                 println!("  body: {}", body);
             }
@@ -754,32 +789,7 @@ impl Expression {
                 break;
             }
 
-            let let_token = tokens.next().unwrap();
-            let name_token = tokens.expect_variable_name(false)?;
-            if name_token.token_type == TokenType::SelfToken {
-                return Err(name_token.error("cannot use 'self' as a local let name"));
-            }
-            let next_token = tokens.expect_token()?;
-            let type_expr = match next_token.token_type {
-                TokenType::Colon => {
-                    let (type_expr, _) =
-                        Expression::parse_type(tokens, Terminator::Is(TokenType::Equals))?;
-                    tokens.skip_newlines();
-                    Some(type_expr)
-                }
-                TokenType::Equals => {
-                    tokens.skip_newlines();
-                    None
-                }
-                _ => return Err(next_token.error("expected ':' or '='")),
-            };
-            let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
-            local_lets.push(LocalLet {
-                let_token,
-                name_token,
-                type_expr,
-                value,
-            });
+            local_lets.push(Expression::parse_local_block_item(tokens)?);
         }
 
         tokens.skip_newlines();
@@ -793,6 +803,104 @@ impl Expression {
                 right_brace,
             ))
         }
+    }
+
+    fn validate_local_let_name(name_token: &Token) -> Result<()> {
+        match name_token.token_type {
+            TokenType::SelfToken => {
+                return Err(name_token.error("cannot use 'self' as a local let name"));
+            }
+            TokenType::Identifier => match name_token.text().chars().next() {
+                Some(c) if c.is_ascii_lowercase() => {}
+                Some(_) => return Err(name_token.error("invalid variable name")),
+                None => return Err(name_token.error("empty token (probably a bug)")),
+            },
+            _ => return Err(name_token.error("expected a variable name")),
+        }
+        Ok(())
+    }
+
+    fn parse_local_block_item(tokens: &mut TokenIter) -> Result<LocalBlockItem> {
+        let let_token = tokens.expect_type(TokenType::Let)?;
+        let first_token = tokens.expect_token()?;
+        let first_name_token = match first_token.token_type {
+            TokenType::Identifier | TokenType::Numeral => first_token,
+            _ => return Err(first_token.error("expected an identifier or numeral")),
+        };
+        let mut function_expr = Expression::Singleton(first_name_token.clone());
+
+        while tokens.peek_type() == Some(TokenType::Dot) {
+            let dot_token = tokens.next().unwrap();
+            let next_token = tokens.expect_token()?;
+            if next_token.token_type != TokenType::Identifier {
+                return Err(next_token.error("expected an identifier after dot"));
+            }
+            function_expr = Expression::Binary(
+                Box::new(function_expr),
+                dot_token,
+                Box::new(Expression::Singleton(next_token)),
+            );
+        }
+
+        let has_type_params = matches!(
+            tokens.peek_type(),
+            Some(TokenType::LeftBracket | TokenType::LessThan)
+        );
+        if has_type_params {
+            return Err(first_name_token.error("local lets don't support type parameters here"));
+        }
+
+        if tokens.peek_type() == Some(TokenType::LeftParen)
+            && tokens.peek_line(TokenType::Equals, TokenType::RightArrow) == Some(TokenType::Equals)
+        {
+            tokens.next();
+            let mut args = vec![];
+            loop {
+                let token = tokens.expect_token()?;
+                match token.token_type {
+                    TokenType::RightParen => break,
+                    TokenType::Identifier | TokenType::Numeral => args.push(token),
+                    TokenType::Comma => continue,
+                    _ => return Err(token.error("expected an argument name or ')'")),
+                }
+            }
+
+            tokens.expect_type(TokenType::Equals)?;
+            tokens.skip_newlines();
+            let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
+            return Ok(LocalBlockItem::Destructuring(LocalDestructuringLet {
+                let_token,
+                function: function_expr,
+                args,
+                value,
+            }));
+        }
+
+        let Expression::Singleton(name_token) = function_expr else {
+            return Err(first_name_token.error("expected ':' or '='"));
+        };
+        Expression::validate_local_let_name(&name_token)?;
+        let next_token = tokens.expect_token()?;
+        let type_expr = match next_token.token_type {
+            TokenType::Colon => {
+                let (type_expr, _) =
+                    Expression::parse_type(tokens, Terminator::Is(TokenType::Equals))?;
+                tokens.skip_newlines();
+                Some(type_expr)
+            }
+            TokenType::Equals => {
+                tokens.skip_newlines();
+                None
+            }
+            _ => return Err(next_token.error("expected ':' or '='")),
+        };
+        let (value, _) = Expression::parse_value(tokens, Terminator::Is(TokenType::NewLine))?;
+        Ok(LocalBlockItem::Let(LocalLet {
+            let_token,
+            name_token,
+            type_expr,
+            value,
+        }))
     }
 
     // Parse an expression that should represent a type, or part of a type.
@@ -1677,21 +1785,44 @@ impl Expression {
             }
             Expression::Block(local_lets, body, _) => {
                 let mut doc = allocator.nil();
-                for local_let in local_lets {
-                    let mut let_doc = allocator
-                        .text(local_let.let_token.text())
-                        .append(allocator.space())
-                        .append(allocator.text(local_let.name_token.text()));
-                    if let Some(type_expr) = &local_let.type_expr {
-                        let_doc = let_doc
-                            .append(allocator.text(": "))
-                            .append(type_expr.pretty_ref(allocator, flat));
-                    }
-                    let_doc = let_doc
-                        .append(allocator.space())
-                        .append(allocator.text("="))
-                        .append(allocator.space())
-                        .append(local_let.value.pretty_ref(allocator, flat));
+                for local_item in local_lets {
+                    let let_doc = match local_item {
+                        LocalBlockItem::Let(local_let) => {
+                            let mut let_doc = allocator
+                                .text(local_let.let_token.text())
+                                .append(allocator.space())
+                                .append(allocator.text(local_let.name_token.text()));
+                            if let Some(type_expr) = &local_let.type_expr {
+                                let_doc = let_doc
+                                    .append(allocator.text(": "))
+                                    .append(type_expr.pretty_ref(allocator, flat));
+                            }
+                            let_doc
+                                .append(allocator.space())
+                                .append(allocator.text("="))
+                                .append(allocator.space())
+                                .append(local_let.value.pretty_ref(allocator, flat))
+                        }
+                        LocalBlockItem::Destructuring(local_destructuring) => {
+                            let mut let_doc = allocator
+                                .text(local_destructuring.let_token.text())
+                                .append(allocator.space())
+                                .append(local_destructuring.function.pretty_ref(allocator, flat))
+                                .append(allocator.text("("));
+                            for (i, arg) in local_destructuring.args.iter().enumerate() {
+                                if i > 0 {
+                                    let_doc = let_doc.append(allocator.text(", "));
+                                }
+                                let_doc = let_doc.append(allocator.text(arg.text()));
+                            }
+                            let_doc
+                                .append(allocator.text(")"))
+                                .append(allocator.space())
+                                .append(allocator.text("="))
+                                .append(allocator.space())
+                                .append(local_destructuring.value.pretty_ref(allocator, flat))
+                        }
+                    };
                     doc = doc.append(let_doc).append(allocator.hardline());
                 }
                 doc.append(body.pretty_ref(allocator, flat)).group()

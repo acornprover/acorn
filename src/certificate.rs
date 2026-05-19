@@ -933,20 +933,21 @@ impl Certificate {
 
         let bindings = bindings.to_mut();
         let kernel_context = kernel_context.to_mut();
-        let (type_params, mut arg_names, mut arg_types, condition, _condition_type) = bindings
-            .evaluate_scoped_value(
-                &fss.type_params,
-                &fss.declarations,
-                None,
-                &fss.condition,
-                None,
-                None,
-                None,
-                None,
-                None,
-                project,
-                None,
-            )?;
+        let scoped_value = bindings.evaluate_scoped_value(
+            &fss.type_params,
+            &fss.declarations,
+            None,
+            &fss.condition,
+            None,
+            None,
+            None,
+            None,
+            None,
+            project,
+            None,
+        )?;
+        let (type_params, mut arg_names, mut arg_types, condition, _condition_type, _) =
+            scoped_value;
         let condition = condition.ok_or_else(|| {
             CodeGenError::GeneratedBadCode("missing function-satisfy condition".to_string())
         })?;

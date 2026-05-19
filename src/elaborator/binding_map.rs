@@ -14,7 +14,7 @@ use crate::elaborator::acorn_type::{
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
-use crate::elaborator::evaluator::Evaluator;
+use crate::elaborator::evaluator::{Evaluator, LocalObligation};
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;
@@ -2130,6 +2130,7 @@ impl BindingMap {
         Vec<AcornType>,
         Option<AcornValue>,
         AcornType,
+        Vec<LocalObligation>,
     )> {
         // Bind all the type parameters and arguments
         let mut evaluator = match current_instance {
@@ -2207,8 +2208,8 @@ impl BindingMap {
         }
 
         // Evaluate the internal value using our modified bindings
-        let internal_value = if value_expr.is_axiom() {
-            None
+        let (internal_value, local_obligations) = if value_expr.is_axiom() {
+            (None, vec![])
         } else {
             let mut evaluator = match current_instance {
                 Some(instance_name) => {
@@ -2232,7 +2233,8 @@ impl BindingMap {
                 }
             }
 
-            Some(value)
+            let local_obligations = evaluator.take_local_obligations();
+            (Some(value), local_obligations)
         };
 
         // Reset the bindings
@@ -2253,6 +2255,7 @@ impl BindingMap {
                 internal_arg_types,
                 internal_value,
                 internal_value_type,
+                local_obligations,
             ))
         } else {
             // Convert to external type variables
@@ -2289,6 +2292,32 @@ impl BindingMap {
                 .map(|t| t.genericize(&type_params))
                 .collect();
             let external_value_type = internal_value_type.genericize(&type_params);
+            let mut local_obligation_type_params =
+                datatype_type_params.unwrap_or_default().to_vec();
+            local_obligation_type_params.extend(type_params.clone());
+            let external_local_obligations = local_obligations
+                .into_iter()
+                .map(|obligation| LocalObligation {
+                    arg_names: obligation.arg_names,
+                    arg_types: obligation
+                        .arg_types
+                        .into_iter()
+                        .map(|arg_type| arg_type.genericize(&local_obligation_type_params))
+                        .collect(),
+                    hidden_constants: obligation
+                        .hidden_constants
+                        .into_iter()
+                        .map(|(name, acorn_type)| {
+                            (name, acorn_type.genericize(&local_obligation_type_params))
+                        })
+                        .collect(),
+                    existence: obligation
+                        .existence
+                        .genericize(&local_obligation_type_params),
+                    witness: obligation.witness.genericize(&local_obligation_type_params),
+                    range: obligation.range,
+                })
+                .collect();
 
             Ok((
                 type_params,
@@ -2296,6 +2325,7 @@ impl BindingMap {
                 external_arg_types,
                 external_value,
                 external_value_type,
+                external_local_obligations,
             ))
         }
     }

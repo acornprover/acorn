@@ -16,7 +16,9 @@ use crate::module::ModuleId;
 #[cfg(test)]
 use crate::project::Project;
 use crate::project::ProjectLookup;
-use crate::syntax::expression::{Declaration, Expression, LocalLet, TypeParamExpr};
+use crate::syntax::expression::{
+    Declaration, Expression, LocalBlockItem, LocalDestructuringLet, LocalLet, TypeParamExpr,
+};
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
 
@@ -46,6 +48,23 @@ struct LocalAlias {
     stack_size: usize,
 }
 
+#[derive(Clone, Debug)]
+struct LocalMatchFact {
+    value: AcornValue,
+    pattern: AcornValue,
+    stack_size: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalObligation {
+    pub arg_names: Vec<String>,
+    pub arg_types: Vec<AcornType>,
+    pub hidden_constants: Vec<(String, AcornType)>,
+    pub existence: AcornValue,
+    pub witness: AcornValue,
+    pub range: tower_lsp::lsp_types::Range,
+}
+
 /// The Evaluator turns expressions into types and values, and other things of that nature.
 pub struct Evaluator<'a> {
     /// The bindings to use for evaluation.
@@ -68,6 +87,10 @@ pub struct Evaluator<'a> {
     /// Local expression-block aliases. These are source-level `let` bindings in function-like
     /// expression blocks, elaborated by inlining their values wherever the name is used.
     local_aliases: Vec<LocalAlias>,
+
+    local_match_facts: Vec<LocalMatchFact>,
+
+    local_obligations: Vec<LocalObligation>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -83,6 +106,8 @@ impl<'a> Evaluator<'a> {
             token_map,
             current_instance_context: None,
             local_aliases: vec![],
+            local_match_facts: vec![],
+            local_obligations: vec![],
         }
     }
 
@@ -103,6 +128,8 @@ impl<'a> Evaluator<'a> {
                 current_attr: instance_name.attribute.clone(),
             }),
             local_aliases: vec![],
+            local_match_facts: vec![],
+            local_obligations: vec![],
         }
     }
 
@@ -153,6 +180,33 @@ impl<'a> Evaluator<'a> {
                 .clone()
                 .insert_stack(alias.stack_size as AtomId, increment),
         )
+    }
+
+    fn local_match_pattern_for_value(
+        &self,
+        value: &AcornValue,
+        stack_size: usize,
+    ) -> Option<AcornValue> {
+        for fact in self.local_match_facts.iter().rev() {
+            debug_assert!(stack_size >= fact.stack_size);
+            let increment = stack_size.saturating_sub(fact.stack_size) as AtomId;
+            let fact_value = fact
+                .value
+                .clone()
+                .insert_stack(fact.stack_size as AtomId, increment);
+            if &fact_value == value {
+                return Some(
+                    fact.pattern
+                        .clone()
+                        .insert_stack(fact.stack_size as AtomId, increment),
+                );
+            }
+        }
+        None
+    }
+
+    pub(crate) fn take_local_obligations(&mut self) -> Vec<LocalObligation> {
+        std::mem::take(&mut self.local_obligations)
     }
 
     fn equality_operator_arg_type(
@@ -296,6 +350,8 @@ impl<'a> Evaluator<'a> {
             token_map,
             current_instance_context: self.current_instance_context.clone(),
             local_aliases: self.local_aliases.clone(),
+            local_match_facts: self.local_match_facts.clone(),
+            local_obligations: vec![],
         }
     }
 
@@ -1500,17 +1556,169 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    fn evaluate_local_destructuring_let(
+        &mut self,
+        stack: &mut Stack,
+        local_destructuring: &LocalDestructuringLet,
+    ) -> error::Result<()> {
+        let mut arg_names = vec![];
+        for arg_token in &local_destructuring.args {
+            let arg_name = arg_token.text().to_string();
+            if arg_names.contains(&arg_name) {
+                return Err(arg_token.error(&format!(
+                    "duplicate argument name '{}' in destructuring pattern",
+                    arg_name
+                )));
+            }
+            if stack.get(&arg_name).is_some() || self.has_local_alias(&arg_name) {
+                return Err(arg_token.error(&format!("name '{}' is already bound", arg_name)));
+            }
+            arg_names.push(arg_name);
+        }
+
+        let value = self.evaluate_value_with_stack(stack, &local_destructuring.value, None)?;
+        let value_type = value.get_type();
+        let mut function = self.evaluate_as_generic_value(stack, &local_destructuring.function)?;
+
+        let function_type_before = function.get_type();
+        let function_ftype_before = match &function_type_before {
+            AcornType::Function(ft) => ft,
+            _ => {
+                return Err(local_destructuring.function.error(&format!(
+                    "expected a function type, but got {}",
+                    function_type_before
+                )));
+            }
+        };
+
+        let return_type_before = function_ftype_before.return_type.as_ref().clone();
+        if return_type_before != value_type {
+            function = InferenceEngine::new(self.bindings).infer_function_return_type(
+                function,
+                &value_type,
+                "destructuring function return type",
+                &local_destructuring.value,
+            )?;
+        }
+
+        let function_type = function.get_type();
+        let (arg_types, return_type) = match &function_type {
+            AcornType::Function(ft) => (ft.arg_types.clone(), ft.return_type.as_ref().clone()),
+            _ => {
+                return Err(local_destructuring.function.error(&format!(
+                    "expected a function type, but got {}",
+                    function_type
+                )));
+            }
+        };
+
+        if arg_types.len() != local_destructuring.args.len() {
+            return Err(local_destructuring.let_token.error(&format!(
+                "function expects {} arguments, but {} were provided in the pattern",
+                arg_types.len(),
+                local_destructuring.args.len()
+            )));
+        }
+
+        if return_type != value_type {
+            return Err(local_destructuring.value.error(&format!(
+                "type mismatch: function returns {} but value has type {}",
+                return_type, value_type
+            )));
+        }
+
+        if arg_types.iter().any(|t| t.has_generic()) {
+            return Err(local_destructuring
+                .function
+                .error("could not infer all argument types for destructuring pattern"));
+        }
+
+        let stack_entries = stack.entries();
+        let stack_names: Vec<_> = stack_entries.iter().map(|(name, _)| name.clone()).collect();
+        let stack_types: Vec<_> = stack_entries
+            .iter()
+            .map(|(_, acorn_type)| acorn_type.clone())
+            .collect();
+        let stack_values: Vec<_> = stack_types
+            .iter()
+            .enumerate()
+            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+            .collect();
+
+        let stack_size = stack.len() as AtomId;
+        let general_arg_values: Vec<_> = arg_types
+            .iter()
+            .enumerate()
+            .map(|(i, arg_type)| AcornValue::Variable(stack_size + i as AtomId, arg_type.clone()))
+            .collect();
+
+        let obligation_value = self
+            .local_match_pattern_for_value(&value, stack.len())
+            .unwrap_or_else(|| value.clone());
+        let general_applied = AcornValue::apply(function.clone(), general_arg_values);
+        let general_equality = AcornValue::equals(general_applied, obligation_value.clone());
+        let existence = AcornValue::exists(arg_types.clone(), general_equality);
+
+        let mut hidden_constants = vec![];
+        let mut witness_args = vec![];
+        for (i, (arg_name, arg_type)) in arg_names.iter().zip(&arg_types).enumerate() {
+            let hidden_name = format!(
+                "__local_destructure_{}_{}_{}_{}",
+                local_destructuring.let_token.line_number,
+                local_destructuring.let_token.start,
+                i,
+                arg_name
+            );
+            let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
+            let hidden_function_type =
+                AcornType::functional_from_flat_context(stack_types.clone(), arg_type.clone());
+            let hidden_function = AcornValue::constant(
+                constant_name,
+                vec![],
+                hidden_function_type.clone(),
+                hidden_function_type.clone(),
+                vec![],
+                vec![],
+            );
+            let witness_value = AcornValue::apply(hidden_function, stack_values.clone());
+            hidden_constants.push((hidden_name, hidden_function_type));
+            self.local_aliases.push(LocalAlias {
+                name: arg_name.clone(),
+                value: witness_value.clone(),
+                stack_size: stack.len(),
+            });
+            witness_args.push(witness_value);
+        }
+
+        let witness_applied = AcornValue::apply(function, witness_args);
+        let witness = AcornValue::equals(witness_applied, obligation_value);
+        self.local_obligations.push(LocalObligation {
+            arg_names: stack_names,
+            arg_types: stack_types,
+            hidden_constants,
+            existence,
+            witness,
+            range: local_destructuring.value.range(),
+        });
+        Ok(())
+    }
+
     fn evaluate_value_block_with_stack(
         &mut self,
         stack: &mut Stack,
-        local_lets: &[LocalLet],
+        local_lets: &[LocalBlockItem],
         body: &Expression,
         expected_type: Option<&AcornType>,
     ) -> error::Result<AcornValue> {
         let alias_count = self.local_aliases.len();
         let result = (|| {
             for local_let in local_lets {
-                self.evaluate_local_let(stack, local_let)?;
+                match local_let {
+                    LocalBlockItem::Let(local_let) => self.evaluate_local_let(stack, local_let)?,
+                    LocalBlockItem::Destructuring(local_destructuring) => {
+                        self.evaluate_local_destructuring_let(stack, local_destructuring)?
+                    }
+                }
             }
             self.evaluate_value_with_stack(stack, body, expected_type)
         })();
@@ -1892,6 +2100,8 @@ impl<'a> Evaluator<'a> {
                     // Generic lambdas may omit value args entirely in type-only claim syntax.
                     let (arg_names, arg_types) = evaluator.bind_args(stack, decls, None)?;
                     let body_val = evaluator.evaluate_value_with_stack(stack, body, None)?;
+                    self.local_obligations
+                        .extend(evaluator.take_local_obligations());
                     let lambda = AcornValue::Lambda(arg_types, Box::new(body_val));
                     stack.remove_all(&arg_names);
 
@@ -2129,8 +2339,16 @@ impl<'a> Evaluator<'a> {
                     }
                     let pattern =
                         self.evaluate_value_with_stack(stack, pattern_exp, Some(&scrutinee_type))?;
+                    let match_fact_count = self.local_match_facts.len();
+                    self.local_match_facts.push(LocalMatchFact {
+                        value: scrutinee.clone(),
+                        pattern: pattern.clone(),
+                        stack_size: stack.len(),
+                    });
                     let result =
-                        self.evaluate_value_with_stack(stack, result_exp, expected_type.as_ref())?;
+                        self.evaluate_value_with_stack(stack, result_exp, expected_type.as_ref());
+                    self.local_match_facts.truncate(match_fact_count);
+                    let result = result?;
                     if expected_type.is_none() {
                         expected_type = Some(result.get_type());
                     }
@@ -2219,6 +2437,8 @@ impl<'a> Evaluator<'a> {
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
                         local_aliases: self.local_aliases.clone(),
+                        local_match_facts: self.local_match_facts.clone(),
+                        local_obligations: vec![],
                     }
                     .evaluate_typeclass(annotation)?;
                     FamilyParam::Type(TypeParam {
@@ -2236,6 +2456,8 @@ impl<'a> Evaluator<'a> {
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
                         local_aliases: self.local_aliases.clone(),
+                        local_match_facts: self.local_match_facts.clone(),
+                        local_obligations: vec![],
                     }
                     .evaluate_type_with_stack(&mut scoped_stack, annotation)?;
                     FamilyParam::Value(ValueParam {

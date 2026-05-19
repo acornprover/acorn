@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::elaborator::error::{self, ErrorContext};
 use crate::module::ModuleDescriptor;
-use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
+use crate::syntax::expression::{Declaration, Expression, LocalBlockItem, TypeParamExpr};
 use crate::syntax::statement::{Body, ImportStatement, Statement, StatementInfo};
 use crate::syntax::token::{Token, TokenIter, TokenType};
 
@@ -184,11 +184,19 @@ fn collect_dependencies_from_expression(expression: &Expression, output: &mut De
             }
         }
         Expression::Block(local_lets, body, _) => {
-            for local_let in local_lets {
-                if let Some(type_expr) = &local_let.type_expr {
-                    collect_dependencies_from_expression(type_expr, output);
+            for local_item in local_lets {
+                match local_item {
+                    LocalBlockItem::Let(local_let) => {
+                        if let Some(type_expr) = &local_let.type_expr {
+                            collect_dependencies_from_expression(type_expr, output);
+                        }
+                        collect_dependencies_from_expression(&local_let.value, output);
+                    }
+                    LocalBlockItem::Destructuring(local_destructuring) => {
+                        collect_dependencies_from_expression(&local_destructuring.function, output);
+                        collect_dependencies_from_expression(&local_destructuring.value, output);
+                    }
                 }
-                collect_dependencies_from_expression(&local_let.value, output);
             }
             collect_dependencies_from_expression(body, output);
         }

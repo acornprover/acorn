@@ -126,3 +126,92 @@ theorem local_match_some(x: Nat, fallback: Nat) {
     local_match(Option.some(x), fallback) = x
 }
 ```
+
+## Destructuring Constructed Value
+
+```acorn
+type Nat: axiom
+
+inductive Option[T] {
+    none
+    some(T)
+}
+
+define local_unwrap_constructed(n: Nat) -> Nat {
+    let Option.some(x) = Option.some(n)
+    x
+}
+
+theorem local_unwrap_constructed_reduces(n: Nat) {
+    local_unwrap_constructed(n) = n
+}
+```
+
+## Generic Destructuring
+
+```acorn
+inductive Option[T] {
+    none
+    some(T)
+}
+
+define local_generic_rebuild[T](value: T) -> Option[T] {
+    let Option.some(x) = Option.some(value)
+    Option.some(x)
+}
+
+theorem local_generic_rebuild_reduces[T](value: T) {
+    local_generic_rebuild(value) = Option.some(value)
+}
+```
+
+## Destructuring In Match Branch
+
+```acorn
+type Nat: axiom
+
+inductive Option[T] {
+    none
+    some(T)
+}
+
+define local_unwrap_or(opt: Option[Nat], fallback: Nat) -> Nat {
+    match opt {
+        Option.none {
+            fallback
+        }
+        Option.some(x) {
+            let Option.some(y) = opt
+            y
+        }
+    }
+}
+
+theorem local_unwrap_or_none(fallback: Nat) {
+    local_unwrap_or(Option.none[Nat], fallback) = fallback
+}
+
+theorem local_unwrap_or_some(x: Nat, fallback: Nat) {
+    local_unwrap_or(Option.some(x), fallback) = x
+}
+```
+
+## Destructuring Structure
+
+```acorn
+type Nat: axiom
+
+structure Pair {
+    first: Nat
+    second: Nat
+}
+
+define local_pair_rebuild(a: Nat, b: Nat) -> Pair {
+    let Pair.new(x, y) = Pair.new(a, b)
+    Pair.new(x, y)
+}
+
+theorem local_pair_rebuild_reduces(a: Nat, b: Nat) {
+    local_pair_rebuild(a, b) = Pair.new(a, b)
+}
+```
