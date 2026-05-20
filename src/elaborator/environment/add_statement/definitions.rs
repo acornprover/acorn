@@ -1,4 +1,4 @@
-use super::transport::{transport_operand, TransportBuilder};
+use super::transport::TransportBuilder;
 use super::*;
 use crate::syntax::expression::TypeParamExpr;
 
@@ -176,6 +176,67 @@ impl Environment {
         Ok(constant_value)
     }
 
+    fn add_witness_let_from_constraint(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        defined_name: &DefinedName,
+        ls: &LetStatement,
+        range: Range,
+        datatype_params: Option<&DatatypeFamilyScope>,
+        local_family_params: &LocalFamilyParams,
+        definition_type_params: Vec<TypeParam>,
+        target_type: AcornType,
+        family_value_param_count: AtomId,
+        target_constraint: AcornValue,
+        instance_error: &str,
+    ) -> error::Result<()> {
+        let general_claim =
+            AcornValue::exists(vec![target_type.clone()], target_constraint.clone());
+        let mut block_args = explicit_value_block_args(&local_family_params.value_params);
+        block_args.extend(datatype_value_block_args(datatype_params));
+        let block = Block::new(
+            project,
+            &self,
+            vec![],
+            block_args,
+            BlockParams::variable_satisfy(general_claim, ls.value.range()),
+            &statement.first_token,
+            &statement.last_token,
+            None,
+        )?;
+
+        let doc_comments = self.take_doc_comments();
+        let constant_value = self.declare_witness_constant(
+            defined_name,
+            &definition_type_params,
+            &target_type,
+            &local_family_params.value_params,
+            datatype_params,
+            doc_comments,
+            range,
+            statement.to_string(),
+            statement,
+            instance_error,
+        )?;
+
+        let specific_constraint = target_constraint.bind_values(
+            family_value_param_count,
+            family_value_param_count + 1,
+            &[constant_value],
+        );
+        let external_claim = quantify_over_explicit_value_params(
+            &local_family_params.value_params,
+            quantify_over_datatype_value_params(datatype_params, specific_constraint),
+        )
+        .genericize(&definition_type_params);
+        let source = Source::anonymous(self.module_id, statement.range(), self.depth);
+        let prop = Proposition::new(external_claim, definition_type_params, source);
+        let index = self.add_node(Node::block(project, self, block, Some(prop)));
+        self.add_node_lines(index, &statement.range());
+        Ok(())
+    }
+
     fn add_result_spec_let_statement(
         &mut self,
         project: &dyn ProjectLookup,
@@ -235,50 +296,20 @@ impl Environment {
                 &definition_type_params,
                 local_obligations,
             )?;
-
-            let general_claim = AcornValue::exists(vec![target_type.clone()], spec.clone());
-            let mut block_args = explicit_value_block_args(&local_family_params.value_params);
-            block_args.extend(datatype_value_block_args(datatype_params));
-            let block = Block::new(
+            self.add_witness_let_from_constraint(
                 project,
-                &self,
-                vec![],
-                block_args,
-                BlockParams::variable_satisfy(general_claim, ls.value.range()),
-                &statement.first_token,
-                &statement.last_token,
-                None,
-            )?;
-
-            let doc_comments = self.take_doc_comments();
-            let constant_value = self.declare_witness_constant(
-                &defined_name,
-                &definition_type_params,
-                &target_type,
-                &local_family_params.value_params,
-                datatype_params,
-                doc_comments,
-                range,
-                statement.to_string(),
                 statement,
-                "result-spec let cannot define instance attributes",
-            )?;
-
-            let specific_spec = spec.bind_values(
+                &defined_name,
+                ls,
+                range,
+                datatype_params,
+                local_family_params,
+                definition_type_params,
+                target_type,
                 family_value_param_count,
-                family_value_param_count + 1,
-                &[constant_value],
-            );
-            let external_claim = quantify_over_explicit_value_params(
-                &local_family_params.value_params,
-                quantify_over_datatype_value_params(datatype_params, specific_spec),
+                spec,
+                "result-spec let cannot define instance attributes",
             )
-            .genericize(&definition_type_params);
-            let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-            let prop = Proposition::new(external_claim, definition_type_params, source);
-            let index = self.add_node(Node::block(project, self, block, Some(prop)));
-            self.add_node_lines(index, &statement.range());
-            Ok(())
         })();
 
         for param in local_type_params.iter().rev() {
@@ -333,7 +364,7 @@ impl Environment {
             .unwrap_or(0)
             + local_family_params.value_params.len() as AtomId;
         let target_variable = AcornValue::Variable(family_value_param_count, target_type.clone());
-        let general_relation = {
+        let target_constraint = {
             let transport = TransportBuilder::new(self, project);
             transport.relation(
                 &source_type,
@@ -344,10 +375,6 @@ impl Environment {
                 family_value_param_count + 1,
             )?
         };
-        let general_claim = AcornValue::Exists(
-            vec![target_type.clone()],
-            Box::new(general_relation.clone()),
-        );
         self.add_genericized_local_obligations(
             project,
             &definition_type_params,
@@ -423,47 +450,21 @@ impl Environment {
                 return Ok(());
             }
         }
-        let block = Block::new(
+
+        self.add_witness_let_from_constraint(
             project,
-            &self,
-            vec![],
-            block_args,
-            BlockParams::variable_satisfy(general_claim, ls.value.range()),
-            &statement.first_token,
-            &statement.last_token,
-            None,
-        )?;
-
-        let doc_comments = self.take_doc_comments();
-        let constant_value = self.declare_witness_constant(
-            &defined_name,
-            &definition_type_params,
-            &target_type,
-            &local_family_params.value_params,
-            datatype_params,
-            doc_comments,
-            range,
-            statement.to_string(),
             statement,
-            "transport cannot define instance attributes",
-        )?;
-
-        let specific_claim_value = general_relation.bind_values(
+            &defined_name,
+            ls,
+            range,
+            datatype_params,
+            local_family_params,
+            definition_type_params,
+            target_type,
             family_value_param_count,
-            family_value_param_count + 1,
-            &[constant_value],
-        );
-        let external_claim = quantify_over_explicit_value_params(
-            &local_family_params.value_params,
-            quantify_over_datatype_value_params(datatype_params, specific_claim_value),
+            target_constraint,
+            "transport cannot define instance attributes",
         )
-        .genericize(&definition_type_params);
-        let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let specific_prop = Proposition::new(external_claim, definition_type_params, source);
-        let node = Node::block(project, self, block, Some(specific_prop));
-        let index = self.add_node(node);
-        self.add_node_lines(index, &statement.range());
-        Ok(())
     }
 
     fn evaluate_local_family_params(
@@ -542,7 +543,7 @@ impl Environment {
             explicit_value_param_types(&local_family_params.value_params);
         enum LetEvaluation {
             Regular(AcornType, Option<AcornValue>, Vec<LocalObligation>),
-            Transport(error::Result<()>),
+            Added(error::Result<()>),
         }
         let evaluation: error::Result<LetEvaluation> = (|| {
             Ok(match &ls.type_expr {
@@ -590,8 +591,8 @@ impl Environment {
                             }
                         }
                     }
-                    if let Some((transport_token, source_expr)) = transport_operand(&ls.value) {
-                        return Ok(LetEvaluation::Transport(self.add_transport_let_statement(
+                    if let Some((transport_token, source_expr)) = ls.value.transport_operand() {
+                        return Ok(LetEvaluation::Added(self.add_transport_let_statement(
                             project,
                             statement,
                             defined_name.clone(),
@@ -633,7 +634,7 @@ impl Environment {
                     LetEvaluation::Regular(acorn_type, value, local_obligations)
                 }
                 None => {
-                    if let Some((transport_token, _)) = transport_operand(&ls.value) {
+                    if let Some((transport_token, _)) = ls.value.transport_operand() {
                         return Err(
                             transport_token.error("transport requires an explicit type annotation")
                         );
@@ -673,7 +674,7 @@ impl Environment {
             LetEvaluation::Regular(acorn_type, value, local_obligations) => {
                 (acorn_type, value, local_obligations)
             }
-            LetEvaluation::Transport(result) => {
+            LetEvaluation::Added(result) => {
                 return result;
             }
         };

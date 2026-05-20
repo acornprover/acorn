@@ -7,12 +7,6 @@ use crate::elaborator::names::DefinedName;
 use crate::elaborator::potential_value::PotentialValue;
 use crate::kernel::atom::AtomId;
 use crate::project::ProjectLookup;
-use crate::syntax::expression::Expression;
-use crate::syntax::token::Token;
-
-pub(super) fn transport_operand(expression: &Expression) -> Option<(&Token, &Expression)> {
-    expression.transport_operand()
-}
 
 fn conjoin(values: Vec<AcornValue>) -> AcornValue {
     let mut iter = values.into_iter();
