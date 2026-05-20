@@ -660,25 +660,44 @@ impl Certificate {
         }
     }
 
-    /// Collect named witness ids referenced by a displayed claim step.
-    fn collect_claim_witness_ids(
+    /// Collect named witness symbols referenced by a displayed claim step.
+    fn collect_claim_witness_symbols(
         step: &CertificateStep,
         kernel_context: &KernelContext,
-    ) -> Result<Vec<AtomId>, CodeGenError> {
-        let mut ids = vec![];
+    ) -> Result<Vec<Symbol>, CodeGenError> {
+        let mut symbols = vec![];
+        let mut collect_symbol = |symbol: Symbol| match symbol {
+            Symbol::ScopedConstant(_) => symbols.push(symbol),
+            Symbol::GlobalConstant(..) => {
+                if matches!(
+                    kernel_context.symbol_table.try_name_for_symbol(symbol),
+                    Some(ConstantName::Synthetic(..))
+                ) {
+                    symbols.push(symbol);
+                }
+            }
+            _ => {}
+        };
         if let CertificateStep::Claim(claim) = step {
             let clause = claim
                 .specialized_clause_for_display(kernel_context)
                 .map_err(CodeGenError::GeneratedBadCode)?;
             for atom in clause.iter_atoms() {
-                if let Atom::Symbol(Symbol::ScopedConstant(local_id)) = atom {
-                    ids.push(*local_id);
+                if let Atom::Symbol(symbol) = atom {
+                    collect_symbol(*symbol);
+                }
+            }
+            for (_, term) in claim.var_map().iter() {
+                for atom in term.iter_atoms() {
+                    if let Atom::Symbol(symbol) = atom {
+                        collect_symbol(*symbol);
+                    }
                 }
             }
         }
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
+        symbols.sort();
+        symbols.dedup();
+        Ok(symbols)
     }
 
     /// Convert one structured certificate step back into source code.
@@ -746,7 +765,15 @@ impl Certificate {
         };
 
         match step {
-            CertificateStep::Claim(_) => ClaimCodec::ensure_claim_code_parses_as_claim(line),
+            CertificateStep::Claim(_) => {
+                let claim_line = line.clone();
+                ClaimCodec::ensure_claim_code_parses_as_claim(line).map_err(|err| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "{} [while validating serialized certificate claim `{}`]",
+                        err, claim_line
+                    ))
+                })
+            }
             CertificateStep::Satisfy(_) => Ok(line),
         }
     }
@@ -1003,6 +1030,45 @@ impl Certificate {
     }
 
     /// Register a local constant introduced by a certificate `let ... satisfy` declaration.
+    fn rename_certificate_witness_symbol(
+        kernel_context: &mut KernelContext,
+        symbol: Symbol,
+        new_name: ConstantName,
+    ) -> Result<(), CodeGenError> {
+        match symbol {
+            Symbol::ScopedConstant(local_id) => kernel_context
+                .symbol_table
+                .rename_scoped_constant(local_id, new_name)
+                .map_err(CodeGenError::GeneratedBadCode),
+            Symbol::GlobalConstant(module_id, atom_id) => kernel_context
+                .symbol_table
+                .rename_global_constant(module_id, atom_id, new_name)
+                .map_err(CodeGenError::GeneratedBadCode),
+            _ => Err(CodeGenError::GeneratedBadCode(format!(
+                "certificate witness symbol {} is not a constant",
+                symbol
+            ))),
+        }
+    }
+
+    fn existing_synthetic_witness_symbol(
+        kernel_context: &KernelContext,
+        justification: &Claim,
+    ) -> Result<Option<Symbol>, CodeGenError> {
+        let generic_clause = justification.normalized_generic_clause();
+        let specialized_clause = justification
+            .normalized_specialized_clause(kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        Ok(kernel_context
+            .synthetic_witness_registry
+            .iter()
+            .find_map(|(&symbol, witness)| {
+                (witness.general_clause == generic_clause
+                    || witness.general_clause == specialized_clause)
+                    .then_some(symbol)
+            }))
+    }
+
     fn register_certificate_local_constant(
         bindings: &mut BindingMap,
         kernel_context: &mut KernelContext,
@@ -1010,6 +1076,7 @@ impl Certificate {
         type_params: &[TypeParam],
         constant_type: &AcornType,
         definition_string: &str,
+        existing_symbol: Option<Symbol>,
     ) -> Result<ConstantName, CodeGenError> {
         let defined_name = DefinedName::unqualified(bindings.module_id(), name);
         if bindings.constant_name_in_use(&defined_name) {
@@ -1032,6 +1099,11 @@ impl Certificate {
         );
 
         let constant_name = ConstantName::unqualified(bindings.module_id(), name);
+        if let Some(symbol) = existing_symbol {
+            Self::rename_certificate_witness_symbol(kernel_context, symbol, constant_name.clone())?;
+            return Ok(constant_name);
+        }
+
         kernel_context.type_store.add_type(constant_type);
         let mut symbol_type = if type_params.is_empty() {
             lower_type_to_term(kernel_context, constant_type, None)
@@ -1109,6 +1181,11 @@ impl Certificate {
             .first()
             .cloned()
             .expect("single declaration has a single name");
+        let general_claim = AcornValue::Exists(quant_types, Box::new(general_condition));
+        let justification =
+            Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
+        let existing_symbol =
+            Self::existing_synthetic_witness_symbol(kernel_context, &justification)?;
         Self::register_certificate_local_constant(
             bindings,
             kernel_context,
@@ -1116,6 +1193,7 @@ impl Certificate {
             &type_params,
             &return_type,
             code,
+            existing_symbol,
         )?;
 
         let mut specific_evaluator = Evaluator::new_internal(project, bindings);
@@ -1125,9 +1203,6 @@ impl Certificate {
             specific_evaluator.take_local_obligations().len(),
         )?;
 
-        let general_claim = AcornValue::Exists(quant_types, Box::new(general_condition));
-        let justification =
-            Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
         let specialized_clause = Self::maybe_specialized_clause_for_proposition(
             kernel_context,
             &specific_condition,
@@ -1213,6 +1288,17 @@ impl Certificate {
         };
         let function_type = AcornType::functional(arg_types.clone(), return_type.clone());
         let name = fss.name_token.text().to_string();
+        let general_claim = AcornValue::ForAll(
+            arg_types.clone(),
+            Box::new(AcornValue::Exists(
+                vec![return_type.clone()],
+                Box::new(condition.clone()),
+            )),
+        );
+        let justification =
+            Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
+        let existing_symbol =
+            Self::existing_synthetic_witness_symbol(kernel_context, &justification)?;
         let constant_name = Self::register_certificate_local_constant(
             bindings,
             kernel_context,
@@ -1220,6 +1306,7 @@ impl Certificate {
             &type_params,
             &function_type,
             code,
+            existing_symbol,
         )?;
         let function_constant = AcornValue::constant(
             constant_name,
@@ -1242,17 +1329,8 @@ impl Certificate {
             condition
                 .clone()
                 .bind_values(num_args, num_args, &[function_term]);
-        let general_claim = AcornValue::ForAll(
-            arg_types.clone(),
-            Box::new(AcornValue::Exists(
-                vec![return_type.clone()],
-                Box::new(condition.clone()),
-            )),
-        );
         let specialized_claim =
             AcornValue::ForAll(arg_types.clone(), Box::new(specialized_condition.clone()));
-        let justification =
-            Self::claim_for_proposition(kernel_context, &general_claim, &type_params)?;
         let witness_clauses = Self::exact_witness_clauses_for_proposition(
             kernel_context,
             &specialized_claim,
@@ -1543,21 +1621,21 @@ struct WitnessEmitter<'a> {
     ordered_steps: Vec<CertificateStep>,
     claim_generic_clauses: Vec<Option<Clause>>,
     claim_clauses: Vec<Option<Clause>>,
-    referenced_ids: Vec<Vec<AtomId>>,
+    referenced_symbols: Vec<Vec<Symbol>>,
     kernel_context: KernelContext,
     module_id: ModuleId,
     synthetic_witness_registry: WitnessRegistry,
     witness_registry: &'a WitnessRegistry,
-    witness_steps: HashMap<AtomId, SatisfyStep>,
-    claim_replacements: HashMap<usize, AtomId>,
-    replacement_indices: HashMap<AtomId, usize>,
-    claim_anchors: HashMap<usize, Vec<AtomId>>,
-    anchor_indices: HashMap<AtomId, usize>,
-    declared: HashSet<AtomId>,
+    witness_steps: HashMap<Symbol, SatisfyStep>,
+    claim_replacements: HashMap<usize, Symbol>,
+    replacement_indices: HashMap<Symbol, usize>,
+    claim_anchors: HashMap<usize, Vec<Symbol>>,
+    anchor_indices: HashMap<Symbol, usize>,
+    declared: HashSet<Symbol>,
     buffered: Vec<usize>,
     emitted: Vec<bool>,
-    in_progress: HashSet<AtomId>,
-    emitted_witnesses: Vec<AtomId>,
+    in_progress: HashSet<Symbol>,
+    emitted_witnesses: Vec<Symbol>,
     output: Vec<CertificateStep>,
 }
 
@@ -1588,16 +1666,16 @@ impl<'a> WitnessEmitter<'a> {
             .iter()
             .map(|step| Certificate::claim_clause(step, &kernel_context))
             .collect::<Result<_, _>>()?;
-        let referenced_ids: Vec<Vec<AtomId>> = ordered_steps
+        let referenced_symbols: Vec<Vec<Symbol>> = ordered_steps
             .iter()
-            .map(|step| Certificate::collect_claim_witness_ids(step, &kernel_context))
+            .map(|step| Certificate::collect_claim_witness_symbols(step, &kernel_context))
             .collect::<Result<_, _>>()?;
 
         let mut emitter = Self {
             ordered_steps,
             claim_generic_clauses,
             claim_clauses,
-            referenced_ids,
+            referenced_symbols,
             kernel_context,
             module_id,
             synthetic_witness_registry: WitnessRegistry::new(),
@@ -1614,13 +1692,13 @@ impl<'a> WitnessEmitter<'a> {
             emitted_witnesses: Vec::new(),
             output: Vec::new(),
         };
-        for ids in emitter.referenced_ids.clone() {
-            for local_id in ids {
-                emitter.prepare_witness(local_id)?;
+        for symbols in emitter.referenced_symbols.clone() {
+            for symbol in symbols {
+                emitter.prepare_witness(symbol)?;
             }
         }
-        for (&local_id, _) in witness_registry.iter() {
-            emitter.prepare_witness(local_id)?;
+        for (&symbol, _) in witness_registry.iter() {
+            emitter.prepare_witness(symbol)?;
         }
         Ok(emitter)
     }
@@ -1635,19 +1713,19 @@ impl<'a> WitnessEmitter<'a> {
         Ok((self.output, self.kernel_context))
     }
 
-    fn declaration_index(&self, local_id: AtomId) -> Option<usize> {
+    fn declaration_index(&self, symbol: Symbol) -> Option<usize> {
         self.replacement_indices
-            .get(&local_id)
+            .get(&symbol)
             .copied()
-            .or_else(|| self.anchor_indices.get(&local_id).copied())
+            .or_else(|| self.anchor_indices.get(&symbol).copied())
     }
 
     /// Delay any step whose first witness use depends on a later replacement claim.
     fn step_needs_future_witness(&self, index: usize, current_index: usize) -> bool {
-        self.referenced_ids[index].iter().any(|local_id| {
-            !self.declared.contains(local_id)
+        self.referenced_symbols[index].iter().any(|symbol| {
+            !self.declared.contains(symbol)
                 && self
-                    .declaration_index(*local_id)
+                    .declaration_index(*symbol)
                     .is_some_and(|declaration_index| declaration_index > current_index)
         })
     }
@@ -1658,8 +1736,8 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        if let Some(local_id) = self.claim_replacements.get(&index).copied() {
-            self.emit_witness(local_id)?;
+        if let Some(symbol) = self.claim_replacements.get(&index).copied() {
+            self.emit_witness(symbol)?;
             self.emitted[index] = true;
             self.emit_anchors_for_step(index)?;
             return Ok(());
@@ -1690,19 +1768,19 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        for local_id in self.referenced_ids[index].clone() {
-            self.ensure_declared(local_id, current_index)?;
+        for symbol in self.referenced_symbols[index].clone() {
+            self.ensure_declared(symbol, current_index)?;
         }
         if let CertificateStep::Claim(claim) = &step {
-            if let Some((local_id, parent_local_id, rewritten_step)) =
+            if let Some((symbol, parent_symbol, rewritten_step)) =
                 self.specialized_positive_exists_step(claim)?
             {
-                self.ensure_declared(local_id, current_index)?;
+                self.ensure_declared(symbol, current_index)?;
                 self.push_output_step(step.clone())?;
                 self.emit_witness_step(
-                    local_id,
+                    symbol,
                     CertificateStep::Satisfy(rewritten_step),
-                    Some(parent_local_id),
+                    Some(parent_symbol),
                 )?;
                 self.emitted[index] = true;
                 return Ok(());
@@ -1745,16 +1823,16 @@ impl<'a> WitnessEmitter<'a> {
     }
 
     /// Prepare one witness step and remember which claim it should replace, if any.
-    fn prepare_witness(&mut self, local_id: AtomId) -> Result<(), CodeGenError> {
-        if self.witness_steps.contains_key(&local_id) {
+    fn prepare_witness(&mut self, symbol: Symbol) -> Result<(), CodeGenError> {
+        if self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
-        let Some(witness) = self.witness_registry.get(local_id) else {
+        let Some(witness) = self.witness_registry.get(symbol) else {
             return Ok(());
         };
 
-        for dependency_id in witness.referenced_scoped_constants() {
-            self.prepare_witness(dependency_id)?;
+        for dependency in witness.referenced_symbols() {
+            self.prepare_witness(dependency)?;
         }
 
         let general_clause = witness.general_clause.clone();
@@ -1775,84 +1853,84 @@ impl<'a> WitnessEmitter<'a> {
             WitnessPlacement::Standalone => {}
             WitnessPlacement::Replace(index) => {
                 if let Some(existing) = self.claim_replacements.get(&index).copied() {
-                    self.claim_anchors.entry(index).or_default().push(local_id);
-                    self.anchor_indices.insert(local_id, index);
-                    debug_assert_ne!(existing, local_id);
+                    self.claim_anchors.entry(index).or_default().push(symbol);
+                    self.anchor_indices.insert(symbol, index);
+                    debug_assert_ne!(existing, symbol);
                 } else {
-                    self.claim_replacements.insert(index, local_id);
-                    self.replacement_indices.insert(local_id, index);
+                    self.claim_replacements.insert(index, symbol);
+                    self.replacement_indices.insert(symbol, index);
                 }
             }
             WitnessPlacement::Anchor(index) => {
-                self.claim_anchors.entry(index).or_default().push(local_id);
-                self.anchor_indices.insert(local_id, index);
+                self.claim_anchors.entry(index).or_default().push(symbol);
+                self.anchor_indices.insert(symbol, index);
             }
         }
         let step =
             Certificate::witness_entry_to_step(witness, justification, &self.kernel_context)?;
-        self.witness_steps.insert(local_id, step);
+        self.witness_steps.insert(symbol, step);
         Ok(())
     }
 
     /// Make sure a witness has been emitted before a claim that references it.
     fn ensure_declared(
         &mut self,
-        local_id: AtomId,
+        symbol: Symbol,
         current_index: usize,
     ) -> Result<(), CodeGenError> {
-        if self.declared.contains(&local_id) || !self.witness_steps.contains_key(&local_id) {
+        if self.declared.contains(&symbol) || !self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
 
-        if let Some(index) = self.declaration_index(local_id) {
+        if let Some(index) = self.declaration_index(symbol) {
             if index > current_index {
                 return Err(CodeGenError::GeneratedBadCode(format!(
-                    "named witness x{} was used before its justification claim",
-                    local_id
+                    "named witness {} was used before its justification claim",
+                    symbol
                 )));
             }
             return self.schedule_step(index, current_index);
         }
 
-        self.emit_witness(local_id)
+        self.emit_witness(symbol)
     }
 
     /// Emit the named-witness step itself after recursively materializing dependencies.
-    fn emit_witness(&mut self, local_id: AtomId) -> Result<(), CodeGenError> {
-        if self.declared.contains(&local_id) || !self.witness_steps.contains_key(&local_id) {
+    fn emit_witness(&mut self, symbol: Symbol) -> Result<(), CodeGenError> {
+        if self.declared.contains(&symbol) || !self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
 
-        let Some(witness) = self.witness_registry.get(local_id) else {
+        let Some(witness) = self.witness_registry.get(symbol) else {
             return Ok(());
         };
-        if !self.in_progress.insert(local_id) {
+        if !self.in_progress.insert(symbol) {
             return Err(CodeGenError::GeneratedBadCode(format!(
                 "cyclic named witness dependency involving '{}'",
                 witness.name
             )));
         }
 
-        for dependency_id in witness.referenced_scoped_constants() {
-            self.ensure_declared(dependency_id, usize::MAX)?;
+        for dependency in witness.referenced_symbols() {
+            self.ensure_declared(dependency, usize::MAX)?;
         }
 
         let step = self
             .witness_steps
-            .get(&local_id)
+            .get(&symbol)
             .expect("prepared witness step should exist")
             .clone();
-        self.emit_witness_step(local_id, CertificateStep::Satisfy(step), None)?;
-        self.in_progress.remove(&local_id);
+        self.emit_witness_step(symbol, CertificateStep::Satisfy(step), None)?;
+        self.in_progress.remove(&symbol);
         Ok(())
     }
 
     /// Emit one `let ... satisfy` witness declaration and record any follow-on clauses it enables.
     fn emit_witness_step(
         &mut self,
-        local_id: AtomId,
+        symbol: Symbol,
         step: CertificateStep,
-        _parent_local_id: Option<AtomId>,
+        _parent_symbol: Option<Symbol>,
     ) -> Result<(), CodeGenError> {
         assert!(matches!(step, CertificateStep::Satisfy(_)));
         let follow_on_clause = match &step {
@@ -1860,40 +1938,40 @@ impl<'a> WitnessEmitter<'a> {
             CertificateStep::Claim(_) => unreachable!(),
         };
         self.push_output_step(step)?;
-        self.declared.insert(local_id);
-        self.emitted_witnesses.push(local_id);
+        self.declared.insert(symbol);
+        self.emitted_witnesses.push(symbol);
         if let Some(clause) = follow_on_clause {
-            self.emit_nested_positive_exists_witness(local_id, &clause)?;
+            self.emit_nested_positive_exists_witness(symbol, &clause)?;
         }
         Ok(())
     }
 
     fn emit_nested_positive_exists_witness(
         &mut self,
-        parent_local_id: AtomId,
+        parent_symbol: Symbol,
         clause: &Clause,
     ) -> Result<(), CodeGenError> {
         let Some(reduction) = clause.positive_exists_reduction(&self.kernel_context) else {
             return Ok(());
         };
-        let module_id = self.witness_module_id(parent_local_id);
+        let module_id = self.witness_module_id(parent_symbol);
         let opening = self.synthetic_witness_registry.open_positive_exists(
             &mut self.kernel_context,
             module_id,
             clause,
             &reduction,
         );
-        let synthetic_local_id = opening
+        let synthetic_symbol = opening
             .term
             .iter_atoms()
             .find_map(|atom| match atom {
-                Atom::Symbol(Symbol::ScopedConstant(local_id)) => Some(*local_id),
+                Atom::Symbol(symbol @ Symbol::ScopedConstant(_)) => Some(*symbol),
                 _ => None,
             })
             .expect("synthetic witness term should reference its scoped constant");
         let synthetic_witness = self
             .synthetic_witness_registry
-            .get(synthetic_local_id)
+            .get(synthetic_symbol)
             .expect("synthetic witness should be registered");
         let justification = Claim::new(clause.clone(), VariableMap::new())
             .map_err(CodeGenError::GeneratedBadCode)?;
@@ -1903,26 +1981,26 @@ impl<'a> WitnessEmitter<'a> {
             &self.kernel_context,
         )?;
         self.emit_witness_step(
-            synthetic_local_id,
+            synthetic_symbol,
             CertificateStep::Satisfy(step),
-            Some(parent_local_id),
+            Some(parent_symbol),
         )
     }
 
-    fn emitted_witness_name_order(&self) -> Vec<AtomId> {
+    fn emitted_witness_name_order(&self) -> Vec<Symbol> {
         let mut ordered = self.emitted_witnesses.clone();
         let emitted: HashSet<_> = ordered.iter().copied().collect();
 
         let mut remaining: Vec<_> = self
             .witness_registry
             .iter()
-            .map(|(&local_id, _)| local_id)
+            .map(|(&symbol, _)| symbol)
             .chain(
                 self.synthetic_witness_registry
                     .iter()
-                    .map(|(&local_id, _)| local_id),
+                    .map(|(&symbol, _)| symbol),
             )
-            .filter(|local_id| !emitted.contains(local_id))
+            .filter(|symbol| !emitted.contains(symbol))
             .collect();
         remaining.sort_unstable();
         remaining.dedup();
@@ -1934,7 +2012,7 @@ impl<'a> WitnessEmitter<'a> {
         &self,
         next_index: &mut u32,
         module_id: ModuleId,
-        renamed_locals: &HashSet<AtomId>,
+        renamed_symbols: &HashSet<Symbol>,
         assigned_names: &HashSet<ConstantName>,
     ) -> ConstantName {
         loop {
@@ -1945,11 +2023,32 @@ impl<'a> WitnessEmitter<'a> {
             }
             match self.kernel_context.symbol_table.get_symbol(&candidate) {
                 None => return candidate,
-                Some(Symbol::ScopedConstant(local_id)) if renamed_locals.contains(&local_id) => {
-                    return candidate;
-                }
+                Some(symbol) if renamed_symbols.contains(&symbol) => return candidate,
                 _ => {}
             }
+        }
+    }
+
+    fn rename_witness_symbol(
+        &mut self,
+        symbol: Symbol,
+        name: ConstantName,
+    ) -> Result<(), CodeGenError> {
+        match symbol {
+            Symbol::ScopedConstant(local_id) => self
+                .kernel_context
+                .symbol_table
+                .rename_scoped_constant(local_id, name)
+                .map_err(CodeGenError::GeneratedBadCode),
+            Symbol::GlobalConstant(module_id, atom_id) => self
+                .kernel_context
+                .symbol_table
+                .rename_global_constant(module_id, atom_id, name)
+                .map_err(CodeGenError::GeneratedBadCode),
+            _ => Err(CodeGenError::GeneratedBadCode(format!(
+                "cannot rename non-constant witness symbol {}",
+                symbol
+            ))),
         }
     }
 
@@ -1958,38 +2057,38 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        let ordered_locals = self.emitted_witness_name_order();
-        let renamed_locals: HashSet<_> = ordered_locals.iter().copied().collect();
+        let ordered_symbols = self.emitted_witness_name_order();
+        let renamed_symbols: HashSet<_> = ordered_symbols.iter().copied().collect();
         let mut assigned_names = HashSet::new();
         let mut final_names = HashMap::new();
         let mut original_names = HashMap::new();
         let mut next_index = 0;
 
-        for &local_id in &ordered_locals {
+        for &symbol in &ordered_symbols {
             let old_name = self
                 .kernel_context
                 .symbol_table
-                .name_for_local_id(local_id)
+                .name_for_symbol(symbol)
                 .clone();
-            original_names.insert(local_id, old_name.clone());
+            original_names.insert(symbol, old_name.clone());
             let new_name = self.next_compact_witness_name(
                 &mut next_index,
                 old_name.module_id(),
-                &renamed_locals,
+                &renamed_symbols,
                 &assigned_names,
             );
             assigned_names.insert(new_name.clone());
-            final_names.insert(local_id, new_name);
+            final_names.insert(symbol, new_name);
         }
 
         let mut assigned_temp_names = HashSet::new();
         let mut next_temp_index = 0;
         let mut temp_names = HashMap::new();
-        for &local_id in &ordered_locals {
+        for &symbol in &ordered_symbols {
             let module_id = self
                 .kernel_context
                 .symbol_table
-                .name_for_local_id(local_id)
+                .name_for_symbol(symbol)
                 .module_id();
             let temp_name = loop {
                 let candidate =
@@ -2008,36 +2107,30 @@ impl<'a> WitnessEmitter<'a> {
                 }
             };
             assigned_temp_names.insert(temp_name.clone());
-            temp_names.insert(local_id, temp_name);
+            temp_names.insert(symbol, temp_name);
         }
 
-        for &local_id in &ordered_locals {
+        for &symbol in &ordered_symbols {
             let temp_name = temp_names
-                .get(&local_id)
+                .get(&symbol)
                 .expect("every renamed witness should have a temporary name");
-            self.kernel_context
-                .symbol_table
-                .rename_scoped_constant(local_id, temp_name.clone())
-                .map_err(CodeGenError::GeneratedBadCode)?;
+            self.rename_witness_symbol(symbol, temp_name.clone())?;
         }
 
-        for &local_id in &ordered_locals {
+        for &symbol in &ordered_symbols {
             let final_name = final_names
-                .get(&local_id)
+                .get(&symbol)
                 .expect("every renamed witness should have a final name");
-            self.kernel_context
-                .symbol_table
-                .rename_scoped_constant(local_id, final_name.clone())
-                .map_err(CodeGenError::GeneratedBadCode)?;
+            self.rename_witness_symbol(symbol, final_name.clone())?;
         }
 
         let old_to_new: HashMap<ConstantName, ConstantName> = original_names
             .into_iter()
-            .map(|(local_id, old_name)| {
+            .map(|(symbol, old_name)| {
                 (
                     old_name,
                     final_names
-                        .get(&local_id)
+                        .get(&symbol)
                         .expect("every renamed witness should have a final name")
                         .clone(),
                 )
@@ -2049,11 +2142,11 @@ impl<'a> WitnessEmitter<'a> {
             let CertificateStep::Satisfy(satisfy_step) = step else {
                 continue;
             };
-            let local_id = emitted_iter
+            let symbol = emitted_iter
                 .next()
                 .expect("every emitted satisfy step should have a witness local id");
             let renamed_name = final_names
-                .get(&local_id)
+                .get(&symbol)
                 .expect("emitted witness should have a compacted name");
             let ConstantName::Unqualified(_, base_name) = renamed_name else {
                 panic!("witness names should remain unqualified");
@@ -2080,24 +2173,26 @@ impl<'a> WitnessEmitter<'a> {
         Ok(())
     }
 
-    fn claim_specialization_source_local_id(claim: &Claim) -> Option<AtomId> {
+    fn claim_specialization_source_symbol(claim: &Claim) -> Option<Symbol> {
         if claim.clause().get_local_context().len() != 1 {
             return None;
         }
         let term = claim.var_map().get_mapping(0)?;
         match term.as_ref().decompose() {
-            Decomposition::Atom(Atom::Symbol(Symbol::ScopedConstant(local_id))) => Some(*local_id),
+            Decomposition::Atom(Atom::Symbol(
+                symbol @ (Symbol::ScopedConstant(_) | Symbol::GlobalConstant(..)),
+            )) => Some(*symbol),
             _ => None,
         }
     }
 
-    fn witness_module_id(&self, parent_local_id: AtomId) -> ModuleId {
+    fn witness_module_id(&self, parent_symbol: Symbol) -> ModuleId {
         self.witness_registry
-            .get(parent_local_id)
+            .get(parent_symbol)
             .map(|witness| witness.name.module_id())
             .or_else(|| {
                 self.synthetic_witness_registry
-                    .get(parent_local_id)
+                    .get(parent_symbol)
                     .map(|witness| witness.name.module_id())
             })
             .unwrap_or(self.module_id)
@@ -2109,9 +2204,9 @@ impl<'a> WitnessEmitter<'a> {
     }
 
     fn emit_anchors_for_step(&mut self, index: usize) -> Result<(), CodeGenError> {
-        if let Some(local_ids) = self.claim_anchors.get(&index).cloned() {
-            for local_id in local_ids {
-                self.emit_witness(local_id)?;
+        if let Some(symbols) = self.claim_anchors.get(&index).cloned() {
+            for symbol in symbols {
+                self.emit_witness(symbol)?;
             }
         }
         Ok(())
@@ -2121,8 +2216,8 @@ impl<'a> WitnessEmitter<'a> {
     fn specialized_positive_exists_step(
         &mut self,
         claim: &Claim,
-    ) -> Result<Option<(AtomId, AtomId, SatisfyStep)>, CodeGenError> {
-        let Some(parent_local_id) = Self::claim_specialization_source_local_id(claim) else {
+    ) -> Result<Option<(Symbol, Symbol, SatisfyStep)>, CodeGenError> {
+        let Some(parent_symbol) = Self::claim_specialization_source_symbol(claim) else {
             return Ok(None);
         };
         let specialized_clause = claim
@@ -2132,31 +2227,31 @@ impl<'a> WitnessEmitter<'a> {
         else {
             return Ok(None);
         };
-        let module_id = self.witness_module_id(parent_local_id);
+        let module_id = self.witness_module_id(parent_symbol);
         let opening = self.synthetic_witness_registry.open_positive_exists(
             &mut self.kernel_context,
             module_id,
             &specialized_clause,
             &reduction,
         );
-        let synthetic_local_id = opening
+        let synthetic_symbol = opening
             .term
             .iter_atoms()
             .find_map(|atom| match atom {
-                Atom::Symbol(Symbol::ScopedConstant(local_id)) => Some(*local_id),
+                Atom::Symbol(symbol @ Symbol::ScopedConstant(_)) => Some(*symbol),
                 _ => None,
             })
             .expect("synthetic witness term should reference its scoped constant");
         let synthetic_witness = self
             .synthetic_witness_registry
-            .get(synthetic_local_id)
+            .get(synthetic_symbol)
             .expect("synthetic witness should be registered");
         let step = Certificate::witness_entry_to_step(
             synthetic_witness,
             claim.clone(),
             &self.kernel_context,
         )?;
-        Ok(Some((synthetic_local_id, parent_local_id, step)))
+        Ok(Some((synthetic_symbol, parent_symbol, step)))
     }
 
     fn find_witness_placement(

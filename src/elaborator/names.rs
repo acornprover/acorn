@@ -3,6 +3,19 @@ use std::fmt;
 use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::module::ModuleId;
 
+/// An internal, source-unnameable constant introduced by elaboration.
+///
+/// Synthetics are used for local witnesses such as local `let ... satisfy`,
+/// destructuring lets, and transport lets. They are not valid source names and
+/// should be printed in certificates only after being converted to cert-local
+/// witness names.
+#[derive(Debug, Eq, PartialEq, Clone, Hash, PartialOrd, Ord)]
+pub struct SyntheticName {
+    pub line: u32,
+    pub column: u32,
+    pub index: u32,
+}
+
 /// An instance name is something like Ring.add<Int>.
 /// This can be defined directly, although it should be expressed in
 /// parameterized form when it's a value.
@@ -89,6 +102,9 @@ pub enum ConstantName {
 
     /// A name for a constant that is not an attribute.
     Unqualified(ModuleId, String),
+
+    /// A source-unnameable synthetic witness identity.
+    Synthetic(ModuleId, SyntheticName),
 }
 
 impl ConstantName {
@@ -121,6 +137,17 @@ impl ConstantName {
         ConstantName::Unqualified(module_id, name.to_string())
     }
 
+    pub fn synthetic(module_id: ModuleId, line: u32, column: u32, index: u32) -> ConstantName {
+        ConstantName::Synthetic(
+            module_id,
+            SyntheticName {
+                line,
+                column,
+                index,
+            },
+        )
+    }
+
     /// Returns attribute receiver information as `(receiver_module_id, receiver_name, attr_name)`.
     ///
     /// This is for receiver-side behavior (inheritance, member syntax, etc.), not for locating
@@ -136,6 +163,7 @@ impl ConstantName {
             ConstantName::TypeclassAttribute(_, tc, attr) => Some((tc.module_id, &tc.name, attr)),
             ConstantName::InstanceAttribute(_, _) => None,
             ConstantName::Unqualified(..) => None,
+            ConstantName::Synthetic(..) => None,
         }
     }
 
@@ -158,6 +186,7 @@ impl ConstantName {
             ConstantName::TypeclassAttribute(module_id, _, _) => *module_id,
             ConstantName::InstanceAttribute(module_id, _) => *module_id,
             ConstantName::Unqualified(module_id, _) => *module_id,
+            ConstantName::Synthetic(module_id, _) => *module_id,
         }
     }
 
@@ -168,6 +197,7 @@ impl ConstantName {
                 datatype_attr == datatype
             }
             ConstantName::InstanceAttribute(_, _) => false,
+            ConstantName::Synthetic(_, _) => false,
             _ => false,
         }
     }
@@ -194,6 +224,11 @@ impl fmt::Display for ConstantName {
             }
             ConstantName::InstanceAttribute(_, inst) => write!(f, "{}", inst),
             ConstantName::Unqualified(_, name) => write!(f, "{}", name),
+            ConstantName::Synthetic(_, synthetic) => write!(
+                f,
+                "<synthetic:{}:{}:{}>",
+                synthetic.line, synthetic.column, synthetic.index
+            ),
         }
     }
 }
@@ -288,6 +323,7 @@ impl DefinedName {
     pub fn is_qualified(&self) -> bool {
         match self {
             DefinedName::Constant(ConstantName::Unqualified(..)) => false,
+            DefinedName::Constant(ConstantName::Synthetic(..)) => false,
             _ => true,
         }
     }

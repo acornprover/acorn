@@ -1,4 +1,4 @@
-mod add_statement;
+pub(crate) mod add_statement;
 
 use std::collections::HashSet;
 use std::sync::Arc;

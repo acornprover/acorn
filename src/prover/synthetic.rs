@@ -31,8 +31,8 @@ pub struct WitnessEntry {
 
 impl WitnessEntry {
     /// Collect any previously declared witnesses that appear in this witness's types or body.
-    pub fn referenced_scoped_constants(&self) -> Vec<AtomId> {
-        let mut ids = vec![];
+    pub fn referenced_symbols(&self) -> Vec<Symbol> {
+        let mut symbols = vec![];
         for term in self
             .ambient_context
             .get_var_types()
@@ -42,14 +42,17 @@ impl WitnessEntry {
             .chain(std::iter::once(&self.body))
         {
             for atom in term.iter_atoms() {
-                if let Atom::Symbol(Symbol::ScopedConstant(local_id)) = atom {
-                    ids.push(*local_id);
+                if let Atom::Symbol(
+                    symbol @ (Symbol::ScopedConstant(_) | Symbol::GlobalConstant(..)),
+                ) = atom
+                {
+                    symbols.push(*symbol);
                 }
             }
         }
-        ids.sort();
-        ids.dedup();
-        ids
+        symbols.sort();
+        symbols.dedup();
+        symbols
     }
 }
 
@@ -60,7 +63,7 @@ pub struct WitnessOpening {
 
 #[derive(Clone, Default)]
 pub struct WitnessRegistry {
-    by_local_id: HashMap<AtomId, WitnessEntry>,
+    by_symbol: HashMap<Symbol, WitnessEntry>,
     next_name_index: u32,
 }
 
@@ -70,14 +73,86 @@ impl WitnessRegistry {
         Self::default()
     }
 
-    /// Look up witness metadata by the scoped constant id used in proof clauses.
-    pub fn get(&self, local_id: AtomId) -> Option<&WitnessEntry> {
-        self.by_local_id.get(&local_id)
+    /// Look up witness metadata by the symbol used in proof clauses.
+    pub fn get(&self, symbol: Symbol) -> Option<&WitnessEntry> {
+        self.by_symbol.get(&symbol)
+    }
+
+    /// Look up witness metadata by a scoped constant id used in proof clauses.
+    pub fn get_local(&self, local_id: AtomId) -> Option<&WitnessEntry> {
+        self.get(Symbol::ScopedConstant(local_id))
     }
 
     /// Iterate over every prover-generated witness recorded for this proof search.
-    pub fn iter(&self) -> impl Iterator<Item = (&AtomId, &WitnessEntry)> {
-        self.by_local_id.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&Symbol, &WitnessEntry)> {
+        self.by_symbol.iter()
+    }
+
+    pub fn merge_from(&mut self, other: &WitnessRegistry) {
+        self.by_symbol.extend(
+            other
+                .by_symbol
+                .iter()
+                .map(|(symbol, entry)| (*symbol, entry.clone())),
+        );
+        self.next_name_index = self.next_name_index.max(other.next_name_index);
+    }
+
+    fn insert_existing_positive_exists(
+        &mut self,
+        kernel_context: &KernelContext,
+        symbol: Symbol,
+        clause: &Clause,
+        reduction: &PositiveExistsReduction,
+    ) -> Result<Clause, String> {
+        let ambient_context = clause.get_local_context();
+        let name = kernel_context
+            .symbol_table
+            .try_name_for_symbol(symbol)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "synthetic witness symbol {:?} has no registered name",
+                    symbol
+                )
+            })?;
+        let witness = witness_application(symbol, ambient_context);
+        let reduced = clause.instantiate_positive_exists_reduction(reduction, witness);
+        self.by_symbol.insert(
+            symbol,
+            WitnessEntry {
+                symbol,
+                name,
+                ambient_context: ambient_context.clone(),
+                return_type: reduction.binder_type.clone(),
+                body: reduction.body.clone(),
+                general_clause: clause.normalized(),
+                specialized_clause: reduced.clause.clone(),
+            },
+        );
+        Ok(reduced.clause.normalized())
+    }
+
+    /// Register existing synthetic constants as witnesses for a nested positive existential.
+    pub fn register_existing_positive_exists_chain(
+        &mut self,
+        kernel_context: &KernelContext,
+        mut clause: Clause,
+        symbols: &[Symbol],
+    ) -> Result<(), String> {
+        for symbol in symbols {
+            let reduction = clause
+                .positive_exists_witness_reduction(kernel_context)
+                .ok_or_else(|| {
+                    format!(
+                        "synthetic witness symbol {:?} did not correspond to a positive existential",
+                        symbol
+                    )
+                })?;
+            clause =
+                self.insert_existing_positive_exists(kernel_context, *symbol, &clause, &reduction)?;
+        }
+        Ok(())
     }
 
     /// Open a top-level positive existential by introducing a named witness.
@@ -116,11 +191,8 @@ impl WitnessRegistry {
         let witness = witness_application(symbol, ambient_context);
         let reduced = clause.instantiate_positive_exists_reduction(reduction, witness.clone());
 
-        let Symbol::ScopedConstant(local_id) = symbol else {
-            panic!("named witness must be a scoped constant");
-        };
-        self.by_local_id.insert(
-            local_id,
+        self.by_symbol.insert(
+            symbol,
             WitnessEntry {
                 symbol,
                 name,

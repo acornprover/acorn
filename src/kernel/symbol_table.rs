@@ -925,6 +925,26 @@ impl SymbolTable {
             .and_then(|name| name.as_ref())
     }
 
+    pub fn name_for_symbol(&self, symbol: Symbol) -> &ConstantName {
+        match symbol {
+            Symbol::GlobalConstant(module_id, atom_id) => {
+                self.name_for_global_id(module_id, atom_id)
+            }
+            Symbol::ScopedConstant(atom_id) => self.name_for_local_id(atom_id),
+            _ => panic!("builtin symbol {:?} does not have a constant name", symbol),
+        }
+    }
+
+    pub fn try_name_for_symbol(&self, symbol: Symbol) -> Option<&ConstantName> {
+        match symbol {
+            Symbol::GlobalConstant(module_id, atom_id) => {
+                self.try_name_for_global_id(module_id, atom_id)
+            }
+            Symbol::ScopedConstant(atom_id) => self.try_name_for_local_id(atom_id),
+            _ => None,
+        }
+    }
+
     /// Ensure a global constant has a stable name without changing its global id or type.
     pub fn ensure_global_name(
         &mut self,
@@ -967,6 +987,50 @@ impl SymbolTable {
 
         self.name_to_symbol.insert(name.clone(), symbol);
         self.global_constants[module_id.get() as usize][atom_id as usize] = Some(name);
+        Ok(())
+    }
+
+    /// Rename one global constant while preserving its module/id and type.
+    pub fn rename_global_constant(
+        &mut self,
+        module_id: ModuleId,
+        atom_id: AtomId,
+        new_name: ConstantName,
+    ) -> Result<(), String> {
+        let Some(old_name) = self
+            .global_constants
+            .get(module_id.get() as usize)
+            .and_then(|constants| constants.get(atom_id as usize))
+            .and_then(|name| name.as_ref())
+            .cloned()
+        else {
+            return Err(format!(
+                "global constant {:?}/{} has no registered name",
+                module_id, atom_id
+            ));
+        };
+        if old_name == new_name {
+            return Ok(());
+        }
+
+        let symbol = Symbol::GlobalConstant(module_id, atom_id);
+        if let Some(existing) = self.name_to_symbol.get(&new_name) {
+            if *existing != symbol {
+                return Err(format!(
+                    "cannot rename global constant {:?}/{} from '{}' to '{}': name already maps to {:?}",
+                    module_id, atom_id, old_name, new_name, existing
+                ));
+            }
+        }
+
+        self.name_to_symbol.remove(&old_name);
+        self.name_to_symbol.insert(new_name.clone(), symbol);
+        self.global_constants[module_id.get() as usize][atom_id as usize] = Some(new_name.clone());
+
+        if let Some(info) = self.polymorphic_info.remove(&old_name) {
+            self.polymorphic_info.insert(new_name, info);
+        }
+
         Ok(())
     }
 

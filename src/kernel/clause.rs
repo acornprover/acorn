@@ -1126,10 +1126,10 @@ impl Clause {
         Some((reduced, output_context))
     }
 
-    /// Return the one top-level positive existential that may be opened as a named witness.
-    pub fn positive_exists_reduction(
+    fn positive_exists_reduction_impl(
         &self,
         kernel_context: &KernelContext,
+        allow_obvious_witness: bool,
     ) -> Option<PositiveExistsReduction> {
         if self.literals.len() != 1 {
             return None;
@@ -1150,7 +1150,9 @@ impl Clause {
         if !literal.right.is_true() || !literal.positive {
             return None;
         }
-        if Self::reduce_exists_with_obvious_witness(&literal.left).is_some() {
+        if !allow_obvious_witness
+            && Self::reduce_exists_with_obvious_witness(&literal.left).is_some()
+        {
             return None;
         }
         let (binder_type, body) = literal.left.as_ref().split_exists()?;
@@ -1159,6 +1161,25 @@ impl Clause {
             binder_type: binder_type.to_owned(),
             body: body.to_owned(),
         })
+    }
+
+    /// Return the one top-level positive existential that may be opened by proof search.
+    pub fn positive_exists_reduction(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Option<PositiveExistsReduction> {
+        self.positive_exists_reduction_impl(kernel_context, false)
+    }
+
+    /// Return the one top-level positive existential that may be opened by a certificate witness.
+    ///
+    /// Unlike proof search, certificate witness replay may still need to name an existential whose
+    /// witness is obvious, because source-local synthetics have already chosen a symbol.
+    pub fn positive_exists_witness_reduction(
+        &self,
+        kernel_context: &KernelContext,
+    ) -> Option<PositiveExistsReduction> {
+        self.positive_exists_reduction_impl(kernel_context, true)
     }
 
     /// Apply a chosen witness term to one positive-existential reduction candidate.

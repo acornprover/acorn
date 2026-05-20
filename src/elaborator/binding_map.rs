@@ -254,6 +254,7 @@ impl BindingMap {
                     }
                     ConstantName::TypeclassAttribute(..) => false,
                     ConstantName::InstanceAttribute(..) => false,
+                    ConstantName::Synthetic(..) => false,
                 }
             }
             DefinedName::Instance(instance_name) => {
@@ -672,6 +673,7 @@ impl BindingMap {
                 self.resolve_typeclass_attr(typeclass, attr)
             }
             ConstantName::InstanceAttribute(module_id, _) => Some((*module_id, name.clone())),
+            ConstantName::Synthetic(module_id, _) => Some((*module_id, name.clone())),
         }
     }
 
@@ -1425,6 +1427,7 @@ impl BindingMap {
                     .insert(attribute.clone(), (*module_id, typeclass.clone()));
             }
             ConstantName::InstanceAttribute(_, _) => {}
+            ConstantName::Synthetic(_, _) => {}
             ConstantName::Unqualified(_, name) if expose_name => {
                 self.unqualified.insert(name.clone(), ());
             }
@@ -2382,7 +2385,10 @@ impl BindingMap {
         match value {
             AcornValue::Variable(_, _) | AcornValue::Bool(_) => {}
             AcornValue::Constant(c) => {
-                if matches!(c.name, ConstantName::InstanceAttribute(..)) {
+                if matches!(
+                    c.name,
+                    ConstantName::InstanceAttribute(..) | ConstantName::Synthetic(..)
+                ) {
                     return;
                 }
                 if c.name.module_id() == self.module_id && !self.constant_defs.contains_key(&c.name)

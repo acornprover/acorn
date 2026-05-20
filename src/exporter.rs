@@ -1027,6 +1027,7 @@ fn export_fact(
                 source_block: None,
             });
         }
+        Fact::SyntheticWitness(_) => {}
         Fact::Extends(_, _, _, _) => {}
     }
 }
@@ -1371,6 +1372,13 @@ fn constant_name_strings(name: &ConstantName) -> (String, String) {
                 inst.typeclass.name, inst.attribute, inst.datatype.name
             ),
         ),
+        ConstantName::Synthetic(_, synthetic) => {
+            let name = format!(
+                "<synthetic:{}:{}:{}>",
+                synthetic.line, synthetic.column, synthetic.index
+            );
+            (name.clone(), name)
+        }
     }
 }
 

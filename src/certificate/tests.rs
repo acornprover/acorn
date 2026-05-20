@@ -739,7 +739,7 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
         .positive_exists_reduction(&kernel_context)
         .expect("expected positive exists reduction");
     let mut witness_registry = WitnessRegistry::new();
-    let mut last_local_id = None;
+    let mut last_symbol = None;
 
     for _ in 0..34 {
         let opening = witness_registry.open_positive_exists(
@@ -748,15 +748,15 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
             &source_clause,
             &exists_reduction,
         );
-        last_local_id = opening.term.iter_atoms().find_map(|atom| match atom {
-            Atom::Symbol(Symbol::ScopedConstant(local_id)) => Some(*local_id),
+        last_symbol = opening.term.iter_atoms().find_map(|atom| match atom {
+            Atom::Symbol(symbol @ Symbol::ScopedConstant(_)) => Some(*symbol),
             _ => None,
         });
     }
-    let last_local_id = last_local_id.expect("expected a final witness local id");
+    let last_symbol = last_symbol.expect("expected a final witness symbol");
     let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
     let witness = witness_registry
-        .get(last_local_id)
+        .get(last_symbol)
         .expect("expected the last witness to remain registered");
     let specialized_claim = Claim::new(witness.specialized_clause.clone(), VariableMap::new())
         .expect("specialized witness clause should normalize");
@@ -789,7 +789,7 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
     assert_eq!(
         updated_kernel_context
             .symbol_table
-            .name_for_local_id(last_local_id)
+            .name_for_symbol(last_symbol)
             .to_string(),
         "w0"
     );
@@ -1016,7 +1016,10 @@ fn test_specialized_positive_exists_step_uses_emitter_module_id() {
         .expect("opening a specialized positive exists should succeed")
         .expect("expected a synthetic witness step");
 
-    assert_eq!(returned_parent_local_id, parent_local_id);
+    assert_eq!(
+        returned_parent_local_id,
+        Symbol::ScopedConstant(parent_local_id)
+    );
     assert_eq!(step.justification, claim);
 
     let synthetic_witness = emitter

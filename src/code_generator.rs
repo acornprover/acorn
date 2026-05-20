@@ -1498,6 +1498,11 @@ impl CodeGenerator<'_> {
                     Expression::generate_identifier(&inst.typeclass.name)
                         .add_dot_str(&inst.attribute)
                 }
+                ConstantName::Synthetic(..) => {
+                    return Err(Error::internal(
+                        "synthetic witness leaked into code generation",
+                    ));
+                }
             });
         }
 
@@ -1558,6 +1563,9 @@ impl CodeGenerator<'_> {
                         .add_dot_str(&inst.attribute)
                 })
             }
+            ConstantName::Synthetic(..) => Err(Error::internal(
+                "synthetic witness leaked into code generation",
+            )),
         }
     }
 

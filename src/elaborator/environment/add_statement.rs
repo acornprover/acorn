@@ -99,7 +99,7 @@ mod generated;
 mod imports;
 mod local_obligations;
 mod simple_types;
-mod transport;
+pub(crate) mod transport;
 mod typeclasses;
 
 // This file generally contains the logic for creating an environment.

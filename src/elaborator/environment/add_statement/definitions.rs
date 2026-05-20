@@ -215,29 +215,21 @@ impl Environment {
             .unwrap_or(0)
             + local_family_params.value_params.len() as AtomId;
         let target_variable = AcornValue::Variable(family_value_param_count, target_type.clone());
-        let transport = TransportBuilder::new(self, project);
-        let general_relation = transport.relation(
-            &source_type,
-            &target_type,
-            source_value.clone(),
-            target_variable,
-            transport_token,
-            family_value_param_count + 1,
-        )?;
-        let relation_is_exact = source_type == target_type;
-        let general_claim = if relation_is_exact {
-            Some(AcornValue::Exists(
-                vec![target_type.clone()],
-                Box::new(general_relation.clone()),
-            ))
-        } else {
-            None
+        let general_relation = {
+            let transport = TransportBuilder::new(self, project);
+            transport.relation(
+                &source_type,
+                &target_type,
+                source_value.clone(),
+                target_variable,
+                transport_token,
+                family_value_param_count + 1,
+            )?
         };
-        let transport_requirements = if relation_is_exact {
-            vec![]
-        } else {
-            transport.requirements(&source_type, &target_type, transport_token)?
-        };
+        let general_claim = AcornValue::Exists(
+            vec![target_type.clone()],
+            Box::new(general_relation.clone()),
+        );
         self.add_genericized_local_obligations(
             project,
             statement,
@@ -247,20 +239,83 @@ impl Environment {
 
         let mut block_args = explicit_value_block_args(&local_family_params.value_params);
         block_args.extend(datatype_value_block_args(datatype_params));
-        let block = if let Some(general_claim) = general_claim {
-            Some(Block::new(
-                project,
-                &self,
-                vec![],
-                block_args.clone(),
-                BlockParams::VariableSatisfy(general_claim, ls.value.range()),
-                &statement.first_token,
-                &statement.last_token,
-                None,
-            )?)
-        } else {
-            None
-        };
+        if local_family_params.value_params.is_empty() && datatype_params.is_none() {
+            let prepared = {
+                let transport = TransportBuilder::new(self, project);
+                if let Some(witness_value) = transport.witness(
+                    &source_type,
+                    &target_type,
+                    source_value.clone(),
+                    transport_token,
+                    family_value_param_count,
+                )? {
+                    let claim = transport.relation(
+                        &source_type,
+                        &target_type,
+                        source_value.clone(),
+                        witness_value.clone(),
+                        transport_token,
+                        family_value_param_count,
+                    )?;
+                    let block = Block::new(
+                        project,
+                        &self,
+                        vec![],
+                        block_args.clone(),
+                        BlockParams::VariableSatisfy(claim, ls.value.range()),
+                        &statement.first_token,
+                        &statement.last_token,
+                        None,
+                    )?;
+                    Some((witness_value, block))
+                } else {
+                    None
+                }
+            };
+            if let Some((witness_value, block)) = prepared {
+                self.define_constant(
+                    defined_name.clone(),
+                    definition_type_params.clone(),
+                    vec![],
+                    target_type.clone().genericize(&definition_type_params),
+                    Some(witness_value.genericize(&definition_type_params)),
+                    range,
+                    Some(statement.to_string()),
+                );
+                let constant_value = self
+                    .bindings
+                    .get_constant_value(&defined_name)
+                    .map_err(|e| statement.error(&e))?
+                    .as_value(statement)?;
+                let external_claim = {
+                    let transport = TransportBuilder::new(self, project);
+                    transport.relation(
+                        &source_type,
+                        &target_type,
+                        source_value,
+                        constant_value,
+                        transport_token,
+                        family_value_param_count,
+                    )?
+                }
+                .genericize(&definition_type_params);
+                let source = Source::anonymous(self.module_id, statement.range(), self.depth);
+                let prop = Proposition::new(external_claim, definition_type_params, source);
+                let index = self.add_node(Node::block(project, self, block, Some(prop)));
+                self.add_node_lines(index, &statement.range());
+                return Ok(());
+            }
+        }
+        let block = Block::new(
+            project,
+            &self,
+            vec![],
+            block_args,
+            BlockParams::VariableSatisfy(general_claim, ls.value.range()),
+            &statement.first_token,
+            &statement.last_token,
+            None,
+        )?;
 
         let doc_comments = self.take_doc_comments();
         let constant_value = self.declare_witness_constant(
@@ -288,20 +343,7 @@ impl Environment {
         .genericize(&definition_type_params);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let specific_prop = Proposition::new(external_claim, definition_type_params, source);
-        let node = if let Some(block) = block {
-            Node::block(project, self, block, Some(specific_prop))
-        } else {
-            self.requirement_backed_fact_node(
-                project,
-                statement,
-                vec![],
-                block_args,
-                transport_requirements,
-                ls.value.range(),
-                None,
-                specific_prop,
-            )?
-        };
+        let node = Node::block(project, self, block, Some(specific_prop));
         let index = self.add_node(node);
         self.add_node_lines(index, &statement.range());
         Ok(())

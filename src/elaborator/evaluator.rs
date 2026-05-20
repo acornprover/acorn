@@ -6,6 +6,7 @@ use crate::elaborator::acorn_type::{
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
+use crate::elaborator::environment::add_statement::transport::TransportBuilder;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::inference::InferenceEngine;
 use crate::elaborator::named_entity::NamedEntity;
@@ -72,6 +73,14 @@ struct LocalStackContext {
     values: Vec<AcornValue>,
 }
 
+#[derive(Clone, Debug)]
+struct SyntheticCaptureContext {
+    types: Vec<AcornType>,
+    values: Vec<AcornValue>,
+    original_stack_len: AtomId,
+    replacement_values: Vec<AcornValue>,
+}
+
 impl LocalStackContext {
     fn from_stack(stack: &Stack) -> LocalStackContext {
         let entries = stack.entries();
@@ -93,8 +102,40 @@ impl LocalStackContext {
     }
 }
 
+impl SyntheticCaptureContext {
+    fn from_stack(stack: &Stack) -> SyntheticCaptureContext {
+        let entries = stack.entries();
+        let replacement_values = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, acorn_type))| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+            .collect();
+        SyntheticCaptureContext {
+            types: entries
+                .iter()
+                .map(|(_, acorn_type)| acorn_type.clone())
+                .collect(),
+            values: entries
+                .iter()
+                .enumerate()
+                .map(|(i, (_, acorn_type))| AcornValue::Variable(i as AtomId, acorn_type.clone()))
+                .collect(),
+            original_stack_len: entries.len() as AtomId,
+            replacement_values,
+        }
+    }
+
+    fn remap_type(&self, acorn_type: &AcornType) -> AcornType {
+        acorn_type.bind_values(0, self.original_stack_len, &self.replacement_values)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum LocalObligationKind {
+    Claim {
+        claim: AcornValue,
+        premises: Vec<AcornValue>,
+    },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
@@ -114,7 +155,7 @@ pub enum LocalObligationKind {
 pub struct LocalObligation {
     pub arg_names: Vec<String>,
     pub arg_types: Vec<AcornType>,
-    pub hidden_constants: Vec<(String, AcornType)>,
+    pub synthetic_names: Vec<ConstantName>,
     pub kind: LocalObligationKind,
     pub range: tower_lsp::lsp_types::Range,
     pub first_token: Token,
@@ -131,12 +172,15 @@ impl LocalObligation {
                 .into_iter()
                 .map(|arg_type| arg_type.genericize(type_params))
                 .collect(),
-            hidden_constants: self
-                .hidden_constants
-                .into_iter()
-                .map(|(name, acorn_type)| (name, acorn_type.genericize(type_params)))
-                .collect(),
+            synthetic_names: self.synthetic_names,
             kind: match self.kind {
+                LocalObligationKind::Claim { claim, premises } => LocalObligationKind::Claim {
+                    claim: claim.genericize(type_params),
+                    premises: premises
+                        .into_iter()
+                        .map(|premise| premise.genericize(type_params))
+                        .collect(),
+                },
                 LocalObligationKind::ExistsWitness {
                     existence,
                     witness,
@@ -354,16 +398,22 @@ impl<'a> Evaluator<'a> {
         });
     }
 
-    fn local_hidden_value(
+    fn local_synthetic_value(
         &self,
-        hidden_name: String,
+        first_token: &Token,
+        index: u32,
         return_type: AcornType,
         context: &LocalStackContext,
-    ) -> (String, AcornType, AcornValue) {
-        let constant_name = ConstantName::unqualified(self.bindings.module_id(), &hidden_name);
+    ) -> (ConstantName, AcornValue) {
+        let constant_name = ConstantName::synthetic(
+            self.bindings.module_id(),
+            first_token.line_number,
+            first_token.start,
+            index,
+        );
         let hidden_type = AcornType::functional(context.types.clone(), return_type);
         let hidden_function = AcornValue::constant(
-            constant_name,
+            constant_name.clone(),
             vec![],
             hidden_type.clone(),
             hidden_type.clone(),
@@ -371,7 +421,482 @@ impl<'a> Evaluator<'a> {
             vec![],
         );
         let value = AcornValue::apply(hidden_function, context.values.clone());
-        (hidden_name, hidden_type, value)
+        (constant_name, value)
+    }
+
+    fn local_synthetic_value_with_capture(
+        &self,
+        first_token: &Token,
+        index: u32,
+        return_type: AcornType,
+        capture: &SyntheticCaptureContext,
+    ) -> (ConstantName, AcornValue) {
+        let constant_name = ConstantName::synthetic(
+            self.bindings.module_id(),
+            first_token.line_number,
+            first_token.start,
+            index,
+        );
+        let hidden_type =
+            AcornType::functional(capture.types.clone(), capture.remap_type(&return_type));
+        let hidden_function = AcornValue::constant(
+            constant_name.clone(),
+            vec![],
+            hidden_type.clone(),
+            hidden_type.clone(),
+            vec![],
+            vec![],
+        );
+        let value = AcornValue::apply(hidden_function, capture.values.clone());
+        (constant_name, value)
+    }
+
+    fn mark_type_stack_refs(acorn_type: &AcornType, ambient_stack_len: usize, used: &mut [bool]) {
+        match acorn_type {
+            AcornType::Data(_, params) => {
+                for param in params {
+                    Self::mark_type_stack_refs(param, ambient_stack_len, used);
+                }
+            }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            Self::mark_type_stack_refs(acorn_type, ambient_stack_len, used);
+                        }
+                        DependentTypeArg::Value(value) => {
+                            Self::mark_value_stack_refs(value, ambient_stack_len, used);
+                        }
+                    }
+                }
+            }
+            AcornType::Function(function_type) => {
+                let mut stack_len = ambient_stack_len;
+                for arg_type in &function_type.arg_types {
+                    Self::mark_type_stack_refs(arg_type, stack_len, used);
+                    stack_len += 1;
+                }
+                Self::mark_type_stack_refs(&function_type.return_type, stack_len, used);
+            }
+            AcornType::Bool
+            | AcornType::Type0
+            | AcornType::Variable(_)
+            | AcornType::Arbitrary(_)
+            | AcornType::TypeclassConstraint(_) => {}
+        }
+    }
+
+    fn mark_value_stack_refs(value: &AcornValue, ambient_stack_len: usize, used: &mut [bool]) {
+        match value {
+            AcornValue::Variable(index, var_type) => {
+                if (*index as usize) < ambient_stack_len && (*index as usize) < used.len() {
+                    used[*index as usize] = true;
+                }
+                Self::mark_type_stack_refs(var_type, ambient_stack_len, used);
+            }
+            AcornValue::Constant(constant) => {
+                for param in &constant.params {
+                    Self::mark_type_stack_refs(param, ambient_stack_len, used);
+                }
+                Self::mark_type_stack_refs(&constant.instance_type, ambient_stack_len, used);
+                Self::mark_type_stack_refs(&constant.generic_type, ambient_stack_len, used);
+                for value_param_type in &constant.value_param_types {
+                    Self::mark_type_stack_refs(value_param_type, ambient_stack_len, used);
+                }
+                for value in &constant.bound_value_args {
+                    Self::mark_value_stack_refs(value, ambient_stack_len, used);
+                }
+            }
+            AcornValue::Application(app) => {
+                Self::mark_value_stack_refs(&app.function, ambient_stack_len, used);
+                for arg in &app.args {
+                    Self::mark_value_stack_refs(arg, ambient_stack_len, used);
+                }
+            }
+            AcornValue::TypeApplication(app) => {
+                Self::mark_value_stack_refs(&app.function, ambient_stack_len, used);
+                for type_arg in &app.type_args {
+                    Self::mark_type_stack_refs(type_arg, ambient_stack_len, used);
+                }
+            }
+            AcornValue::Lambda(arg_types, body)
+            | AcornValue::ForAll(arg_types, body)
+            | AcornValue::Exists(arg_types, body) => {
+                let mut stack_len = ambient_stack_len;
+                for arg_type in arg_types {
+                    Self::mark_type_stack_refs(arg_type, stack_len, used);
+                    stack_len += 1;
+                }
+                Self::mark_value_stack_refs(body, stack_len, used);
+            }
+            AcornValue::Grouping(value) | AcornValue::Not(value) => {
+                Self::mark_value_stack_refs(value, ambient_stack_len, used);
+            }
+            AcornValue::Binary(_, left, right) => {
+                Self::mark_value_stack_refs(left, ambient_stack_len, used);
+                Self::mark_value_stack_refs(right, ambient_stack_len, used);
+            }
+            AcornValue::IfThenElse(condition, if_value, else_value) => {
+                Self::mark_value_stack_refs(condition, ambient_stack_len, used);
+                Self::mark_value_stack_refs(if_value, ambient_stack_len, used);
+                Self::mark_value_stack_refs(else_value, ambient_stack_len, used);
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                Self::mark_value_stack_refs(scrutinee, ambient_stack_len, used);
+                for case in cases {
+                    let mut stack_len = ambient_stack_len;
+                    for var_type in &case.new_vars {
+                        Self::mark_type_stack_refs(var_type, stack_len, used);
+                        stack_len += 1;
+                    }
+                    Self::mark_value_stack_refs(&case.pattern, stack_len, used);
+                    Self::mark_value_stack_refs(&case.result, stack_len, used);
+                }
+            }
+            AcornValue::Try(value, try_type) => {
+                Self::mark_value_stack_refs(value, ambient_stack_len, used);
+                Self::mark_type_stack_refs(try_type, ambient_stack_len, used);
+            }
+            AcornValue::Bool(_) => {}
+        }
+    }
+
+    fn close_used_stack_vars_over_types(entries: &[(String, AcornType)], used: &mut [bool]) {
+        loop {
+            let before = used.to_vec();
+            for (i, (_, acorn_type)) in entries.iter().enumerate() {
+                if used[i] {
+                    Self::mark_type_stack_refs(acorn_type, entries.len(), used);
+                }
+            }
+            if before == used {
+                break;
+            }
+        }
+    }
+
+    fn push_stack_ref(
+        index: AtomId,
+        ambient_stack_len: usize,
+        seen: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        let index = index as usize;
+        if index < ambient_stack_len && index < seen.len() && !seen[index] {
+            seen[index] = true;
+            order.push(index);
+        }
+    }
+
+    fn collect_type_stack_refs_in_order(
+        acorn_type: &AcornType,
+        ambient_stack_len: usize,
+        seen: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        match acorn_type {
+            AcornType::Data(_, params) => {
+                for param in params {
+                    Self::collect_type_stack_refs_in_order(param, ambient_stack_len, seen, order);
+                }
+            }
+            AcornType::Family(_, args) => {
+                for arg in args {
+                    match arg {
+                        DependentTypeArg::Type(acorn_type) => {
+                            Self::collect_type_stack_refs_in_order(
+                                acorn_type,
+                                ambient_stack_len,
+                                seen,
+                                order,
+                            );
+                        }
+                        DependentTypeArg::Value(value) => {
+                            Self::collect_value_stack_refs_in_order(
+                                value,
+                                ambient_stack_len,
+                                seen,
+                                order,
+                            );
+                        }
+                    }
+                }
+            }
+            AcornType::Function(function_type) => {
+                let mut stack_len = ambient_stack_len;
+                for arg_type in &function_type.arg_types {
+                    Self::collect_type_stack_refs_in_order(arg_type, stack_len, seen, order);
+                    stack_len += 1;
+                }
+                Self::collect_type_stack_refs_in_order(
+                    &function_type.return_type,
+                    stack_len,
+                    seen,
+                    order,
+                );
+            }
+            AcornType::Bool
+            | AcornType::Type0
+            | AcornType::Variable(_)
+            | AcornType::Arbitrary(_)
+            | AcornType::TypeclassConstraint(_) => {}
+        }
+    }
+
+    fn collect_value_stack_refs_in_order(
+        value: &AcornValue,
+        ambient_stack_len: usize,
+        seen: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        match value {
+            AcornValue::Variable(index, var_type) => {
+                Self::collect_type_stack_refs_in_order(var_type, ambient_stack_len, seen, order);
+                Self::push_stack_ref(*index, ambient_stack_len, seen, order);
+            }
+            AcornValue::Constant(constant) => {
+                for param in &constant.params {
+                    Self::collect_type_stack_refs_in_order(param, ambient_stack_len, seen, order);
+                }
+                Self::collect_type_stack_refs_in_order(
+                    &constant.instance_type,
+                    ambient_stack_len,
+                    seen,
+                    order,
+                );
+                Self::collect_type_stack_refs_in_order(
+                    &constant.generic_type,
+                    ambient_stack_len,
+                    seen,
+                    order,
+                );
+                for value_param_type in &constant.value_param_types {
+                    Self::collect_type_stack_refs_in_order(
+                        value_param_type,
+                        ambient_stack_len,
+                        seen,
+                        order,
+                    );
+                }
+                for value in &constant.bound_value_args {
+                    Self::collect_value_stack_refs_in_order(value, ambient_stack_len, seen, order);
+                }
+            }
+            AcornValue::Application(app) => {
+                Self::collect_value_stack_refs_in_order(
+                    &app.function,
+                    ambient_stack_len,
+                    seen,
+                    order,
+                );
+                for arg in &app.args {
+                    Self::collect_value_stack_refs_in_order(arg, ambient_stack_len, seen, order);
+                }
+            }
+            AcornValue::TypeApplication(app) => {
+                Self::collect_value_stack_refs_in_order(
+                    &app.function,
+                    ambient_stack_len,
+                    seen,
+                    order,
+                );
+                for type_arg in &app.type_args {
+                    Self::collect_type_stack_refs_in_order(
+                        type_arg,
+                        ambient_stack_len,
+                        seen,
+                        order,
+                    );
+                }
+            }
+            AcornValue::Lambda(arg_types, body)
+            | AcornValue::ForAll(arg_types, body)
+            | AcornValue::Exists(arg_types, body) => {
+                let mut stack_len = ambient_stack_len;
+                for arg_type in arg_types {
+                    Self::collect_type_stack_refs_in_order(arg_type, stack_len, seen, order);
+                    stack_len += 1;
+                }
+                Self::collect_value_stack_refs_in_order(body, stack_len, seen, order);
+            }
+            AcornValue::Grouping(value) | AcornValue::Not(value) => {
+                Self::collect_value_stack_refs_in_order(value, ambient_stack_len, seen, order);
+            }
+            AcornValue::Binary(_, left, right) => {
+                Self::collect_value_stack_refs_in_order(left, ambient_stack_len, seen, order);
+                Self::collect_value_stack_refs_in_order(right, ambient_stack_len, seen, order);
+            }
+            AcornValue::IfThenElse(condition, if_value, else_value) => {
+                Self::collect_value_stack_refs_in_order(condition, ambient_stack_len, seen, order);
+                Self::collect_value_stack_refs_in_order(if_value, ambient_stack_len, seen, order);
+                Self::collect_value_stack_refs_in_order(else_value, ambient_stack_len, seen, order);
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                Self::collect_value_stack_refs_in_order(scrutinee, ambient_stack_len, seen, order);
+                for case in cases {
+                    let mut stack_len = ambient_stack_len;
+                    for var_type in &case.new_vars {
+                        Self::collect_type_stack_refs_in_order(var_type, stack_len, seen, order);
+                        stack_len += 1;
+                    }
+                    Self::collect_value_stack_refs_in_order(&case.pattern, stack_len, seen, order);
+                    Self::collect_value_stack_refs_in_order(&case.result, stack_len, seen, order);
+                }
+            }
+            AcornValue::Try(value, try_type) => {
+                Self::collect_value_stack_refs_in_order(value, ambient_stack_len, seen, order);
+                Self::collect_type_stack_refs_in_order(try_type, ambient_stack_len, seen, order);
+            }
+            AcornValue::Bool(_) => {}
+        }
+    }
+
+    fn capture_context_for_local_witness(
+        &self,
+        stack: &Stack,
+        seed_values: &[&AcornValue],
+        seed_types: &[&AcornType],
+    ) -> SyntheticCaptureContext {
+        let entries = stack.entries();
+        let stack_len = entries.len();
+        let mut used = vec![false; stack_len];
+        for value in seed_values {
+            Self::mark_value_stack_refs(value, stack_len, &mut used);
+        }
+        for acorn_type in seed_types {
+            Self::mark_type_stack_refs(acorn_type, stack_len, &mut used);
+        }
+        Self::close_used_stack_vars_over_types(&entries, &mut used);
+
+        let mut capture_indices = vec![];
+        let mut seen = vec![false; stack_len];
+        for acorn_type in seed_types {
+            Self::collect_type_stack_refs_in_order(
+                acorn_type,
+                stack_len,
+                &mut seen,
+                &mut capture_indices,
+            );
+        }
+        for value in seed_values {
+            Self::collect_value_stack_refs_in_order(
+                value,
+                stack_len,
+                &mut seen,
+                &mut capture_indices,
+            );
+        }
+        for (i, is_used) in used.iter().enumerate() {
+            if *is_used && !seen[i] {
+                capture_indices.push(i);
+            }
+        }
+        if capture_indices.len() == stack_len {
+            return SyntheticCaptureContext::from_stack(stack);
+        }
+
+        let mut index_to_capture = vec![None; stack_len];
+        for (capture_index, original_index) in capture_indices.iter().copied().enumerate() {
+            index_to_capture[original_index] = Some(capture_index as AtomId);
+        }
+
+        let mut replacement_values: Vec<AcornValue> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, acorn_type))| {
+                let capture_index = index_to_capture[i].unwrap_or(0);
+                AcornValue::Variable(capture_index, acorn_type.clone())
+            })
+            .collect();
+        let mut capture_types = vec![];
+        for &original_index in &capture_indices {
+            let remapped_type =
+                entries[original_index]
+                    .1
+                    .bind_values(0, stack_len as AtomId, &replacement_values);
+            let capture_index = capture_types.len() as AtomId;
+            replacement_values[original_index] =
+                AcornValue::Variable(capture_index, remapped_type.clone());
+            capture_types.push(remapped_type);
+        }
+        let capture_values = capture_indices
+            .iter()
+            .map(|&original_index| {
+                AcornValue::Variable(original_index as AtomId, entries[original_index].1.clone())
+            })
+            .collect();
+        SyntheticCaptureContext {
+            types: capture_types,
+            values: capture_values,
+            original_stack_len: stack_len as AtomId,
+            replacement_values,
+        }
+    }
+
+    fn references_stack_var(value: &AcornValue, var_index: AtomId) -> bool {
+        match value {
+            AcornValue::Variable(index, _) => *index == var_index,
+            AcornValue::Constant(_) | AcornValue::Bool(_) => false,
+            AcornValue::Application(app) => {
+                Self::references_stack_var(&app.function, var_index)
+                    || app
+                        .args
+                        .iter()
+                        .any(|arg| Self::references_stack_var(arg, var_index))
+            }
+            AcornValue::TypeApplication(app) => {
+                Self::references_stack_var(&app.function, var_index)
+            }
+            AcornValue::Lambda(_, body)
+            | AcornValue::ForAll(_, body)
+            | AcornValue::Exists(_, body)
+            | AcornValue::Grouping(body)
+            | AcornValue::Not(body)
+            | AcornValue::Try(body, _) => Self::references_stack_var(body, var_index),
+            AcornValue::Binary(_, left, right) => {
+                Self::references_stack_var(left, var_index)
+                    || Self::references_stack_var(right, var_index)
+            }
+            AcornValue::IfThenElse(condition, if_value, else_value) => {
+                Self::references_stack_var(condition, var_index)
+                    || Self::references_stack_var(if_value, var_index)
+                    || Self::references_stack_var(else_value, var_index)
+            }
+            AcornValue::Match(scrutinee, cases) => {
+                Self::references_stack_var(scrutinee, var_index)
+                    || cases.iter().any(|case| {
+                        Self::references_stack_var(&case.pattern, var_index)
+                            || Self::references_stack_var(&case.result, var_index)
+                    })
+            }
+        }
+    }
+
+    fn local_satisfy_equality_witness(
+        condition: &AcornValue,
+        var_index: AtomId,
+        var_type: &AcornType,
+    ) -> Option<AcornValue> {
+        match condition {
+            AcornValue::Binary(BinaryOp::Equals, left, right) => {
+                let target = AcornValue::Variable(var_index, var_type.clone());
+                if **left == target && !Self::references_stack_var(right, var_index) {
+                    Some((**right).clone())
+                } else if **right == target && !Self::references_stack_var(left, var_index) {
+                    Some((**left).clone())
+                } else {
+                    None
+                }
+            }
+            AcornValue::Binary(BinaryOp::And, left, right) => {
+                Self::local_satisfy_equality_witness(left, var_index, var_type)
+                    .or_else(|| Self::local_satisfy_equality_witness(right, var_index, var_type))
+            }
+            AcornValue::Grouping(value) => {
+                Self::local_satisfy_equality_witness(value, var_index, var_type)
+            }
+            _ => None,
+        }
     }
 
     fn validate_pattern_arg_name(name_token: &Token) -> error::Result<()> {
@@ -1769,23 +2294,53 @@ impl<'a> Evaluator<'a> {
                 source_value
             } else {
                 let context = LocalStackContext::from_stack(stack);
-                let hidden_name = format!(
-                    "__local_transport_{}_{}_{}",
-                    transport_token.line_number, transport_token.start, name
-                );
-                let (hidden_name, hidden_type, target_value) =
-                    self.local_hidden_value(hidden_name, expected_type.clone(), &context);
+                let premises = self.local_premises_for_stack(stack.len());
+                let transport = TransportBuilder::from_bindings(self.bindings, self.project);
+                if let Some(target_value) = transport.witness(
+                    &source_type,
+                    expected_type,
+                    source_value.clone(),
+                    transport_token,
+                    stack.len() as AtomId,
+                )? {
+                    let claim = transport.relation(
+                        &source_type,
+                        expected_type,
+                        source_value,
+                        target_value.clone(),
+                        transport_token,
+                        stack.len() as AtomId,
+                    )?;
+                    self.push_local_alias(name, target_value, stack.len());
+                    self.local_obligations.push(LocalObligation {
+                        arg_names: context.names,
+                        arg_types: context.types,
+                        synthetic_names: vec![],
+                        kind: LocalObligationKind::Claim { claim, premises },
+                        range: local_let.value.range(),
+                        first_token: local_let.let_token.clone(),
+                        last_token: local_let
+                            .body
+                            .as_ref()
+                            .map(|body| body.right_brace.clone())
+                            .unwrap_or_else(|| local_let.value.last_token().clone()),
+                        body: local_let.body.clone(),
+                    });
+                    return Ok(());
+                }
+                let (synthetic_name, target_value) =
+                    self.local_synthetic_value(transport_token, 0, expected_type.clone(), &context);
                 self.push_local_alias(name, target_value.clone(), stack.len());
                 self.local_obligations.push(LocalObligation {
                     arg_names: context.names,
                     arg_types: context.types,
-                    hidden_constants: vec![(hidden_name, hidden_type)],
+                    synthetic_names: vec![synthetic_name],
                     kind: LocalObligationKind::Transport {
                         source_type,
                         target_type: expected_type.clone(),
                         source_value,
                         target_value,
-                        premises: self.local_premises_for_stack(stack.len()),
+                        premises,
                         transport_token: transport_token.clone(),
                     },
                     range: local_let.value.range(),
@@ -1836,21 +2391,41 @@ impl<'a> Evaluator<'a> {
         stack.remove(&name);
         let condition = condition_result?;
 
-        let hidden_name = format!(
-            "__local_satisfy_{}_{}_{}",
-            local_satisfy.let_token.line_number, local_satisfy.let_token.start, name
-        );
-        let (hidden_name, hidden_type, witness_value) =
-            self.local_hidden_value(hidden_name, arg_type.clone(), &context);
+        let stack_size = stack.len() as AtomId;
+        if local_satisfy.body.is_none() {
+            if let Some(witness_value) =
+                Self::local_satisfy_equality_witness(&condition, stack_size, &arg_type)
+            {
+                let claim =
+                    condition.bind_values(stack_size, stack_size + 1, &[witness_value.clone()]);
+                self.push_local_alias(name, witness_value, stack.len());
+                self.local_obligations.push(LocalObligation {
+                    arg_names: context.names,
+                    arg_types: context.types,
+                    synthetic_names: vec![],
+                    kind: LocalObligationKind::Claim {
+                        claim,
+                        premises: self.local_premises_for_stack(stack.len()),
+                    },
+                    range: local_satisfy.condition.range(),
+                    first_token: local_satisfy.let_token.clone(),
+                    last_token: local_satisfy.condition_right_brace.clone(),
+                    body: None,
+                });
+                return Ok(());
+            }
+        }
+
+        let (synthetic_name, witness_value) =
+            self.local_synthetic_value(&local_satisfy.let_token, 0, arg_type.clone(), &context);
         self.push_local_alias(name, witness_value.clone(), stack.len());
 
-        let stack_size = stack.len() as AtomId;
         let existence = AcornValue::exists(vec![arg_type], condition.clone());
         let witness = condition.bind_values(stack_size, stack_size + 1, &[witness_value]);
         self.local_obligations.push(LocalObligation {
             arg_names: context.names,
             arg_types: context.types,
-            hidden_constants: vec![(hidden_name, hidden_type)],
+            synthetic_names: vec![synthetic_name],
             kind: LocalObligationKind::ExistsWitness {
                 existence,
                 witness,
@@ -1963,20 +2538,22 @@ impl<'a> Evaluator<'a> {
         let general_applied = AcornValue::apply(function.clone(), general_arg_values);
         let general_equality = AcornValue::equals(general_applied, obligation_value.clone());
         let existence = AcornValue::exists(arg_types.clone(), general_equality);
+        let premises = self.local_premises_for_stack(stack.len());
+        let seed_types = arg_types.iter().collect::<Vec<_>>();
+        let mut seed_values = vec![&obligation_value];
+        seed_values.extend(premises.iter());
+        let capture = self.capture_context_for_local_witness(stack, &seed_values, &seed_types);
 
-        let mut hidden_constants = vec![];
+        let mut synthetic_names = vec![];
         let mut witness_args = vec![];
         for (i, (arg_name, arg_type)) in arg_names.iter().zip(&arg_types).enumerate() {
-            let hidden_name = format!(
-                "__local_destructure_{}_{}_{}_{}",
-                local_destructuring.let_token.line_number,
-                local_destructuring.let_token.start,
-                i,
-                arg_name
+            let (synthetic_name, witness_value) = self.local_synthetic_value_with_capture(
+                &local_destructuring.let_token,
+                i as u32,
+                arg_type.clone(),
+                &capture,
             );
-            let (hidden_name, hidden_type, witness_value) =
-                self.local_hidden_value(hidden_name, arg_type.clone(), &context);
-            hidden_constants.push((hidden_name, hidden_type));
+            synthetic_names.push(synthetic_name);
             self.push_local_alias(arg_name.clone(), witness_value.clone(), stack.len());
             witness_args.push(witness_value);
         }
@@ -1986,11 +2563,11 @@ impl<'a> Evaluator<'a> {
         self.local_obligations.push(LocalObligation {
             arg_names: context.names,
             arg_types: context.types,
-            hidden_constants,
+            synthetic_names,
             kind: LocalObligationKind::ExistsWitness {
                 existence,
                 witness,
-                premises: self.local_premises_for_stack(stack.len()),
+                premises,
             },
             range: local_destructuring.value.range(),
             first_token: local_destructuring.let_token.clone(),

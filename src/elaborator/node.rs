@@ -160,8 +160,12 @@ impl Node {
     pub fn proposition(&self) -> Option<&Proposition> {
         match self {
             Node::Structural(Fact::Proposition(p)) => Some(p.as_ref()),
+            Node::Structural(Fact::SyntheticWitness(witness)) => Some(witness.proposition.as_ref()),
             Node::Claim(g, _) => Some(g.proposition.as_ref()),
             Node::Block(_, Some(Fact::Proposition(p))) => Some(p.as_ref()),
+            Node::Block(_, Some(Fact::SyntheticWitness(witness))) => {
+                Some(witness.proposition.as_ref())
+            }
             _ => None,
         }
     }

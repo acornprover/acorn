@@ -6,12 +6,14 @@ use crate::kernel::symbol_table::SymbolTable;
 use crate::kernel::term::Term;
 use crate::kernel::type_store::TypeStore;
 use crate::kernel::types::TypeclassId;
+use crate::prover::synthetic::WitnessRegistry;
 
 /// KernelContext combines the kernel stores needed for typing and normalization.
 #[derive(Clone)]
 pub struct KernelContext {
     pub type_store: TypeStore,
     pub symbol_table: SymbolTable,
+    pub synthetic_witness_registry: WitnessRegistry,
 }
 
 impl KernelContext {
@@ -19,6 +21,7 @@ impl KernelContext {
         KernelContext {
             type_store: TypeStore::new(),
             symbol_table: SymbolTable::new(),
+            synthetic_witness_registry: WitnessRegistry::new(),
         }
     }
 
@@ -1307,6 +1310,8 @@ impl KernelContext {
     pub fn merge(&mut self, other: &KernelContext) {
         self.type_store.merge(&other.type_store);
         self.symbol_table.merge(&other.symbol_table);
+        self.synthetic_witness_registry
+            .merge_from(&other.synthetic_witness_registry);
     }
 
     /// Merges another KernelContext into this one, excluding scoped constants.

@@ -483,9 +483,16 @@ pub(crate) fn register_value_symbols(
             pi_from_telescope_binders(&binder_types, body_type)
         };
 
-        let _symbol = kernel_context
-            .symbol_table
-            .add_constant(c.name.clone(), ctype, var_type);
+        let constant_type = if matches!(c.name, ConstantName::Synthetic(..)) {
+            NewConstantType::Local
+        } else {
+            ctype
+        };
+
+        let _symbol =
+            kernel_context
+                .symbol_table
+                .add_constant(c.name.clone(), constant_type, var_type);
 
         if is_polymorphic {
             let mut vars = std::collections::HashMap::new();

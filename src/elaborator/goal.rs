@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::code_generator::CodeGenerator;
+use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::environment::Environment;
 use crate::elaborator::proposition::Proposition;
@@ -63,9 +63,21 @@ impl Goal {
         let name = if let Some(name) = prop.theorem_name() {
             name.to_string()
         } else {
-            CodeGenerator::new(&env.bindings)
-                .value_to_code(&prop.value)
-                .map_err(|e| e.to_string())?
+            match CodeGenerator::new(&env.bindings).value_to_code(&prop.value) {
+                Ok(code) => code,
+                Err(CodeGenError::InternalError(message))
+                    if message.contains("synthetic witness leaked") =>
+                {
+                    format!(
+                        "goal@{}:{}-{}:{}",
+                        prop.source.range.start.line,
+                        prop.source.range.start.character,
+                        prop.source.range.end.line,
+                        prop.source.range.end.character
+                    )
+                }
+                Err(err) => return Err(err.to_string()),
+            }
         };
 
         Ok(Goal {

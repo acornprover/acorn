@@ -9,11 +9,21 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 
+#[derive(Clone, Debug)]
+pub struct SyntheticWitnessFact {
+    pub proposition: Arc<Proposition>,
+    pub existence: Proposition,
+    pub synthetic_names: Vec<ConstantName>,
+}
+
 /// A fact is a statement that we are assuming to be true in a particular context.
 #[derive(Clone, Debug)]
 pub enum Fact {
     /// A true statement representable as a boolean value.
     Proposition(Arc<Proposition>),
+
+    /// A fact produced by opening a local synthetic witness.
+    SyntheticWitness(Arc<SyntheticWitnessFact>),
 
     /// The first typeclass extends this set of typeclasses.
     /// The optional witness provider is a constant of shape `forall(P: Typeclass). P`.
@@ -37,6 +47,13 @@ impl fmt::Display for Fact {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Fact::Proposition(p) => write!(f, "prop: {}", p.source.description()),
+            Fact::SyntheticWitness(witness) => {
+                write!(
+                    f,
+                    "synthetic witness: {}",
+                    witness.proposition.source.description()
+                )
+            }
             Fact::Extends(tc, base_set, _, _) => {
                 if base_set.is_empty() {
                     write!(f, "{} extends nothing", tc.name)
@@ -66,6 +83,7 @@ impl Fact {
     pub fn source(&self) -> &Source {
         match self {
             Fact::Proposition(p) => &p.source,
+            Fact::SyntheticWitness(witness) => &witness.proposition.source,
             Fact::Extends(_, _, _, source) => source,
             Fact::Instance(_, source) => source,
             Fact::Definition(_, _, source) => source,
@@ -76,6 +94,7 @@ impl Fact {
     /// the prover.
     pub fn used_in_normalization(&self) -> bool {
         match self {
+            Fact::SyntheticWitness(..) => true,
             Fact::Instance(..) => true,
             Fact::Extends(..) => true,
             Fact::Definition(PotentialValue::Resolved(AcornValue::Constant(ci)), _, _) => {

@@ -895,6 +895,8 @@ impl Prover {
         if self.kernel_context.is_none() {
             self.kernel_context = Some(kernel_context.clone());
         }
+        self.witness_registry
+            .merge_from(&kernel_context.synthetic_witness_registry);
         self.passive_set.push_batch(steps, kernel_context);
     }
 

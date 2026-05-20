@@ -439,6 +439,7 @@ impl KernelContext {
         {
             let propositions: Vec<Proposition> = match fact {
                 Fact::Proposition(prop) => vec![prop.as_ref().clone()],
+                Fact::SyntheticWitness(witness) => vec![witness.proposition.as_ref().clone()],
                 Fact::Definition(potential, definition, source) => {
                     let (params, constant) = match potential {
                         PotentialValue::Unresolved(u) => {
@@ -458,6 +459,39 @@ impl KernelContext {
             for proposition in &propositions {
                 steps.extend(self.lower_proposition_to_steps(proposition)?);
             }
+        }
+
+        if let Fact::SyntheticWitness(witness) = fact {
+            let existence_clauses = self
+                .lower_proposition_to_clauses(&witness.existence)
+                .map_err(|msg| BuildError::new(witness.existence.source.range, msg))?;
+            let Some(existence_clause) = existence_clauses
+                .into_iter()
+                .find(|clause| clause.positive_exists_witness_reduction(self).is_some())
+            else {
+                return Err(BuildError::new(
+                    witness.existence.source.range,
+                    "synthetic witness existence did not lower to a clause".to_string(),
+                ));
+            };
+            let mut symbols = Vec::with_capacity(witness.synthetic_names.len());
+            for name in &witness.synthetic_names {
+                let symbol = self.symbol_table.get_symbol(name).ok_or_else(|| {
+                    BuildError::new(
+                        witness.proposition.source.range,
+                        format!("synthetic witness {} was not registered", name),
+                    )
+                })?;
+                symbols.push(symbol);
+            }
+            let context_snapshot = self.clone();
+            self.synthetic_witness_registry
+                .register_existing_positive_exists_chain(
+                    &context_snapshot,
+                    existence_clause,
+                    &symbols,
+                )
+                .map_err(|msg| BuildError::new(witness.existence.source.range, msg))?;
         }
 
         if let Some((constant_instance, alias_name, constant_type)) = fact.as_instance_alias() {
