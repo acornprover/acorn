@@ -1,6 +1,6 @@
 use super::*;
 use crate::elaborator::evaluator::{
-    GuardedLocalClaim, LocalClaimExport, LocalObligation, LocalObligationKind,
+    GuardedLocalClaim, LocalClaimExport, LocalObligation, LocalObligationKind, LocalProofBlock,
 };
 use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
@@ -49,7 +49,7 @@ impl Environment {
         self.add_local_obligations(project, type_params, local_obligations)
     }
 
-    pub(super) fn add_local_obligations(
+    pub(crate) fn add_local_obligations(
         &mut self,
         project: &dyn ProjectLookup,
         type_params: &[TypeParam],
@@ -76,6 +76,9 @@ impl Environment {
                         existence,
                         witness,
                     )?;
+                }
+                LocalObligationKind::ProofBlock(block) => {
+                    self.add_local_proof_block(project, type_params, frame, block)?;
                 }
             }
         }
@@ -167,6 +170,36 @@ impl Environment {
                 synthetic_names,
             },
         ))));
+        Ok(())
+    }
+
+    fn add_local_proof_block(
+        &mut self,
+        project: &dyn ProjectLookup,
+        type_params: &[TypeParam],
+        frame: LocalObligationFrame,
+        block: LocalProofBlock,
+    ) -> error::Result<()> {
+        let external_value = block.external_value(frame.arg_types.clone());
+        let params = BlockParams::LocalPremises(block.block_premises());
+        let inner_obligations = block.obligations();
+        let block = Block::new_with_local_obligations(
+            project,
+            self,
+            type_params.to_vec(),
+            frame.block_args,
+            params,
+            &frame.first_token,
+            &frame.last_token,
+            frame.body.as_deref(),
+            inner_obligations,
+        )?;
+        let external_fact = external_value.map(|claim| {
+            let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
+            Proposition::new(claim, type_params.to_vec(), source).with_arg_count(frame.arg_count)
+        });
+        let index = self.add_node(Node::block(project, self, block, external_fact));
+        self.add_node_lines(index, &frame.range);
         Ok(())
     }
 }

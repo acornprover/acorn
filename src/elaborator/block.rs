@@ -7,6 +7,7 @@ use crate::elaborator::acorn_type::{AcornType, PotentialType, TypeParam};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::environment::{Environment, LineType};
 use crate::elaborator::error::{self, ErrorContext};
+use crate::elaborator::evaluator::LocalObligation;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::names::DefinedName;
@@ -77,6 +78,9 @@ pub enum BlockParams<'a> {
 
     /// The assumption to be used by the block, and the range of this assumption.
     Conditional(BlockPremise),
+
+    /// Premises for an implicit proof block that may contain child proof obligations.
+    LocalPremises(Vec<BlockPremise>),
 
     /// (unbound goal, function return type, range of condition)
     /// This goal has one more unbound variable than the block args account for.
@@ -214,6 +218,30 @@ impl Block {
         last_token: &Token,
         body: Option<&Body>,
     ) -> error::Result<Block> {
+        Self::new_with_local_obligations(
+            project,
+            env,
+            type_params,
+            args,
+            params,
+            first_token,
+            last_token,
+            body,
+            vec![],
+        )
+    }
+
+    pub(crate) fn new_with_local_obligations(
+        project: &dyn ProjectLookup,
+        env: &Environment,
+        type_params: Vec<TypeParam>,
+        args: Vec<(String, AcornType)>,
+        params: BlockParams,
+        first_token: &Token,
+        last_token: &Token,
+        body: Option<&Body>,
+        local_obligations: Vec<LocalObligation>,
+    ) -> error::Result<Block> {
         let mut subenv = env.create_child(first_token.line_number);
 
         // Inside the block, the type parameters are arbitrary types.
@@ -264,6 +292,16 @@ impl Block {
                     env.module_id,
                     &internal_args,
                     premise,
+                );
+                None
+            }
+            BlockParams::LocalPremises(ref premises) => {
+                Self::add_structural_premises(
+                    project,
+                    &mut subenv,
+                    env.module_id,
+                    &internal_args,
+                    premises,
                 );
                 None
             }
@@ -444,6 +482,8 @@ impl Block {
                 );
             }
         };
+
+        subenv.add_local_obligations(project, &type_params, local_obligations)?;
 
         // If there is a goal proposition, add it as a child node at the end of the environment.
         // This allows the goal to use all facts from the block's internal nodes.
