@@ -195,6 +195,10 @@ pub struct Evaluator<'a> {
     /// in-progress instance-body elaboration path.
     current_instance_context: Option<CurrentInstanceContext>,
 
+    /// Generated proof/certificate code may refer to internal constants that source code cannot
+    /// name directly.
+    allow_hidden_constants: bool,
+
     /// Local expression-block aliases. These are source-level `let` bindings in function-like
     /// expression blocks, elaborated by inlining their values wherever the name is used.
     local_aliases: Vec<LocalAlias>,
@@ -218,11 +222,18 @@ impl<'a> Evaluator<'a> {
             bindings,
             token_map,
             current_instance_context: None,
+            allow_hidden_constants: false,
             local_aliases: vec![],
             local_match_facts: vec![],
             local_premises: vec![],
             local_obligations: vec![],
         }
+    }
+
+    pub fn new_internal(project: &'a dyn ProjectLookup, bindings: &'a BindingMap) -> Self {
+        let mut evaluator = Self::new(project, bindings, None);
+        evaluator.allow_hidden_constants = true;
+        evaluator
     }
 
     pub fn new_for_instance_member(
@@ -241,6 +252,7 @@ impl<'a> Evaluator<'a> {
                 datatype: instance_name.datatype.clone(),
                 current_attr: instance_name.attribute.clone(),
             }),
+            allow_hidden_constants: false,
             local_aliases: vec![],
             local_match_facts: vec![],
             local_premises: vec![],
@@ -514,6 +526,7 @@ impl<'a> Evaluator<'a> {
             bindings,
             token_map,
             current_instance_context: self.current_instance_context.clone(),
+            allow_hidden_constants: self.allow_hidden_constants,
             local_aliases: self.local_aliases.clone(),
             local_match_facts: self.local_match_facts.clone(),
             local_premises: self.local_premises.clone(),
@@ -1491,6 +1504,13 @@ impl<'a> Evaluator<'a> {
                             NamedEntity::Value(AcornValue::Variable(*i, t.clone()))
                         } else if let Some(value) = self.local_alias_value(name, stack.len()) {
                             NamedEntity::Value(value)
+                        } else if !self.bindings.has_unqualified_constant_name(name)
+                            && !(self.allow_hidden_constants
+                                && self.bindings.has_constant_name(name))
+                        {
+                            return Err(
+                                name_token.error(&format!("local constant {} not found", name))
+                            );
                         } else {
                             let constant_name =
                                 DefinedName::unqualified(self.bindings.module_id(), name);
@@ -2785,6 +2805,7 @@ impl<'a> Evaluator<'a> {
                         bindings: &scoped_bindings,
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
+                        allow_hidden_constants: self.allow_hidden_constants,
                         local_aliases: self.local_aliases.clone(),
                         local_match_facts: self.local_match_facts.clone(),
                         local_premises: self.local_premises.clone(),
@@ -2805,6 +2826,7 @@ impl<'a> Evaluator<'a> {
                         bindings: &scoped_bindings,
                         token_map: self.token_map.as_deref_mut(),
                         current_instance_context: current_instance_context.clone(),
+                        allow_hidden_constants: self.allow_hidden_constants,
                         local_aliases: self.local_aliases.clone(),
                         local_match_facts: self.local_match_facts.clone(),
                         local_premises: self.local_premises.clone(),

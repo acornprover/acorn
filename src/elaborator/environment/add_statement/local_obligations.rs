@@ -179,15 +179,11 @@ impl Environment {
                     name
                 )));
             }
-            self.bindings.add_unqualified_constant(
+            self.bindings.add_hidden_unqualified_constant(
                 name,
                 type_params.to_vec(),
                 vec![],
                 hidden_type.clone(),
-                None,
-                None,
-                vec![],
-                None,
                 format!("{}: {}", name, hidden_type),
             );
         }

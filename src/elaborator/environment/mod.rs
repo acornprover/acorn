@@ -406,36 +406,6 @@ impl Environment {
         }
     }
 
-    /// Checks that new specific attributes don't conflict with existing generic attributes.
-    pub fn check_no_conflicting_attributes(
-        &self,
-        datatype: &Datatype,
-        body: &crate::syntax::statement::Body,
-    ) -> error::Result<()> {
-        use crate::syntax::statement::StatementInfo;
-
-        // Check if any of the new specific attributes conflict with existing generic ones
-        for stmt in &body.statements {
-            let attr_name = match &stmt.statement {
-                StatementInfo::Let(ls) => Some(ls.name_token.text()),
-                StatementInfo::Define(ds) => Some(ds.name_token.text()),
-                _ => None,
-            };
-
-            if let Some(name) = attr_name {
-                // Check if a generic attribute with this name already exists
-                if self.bindings.has_type_attr(datatype, name) {
-                    return Err(stmt.error(&format!(
-                        "attribute '{}' conflicts with existing generic attribute on {}",
-                        name, datatype.name
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Adds a conditional block to the environment.
     /// Takes the condition, the range to associate with the condition, the first line of
     /// the conditional block, and finally the body itself.

@@ -733,7 +733,7 @@ impl ClaimCodec {
         project: &dyn ProjectLookup,
         bindings: &BindingMap,
     ) -> Result<(ClaimFunctionValue, Vec<AcornValue>), CodeGenError> {
-        let mut type_param_evaluator = Evaluator::new(project, bindings, None);
+        let mut type_param_evaluator = Evaluator::new_internal(project, bindings);
         let type_params = type_param_evaluator.evaluate_type_params(shape.type_params)?;
 
         let mut scoped_bindings = bindings.clone();
@@ -741,7 +741,7 @@ impl ClaimCodec {
             scoped_bindings.add_arbitrary_type(type_param.clone());
         }
 
-        let mut evaluator = Evaluator::new(project, &scoped_bindings, None);
+        let mut evaluator = Evaluator::new_internal(project, &scoped_bindings);
         let type_args = shape
             .type_args
             .iter()

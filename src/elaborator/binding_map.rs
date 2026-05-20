@@ -350,6 +350,10 @@ impl BindingMap {
         self.constant_defs.contains_key(&constant_name)
     }
 
+    pub fn has_unqualified_constant_name(&self, name: &str) -> bool {
+        self.unqualified.contains_key(name)
+    }
+
     /// Returns the defined value, if there is a defined value.
     /// If there isn't, returns None.
     pub fn get_definition(&self, name: &DefinedName) -> Option<&AcornValue> {
@@ -1133,6 +1137,7 @@ impl BindingMap {
                 doc_comments,
                 range,
                 definition_string,
+                true,
             ),
             DefinedName::Instance(instance_name) => {
                 let definition = definition.expect("instance must have a definition");
@@ -1199,6 +1204,7 @@ impl BindingMap {
             doc_comments,
             None,
             Some(definition_string),
+            true,
         )
     }
 
@@ -1225,6 +1231,7 @@ impl BindingMap {
             doc_comments,
             None,
             Some(definition_string),
+            true,
         )
     }
 
@@ -1271,6 +1278,31 @@ impl BindingMap {
             doc_comments,
             range,
             Some(definition_string),
+            true,
+        )
+    }
+
+    /// Adds an internal generated constant that source code cannot name directly.
+    pub fn add_hidden_unqualified_constant(
+        &mut self,
+        name: &str,
+        params: Vec<TypeParam>,
+        value_param_types: Vec<AcornType>,
+        constant_type: AcornType,
+        definition_string: String,
+    ) -> PotentialValue {
+        let constant_name = ConstantName::unqualified(self.module_id, name);
+        self.add_constant_name(
+            &constant_name,
+            params,
+            value_param_types,
+            constant_type,
+            None,
+            None,
+            vec![],
+            None,
+            Some(definition_string),
+            false,
         )
     }
 
@@ -1290,6 +1322,7 @@ impl BindingMap {
         doc_comments: Vec<String>,
         range: Option<Range>,
         definition_string: Option<String>,
+        expose_name: bool,
     ) -> PotentialValue {
         if let Some(definition) = &definition {
             if let Err(e) = definition.validate() {
@@ -1344,7 +1377,7 @@ impl BindingMap {
             definition_string,
         };
 
-        self.add_constant_def(constant_name.clone(), info);
+        self.add_constant_def(constant_name.clone(), info, expose_name);
 
         // Validate constants after adding the definition, so recursive references can be checked
         if let Some(definition) = &definition {
@@ -1360,7 +1393,12 @@ impl BindingMap {
     }
 
     /// Adds information for either a newly defined constant, or an alias.
-    fn add_constant_def(&mut self, constant_name: ConstantName, info: ConstantDefinition) {
+    fn add_constant_def(
+        &mut self,
+        constant_name: ConstantName,
+        info: ConstantDefinition,
+        expose_name: bool,
+    ) {
         match &constant_name {
             ConstantName::DatatypeAttribute(module_id, datatype, attribute) => {
                 // We are defining a new datatype attribute.
@@ -1387,9 +1425,10 @@ impl BindingMap {
                     .insert(attribute.clone(), (*module_id, typeclass.clone()));
             }
             ConstantName::InstanceAttribute(_, _) => {}
-            ConstantName::Unqualified(_, name) => {
+            ConstantName::Unqualified(_, name) if expose_name => {
                 self.unqualified.insert(name.clone(), ());
             }
+            ConstantName::Unqualified(_, _) => {}
         }
 
         self.constant_defs.insert(constant_name, info);
@@ -1432,7 +1471,7 @@ impl BindingMap {
             range: None,
             definition_string,
         };
-        self.add_constant_def(alias, info);
+        self.add_constant_def(alias, info, true);
     }
 
     pub fn mark_as_theorem(&mut self, name: &ConstantName) {
@@ -2207,6 +2246,7 @@ impl BindingMap {
                     vec![],
                     None,
                     None,
+                    true,
                 );
                 added_function_binding = true;
             }

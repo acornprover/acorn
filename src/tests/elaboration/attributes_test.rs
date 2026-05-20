@@ -351,6 +351,75 @@ fn test_class_variables() {
 }
 
 #[test]
+fn test_duplicate_attribute_body_names_rejected_before_partial_definition() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            type Nat: axiom
+            structure Box[T] {
+                value: T
+            }
+        "#,
+    );
+    env.bad(
+        r#"
+            attributes Box[T] {
+                define extra(self) -> T { self.value }
+                define extra(self) -> T { self.value }
+            }
+        "#,
+    );
+    env.add(
+        r#"
+            attributes Box[T] {
+                define extra(self) -> T { self.value }
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_failed_generic_attribute_block_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add(
+        r#"
+            structure Box[T] {
+                value: T
+            }
+        "#,
+    );
+    env.bad(
+        r#"
+            attributes Box[Thing] {
+                define extra(self) -> Thing { missing }
+            }
+        "#,
+    );
+    env.add("type Thing: axiom");
+}
+
+#[test]
+fn test_failed_typeclass_attribute_block_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add(
+        r#"
+            typeclass T: Cls {
+                attr: T -> Bool
+            }
+        "#,
+    );
+    env.bad(
+        r#"
+            attributes Thing: Cls {
+                define attr(self) -> Bool { true }
+            }
+        "#,
+    );
+    env.add("type Thing: axiom");
+}
+
+#[test]
 fn test_attribute_let_satisfy_exports_names() {
     let mut env = Environment::test();
     env.add(

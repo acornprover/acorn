@@ -1,6 +1,75 @@
 use super::*;
 
+fn attribute_name_tokens(statement: &Statement) -> Vec<&Token> {
+    match &statement.statement {
+        StatementInfo::Let(ls) => vec![&ls.name_token],
+        StatementInfo::VariableSatisfy(vss) => vss.declarations.iter().map(|d| d.token()).collect(),
+        StatementInfo::FunctionSatisfy(fss) => vec![&fss.name_token],
+        StatementInfo::Define(ds) => vec![&ds.name_token],
+        _ => vec![],
+    }
+}
+
 impl Environment {
+    fn check_attribute_body_names_unique(
+        &self,
+        body: &crate::syntax::statement::Body,
+    ) -> error::Result<()> {
+        let mut names = std::collections::BTreeSet::new();
+        for statement in &body.statements {
+            for token in attribute_name_tokens(statement) {
+                if !names.insert(token.text()) {
+                    return Err(
+                        token.error(&format!("duplicate attribute name '{}'", token.text()))
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_type_attribute_names_available(
+        &self,
+        datatype: &Datatype,
+        body: &crate::syntax::statement::Body,
+    ) -> error::Result<()> {
+        self.check_attribute_body_names_unique(body)?;
+        for statement in &body.statements {
+            for token in attribute_name_tokens(statement) {
+                if self.bindings.has_type_attr(datatype, token.text()) {
+                    return Err(token.error(&format!(
+                        "attribute '{}' is already defined on {}",
+                        token.text(),
+                        datatype.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_typeclass_attribute_names_available(
+        &self,
+        typeclass: &Typeclass,
+        body: &crate::syntax::statement::Body,
+    ) -> error::Result<()> {
+        self.check_attribute_body_names_unique(body)?;
+        for statement in &body.statements {
+            for token in attribute_name_tokens(statement) {
+                if let Some(existing_tc) =
+                    self.bindings.typeclass_attr_lookup(typeclass, token.text())
+                {
+                    return Err(token.error(&format!(
+                        "attribute '{}' is already defined via typeclass '{}'",
+                        token.text(),
+                        existing_tc.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn add_attributes_statement(
         &mut self,
         project: &dyn ProjectLookup,
@@ -120,80 +189,84 @@ impl Environment {
                 let datatype = self
                     .check_can_add_attributes(&ats.name_token, &instance_type)?
                     .clone();
+                self.check_type_attribute_names_available(&datatype, &ats.body)?;
 
-                for substatement in &ats.body.statements {
-                    match &substatement.statement {
-                        StatementInfo::Let(ls) => {
-                            self.add_let_statement(
-                                project,
-                                substatement,
-                                DefinedName::datatype_attr_defined(
-                                    defining_module,
-                                    &datatype,
-                                    ls.name_token.text(),
-                                ),
-                                ls,
-                                ls.name_token.range(),
-                                Some(&family_scope),
-                            )?;
-                        }
-                        StatementInfo::VariableSatisfy(vss) => {
-                            let datatype = datatype.clone();
-                            self.add_variable_satisfy_statement_named(
-                                project,
-                                substatement,
-                                vss,
-                                Some(&family_scope),
-                                move |name| {
+                let result = (|| {
+                    for substatement in &ats.body.statements {
+                        match &substatement.statement {
+                            StatementInfo::Let(ls) => {
+                                self.add_let_statement(
+                                    project,
+                                    substatement,
                                     DefinedName::datatype_attr_defined(
                                         defining_module,
                                         &datatype,
-                                        name,
-                                    )
-                                },
-                            )?;
-                        }
-                        StatementInfo::FunctionSatisfy(fss) => {
-                            self.add_function_satisfy_statement_named(
-                                project,
-                                substatement,
-                                fss,
-                                DefinedName::datatype_attr_defined(
-                                    defining_module,
-                                    &datatype,
-                                    fss.name_token.text(),
-                                ),
-                                Some(&family_scope),
-                            )?;
-                        }
-                        StatementInfo::Define(ds) => {
-                            self.add_define_statement(
-                                project,
-                                substatement,
-                                DefinedName::datatype_attr_defined(
-                                    defining_module,
-                                    &datatype,
-                                    ds.name_token.text(),
-                                ),
-                                Some(&instance_type),
-                                Some(&family_scope),
-                                ds,
-                                ds.name_token.range(),
-                            )?;
-                        }
-                        StatementInfo::DocComment(s) => {
-                            self.doc_comments.push(s.clone());
-                        }
-                        _ => {
-                            return Err(substatement
-                                .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
+                                        ls.name_token.text(),
+                                    ),
+                                    ls,
+                                    ls.name_token.range(),
+                                    Some(&family_scope),
+                                )?;
+                            }
+                            StatementInfo::VariableSatisfy(vss) => {
+                                let datatype = datatype.clone();
+                                self.add_variable_satisfy_statement_named(
+                                    project,
+                                    substatement,
+                                    vss,
+                                    Some(&family_scope),
+                                    move |name| {
+                                        DefinedName::datatype_attr_defined(
+                                            defining_module,
+                                            &datatype,
+                                            name,
+                                        )
+                                    },
+                                )?;
+                            }
+                            StatementInfo::FunctionSatisfy(fss) => {
+                                self.add_function_satisfy_statement_named(
+                                    project,
+                                    substatement,
+                                    fss,
+                                    DefinedName::datatype_attr_defined(
+                                        defining_module,
+                                        &datatype,
+                                        fss.name_token.text(),
+                                    ),
+                                    Some(&family_scope),
+                                )?;
+                            }
+                            StatementInfo::Define(ds) => {
+                                self.add_define_statement(
+                                    project,
+                                    substatement,
+                                    DefinedName::datatype_attr_defined(
+                                        defining_module,
+                                        &datatype,
+                                        ds.name_token.text(),
+                                    ),
+                                    Some(&instance_type),
+                                    Some(&family_scope),
+                                    ds,
+                                    ds.name_token.range(),
+                                )?;
+                            }
+                            StatementInfo::DocComment(s) => {
+                                self.doc_comments.push(s.clone());
+                            }
+                            _ => {
+                                return Err(substatement
+                                    .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
+                            }
                         }
                     }
-                }
+                    Ok(())
+                })();
                 for type_param in family_scope.type_params() {
                     self.bindings.remove_type(&type_param.name);
                 }
-                Ok(())
+                result
             }
             AttributesTypeArgs::Concrete(concrete_types) => {
                 let instance_type = potential.resolve(concrete_types.clone(), &ats.name_token)?;
@@ -201,7 +274,7 @@ impl Environment {
                     .check_can_add_attributes(&ats.name_token, &instance_type)?
                     .clone();
 
-                self.check_no_conflicting_attributes(&datatype, &ats.body)?;
+                self.check_type_attribute_names_available(&datatype, &ats.body)?;
 
                 for substatement in &ats.body.statements {
                     match &substatement.statement {
@@ -310,73 +383,81 @@ impl Environment {
         let family_scope =
             DatatypeFamilyScope::new(Telescope::new(vec![FamilyParam::Type(type_param)]));
 
-        for substatement in &ats.body.statements {
-            match &substatement.statement {
-                StatementInfo::Let(ls) => {
-                    self.add_let_statement(
-                        project,
-                        substatement,
-                        DefinedName::typeclass_attr_defined(
-                            defining_module,
-                            &typeclass,
-                            ls.name_token.text(),
-                        ),
-                        ls,
-                        ls.name_token.range(),
-                        Some(&family_scope),
-                    )?;
-                }
-                StatementInfo::VariableSatisfy(vss) => {
-                    let typeclass = typeclass.clone();
-                    self.add_variable_satisfy_statement_named(
-                        project,
-                        substatement,
-                        vss,
-                        Some(&family_scope),
-                        move |name| {
-                            DefinedName::typeclass_attr_defined(defining_module, &typeclass, name)
-                        },
-                    )?;
-                }
-                StatementInfo::FunctionSatisfy(fss) => {
-                    self.add_function_satisfy_statement_named(
-                        project,
-                        substatement,
-                        fss,
-                        DefinedName::typeclass_attr_defined(
-                            defining_module,
-                            &typeclass,
-                            fss.name_token.text(),
-                        ),
-                        Some(&family_scope),
-                    )?;
-                }
-                StatementInfo::Define(ds) => {
-                    self.add_define_statement(
-                        project,
-                        substatement,
-                        DefinedName::typeclass_attr_defined(
-                            defining_module,
-                            &typeclass,
-                            ds.name_token.text(),
-                        ),
-                        Some(&instance_type),
-                        Some(&family_scope),
-                        ds,
-                        ds.name_token.range(),
-                    )?;
-                }
-                StatementInfo::DocComment(s) => {
-                    self.doc_comments.push(s.clone());
-                }
-                _ => {
-                    return Err(substatement
-                        .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
+        let result = (|| {
+            self.check_typeclass_attribute_names_available(&typeclass, &ats.body)?;
+            for substatement in &ats.body.statements {
+                match &substatement.statement {
+                    StatementInfo::Let(ls) => {
+                        self.add_let_statement(
+                            project,
+                            substatement,
+                            DefinedName::typeclass_attr_defined(
+                                defining_module,
+                                &typeclass,
+                                ls.name_token.text(),
+                            ),
+                            ls,
+                            ls.name_token.range(),
+                            Some(&family_scope),
+                        )?;
+                    }
+                    StatementInfo::VariableSatisfy(vss) => {
+                        let typeclass = typeclass.clone();
+                        self.add_variable_satisfy_statement_named(
+                            project,
+                            substatement,
+                            vss,
+                            Some(&family_scope),
+                            move |name| {
+                                DefinedName::typeclass_attr_defined(
+                                    defining_module,
+                                    &typeclass,
+                                    name,
+                                )
+                            },
+                        )?;
+                    }
+                    StatementInfo::FunctionSatisfy(fss) => {
+                        self.add_function_satisfy_statement_named(
+                            project,
+                            substatement,
+                            fss,
+                            DefinedName::typeclass_attr_defined(
+                                defining_module,
+                                &typeclass,
+                                fss.name_token.text(),
+                            ),
+                            Some(&family_scope),
+                        )?;
+                    }
+                    StatementInfo::Define(ds) => {
+                        self.add_define_statement(
+                            project,
+                            substatement,
+                            DefinedName::typeclass_attr_defined(
+                                defining_module,
+                                &typeclass,
+                                ds.name_token.text(),
+                            ),
+                            Some(&instance_type),
+                            Some(&family_scope),
+                            ds,
+                            ds.name_token.range(),
+                        )?;
+                    }
+                    StatementInfo::DocComment(s) => {
+                        self.doc_comments.push(s.clone());
+                    }
+                    _ => {
+                        return Err(substatement
+                            .error("only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"));
+                    }
                 }
             }
-        }
+            Ok(())
+        })();
 
         self.bindings.remove_type(instance_name);
-        Ok(())
+        result
     }
 }

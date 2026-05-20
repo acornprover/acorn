@@ -504,6 +504,30 @@ fn test_failed_parameterized_transport_let_cleans_type_parameter() {
 }
 
 #[test]
+fn test_local_hidden_witness_names_are_not_user_visible() {
+    let mut env = Environment::test();
+    env.add(
+        "type Empty: axiom\n\
+        \n\
+        let seed: Bool = if (exists(y: Empty) {\n\
+            true\n\
+        }) {\n\
+            let x: Empty satisfy {\n\
+                true\n\
+            }\n\
+            true\n\
+        } else {\n\
+            true\n\
+        }",
+    );
+    let message = env.bad("let leaked: Empty = __local_satisfy_5_4_x");
+    assert!(
+        message.contains("local constant __local_satisfy_5_4_x not found"),
+        "{message}"
+    );
+}
+
+#[test]
 fn test_no_recursive_complicated_infinite_loops() {
     let mut env = Environment::test();
     env.add(
