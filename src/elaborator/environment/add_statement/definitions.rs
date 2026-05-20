@@ -866,7 +866,7 @@ impl Environment {
                     None => ts.claim.range(),
                 };
                 (
-                    Some((left.to_arbitrary(), premise_range)),
+                    Some(BlockPremise::new(left.to_arbitrary(), premise_range)),
                     right.to_arbitrary(),
                 )
             }

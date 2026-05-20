@@ -73,12 +73,7 @@ pub enum BlockParams<'a> {
     /// The premise is optional.
     ///
     /// The premise and goal should not have type variables in them.
-    Theorem(
-        Option<&'a str>,
-        Range,
-        Option<(AcornValue, Range)>,
-        AcornValue,
-    ),
+    Theorem(Option<&'a str>, Range, Option<BlockPremise>, AcornValue),
 
     /// The assumption to be used by the block, and the range of this assumption.
     Conditional(BlockPremise),
@@ -277,13 +272,15 @@ impl Block {
                     theorem_alias = applied;
                 }
 
-                if let Some((unbound_premise, premise_range)) = premise {
+                if let Some(premise) = premise {
                     // Add the premise to the environment, when proving the theorem.
-                    // The premise is unbound, so we need to bind the block's arg values.
-                    let bound = unbound_premise.clone().bind_values(0, 0, &internal_args);
-                    let source = Source::premise(env.module_id, *premise_range, subenv.depth);
-                    let prop = Proposition::new(bound, vec![], source);
-                    subenv.add_node(Node::structural(project, &subenv, prop));
+                    Self::add_structural_premise(
+                        project,
+                        &mut subenv,
+                        env.module_id,
+                        &internal_args,
+                        premise,
+                    );
                 }
 
                 let bound_goal = unbound_goal

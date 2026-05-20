@@ -75,25 +75,22 @@ fn prepare_local_obligation(
     obligation: &LocalObligation,
 ) -> error::Result<PreparedLocalObligation> {
     match &obligation.kind {
-        LocalObligationKind::Claim { claim, premises } => Ok(PreparedLocalObligation::Claim {
+        LocalObligationKind::Claim { claim } => Ok(PreparedLocalObligation::Claim {
             claim: claim.clone(),
-            premises: premises.clone(),
+            premises: obligation.premises.clone(),
         }),
-        LocalObligationKind::ExistsWitness {
-            existence,
-            witness,
-            premises,
-        } => Ok(PreparedLocalObligation::ExistsWitness {
-            existence: existence.clone(),
-            witness: witness.clone(),
-            premises: premises.clone(),
-        }),
+        LocalObligationKind::ExistsWitness { existence, witness } => {
+            Ok(PreparedLocalObligation::ExistsWitness {
+                existence: existence.clone(),
+                witness: witness.clone(),
+                premises: obligation.premises.clone(),
+            })
+        }
         LocalObligationKind::Transport {
             source_type,
             target_type,
             source_value,
             target_value,
-            premises,
             transport_token,
         } => {
             let transport = TransportBuilder::new(env, project);
@@ -118,7 +115,7 @@ fn prepare_local_obligation(
             Ok(PreparedLocalObligation::ExistsWitness {
                 existence: AcornValue::exists(vec![target_type.clone()], existence_relation),
                 witness: witness_relation,
-                premises: premises.clone(),
+                premises: obligation.premises.clone(),
             })
         }
     }

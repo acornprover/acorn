@@ -136,19 +136,16 @@ impl SyntheticCaptureContext {
 pub enum LocalObligationKind {
     Claim {
         claim: AcornValue,
-        premises: Vec<LocalPremise>,
     },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<LocalPremise>,
     },
     Transport {
         source_type: AcornType,
         target_type: AcornType,
         source_value: AcornValue,
         target_value: AcornValue,
-        premises: Vec<LocalPremise>,
         transport_token: Token,
     },
 }
@@ -158,6 +155,7 @@ pub struct LocalObligation {
     pub arg_names: Vec<String>,
     pub arg_types: Vec<AcornType>,
     pub synthetic_names: Vec<ConstantName>,
+    pub premises: Vec<LocalPremise>,
     pub kind: LocalObligationKind,
     pub range: tower_lsp::lsp_types::Range,
     pub first_token: Token,
@@ -175,42 +173,32 @@ impl LocalObligation {
                 .map(|arg_type| arg_type.genericize(type_params))
                 .collect(),
             synthetic_names: self.synthetic_names,
+            premises: self
+                .premises
+                .into_iter()
+                .map(|premise| premise.genericize(type_params))
+                .collect(),
             kind: match self.kind {
-                LocalObligationKind::Claim { claim, premises } => LocalObligationKind::Claim {
+                LocalObligationKind::Claim { claim } => LocalObligationKind::Claim {
                     claim: claim.genericize(type_params),
-                    premises: premises
-                        .into_iter()
-                        .map(|premise| premise.genericize(type_params))
-                        .collect(),
                 },
-                LocalObligationKind::ExistsWitness {
-                    existence,
-                    witness,
-                    premises,
-                } => LocalObligationKind::ExistsWitness {
-                    existence: existence.genericize(type_params),
-                    witness: witness.genericize(type_params),
-                    premises: premises
-                        .into_iter()
-                        .map(|premise| premise.genericize(type_params))
-                        .collect(),
-                },
+                LocalObligationKind::ExistsWitness { existence, witness } => {
+                    LocalObligationKind::ExistsWitness {
+                        existence: existence.genericize(type_params),
+                        witness: witness.genericize(type_params),
+                    }
+                }
                 LocalObligationKind::Transport {
                     source_type,
                     target_type,
                     source_value,
                     target_value,
-                    premises,
                     transport_token,
                 } => LocalObligationKind::Transport {
                     source_type: source_type.genericize(type_params),
                     target_type: target_type.genericize(type_params),
                     source_value: source_value.genericize(type_params),
                     target_value: target_value.genericize(type_params),
-                    premises: premises
-                        .into_iter()
-                        .map(|premise| premise.genericize(type_params))
-                        .collect(),
                     transport_token,
                 },
             },
@@ -223,6 +211,14 @@ impl LocalObligation {
 }
 
 impl LocalPremise {
+    fn new(value: AcornValue, range: Range, stack_size: usize) -> LocalPremise {
+        LocalPremise {
+            value,
+            range,
+            stack_size,
+        }
+    }
+
     fn shifted_to_stack(&self, stack_size: usize) -> LocalPremise {
         debug_assert!(stack_size >= self.stack_size);
         let increment = stack_size.saturating_sub(self.stack_size) as AtomId;
@@ -406,6 +402,20 @@ impl<'a> Evaluator<'a> {
             .iter()
             .map(|premise| premise.shifted_to_stack(stack_size))
             .collect()
+    }
+
+    fn evaluate_value_with_premise(
+        &mut self,
+        premise: LocalPremise,
+        stack: &mut Stack,
+        expression: &Expression,
+        expected_type: Option<&AcornType>,
+    ) -> error::Result<AcornValue> {
+        let premise_count = self.local_premises.len();
+        self.local_premises.push(premise);
+        let result = self.evaluate_value_with_stack(stack, expression, expected_type);
+        self.local_premises.truncate(premise_count);
+        result
     }
 
     fn push_local_alias(&mut self, name: String, value: AcornValue, stack_size: usize) {
@@ -2334,7 +2344,8 @@ impl<'a> Evaluator<'a> {
                         arg_names: context.names,
                         arg_types: context.types,
                         synthetic_names: vec![],
-                        kind: LocalObligationKind::Claim { claim, premises },
+                        premises,
+                        kind: LocalObligationKind::Claim { claim },
                         range: local_let.value.range(),
                         first_token: local_let.let_token.clone(),
                         last_token: local_let
@@ -2353,12 +2364,12 @@ impl<'a> Evaluator<'a> {
                     arg_names: context.names,
                     arg_types: context.types,
                     synthetic_names: vec![synthetic_name],
+                    premises,
                     kind: LocalObligationKind::Transport {
                         source_type,
                         target_type: expected_type.clone(),
                         source_value,
                         target_value,
-                        premises,
                         transport_token: transport_token.clone(),
                     },
                     range: local_let.value.range(),
@@ -2421,10 +2432,8 @@ impl<'a> Evaluator<'a> {
                     arg_names: context.names,
                     arg_types: context.types,
                     synthetic_names: vec![],
-                    kind: LocalObligationKind::Claim {
-                        claim,
-                        premises: self.local_premises_for_stack(stack.len()),
-                    },
+                    premises: self.local_premises_for_stack(stack.len()),
+                    kind: LocalObligationKind::Claim { claim },
                     range: local_satisfy.condition.range(),
                     first_token: local_satisfy.let_token.clone(),
                     last_token: local_satisfy.condition_right_brace.clone(),
@@ -2444,11 +2453,8 @@ impl<'a> Evaluator<'a> {
             arg_names: context.names,
             arg_types: context.types,
             synthetic_names: vec![synthetic_name],
-            kind: LocalObligationKind::ExistsWitness {
-                existence,
-                witness,
-                premises: self.local_premises_for_stack(stack.len()),
-            },
+            premises: self.local_premises_for_stack(stack.len()),
+            kind: LocalObligationKind::ExistsWitness { existence, witness },
             range: local_satisfy.condition.range(),
             first_token: local_satisfy.let_token.clone(),
             last_token: local_satisfy
@@ -2567,7 +2573,8 @@ impl<'a> Evaluator<'a> {
                     arg_names: context.names,
                     arg_types: context.types,
                     synthetic_names: vec![],
-                    kind: LocalObligationKind::Claim { claim, premises },
+                    premises,
+                    kind: LocalObligationKind::Claim { claim },
                     range: local_destructuring.value.range(),
                     first_token: local_destructuring.let_token.clone(),
                     last_token: local_destructuring
@@ -2609,11 +2616,8 @@ impl<'a> Evaluator<'a> {
             arg_names: context.names,
             arg_types: context.types,
             synthetic_names,
-            kind: LocalObligationKind::ExistsWitness {
-                existence,
-                witness,
-                premises,
-            },
+            premises,
+            kind: LocalObligationKind::ExistsWitness { existence, witness },
             range: local_destructuring.value.range(),
             first_token: local_destructuring.let_token.clone(),
             last_token: local_destructuring
@@ -3239,32 +3243,24 @@ impl<'a> Evaluator<'a> {
             Expression::IfThenElse(_, cond_exp, if_exp, else_exp, _) => {
                 let cond =
                     self.evaluate_value_with_stack(stack, cond_exp, Some(&AcornType::Bool))?;
-                let premise_count = self.local_premises.len();
-                self.local_premises.push(LocalPremise {
-                    value: cond.clone(),
-                    range: cond_exp.range(),
-                    stack_size: stack.len(),
-                });
-                let if_value = self.evaluate_value_with_stack(stack, if_exp, expected_type);
-                self.local_premises.truncate(premise_count);
-                let if_value = if_value?;
+                let if_premise = LocalPremise::new(cond.clone(), cond_exp.range(), stack.len());
+                let if_value =
+                    self.evaluate_value_with_premise(if_premise, stack, if_exp, expected_type)?;
 
                 match else_exp {
                     Some(else_exp) => {
                         // Traditional if-then-else
-                        let premise_count = self.local_premises.len();
-                        self.local_premises.push(LocalPremise {
-                            value: AcornValue::Not(Box::new(cond.clone())),
-                            range: cond_exp.range(),
-                            stack_size: stack.len(),
-                        });
-                        let else_value = self.evaluate_value_with_stack(
+                        let else_premise = LocalPremise::new(
+                            AcornValue::Not(Box::new(cond.clone())),
+                            cond_exp.range(),
+                            stack.len(),
+                        );
+                        let else_value = self.evaluate_value_with_premise(
+                            else_premise,
                             stack,
                             else_exp,
                             Some(&if_value.get_type()),
-                        );
-                        self.local_premises.truncate(premise_count);
-                        let else_value = else_value?;
+                        )?;
                         AcornValue::IfThenElse(
                             Box::new(cond),
                             Box::new(if_value),
@@ -3330,15 +3326,17 @@ impl<'a> Evaluator<'a> {
                         pattern: pattern.clone(),
                         stack_size: stack.len(),
                     });
-                    let premise_count = self.local_premises.len();
-                    self.local_premises.push(LocalPremise {
-                        value: AcornValue::equals(scrutinee.clone(), pattern.clone()),
-                        range: pattern_exp.range(),
-                        stack_size: stack.len(),
-                    });
-                    let result =
-                        self.evaluate_value_with_stack(stack, result_exp, expected_type.as_ref());
-                    self.local_premises.truncate(premise_count);
+                    let premise = LocalPremise::new(
+                        AcornValue::equals(scrutinee.clone(), pattern.clone()),
+                        pattern_exp.range(),
+                        stack.len(),
+                    );
+                    let result = self.evaluate_value_with_premise(
+                        premise,
+                        stack,
+                        result_exp,
+                        expected_type.as_ref(),
+                    );
                     self.local_match_facts.truncate(match_fact_count);
                     if expected_type.is_none() {
                         if let Ok(result) = &result {
