@@ -1,15 +1,13 @@
-use std::sync::Arc;
-
 use crate::elaborator::acorn_type::{
     AcornType, Datatype, DependentTypeArg, FamilyParam, FamilyParamKind, PotentialType, Telescope,
     TypeParam, Typeclass, ValueParam,
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp, MatchCase};
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::block::BlockPremise;
 use crate::elaborator::environment::add_statement::transport::TransportBuilder;
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::inference::InferenceEngine;
+use crate::elaborator::local::{LocalObligation, LocalPremise, LocalProofSite, LocalStackContext};
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;
@@ -24,10 +22,8 @@ use crate::syntax::expression::{
     Declaration, Expression, LocalBlockItem, LocalDestructuringLet, LocalLet, LocalSatisfyLet,
     TypeParamExpr,
 };
-use crate::syntax::statement::Body;
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
-use tower_lsp::lsp_types::Range;
 
 /// Represents the arguments in an attributes statement.
 /// Either generic datatype-family parameters (e.g., `K`, `n: Nat`) or concrete
@@ -63,69 +59,11 @@ struct LocalMatchFact {
 }
 
 #[derive(Clone, Debug)]
-pub struct LocalPremise {
-    premise: BlockPremise,
-    stack_size: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LocalClaimExport {
-    /// Prove the claim for use inside its proof block only.
-    InternalOnly,
-    /// Also export the claim to the outer environment, guarded by its local premises.
-    Guarded,
-}
-
-/// A proof obligation claim together with the branch/match premises it may assume.
-///
-/// Inside the proof block, the premises are added structurally. When exported out of
-/// the local context, the same claim becomes `premises -> claim`.
-#[derive(Clone, Debug)]
-pub struct GuardedLocalClaim {
-    claim: AcornValue,
-    premises: Vec<LocalPremise>,
-}
-
-#[derive(Clone)]
-pub struct LocalProofBlock {
-    premises: Vec<LocalPremise>,
-    obligations: Vec<LocalObligation>,
-}
-
-#[derive(Clone, Debug)]
-struct LocalStackContext {
-    names: Vec<String>,
-    types: Vec<AcornType>,
-    values: Vec<AcornValue>,
-}
-
-#[derive(Clone, Debug)]
 struct SyntheticCaptureContext {
     types: Vec<AcornType>,
     values: Vec<AcornValue>,
     original_stack_len: AtomId,
     replacement_values: Vec<AcornValue>,
-}
-
-impl LocalStackContext {
-    fn from_stack(stack: &Stack) -> LocalStackContext {
-        let entries = stack.entries();
-        let names = entries.iter().map(|(name, _)| name.clone()).collect();
-        let types: Vec<_> = entries
-            .iter()
-            .map(|(_, acorn_type)| acorn_type.clone())
-            .collect();
-        let values = types
-            .iter()
-            .enumerate()
-            .map(|(i, acorn_type)| AcornValue::Variable(i as AtomId, acorn_type.clone()))
-            .collect();
-        LocalStackContext {
-            names,
-            types,
-            values,
-        }
-    }
 }
 
 impl SyntheticCaptureContext {
@@ -153,386 +91,6 @@ impl SyntheticCaptureContext {
 
     fn remap_type(&self, acorn_type: &AcornType) -> AcornType {
         acorn_type.bind_values(0, self.original_stack_len, &self.replacement_values)
-    }
-}
-
-#[derive(Clone)]
-pub enum LocalObligationKind {
-    Claim {
-        claim: GuardedLocalClaim,
-        export: LocalClaimExport,
-    },
-    ExistsWitness {
-        existence: AcornValue,
-        witness: GuardedLocalClaim,
-    },
-    ProofBlock(LocalProofBlock),
-}
-
-#[derive(Clone)]
-pub struct LocalObligation {
-    pub arg_names: Vec<String>,
-    pub arg_types: Vec<AcornType>,
-    pub synthetic_names: Vec<ConstantName>,
-    pub kind: LocalObligationKind,
-    pub range: Range,
-    pub first_token: Token,
-    pub last_token: Token,
-    pub body: Option<Arc<Body>>,
-}
-
-impl LocalObligation {
-    fn new(
-        context: LocalStackContext,
-        synthetic_names: Vec<ConstantName>,
-        kind: LocalObligationKind,
-        range: Range,
-        first_token: Token,
-        last_token: Token,
-        body: Option<Arc<Body>>,
-    ) -> LocalObligation {
-        LocalObligation {
-            arg_names: context.names,
-            arg_types: context.types,
-            synthetic_names,
-            kind,
-            range,
-            first_token,
-            last_token,
-            body,
-        }
-    }
-
-    fn claim(
-        context: LocalStackContext,
-        premises: Vec<LocalPremise>,
-        claim: AcornValue,
-        range: Range,
-        first_token: Token,
-        last_token: Token,
-        body: Option<Arc<Body>>,
-    ) -> LocalObligation {
-        LocalObligation::new(
-            context,
-            vec![],
-            LocalObligationKind::Claim {
-                claim: GuardedLocalClaim::new(premises, claim),
-                export: LocalClaimExport::InternalOnly,
-            },
-            range,
-            first_token,
-            last_token,
-            body,
-        )
-    }
-
-    fn exported_claim(
-        context: LocalStackContext,
-        premises: Vec<LocalPremise>,
-        claim: AcornValue,
-        range: Range,
-        first_token: Token,
-        last_token: Token,
-        body: Option<Arc<Body>>,
-    ) -> LocalObligation {
-        LocalObligation::new(
-            context,
-            vec![],
-            LocalObligationKind::Claim {
-                claim: GuardedLocalClaim::new(premises, claim),
-                export: LocalClaimExport::Guarded,
-            },
-            range,
-            first_token,
-            last_token,
-            body,
-        )
-    }
-
-    fn witness(
-        context: LocalStackContext,
-        synthetic_names: Vec<ConstantName>,
-        premises: Vec<LocalPremise>,
-        existence: AcornValue,
-        witness: AcornValue,
-        range: Range,
-        first_token: Token,
-        last_token: Token,
-        body: Option<Arc<Body>>,
-    ) -> LocalObligation {
-        LocalObligation::new(
-            context,
-            synthetic_names,
-            LocalObligationKind::ExistsWitness {
-                existence,
-                witness: GuardedLocalClaim::new(premises, witness),
-            },
-            range,
-            first_token,
-            last_token,
-            body,
-        )
-    }
-
-    fn proof_block(
-        context: LocalStackContext,
-        premises: Vec<LocalPremise>,
-        obligations: Vec<LocalObligation>,
-        range: Range,
-        first_token: Token,
-        last_token: Token,
-    ) -> LocalObligation {
-        LocalObligation::new(
-            context,
-            vec![],
-            LocalObligationKind::ProofBlock(LocalProofBlock::new(premises, obligations)),
-            range,
-            first_token,
-            last_token,
-            None,
-        )
-    }
-
-    pub(crate) fn requires_result_spec_export(&self) -> bool {
-        match &self.kind {
-            LocalObligationKind::ExistsWitness { witness, .. } => {
-                !self.synthetic_names.is_empty() && witness.has_premises()
-            }
-            LocalObligationKind::ProofBlock(block) => {
-                block.requires_result_spec_export() || block.obligations_need_result_spec_export()
-            }
-            LocalObligationKind::Claim { .. } => false,
-        }
-    }
-
-    fn contains_synthetic_witness(&self) -> bool {
-        if !self.synthetic_names.is_empty() {
-            return true;
-        }
-        match &self.kind {
-            LocalObligationKind::ProofBlock(block) => block.contains_synthetic_witness(),
-            _ => false,
-        }
-    }
-
-    fn exported_value_for_context_len(&self, context_len: usize) -> Option<AcornValue> {
-        if self.arg_types.len() != context_len {
-            return None;
-        }
-        match &self.kind {
-            LocalObligationKind::Claim {
-                claim,
-                export: LocalClaimExport::Guarded,
-            } => Some(claim.guarded_value()),
-            LocalObligationKind::ProofBlock(block) => block
-                .external_value(self.arg_types.clone())
-                .and_then(|value| {
-                    if context_len == 0 {
-                        return Some(value);
-                    }
-                    if let AcornValue::ForAll(_, body) = value {
-                        Some(*body)
-                    } else {
-                        None
-                    }
-                }),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn genericize(self, type_params: &[TypeParam]) -> LocalObligation {
-        LocalObligation {
-            arg_names: self.arg_names,
-            arg_types: self
-                .arg_types
-                .into_iter()
-                .map(|arg_type| arg_type.genericize(type_params))
-                .collect(),
-            synthetic_names: self.synthetic_names,
-            kind: match self.kind {
-                LocalObligationKind::Claim { claim, export } => LocalObligationKind::Claim {
-                    claim: claim.genericize(type_params),
-                    export,
-                },
-                LocalObligationKind::ExistsWitness { existence, witness } => {
-                    LocalObligationKind::ExistsWitness {
-                        existence: existence.genericize(type_params),
-                        witness: witness.genericize(type_params),
-                    }
-                }
-                LocalObligationKind::ProofBlock(block) => {
-                    LocalObligationKind::ProofBlock(block.genericize(type_params))
-                }
-            },
-            range: self.range,
-            first_token: self.first_token,
-            last_token: self.last_token,
-            body: self.body,
-        }
-    }
-}
-
-impl LocalPremise {
-    fn new(value: AcornValue, range: Range, stack_size: usize) -> LocalPremise {
-        LocalPremise {
-            premise: BlockPremise::new(value, range),
-            stack_size,
-        }
-    }
-
-    fn genericize(self, type_params: &[TypeParam]) -> LocalPremise {
-        LocalPremise {
-            premise: BlockPremise::new(
-                self.premise.value.genericize(type_params),
-                self.premise.range,
-            ),
-            stack_size: self.stack_size,
-        }
-    }
-
-    pub(crate) fn value(&self) -> &AcornValue {
-        &self.premise.value
-    }
-
-    pub(crate) fn to_block_premise(&self) -> BlockPremise {
-        self.premise.clone()
-    }
-}
-
-impl GuardedLocalClaim {
-    fn new(premises: Vec<LocalPremise>, claim: AcornValue) -> GuardedLocalClaim {
-        GuardedLocalClaim { claim, premises }
-    }
-
-    fn has_premises(&self) -> bool {
-        !self.premises.is_empty()
-    }
-
-    fn genericize(self, type_params: &[TypeParam]) -> GuardedLocalClaim {
-        GuardedLocalClaim {
-            claim: self.claim.genericize(type_params),
-            premises: self
-                .premises
-                .into_iter()
-                .map(|premise| premise.genericize(type_params))
-                .collect(),
-        }
-    }
-
-    fn conjoin_premises(&self) -> AcornValue {
-        let mut iter = self.premises.iter().map(|premise| premise.value().clone());
-        let Some(first) = iter.next() else {
-            return AcornValue::Bool(true);
-        };
-        iter.fold(first, AcornValue::and)
-    }
-
-    fn guarded_value(&self) -> AcornValue {
-        if self.premises.is_empty() {
-            self.claim.clone()
-        } else {
-            AcornValue::implies(self.conjoin_premises(), self.claim.clone())
-        }
-    }
-
-    pub(crate) fn claim(&self) -> &AcornValue {
-        &self.claim
-    }
-
-    pub(crate) fn block_premises(&self) -> Vec<BlockPremise> {
-        self.premises
-            .iter()
-            .map(LocalPremise::to_block_premise)
-            .collect()
-    }
-
-    pub(crate) fn external_value(&self, arg_types: Vec<AcornType>) -> AcornValue {
-        AcornValue::forall(arg_types, self.guarded_value())
-    }
-}
-
-impl LocalProofBlock {
-    fn new(premises: Vec<LocalPremise>, obligations: Vec<LocalObligation>) -> LocalProofBlock {
-        LocalProofBlock {
-            premises,
-            obligations,
-        }
-    }
-
-    fn genericize(self, type_params: &[TypeParam]) -> LocalProofBlock {
-        LocalProofBlock {
-            premises: self
-                .premises
-                .into_iter()
-                .map(|premise| premise.genericize(type_params))
-                .collect(),
-            obligations: self
-                .obligations
-                .into_iter()
-                .map(|obligation| obligation.genericize(type_params))
-                .collect(),
-        }
-    }
-
-    fn has_premises(&self) -> bool {
-        !self.premises.is_empty()
-    }
-
-    fn contains_synthetic_witness(&self) -> bool {
-        self.obligations
-            .iter()
-            .any(LocalObligation::contains_synthetic_witness)
-    }
-
-    fn requires_result_spec_export(&self) -> bool {
-        self.has_premises() && self.contains_synthetic_witness()
-    }
-
-    fn obligations_need_result_spec_export(&self) -> bool {
-        self.obligations
-            .iter()
-            .any(LocalObligation::requires_result_spec_export)
-    }
-
-    fn conjoin_premises(&self) -> AcornValue {
-        let mut iter = self.premises.iter().map(|premise| premise.value().clone());
-        let Some(first) = iter.next() else {
-            return AcornValue::Bool(true);
-        };
-        iter.fold(first, AcornValue::and)
-    }
-
-    fn conjoin_values(values: Vec<AcornValue>) -> Option<AcornValue> {
-        let mut iter = values.into_iter();
-        let first = iter.next()?;
-        Some(iter.fold(first, AcornValue::and))
-    }
-
-    pub(crate) fn obligations(self) -> Vec<LocalObligation> {
-        self.obligations
-    }
-
-    pub(crate) fn block_premises(&self) -> Vec<BlockPremise> {
-        self.premises
-            .iter()
-            .map(LocalPremise::to_block_premise)
-            .collect()
-    }
-
-    pub(crate) fn external_value(&self, arg_types: Vec<AcornType>) -> Option<AcornValue> {
-        let mut exported_values = vec![];
-        for obligation in &self.obligations {
-            if let Some(value) = obligation.exported_value_for_context_len(arg_types.len()) {
-                exported_values.push(value);
-            }
-        }
-        let conclusion = Self::conjoin_values(exported_values)?;
-        let guarded = if self.premises.is_empty() {
-            conclusion
-        } else {
-            AcornValue::implies(self.conjoin_premises(), conclusion)
-        };
-        Some(AcornValue::forall(arg_types, guarded))
     }
 }
 
@@ -709,16 +267,7 @@ impl<'a> Evaluator<'a> {
             first_token.start,
             index,
         );
-        let hidden_type = AcornType::functional(context.types.clone(), return_type);
-        let hidden_function = AcornValue::constant(
-            constant_name.clone(),
-            vec![],
-            hidden_type.clone(),
-            hidden_type.clone(),
-            vec![],
-            vec![],
-        );
-        let value = AcornValue::apply(hidden_function, context.values.clone());
+        let value = context.synthetic_value(constant_name.clone(), return_type);
         (constant_name, value)
     }
 
@@ -2591,7 +2140,18 @@ impl<'a> Evaluator<'a> {
                 source_value
             } else {
                 let context = LocalStackContext::from_stack(stack);
-                let premises = vec![];
+                let proof_site = LocalProofSite::new(
+                    context.clone(),
+                    vec![],
+                    local_let.value.range(),
+                    local_let.let_token.clone(),
+                    local_let
+                        .body
+                        .as_ref()
+                        .map(|body| body.right_brace.clone())
+                        .unwrap_or_else(|| local_let.value.last_token().clone()),
+                    local_let.body.clone(),
+                );
                 let transport = TransportBuilder::from_bindings(self.bindings, self.project);
                 if let Some(target_value) = transport.witness(
                     &source_type,
@@ -2609,19 +2169,7 @@ impl<'a> Evaluator<'a> {
                         stack.len() as AtomId,
                     )?;
                     self.push_local_alias(name, target_value, stack.len());
-                    self.local_obligations.push(LocalObligation::claim(
-                        context,
-                        premises,
-                        claim,
-                        local_let.value.range(),
-                        local_let.let_token.clone(),
-                        local_let
-                            .body
-                            .as_ref()
-                            .map(|body| body.right_brace.clone())
-                            .unwrap_or_else(|| local_let.value.last_token().clone()),
-                        local_let.body.clone(),
-                    ));
+                    self.local_obligations.push(proof_site.claim(claim));
                     return Ok(());
                 }
                 let (synthetic_name, target_value) =
@@ -2645,20 +2193,10 @@ impl<'a> Evaluator<'a> {
                     stack_size,
                 )?;
                 self.push_local_alias(name, target_value.clone(), stack.len());
-                self.local_obligations.push(LocalObligation::witness(
-                    context,
+                self.local_obligations.push(proof_site.witness(
                     vec![synthetic_name],
-                    premises,
                     AcornValue::exists(vec![expected_type.clone()], existence_relation),
                     witness_relation,
-                    local_let.value.range(),
-                    local_let.let_token.clone(),
-                    local_let
-                        .body
-                        .as_ref()
-                        .map(|body| body.right_brace.clone())
-                        .unwrap_or_else(|| local_let.value.last_token().clone()),
-                    local_let.body.clone(),
                 ));
                 return Ok(());
             }
@@ -2707,15 +2245,15 @@ impl<'a> Evaluator<'a> {
                 let claim =
                     condition.bind_values(stack_size, stack_size + 1, &[witness_value.clone()]);
                 self.push_local_alias(name, witness_value, stack.len());
-                self.local_obligations.push(LocalObligation::claim(
-                    context,
+                let proof_site = LocalProofSite::new(
+                    context.clone(),
                     vec![],
-                    claim,
                     local_satisfy.condition.range(),
                     local_satisfy.let_token.clone(),
                     local_satisfy.condition_right_brace.clone(),
                     None,
-                ));
+                );
+                self.local_obligations.push(proof_site.claim(claim));
                 return Ok(());
             }
         }
@@ -2726,12 +2264,9 @@ impl<'a> Evaluator<'a> {
 
         let existence = AcornValue::exists(vec![arg_type], condition.clone());
         let witness = condition.bind_values(stack_size, stack_size + 1, &[witness_value]);
-        self.local_obligations.push(LocalObligation::witness(
+        let proof_site = LocalProofSite::new(
             context,
-            vec![synthetic_name],
             vec![],
-            existence,
-            witness,
             local_satisfy.condition.range(),
             local_satisfy.let_token.clone(),
             local_satisfy
@@ -2740,7 +2275,9 @@ impl<'a> Evaluator<'a> {
                 .map(|body| body.right_brace.clone())
                 .unwrap_or_else(|| local_satisfy.condition_right_brace.clone()),
             local_satisfy.body.clone(),
-        ));
+        );
+        self.local_obligations
+            .push(proof_site.witness(vec![synthetic_name], existence, witness));
         Ok(())
     }
 
@@ -2825,6 +2362,18 @@ impl<'a> Evaluator<'a> {
         }
 
         let context = LocalStackContext::from_stack(stack);
+        let proof_site = LocalProofSite::new(
+            context.clone(),
+            vec![],
+            local_destructuring.value.range(),
+            local_destructuring.let_token.clone(),
+            local_destructuring
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
+            local_destructuring.body.clone(),
+        );
 
         let stack_size = stack.len() as AtomId;
         let general_arg_values: Vec<_> = arg_types
@@ -2836,7 +2385,6 @@ impl<'a> Evaluator<'a> {
         let obligation_value = self
             .local_match_pattern_for_value(&value, stack.len())
             .unwrap_or_else(|| value.clone());
-        let premises = vec![];
 
         if let AcornValue::Application(app) = &obligation_value {
             if app.function.as_ref() == &function && app.args.len() == arg_types.len() {
@@ -2846,19 +2394,7 @@ impl<'a> Evaluator<'a> {
                 }
                 let witness_applied = AcornValue::apply(function, witness_args);
                 let claim = AcornValue::equals(witness_applied, obligation_value);
-                self.local_obligations.push(LocalObligation::claim(
-                    context,
-                    premises,
-                    claim,
-                    local_destructuring.value.range(),
-                    local_destructuring.let_token.clone(),
-                    local_destructuring
-                        .body
-                        .as_ref()
-                        .map(|body| body.right_brace.clone())
-                        .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
-                    local_destructuring.body.clone(),
-                ));
+                self.local_obligations.push(proof_site.claim(claim));
                 return Ok(());
             }
         }
@@ -2867,8 +2403,7 @@ impl<'a> Evaluator<'a> {
         let general_equality = AcornValue::equals(general_applied, obligation_value.clone());
         let existence = AcornValue::exists(arg_types.clone(), general_equality);
         let seed_types = arg_types.iter().collect::<Vec<_>>();
-        let mut seed_values = vec![&obligation_value];
-        seed_values.extend(premises.iter().map(|premise| premise.value()));
+        let seed_values = vec![&obligation_value];
         let capture = self.capture_context_for_local_witness(stack, &seed_values, &seed_types);
 
         let mut synthetic_names = vec![];
@@ -2887,21 +2422,8 @@ impl<'a> Evaluator<'a> {
 
         let witness_applied = AcornValue::apply(function, witness_args);
         let witness = AcornValue::equals(witness_applied, obligation_value);
-        self.local_obligations.push(LocalObligation::witness(
-            context,
-            synthetic_names,
-            premises,
-            existence,
-            witness,
-            local_destructuring.value.range(),
-            local_destructuring.let_token.clone(),
-            local_destructuring
-                .body
-                .as_ref()
-                .map(|body| body.right_brace.clone())
-                .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
-            local_destructuring.body.clone(),
-        ));
+        self.local_obligations
+            .push(proof_site.witness(synthetic_names, existence, witness));
         Ok(())
     }
 
@@ -2945,14 +2467,16 @@ impl<'a> Evaluator<'a> {
         if obligations.is_empty() {
             return;
         }
-        self.local_obligations.push(LocalObligation::proof_block(
+        let proof_site = LocalProofSite::new(
             context,
             vec![premise],
-            obligations,
             expression.range(),
             expression.first_token().clone(),
             expression.last_token().clone(),
-        ));
+            None,
+        );
+        self.local_obligations
+            .push(proof_site.proof_block(obligations));
     }
 
     fn evaluate_value_branch_with_block(
@@ -3053,7 +2577,6 @@ impl<'a> Evaluator<'a> {
         }
         let name = self.check_local_value_name(&local_let.name_token, stack)?;
         let context = LocalStackContext::from_stack(stack);
-        let premises = vec![];
         let local_index = stack.insert(name.clone(), value_type.clone());
         let local_target = AcornValue::Variable(local_index, value_type.clone());
         let value_spec = self.evaluate_result_spec_with_stack(
@@ -3067,15 +2590,16 @@ impl<'a> Evaluator<'a> {
                 if let Some(proof_body) = &local_let.body {
                     let existence =
                         AcornValue::exists(vec![value_type.clone()], value_spec.clone());
-                    self.local_obligations.push(LocalObligation::exported_claim(
-                        context,
-                        premises,
-                        existence,
+                    let proof_site = LocalProofSite::new(
+                        context.clone(),
+                        vec![],
                         local_let.value.range(),
                         local_let.let_token.clone(),
                         proof_body.right_brace.clone(),
                         local_let.body.clone(),
-                    ));
+                    );
+                    self.local_obligations
+                        .push(proof_site.exported_claim(existence));
                 }
                 let body_spec = self.evaluate_block_result_spec_from(
                     stack,
@@ -3105,7 +2629,6 @@ impl<'a> Evaluator<'a> {
     ) -> error::Result<AcornValue> {
         let name = self.check_local_value_name(&local_satisfy.name_token, stack)?;
         let context = LocalStackContext::from_stack(stack);
-        let premises = vec![];
         let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
         stack.insert(name.clone(), arg_type.clone());
         let condition = self.evaluate_direct_value_without_local_obligations(
@@ -3117,15 +2640,16 @@ impl<'a> Evaluator<'a> {
             Ok(condition) => {
                 if let Some(proof_body) = &local_satisfy.body {
                     let existence = AcornValue::exists(vec![arg_type.clone()], condition.clone());
-                    self.local_obligations.push(LocalObligation::exported_claim(
-                        context,
-                        premises,
-                        existence,
+                    let proof_site = LocalProofSite::new(
+                        context.clone(),
+                        vec![],
                         local_satisfy.condition.range(),
                         local_satisfy.let_token.clone(),
                         proof_body.right_brace.clone(),
                         local_satisfy.body.clone(),
-                    ));
+                    );
+                    self.local_obligations
+                        .push(proof_site.exported_claim(existence));
                 }
                 let body_spec = self.evaluate_block_result_spec_from(
                     stack,
@@ -3233,7 +2757,6 @@ impl<'a> Evaluator<'a> {
         }
 
         let context = LocalStackContext::from_stack(stack);
-        let premises = vec![];
         let stack_size = stack.len() as AtomId;
         let arg_values: Vec<_> = arg_types
             .iter()
@@ -3251,15 +2774,16 @@ impl<'a> Evaluator<'a> {
             AcornValue::equals(AcornValue::apply(function, arg_values), obligation_value);
         if let Some(proof_body) = &local_destructuring.body {
             let existence = AcornValue::exists(arg_types.clone(), pattern_spec.clone());
-            self.local_obligations.push(LocalObligation::exported_claim(
+            let proof_site = LocalProofSite::new(
                 context,
-                premises,
-                existence,
+                vec![],
                 local_destructuring.value.range(),
                 local_destructuring.let_token.clone(),
                 proof_body.right_brace.clone(),
                 local_destructuring.body.clone(),
-            ));
+            );
+            self.local_obligations
+                .push(proof_site.exported_claim(existence));
         }
         let body_spec = self.evaluate_block_result_spec_from(
             stack,
@@ -3425,7 +2949,7 @@ impl<'a> Evaluator<'a> {
                         cond_exp,
                         Some(&AcornType::Bool),
                     )?;
-                    let if_premise = LocalPremise::new(cond.clone(), cond_exp.range(), stack.len());
+                    let if_premise = LocalPremise::new(cond.clone(), cond_exp.range());
                     let if_spec = self.evaluate_result_spec_branch_with_block(
                         stack,
                         if_premise,
@@ -3436,7 +2960,6 @@ impl<'a> Evaluator<'a> {
                     let else_premise = LocalPremise::new(
                         AcornValue::Not(Box::new(cond.clone())),
                         cond_exp.range(),
-                        stack.len(),
                     );
                     let else_spec = self.evaluate_result_spec_branch_with_block(
                         stack,
@@ -3503,8 +3026,7 @@ impl<'a> Evaluator<'a> {
                             stack_size: stack.len(),
                         });
                         let equality = AcornValue::equals(scrutinee.clone(), pattern);
-                        let premise =
-                            LocalPremise::new(equality.clone(), pattern_exp.range(), stack.len());
+                        let premise = LocalPremise::new(equality.clone(), pattern_exp.range());
                         let branch_spec = self.evaluate_result_spec_branch_with_block(
                             stack,
                             premise,
@@ -4115,7 +3637,7 @@ impl<'a> Evaluator<'a> {
             Expression::IfThenElse(_, cond_exp, if_exp, else_exp, _) => {
                 let cond =
                     self.evaluate_value_with_stack(stack, cond_exp, Some(&AcornType::Bool))?;
-                let if_premise = LocalPremise::new(cond.clone(), cond_exp.range(), stack.len());
+                let if_premise = LocalPremise::new(cond.clone(), cond_exp.range());
                 let if_value = self.evaluate_value_branch_with_block(
                     stack,
                     if_premise,
@@ -4129,7 +3651,6 @@ impl<'a> Evaluator<'a> {
                         let else_premise = LocalPremise::new(
                             AcornValue::Not(Box::new(cond.clone())),
                             cond_exp.range(),
-                            stack.len(),
                         );
                         let else_value = self.evaluate_value_branch_with_block(
                             stack,
@@ -4205,7 +3726,6 @@ impl<'a> Evaluator<'a> {
                     let premise = LocalPremise::new(
                         AcornValue::equals(scrutinee.clone(), pattern.clone()),
                         pattern_exp.range(),
-                        stack.len(),
                     );
                     let result = self.evaluate_value_branch_with_block(
                         stack,

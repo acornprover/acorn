@@ -8,6 +8,7 @@ pub mod evaluator;
 pub mod fact;
 pub mod goal;
 pub mod inference;
+pub mod local;
 pub mod lowered_module;
 pub mod lowering;
 pub mod named_entity;

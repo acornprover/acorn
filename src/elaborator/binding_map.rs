@@ -14,7 +14,8 @@ use crate::elaborator::acorn_type::{
 };
 use crate::elaborator::acorn_value::{AcornValue, FunctionApplication, MatchCase, TypeApplication};
 use crate::elaborator::error::{self, ErrorContext};
-use crate::elaborator::evaluator::{Evaluator, LocalObligation};
+use crate::elaborator::evaluator::Evaluator;
+use crate::elaborator::local::LocalObligation;
 use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::elaborator::potential_value::PotentialValue;

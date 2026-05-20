@@ -1,8 +1,8 @@
 use super::*;
-use crate::elaborator::evaluator::{
+use crate::elaborator::fact::SyntheticWitnessFact;
+use crate::elaborator::local::{
     GuardedLocalClaim, LocalClaimExport, LocalObligation, LocalObligationKind, LocalProofBlock,
 };
-use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
 
 struct LocalObligationFrame {
