@@ -58,6 +58,36 @@ struct LocalMatchFact {
     stack_size: usize,
 }
 
+#[derive(Clone, Copy)]
+enum LocalBindingValueMode {
+    /// Evaluate normally, collecting any proof obligations that appear inside the value.
+    Normal,
+    /// Evaluate without allowing local proof obligations. This is used while constructing
+    /// result specifications, where the obligation shape is represented explicitly.
+    Direct,
+}
+
+struct LocalSatisfyElaboration {
+    name: String,
+    arg_type: AcornType,
+    condition: AcornValue,
+    proof_site: LocalProofSite,
+}
+
+struct LocalLetElaboration {
+    name: String,
+    context: LocalStackContext,
+}
+
+struct LocalDestructuringElaboration {
+    arg_names: Vec<String>,
+    arg_types: Vec<AcornType>,
+    function: AcornValue,
+    obligation_value: AcornValue,
+    proof_site: LocalProofSite,
+    stack_size: AtomId,
+}
+
 #[derive(Clone, Debug)]
 struct SyntheticCaptureContext {
     types: Vec<AcornType>,
@@ -2104,14 +2134,7 @@ impl<'a> Evaluator<'a> {
     /// If the result is an unresolved constant and we have an expected type, we'll try to
     /// use type inference to resolve it.
     fn evaluate_local_let(&mut self, stack: &mut Stack, local_let: &LocalLet) -> error::Result<()> {
-        let name = local_let.name_token.text().to_string();
-        if stack.get(&name).is_some() || self.has_local_alias(&name) {
-            return Err(local_let
-                .name_token
-                .error(&format!("name '{}' is already bound", name)));
-        }
-        self.bindings
-            .check_unqualified_name_available(&name, &local_let.name_token)?;
+        let binding = self.evaluate_local_let_binding(stack, local_let)?;
         if local_let.value.is_axiom() {
             return Err(local_let
                 .value
@@ -2139,19 +2162,7 @@ impl<'a> Evaluator<'a> {
                 }
                 source_value
             } else {
-                let context = LocalStackContext::from_stack(stack);
-                let proof_site = LocalProofSite::new(
-                    context.clone(),
-                    vec![],
-                    local_let.value.range(),
-                    local_let.let_token.clone(),
-                    local_let
-                        .body
-                        .as_ref()
-                        .map(|body| body.right_brace.clone())
-                        .unwrap_or_else(|| local_let.value.last_token().clone()),
-                    local_let.body.clone(),
-                );
+                let proof_site = self.local_let_proof_site(&binding, local_let);
                 let transport = TransportBuilder::from_bindings(self.bindings, self.project);
                 if let Some(target_value) = transport.witness(
                     &source_type,
@@ -2168,12 +2179,16 @@ impl<'a> Evaluator<'a> {
                         transport_token,
                         stack.len() as AtomId,
                     )?;
-                    self.push_local_alias(name, target_value, stack.len());
+                    self.push_local_alias(binding.name, target_value, stack.len());
                     self.local_obligations.push(proof_site.claim(claim));
                     return Ok(());
                 }
-                let (synthetic_name, target_value) =
-                    self.local_synthetic_value(transport_token, 0, expected_type.clone(), &context);
+                let (synthetic_name, target_value) = self.local_synthetic_value(
+                    transport_token,
+                    0,
+                    expected_type.clone(),
+                    &binding.context,
+                );
                 let stack_size = stack.len() as AtomId;
                 let target_variable = AcornValue::Variable(stack_size, expected_type.clone());
                 let existence_relation = transport.relation(
@@ -2192,7 +2207,7 @@ impl<'a> Evaluator<'a> {
                     transport_token,
                     stack_size,
                 )?;
-                self.push_local_alias(name, target_value.clone(), stack.len());
+                self.push_local_alias(binding.name, target_value.clone(), stack.len());
                 self.local_obligations.push(proof_site.witness(
                     vec![synthetic_name],
                     AcornValue::exists(vec![expected_type.clone()], existence_relation),
@@ -2201,16 +2216,12 @@ impl<'a> Evaluator<'a> {
                 return Ok(());
             }
         } else {
-            if local_let.body.is_some() {
-                return Err(local_let
-                    .let_token
-                    .error("proof blocks on local value lets are only supported for transport"));
-            }
+            Self::check_local_value_let_proof_body(local_let)?;
             self.evaluate_value_with_stack(stack, &local_let.value, expected_type.as_ref())?
         };
         let value_type = expected_type.unwrap_or_else(|| value.get_type());
         value.check_type(Some(&value_type), &local_let.value)?;
-        self.push_local_alias(name, value, stack.len());
+        self.push_local_alias(binding.name, value, stack.len());
         Ok(())
     }
 
@@ -2219,65 +2230,51 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         local_satisfy: &LocalSatisfyLet,
     ) -> error::Result<()> {
-        let name = local_satisfy.name_token.text().to_string();
-        if stack.get(&name).is_some() || self.has_local_alias(&name) {
-            return Err(local_satisfy
-                .name_token
-                .error(&format!("name '{}' is already bound", name)));
-        }
-        self.bindings
-            .check_unqualified_name_available(&name, &local_satisfy.name_token)?;
-
-        let context = LocalStackContext::from_stack(stack);
-
-        let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
-        stack.insert(name.clone(), arg_type.clone());
-        let condition_result =
-            self.evaluate_value_with_stack(stack, &local_satisfy.condition, Some(&AcornType::Bool));
-        stack.remove(&name);
-        let condition = condition_result?;
+        let elaboration = self.evaluate_local_satisfy_binding(
+            stack,
+            local_satisfy,
+            LocalBindingValueMode::Normal,
+        )?;
 
         let stack_size = stack.len() as AtomId;
         if local_satisfy.body.is_none() {
-            if let Some(witness_value) =
-                Self::local_satisfy_equality_witness(&condition, stack_size, &arg_type)
-            {
-                let claim =
-                    condition.bind_values(stack_size, stack_size + 1, &[witness_value.clone()]);
-                self.push_local_alias(name, witness_value, stack.len());
-                let proof_site = LocalProofSite::new(
-                    context.clone(),
-                    vec![],
-                    local_satisfy.condition.range(),
-                    local_satisfy.let_token.clone(),
-                    local_satisfy.condition_right_brace.clone(),
-                    None,
+            if let Some(witness_value) = Self::local_satisfy_equality_witness(
+                &elaboration.condition,
+                stack_size,
+                &elaboration.arg_type,
+            ) {
+                let claim = elaboration.condition.bind_values(
+                    stack_size,
+                    stack_size + 1,
+                    &[witness_value.clone()],
                 );
-                self.local_obligations.push(proof_site.claim(claim));
+                self.push_local_alias(elaboration.name, witness_value, stack.len());
+                self.local_obligations
+                    .push(elaboration.proof_site.claim(claim));
                 return Ok(());
             }
         }
 
-        let (synthetic_name, witness_value) =
-            self.local_synthetic_value(&local_satisfy.let_token, 0, arg_type.clone(), &context);
-        self.push_local_alias(name, witness_value.clone(), stack.len());
-
-        let existence = AcornValue::exists(vec![arg_type], condition.clone());
-        let witness = condition.bind_values(stack_size, stack_size + 1, &[witness_value]);
-        let proof_site = LocalProofSite::new(
-            context,
-            vec![],
-            local_satisfy.condition.range(),
-            local_satisfy.let_token.clone(),
-            local_satisfy
-                .body
-                .as_ref()
-                .map(|body| body.right_brace.clone())
-                .unwrap_or_else(|| local_satisfy.condition_right_brace.clone()),
-            local_satisfy.body.clone(),
+        let context = LocalStackContext::from_stack(stack);
+        let (synthetic_name, witness_value) = self.local_synthetic_value(
+            &local_satisfy.let_token,
+            0,
+            elaboration.arg_type.clone(),
+            &context,
         );
-        self.local_obligations
-            .push(proof_site.witness(vec![synthetic_name], existence, witness));
+        self.push_local_alias(elaboration.name, witness_value.clone(), stack.len());
+
+        let existence =
+            AcornValue::exists(vec![elaboration.arg_type], elaboration.condition.clone());
+        let witness =
+            elaboration
+                .condition
+                .bind_values(stack_size, stack_size + 1, &[witness_value]);
+        self.local_obligations.push(elaboration.proof_site.witness(
+            vec![synthetic_name],
+            existence,
+            witness,
+        ));
         Ok(())
     }
 
@@ -2286,129 +2283,53 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         local_destructuring: &LocalDestructuringLet,
     ) -> error::Result<()> {
-        let mut arg_names = vec![];
-        for arg_token in &local_destructuring.args {
-            Self::validate_pattern_arg_name(arg_token)?;
-            let arg_name = arg_token.text().to_string();
-            if arg_names.contains(&arg_name) {
-                return Err(arg_token.error(&format!(
-                    "duplicate argument name '{}' in destructuring pattern",
-                    arg_name
-                )));
-            }
-            if stack.get(&arg_name).is_some() || self.has_local_alias(&arg_name) {
-                return Err(arg_token.error(&format!("name '{}' is already bound", arg_name)));
-            }
-            self.bindings
-                .check_unqualified_name_available(&arg_name, arg_token)?;
-            arg_names.push(arg_name);
-        }
+        let elaboration = self.evaluate_local_destructuring_binding(
+            stack,
+            local_destructuring,
+            LocalBindingValueMode::Normal,
+        )?;
 
-        let value = self.evaluate_value_with_stack(stack, &local_destructuring.value, None)?;
-        let value_type = value.get_type();
-        let mut function = self.evaluate_as_generic_value(stack, &local_destructuring.function)?;
-
-        let function_type_before = function.get_type();
-        let function_ftype_before = match &function_type_before {
-            AcornType::Function(ft) => ft,
-            _ => {
-                return Err(local_destructuring.function.error(&format!(
-                    "expected a function type, but got {}",
-                    function_type_before
-                )));
-            }
-        };
-
-        let return_type_before = function_ftype_before.return_type.as_ref().clone();
-        if return_type_before != value_type {
-            function = InferenceEngine::new(self.bindings).infer_function_return_type(
-                function,
-                &value_type,
-                "destructuring function return type",
-                &local_destructuring.value,
-            )?;
-        }
-
-        let function_type = function.get_type();
-        let (arg_types, return_type) = match &function_type {
-            AcornType::Function(ft) => (ft.arg_types.clone(), ft.return_type.as_ref().clone()),
-            _ => {
-                return Err(local_destructuring.function.error(&format!(
-                    "expected a function type, but got {}",
-                    function_type
-                )));
-            }
-        };
-
-        if arg_types.len() != local_destructuring.args.len() {
-            return Err(local_destructuring.let_token.error(&format!(
-                "function expects {} arguments, but {} were provided in the pattern",
-                arg_types.len(),
-                local_destructuring.args.len()
-            )));
-        }
-
-        if return_type != value_type {
-            return Err(local_destructuring.value.error(&format!(
-                "type mismatch: function returns {} but value has type {}",
-                return_type, value_type
-            )));
-        }
-
-        if arg_types.iter().any(|t| t.has_generic()) {
-            return Err(local_destructuring
-                .function
-                .error("could not infer all argument types for destructuring pattern"));
-        }
-
-        let context = LocalStackContext::from_stack(stack);
-        let proof_site = LocalProofSite::new(
-            context.clone(),
-            vec![],
-            local_destructuring.value.range(),
-            local_destructuring.let_token.clone(),
-            local_destructuring
-                .body
-                .as_ref()
-                .map(|body| body.right_brace.clone())
-                .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
-            local_destructuring.body.clone(),
-        );
-
-        let stack_size = stack.len() as AtomId;
-        let general_arg_values: Vec<_> = arg_types
+        let general_arg_values: Vec<_> = elaboration
+            .arg_types
             .iter()
             .enumerate()
-            .map(|(i, arg_type)| AcornValue::Variable(stack_size + i as AtomId, arg_type.clone()))
+            .map(|(i, arg_type)| {
+                AcornValue::Variable(elaboration.stack_size + i as AtomId, arg_type.clone())
+            })
             .collect();
 
-        let obligation_value = self
-            .local_match_pattern_for_value(&value, stack.len())
-            .unwrap_or_else(|| value.clone());
-
-        if let AcornValue::Application(app) = &obligation_value {
-            if app.function.as_ref() == &function && app.args.len() == arg_types.len() {
+        if let AcornValue::Application(app) = &elaboration.obligation_value {
+            if app.function.as_ref() == &elaboration.function
+                && app.args.len() == elaboration.arg_types.len()
+            {
                 let witness_args = app.args.clone();
-                for (arg_name, witness_value) in arg_names.iter().zip(&witness_args) {
+                for (arg_name, witness_value) in elaboration.arg_names.iter().zip(&witness_args) {
                     self.push_local_alias(arg_name.clone(), witness_value.clone(), stack.len());
                 }
-                let witness_applied = AcornValue::apply(function, witness_args);
-                let claim = AcornValue::equals(witness_applied, obligation_value);
-                self.local_obligations.push(proof_site.claim(claim));
+                let witness_applied = AcornValue::apply(elaboration.function, witness_args);
+                let claim = AcornValue::equals(witness_applied, elaboration.obligation_value);
+                self.local_obligations
+                    .push(elaboration.proof_site.claim(claim));
                 return Ok(());
             }
         }
 
-        let general_applied = AcornValue::apply(function.clone(), general_arg_values);
-        let general_equality = AcornValue::equals(general_applied, obligation_value.clone());
-        let existence = AcornValue::exists(arg_types.clone(), general_equality);
-        let seed_types = arg_types.iter().collect::<Vec<_>>();
-        let seed_values = vec![&obligation_value];
+        let general_applied = AcornValue::apply(elaboration.function.clone(), general_arg_values);
+        let general_equality =
+            AcornValue::equals(general_applied, elaboration.obligation_value.clone());
+        let existence = AcornValue::exists(elaboration.arg_types.clone(), general_equality);
+        let seed_types = elaboration.arg_types.iter().collect::<Vec<_>>();
+        let seed_values = vec![&elaboration.obligation_value];
         let capture = self.capture_context_for_local_witness(stack, &seed_values, &seed_types);
 
         let mut synthetic_names = vec![];
         let mut witness_args = vec![];
-        for (i, (arg_name, arg_type)) in arg_names.iter().zip(&arg_types).enumerate() {
+        for (i, (arg_name, arg_type)) in elaboration
+            .arg_names
+            .iter()
+            .zip(&elaboration.arg_types)
+            .enumerate()
+        {
             let (synthetic_name, witness_value) = self.local_synthetic_value_with_capture(
                 &local_destructuring.let_token,
                 i as u32,
@@ -2420,10 +2341,13 @@ impl<'a> Evaluator<'a> {
             witness_args.push(witness_value);
         }
 
-        let witness_applied = AcornValue::apply(function, witness_args);
-        let witness = AcornValue::equals(witness_applied, obligation_value);
-        self.local_obligations
-            .push(proof_site.witness(synthetic_names, existence, witness));
+        let witness_applied = AcornValue::apply(elaboration.function, witness_args);
+        let witness = AcornValue::equals(witness_applied, elaboration.obligation_value);
+        self.local_obligations.push(elaboration.proof_site.witness(
+            synthetic_names,
+            existence,
+            witness,
+        ));
         Ok(())
     }
 
@@ -2557,126 +2481,106 @@ impl<'a> Evaluator<'a> {
         Ok(name)
     }
 
-    fn evaluate_local_typed_let_result_spec(
-        &mut self,
-        stack: &mut Stack,
+    fn evaluate_local_let_binding(
+        &self,
+        stack: &Stack,
         local_let: &LocalLet,
-        value_type: AcornType,
-        local_lets: &[LocalBlockItem],
-        next_index: usize,
-        body: &Expression,
-        target: AcornValue,
-        expected_type: &AcornType,
-    ) -> error::Result<AcornValue> {
-        if local_let.body.is_some() {
-            if local_let.value.transport_operand().is_none() {
-                return Err(local_let
-                    .let_token
-                    .error("proof blocks on local value lets are only supported for transport"));
-            }
-        }
-        let name = self.check_local_value_name(&local_let.name_token, stack)?;
-        let context = LocalStackContext::from_stack(stack);
-        let local_index = stack.insert(name.clone(), value_type.clone());
-        let local_target = AcornValue::Variable(local_index, value_type.clone());
-        let value_spec = self.evaluate_result_spec_with_stack(
-            stack,
-            &local_let.value,
-            local_target,
-            &value_type,
-        );
-        let body_spec = match value_spec {
-            Ok(value_spec) => {
-                if let Some(proof_body) = &local_let.body {
-                    let existence =
-                        AcornValue::exists(vec![value_type.clone()], value_spec.clone());
-                    let proof_site = LocalProofSite::new(
-                        context.clone(),
-                        vec![],
-                        local_let.value.range(),
-                        local_let.let_token.clone(),
-                        proof_body.right_brace.clone(),
-                        local_let.body.clone(),
-                    );
-                    self.local_obligations
-                        .push(proof_site.exported_claim(existence));
-                }
-                let body_spec = self.evaluate_block_result_spec_from(
-                    stack,
-                    local_lets,
-                    next_index,
-                    body,
-                    target,
-                    expected_type,
-                );
-                body_spec.map(|body_spec| Self::conjoin_result_specs(value_spec, body_spec))
-            }
-            Err(e) => Err(e),
-        };
-        stack.remove(&name);
-        Ok(AcornValue::exists(vec![value_type], body_spec?))
+    ) -> error::Result<LocalLetElaboration> {
+        Ok(LocalLetElaboration {
+            name: self.check_local_value_name(&local_let.name_token, stack)?,
+            context: LocalStackContext::from_stack(stack),
+        })
     }
 
-    fn evaluate_local_satisfy_result_spec(
+    fn local_let_proof_site(
+        &self,
+        binding: &LocalLetElaboration,
+        local_let: &LocalLet,
+    ) -> LocalProofSite {
+        LocalProofSite::new(
+            binding.context.clone(),
+            vec![],
+            local_let.value.range(),
+            local_let.let_token.clone(),
+            local_let
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_let.value.last_token().clone()),
+            local_let.body.clone(),
+        )
+    }
+
+    fn check_local_value_let_proof_body(local_let: &LocalLet) -> error::Result<()> {
+        if local_let.body.is_some() && local_let.value.transport_operand().is_none() {
+            return Err(local_let
+                .let_token
+                .error("proof blocks on local value lets are only supported for transport"));
+        }
+        Ok(())
+    }
+
+    fn evaluate_local_binding_value(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        expected_type: Option<&AcornType>,
+        mode: LocalBindingValueMode,
+    ) -> error::Result<AcornValue> {
+        match mode {
+            LocalBindingValueMode::Normal => {
+                self.evaluate_value_with_stack(stack, expression, expected_type)
+            }
+            LocalBindingValueMode::Direct => self.evaluate_direct_value_without_local_obligations(
+                stack,
+                expression,
+                expected_type,
+            ),
+        }
+    }
+
+    fn evaluate_local_satisfy_binding(
         &mut self,
         stack: &mut Stack,
         local_satisfy: &LocalSatisfyLet,
-        local_lets: &[LocalBlockItem],
-        next_index: usize,
-        body: &Expression,
-        target: AcornValue,
-        expected_type: &AcornType,
-    ) -> error::Result<AcornValue> {
+        mode: LocalBindingValueMode,
+    ) -> error::Result<LocalSatisfyElaboration> {
         let name = self.check_local_value_name(&local_satisfy.name_token, stack)?;
         let context = LocalStackContext::from_stack(stack);
         let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
         stack.insert(name.clone(), arg_type.clone());
-        let condition = self.evaluate_direct_value_without_local_obligations(
+        let condition = self.evaluate_local_binding_value(
             stack,
             &local_satisfy.condition,
             Some(&AcornType::Bool),
+            mode,
         );
-        let body_spec = match condition {
-            Ok(condition) => {
-                if let Some(proof_body) = &local_satisfy.body {
-                    let existence = AcornValue::exists(vec![arg_type.clone()], condition.clone());
-                    let proof_site = LocalProofSite::new(
-                        context.clone(),
-                        vec![],
-                        local_satisfy.condition.range(),
-                        local_satisfy.let_token.clone(),
-                        proof_body.right_brace.clone(),
-                        local_satisfy.body.clone(),
-                    );
-                    self.local_obligations
-                        .push(proof_site.exported_claim(existence));
-                }
-                let body_spec = self.evaluate_block_result_spec_from(
-                    stack,
-                    local_lets,
-                    next_index,
-                    body,
-                    target,
-                    expected_type,
-                );
-                body_spec.map(|body_spec| Self::conjoin_result_specs(condition, body_spec))
-            }
-            Err(e) => Err(e),
-        };
         stack.remove(&name);
-        Ok(AcornValue::exists(vec![arg_type], body_spec?))
+        let proof_site = LocalProofSite::new(
+            context,
+            vec![],
+            local_satisfy.condition.range(),
+            local_satisfy.let_token.clone(),
+            local_satisfy
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_satisfy.condition_right_brace.clone()),
+            local_satisfy.body.clone(),
+        );
+        Ok(LocalSatisfyElaboration {
+            name,
+            arg_type,
+            condition: condition?,
+            proof_site,
+        })
     }
 
-    fn evaluate_local_destructuring_result_spec(
-        &mut self,
-        stack: &mut Stack,
+    fn check_local_destructuring_arg_names(
+        &self,
+        stack: &Stack,
         local_destructuring: &LocalDestructuringLet,
-        local_lets: &[LocalBlockItem],
-        next_index: usize,
-        body: &Expression,
-        target: AcornValue,
-        expected_type: &AcornType,
-    ) -> error::Result<AcornValue> {
+    ) -> error::Result<Vec<String>> {
         let mut arg_names = vec![];
         for arg_token in &local_destructuring.args {
             Self::validate_pattern_arg_name(arg_token)?;
@@ -2694,12 +2598,18 @@ impl<'a> Evaluator<'a> {
                 .check_unqualified_name_available(&arg_name, arg_token)?;
             arg_names.push(arg_name);
         }
+        Ok(arg_names)
+    }
 
-        let value = self.evaluate_direct_value_without_local_obligations(
-            stack,
-            &local_destructuring.value,
-            None,
-        )?;
+    fn evaluate_local_destructuring_binding(
+        &mut self,
+        stack: &mut Stack,
+        local_destructuring: &LocalDestructuringLet,
+        mode: LocalBindingValueMode,
+    ) -> error::Result<LocalDestructuringElaboration> {
+        let arg_names = self.check_local_destructuring_arg_names(stack, local_destructuring)?;
+        let value =
+            self.evaluate_local_binding_value(stack, &local_destructuring.value, None, mode)?;
         let value_type = value.get_type();
         let mut function = self.evaluate_as_generic_value(stack, &local_destructuring.function)?;
 
@@ -2757,33 +2667,99 @@ impl<'a> Evaluator<'a> {
         }
 
         let context = LocalStackContext::from_stack(stack);
-        let stack_size = stack.len() as AtomId;
-        let arg_values: Vec<_> = arg_types
-            .iter()
-            .enumerate()
-            .map(|(i, arg_type)| AcornValue::Variable(stack_size + i as AtomId, arg_type.clone()))
-            .collect();
+        let proof_site = LocalProofSite::new(
+            context,
+            vec![],
+            local_destructuring.value.range(),
+            local_destructuring.let_token.clone(),
+            local_destructuring
+                .body
+                .as_ref()
+                .map(|body| body.right_brace.clone())
+                .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
+            local_destructuring.body.clone(),
+        );
         let obligation_value = self
             .local_match_pattern_for_value(&value, stack.len())
             .unwrap_or_else(|| value.clone());
+        Ok(LocalDestructuringElaboration {
+            arg_names,
+            arg_types,
+            function,
+            obligation_value,
+            proof_site,
+            stack_size: stack.len() as AtomId,
+        })
+    }
 
-        for (arg_name, arg_type) in arg_names.iter().zip(&arg_types) {
-            stack.insert(arg_name.clone(), arg_type.clone());
-        }
-        let pattern_spec =
-            AcornValue::equals(AcornValue::apply(function, arg_values), obligation_value);
-        if let Some(proof_body) = &local_destructuring.body {
-            let existence = AcornValue::exists(arg_types.clone(), pattern_spec.clone());
-            let proof_site = LocalProofSite::new(
-                context,
-                vec![],
-                local_destructuring.value.range(),
-                local_destructuring.let_token.clone(),
-                proof_body.right_brace.clone(),
-                local_destructuring.body.clone(),
-            );
+    fn evaluate_local_typed_let_result_spec(
+        &mut self,
+        stack: &mut Stack,
+        local_let: &LocalLet,
+        value_type: AcornType,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        Self::check_local_value_let_proof_body(local_let)?;
+        let binding = self.evaluate_local_let_binding(stack, local_let)?;
+        let local_index = stack.insert(binding.name.clone(), value_type.clone());
+        let local_target = AcornValue::Variable(local_index, value_type.clone());
+        let value_spec = self.evaluate_result_spec_with_stack(
+            stack,
+            &local_let.value,
+            local_target,
+            &value_type,
+        );
+        let body_spec = match value_spec {
+            Ok(value_spec) => {
+                if local_let.body.is_some() {
+                    let existence =
+                        AcornValue::exists(vec![value_type.clone()], value_spec.clone());
+                    let proof_site = self.local_let_proof_site(&binding, local_let);
+                    self.local_obligations
+                        .push(proof_site.exported_claim(existence));
+                }
+                let body_spec = self.evaluate_block_result_spec_from(
+                    stack,
+                    local_lets,
+                    next_index,
+                    body,
+                    target,
+                    expected_type,
+                );
+                body_spec.map(|body_spec| Self::conjoin_result_specs(value_spec, body_spec))
+            }
+            Err(e) => Err(e),
+        };
+        stack.remove(&binding.name);
+        Ok(AcornValue::exists(vec![value_type], body_spec?))
+    }
+
+    fn evaluate_local_satisfy_result_spec(
+        &mut self,
+        stack: &mut Stack,
+        local_satisfy: &LocalSatisfyLet,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let elaboration = self.evaluate_local_satisfy_binding(
+            stack,
+            local_satisfy,
+            LocalBindingValueMode::Direct,
+        )?;
+        stack.insert(elaboration.name.clone(), elaboration.arg_type.clone());
+        let condition = elaboration.condition.clone();
+        if local_satisfy.body.is_some() {
+            let existence =
+                AcornValue::exists(vec![elaboration.arg_type.clone()], condition.clone());
             self.local_obligations
-                .push(proof_site.exported_claim(existence));
+                .push(elaboration.proof_site.exported_claim(existence));
         }
         let body_spec = self.evaluate_block_result_spec_from(
             stack,
@@ -2793,11 +2769,61 @@ impl<'a> Evaluator<'a> {
             target,
             expected_type,
         );
-        for arg_name in &arg_names {
+        let body_spec = body_spec.map(|body_spec| Self::conjoin_result_specs(condition, body_spec));
+        stack.remove(&elaboration.name);
+        Ok(AcornValue::exists(vec![elaboration.arg_type], body_spec?))
+    }
+
+    fn evaluate_local_destructuring_result_spec(
+        &mut self,
+        stack: &mut Stack,
+        local_destructuring: &LocalDestructuringLet,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let elaboration = self.evaluate_local_destructuring_binding(
+            stack,
+            local_destructuring,
+            LocalBindingValueMode::Direct,
+        )?;
+
+        let arg_values: Vec<_> = elaboration
+            .arg_types
+            .iter()
+            .enumerate()
+            .map(|(i, arg_type)| {
+                AcornValue::Variable(elaboration.stack_size + i as AtomId, arg_type.clone())
+            })
+            .collect();
+
+        for (arg_name, arg_type) in elaboration.arg_names.iter().zip(&elaboration.arg_types) {
+            stack.insert(arg_name.clone(), arg_type.clone());
+        }
+        let pattern_spec = AcornValue::equals(
+            AcornValue::apply(elaboration.function, arg_values),
+            elaboration.obligation_value,
+        );
+        if local_destructuring.body.is_some() {
+            let existence = AcornValue::exists(elaboration.arg_types.clone(), pattern_spec.clone());
+            self.local_obligations
+                .push(elaboration.proof_site.exported_claim(existence));
+        }
+        let body_spec = self.evaluate_block_result_spec_from(
+            stack,
+            local_lets,
+            next_index,
+            body,
+            target,
+            expected_type,
+        );
+        for arg_name in &elaboration.arg_names {
             stack.remove(arg_name);
         }
         let spec = Self::conjoin_result_specs(pattern_spec, body_spec?);
-        Ok(AcornValue::exists(arg_types, spec))
+        Ok(AcornValue::exists(elaboration.arg_types, spec))
     }
 
     fn evaluate_block_result_spec_from(
