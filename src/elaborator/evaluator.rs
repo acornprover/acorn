@@ -26,6 +26,7 @@ use crate::syntax::expression::{
 use crate::syntax::statement::Body;
 use crate::syntax::token::{Token, TokenType};
 use crate::syntax::token_map::TokenMap;
+use tower_lsp::lsp_types::Range;
 
 /// Represents the arguments in an attributes statement.
 /// Either generic datatype-family parameters (e.g., `K`, `n: Nat`) or concrete
@@ -63,7 +64,14 @@ struct LocalMatchFact {
 #[derive(Clone, Debug)]
 struct LocalPremise {
     value: AcornValue,
+    range: Range,
     stack_size: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalObligationPremise {
+    pub value: AcornValue,
+    pub range: Range,
 }
 
 #[derive(Clone, Debug)]
@@ -134,19 +142,19 @@ impl SyntheticCaptureContext {
 pub enum LocalObligationKind {
     Claim {
         claim: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     },
     Transport {
         source_type: AcornType,
         target_type: AcornType,
         source_value: AcornValue,
         target_value: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
         transport_token: Token,
     },
 }
@@ -216,6 +224,15 @@ impl LocalObligation {
             first_token: self.first_token,
             last_token: self.last_token,
             body: self.body,
+        }
+    }
+}
+
+impl LocalObligationPremise {
+    fn genericize(self, type_params: &[TypeParam]) -> LocalObligationPremise {
+        LocalObligationPremise {
+            value: self.value.genericize(type_params),
+            range: self.range,
         }
     }
 }
@@ -376,16 +393,19 @@ impl<'a> Evaluator<'a> {
         None
     }
 
-    fn local_premises_for_stack(&self, stack_size: usize) -> Vec<AcornValue> {
+    fn local_premises_for_stack(&self, stack_size: usize) -> Vec<LocalObligationPremise> {
         self.local_premises
             .iter()
             .map(|premise| {
                 debug_assert!(stack_size >= premise.stack_size);
                 let increment = stack_size.saturating_sub(premise.stack_size) as AtomId;
-                premise
-                    .value
-                    .clone()
-                    .insert_stack(premise.stack_size as AtomId, increment)
+                LocalObligationPremise {
+                    value: premise
+                        .value
+                        .clone()
+                        .insert_stack(premise.stack_size as AtomId, increment),
+                    range: premise.range,
+                }
             })
             .collect()
     }
@@ -2535,13 +2555,40 @@ impl<'a> Evaluator<'a> {
         let obligation_value = self
             .local_match_pattern_for_value(&value, stack.len())
             .unwrap_or_else(|| value.clone());
+        let premises = self.local_premises_for_stack(stack.len());
+
+        if let AcornValue::Application(app) = &obligation_value {
+            if app.function.as_ref() == &function && app.args.len() == arg_types.len() {
+                let witness_args = app.args.clone();
+                for (arg_name, witness_value) in arg_names.iter().zip(&witness_args) {
+                    self.push_local_alias(arg_name.clone(), witness_value.clone(), stack.len());
+                }
+                let witness_applied = AcornValue::apply(function, witness_args);
+                let claim = AcornValue::equals(witness_applied, obligation_value);
+                self.local_obligations.push(LocalObligation {
+                    arg_names: context.names,
+                    arg_types: context.types,
+                    synthetic_names: vec![],
+                    kind: LocalObligationKind::Claim { claim, premises },
+                    range: local_destructuring.value.range(),
+                    first_token: local_destructuring.let_token.clone(),
+                    last_token: local_destructuring
+                        .body
+                        .as_ref()
+                        .map(|body| body.right_brace.clone())
+                        .unwrap_or_else(|| local_destructuring.value.last_token().clone()),
+                    body: local_destructuring.body.clone(),
+                });
+                return Ok(());
+            }
+        }
+
         let general_applied = AcornValue::apply(function.clone(), general_arg_values);
         let general_equality = AcornValue::equals(general_applied, obligation_value.clone());
         let existence = AcornValue::exists(arg_types.clone(), general_equality);
-        let premises = self.local_premises_for_stack(stack.len());
         let seed_types = arg_types.iter().collect::<Vec<_>>();
         let mut seed_values = vec![&obligation_value];
-        seed_values.extend(premises.iter());
+        seed_values.extend(premises.iter().map(|premise| &premise.value));
         let capture = self.capture_context_for_local_witness(stack, &seed_values, &seed_types);
 
         let mut synthetic_names = vec![];
@@ -3197,6 +3244,7 @@ impl<'a> Evaluator<'a> {
                 let premise_count = self.local_premises.len();
                 self.local_premises.push(LocalPremise {
                     value: cond.clone(),
+                    range: cond_exp.range(),
                     stack_size: stack.len(),
                 });
                 let if_value = self.evaluate_value_with_stack(stack, if_exp, expected_type);
@@ -3209,6 +3257,7 @@ impl<'a> Evaluator<'a> {
                         let premise_count = self.local_premises.len();
                         self.local_premises.push(LocalPremise {
                             value: AcornValue::Not(Box::new(cond.clone())),
+                            range: cond_exp.range(),
                             stack_size: stack.len(),
                         });
                         let else_value = self.evaluate_value_with_stack(
@@ -3286,6 +3335,7 @@ impl<'a> Evaluator<'a> {
                     let premise_count = self.local_premises.len();
                     self.local_premises.push(LocalPremise {
                         value: AcornValue::equals(scrutinee.clone(), pattern.clone()),
+                        range: pattern_exp.range(),
                         stack_size: stack.len(),
                     });
                     let result =

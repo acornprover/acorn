@@ -1,18 +1,18 @@
 use super::transport::TransportBuilder;
 use super::*;
-use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind};
+use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind, LocalObligationPremise};
 use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
 
 enum PreparedLocalObligation {
     Claim {
         claim: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     },
 }
 
@@ -46,6 +46,13 @@ impl LocalObligationFrame {
     }
 }
 
+fn premise_values(premises: &[LocalObligationPremise]) -> Vec<AcornValue> {
+    premises
+        .iter()
+        .map(|premise| premise.value.clone())
+        .collect()
+}
+
 fn conjoin_values(values: Vec<AcornValue>) -> AcornValue {
     let mut iter = values.into_iter();
     let Some(first) = iter.next() else {
@@ -54,23 +61,11 @@ fn conjoin_values(values: Vec<AcornValue>) -> AcornValue {
     iter.fold(first, AcornValue::and)
 }
 
-fn imply_premises(premises: Vec<AcornValue>, conclusion: AcornValue) -> AcornValue {
+fn imply_premises(premises: &[LocalObligationPremise], conclusion: AcornValue) -> AcornValue {
     if premises.is_empty() {
         conclusion
     } else {
-        AcornValue::implies(conjoin_values(premises), conclusion)
-    }
-}
-
-fn guard_positive_exists(existence: AcornValue, premises: &[AcornValue]) -> AcornValue {
-    if premises.is_empty() {
-        return existence;
-    }
-    match existence {
-        AcornValue::Exists(types, body) => {
-            AcornValue::Exists(types, Box::new(guard_positive_exists(*body, premises)))
-        }
-        value => imply_premises(premises.to_vec(), value),
+        AcornValue::implies(conjoin_values(premise_values(premises)), conclusion)
     }
 }
 
@@ -186,15 +181,21 @@ impl Environment {
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
         claim: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     ) -> error::Result<()> {
-        let goal = imply_premises(premises, claim);
         let block = Block::new(
             project,
             self,
             type_params.to_vec(),
             frame.block_args,
-            BlockParams::VariableSatisfy(goal, frame.range.clone()),
+            BlockParams::VariableSatisfyWithPremises {
+                goal: claim,
+                premises: premises
+                    .iter()
+                    .map(|premise| (premise.value.clone(), premise.range))
+                    .collect(),
+                range: frame.range.clone(),
+            },
             &frame.first_token,
             &frame.last_token,
             frame.body.as_deref(),
@@ -213,20 +214,22 @@ impl Environment {
         synthetic_names: Vec<ConstantName>,
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<AcornValue>,
+        premises: Vec<LocalObligationPremise>,
     ) -> error::Result<()> {
-        let guarded_existence = guard_positive_exists(existence, &premises);
+        // Branch premises may justify the relation we expose for the local witness, but not the
+        // witness's existence. The existence proof stays unconditional so that a dead branch can't
+        // manufacture an inhabitant of an empty type via `exists w { premise -> R(w) }`.
         let block = Block::new(
             project,
             self,
             type_params.to_vec(),
             frame.block_args,
-            BlockParams::VariableSatisfy(guarded_existence.clone(), frame.range.clone()),
+            BlockParams::VariableSatisfy(existence.clone(), frame.range.clone()),
             &frame.first_token,
             &frame.last_token,
             frame.body.as_deref(),
         )?;
-        let external_existence = AcornValue::forall(frame.arg_types.clone(), guarded_existence);
+        let external_existence = AcornValue::forall(frame.arg_types.clone(), existence);
         let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
         let prop = Proposition::new(external_existence, type_params.to_vec(), source)
             .with_arg_count(frame.arg_count);
@@ -239,7 +242,7 @@ impl Environment {
         ));
         self.add_node_lines(index, &frame.range);
 
-        let witness = AcornValue::forall(frame.arg_types, imply_premises(premises, witness));
+        let witness = AcornValue::forall(frame.arg_types, imply_premises(&premises, witness));
         let source = Source::anonymous(self.module_id, frame.range, self.depth);
         let prop =
             Proposition::new(witness, type_params.to_vec(), source).with_arg_count(frame.arg_count);

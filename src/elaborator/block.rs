@@ -80,6 +80,13 @@ pub enum BlockParams<'a> {
     /// ambient type parameters have been converted to arbitrary types.
     VariableSatisfy(AcornValue, Range),
 
+    /// A local obligation goal with structural premises from an expression branch.
+    VariableSatisfyWithPremises {
+        goal: AcornValue,
+        premises: Vec<(AcornValue, Range)>,
+        range: Range,
+    },
+
     /// MatchCase represents a single case within a match statement.
     /// The scrutinee, the constructor, the pattern arguments, and the range of the pattern.
     MatchCase(AcornValue, AcornValue, Vec<(String, AcornType)>, Range),
@@ -263,6 +270,28 @@ impl Block {
             }
             BlockParams::VariableSatisfy(ref unbound_goal, range) => {
                 let bound_goal = unbound_goal
+                    .clone()
+                    .bind_values(0, 0, &internal_args)
+                    .to_arbitrary();
+                let source = Source::block_goal(env.module_id, range, subenv.depth);
+                let prop = Proposition::new(bound_goal, vec![], source);
+                Some(prop)
+            }
+            BlockParams::VariableSatisfyWithPremises {
+                ref goal,
+                ref premises,
+                range,
+            } => {
+                for (premise, premise_range) in premises {
+                    let bound = premise
+                        .clone()
+                        .bind_values(0, 0, &internal_args)
+                        .to_arbitrary();
+                    let source = Source::premise(env.module_id, *premise_range, subenv.depth);
+                    let prop = Proposition::new(bound, vec![], source);
+                    subenv.add_node(Node::structural(project, &subenv, prop));
+                }
+                let bound_goal = goal
                     .clone()
                     .bind_values(0, 0, &internal_args)
                     .to_arbitrary();

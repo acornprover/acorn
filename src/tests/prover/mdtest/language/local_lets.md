@@ -354,6 +354,30 @@ theorem picked_is_seed {
 }
 ```
 
+## Local Satisfy In Dead Branch Cannot Inhabit Empty Type
+
+Branch-local witnesses must not be exported as unconditional witnesses. In particular, a dead
+branch cannot manufacture an inhabitant of an arbitrary type.
+
+```acorn,fail
+type Empty: axiom
+
+let picked: Bool = if false {
+    let x: Empty satisfy {
+        true
+    }
+    true
+} else {
+    true
+}
+
+theorem impossible {
+    exists(x: Empty) {
+        x = x
+    }
+}
+```
+
 ## Local Satisfy Cannot Inhabit Empty Let RHS
 
 ```acorn,fail
