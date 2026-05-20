@@ -68,6 +68,24 @@ pub struct LocalPremise {
     stack_size: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalClaimExport {
+    /// Prove the claim for use inside its proof block only.
+    InternalOnly,
+    /// Also export the claim to the outer environment, guarded by its local premises.
+    Guarded,
+}
+
+/// A proof obligation claim together with the branch/match premises it may assume.
+///
+/// Inside the proof block, the premises are added structurally. When exported out of
+/// the local context, the same claim becomes `premises -> claim`.
+#[derive(Clone, Debug)]
+pub struct GuardedLocalClaim {
+    claim: AcornValue,
+    premises: Vec<LocalPremise>,
+}
+
 #[derive(Clone, Debug)]
 struct LocalStackContext {
     names: Vec<String>,
@@ -135,12 +153,12 @@ impl SyntheticCaptureContext {
 #[derive(Clone, Debug)]
 pub enum LocalObligationKind {
     Claim {
-        claim: AcornValue,
-        export: bool,
+        claim: GuardedLocalClaim,
+        export: LocalClaimExport,
     },
     ExistsWitness {
         existence: AcornValue,
-        witness: AcornValue,
+        witness: GuardedLocalClaim,
     },
 }
 
@@ -149,7 +167,6 @@ pub struct LocalObligation {
     pub arg_names: Vec<String>,
     pub arg_types: Vec<AcornType>,
     pub synthetic_names: Vec<ConstantName>,
-    pub premises: Vec<LocalPremise>,
     pub kind: LocalObligationKind,
     pub range: Range,
     pub first_token: Token,
@@ -161,7 +178,6 @@ impl LocalObligation {
     fn new(
         context: LocalStackContext,
         synthetic_names: Vec<ConstantName>,
-        premises: Vec<LocalPremise>,
         kind: LocalObligationKind,
         range: Range,
         first_token: Token,
@@ -172,7 +188,6 @@ impl LocalObligation {
             arg_names: context.names,
             arg_types: context.types,
             synthetic_names,
-            premises,
             kind,
             range,
             first_token,
@@ -193,10 +208,9 @@ impl LocalObligation {
         LocalObligation::new(
             context,
             vec![],
-            premises,
             LocalObligationKind::Claim {
-                claim,
-                export: false,
+                claim: GuardedLocalClaim::new(premises, claim),
+                export: LocalClaimExport::InternalOnly,
             },
             range,
             first_token,
@@ -217,10 +231,9 @@ impl LocalObligation {
         LocalObligation::new(
             context,
             vec![],
-            premises,
             LocalObligationKind::Claim {
-                claim,
-                export: true,
+                claim: GuardedLocalClaim::new(premises, claim),
+                export: LocalClaimExport::Guarded,
             },
             range,
             first_token,
@@ -243,8 +256,10 @@ impl LocalObligation {
         LocalObligation::new(
             context,
             synthetic_names,
-            premises,
-            LocalObligationKind::ExistsWitness { existence, witness },
+            LocalObligationKind::ExistsWitness {
+                existence,
+                witness: GuardedLocalClaim::new(premises, witness),
+            },
             range,
             first_token,
             last_token,
@@ -253,7 +268,11 @@ impl LocalObligation {
     }
 
     pub(crate) fn requires_result_spec_export(&self) -> bool {
-        !self.synthetic_names.is_empty() && !self.premises.is_empty()
+        !self.synthetic_names.is_empty()
+            && matches!(
+                &self.kind,
+                LocalObligationKind::ExistsWitness { witness, .. } if witness.has_premises()
+            )
     }
 
     pub(crate) fn genericize(self, type_params: &[TypeParam]) -> LocalObligation {
@@ -265,11 +284,6 @@ impl LocalObligation {
                 .map(|arg_type| arg_type.genericize(type_params))
                 .collect(),
             synthetic_names: self.synthetic_names,
-            premises: self
-                .premises
-                .into_iter()
-                .map(|premise| premise.genericize(type_params))
-                .collect(),
             kind: match self.kind {
                 LocalObligationKind::Claim { claim, export } => LocalObligationKind::Claim {
                     claim: claim.genericize(type_params),
@@ -329,6 +343,55 @@ impl LocalPremise {
 
     pub(crate) fn to_block_premise(&self) -> BlockPremise {
         self.premise.clone()
+    }
+}
+
+impl GuardedLocalClaim {
+    fn new(premises: Vec<LocalPremise>, claim: AcornValue) -> GuardedLocalClaim {
+        GuardedLocalClaim { claim, premises }
+    }
+
+    fn has_premises(&self) -> bool {
+        !self.premises.is_empty()
+    }
+
+    fn genericize(self, type_params: &[TypeParam]) -> GuardedLocalClaim {
+        GuardedLocalClaim {
+            claim: self.claim.genericize(type_params),
+            premises: self
+                .premises
+                .into_iter()
+                .map(|premise| premise.genericize(type_params))
+                .collect(),
+        }
+    }
+
+    fn conjoin_premises(&self) -> AcornValue {
+        let mut iter = self.premises.iter().map(|premise| premise.value().clone());
+        let Some(first) = iter.next() else {
+            return AcornValue::Bool(true);
+        };
+        iter.fold(first, AcornValue::and)
+    }
+
+    pub(crate) fn claim(&self) -> &AcornValue {
+        &self.claim
+    }
+
+    pub(crate) fn block_premises(&self) -> Vec<BlockPremise> {
+        self.premises
+            .iter()
+            .map(LocalPremise::to_block_premise)
+            .collect()
+    }
+
+    pub(crate) fn external_value(&self, arg_types: Vec<AcornType>) -> AcornValue {
+        let conclusion = if self.premises.is_empty() {
+            self.claim.clone()
+        } else {
+            AcornValue::implies(self.conjoin_premises(), self.claim.clone())
+        };
+        AcornValue::forall(arg_types, conclusion)
     }
 }
 

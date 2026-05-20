@@ -1,5 +1,7 @@
 use super::*;
-use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind, LocalPremise};
+use crate::elaborator::evaluator::{
+    GuardedLocalClaim, LocalClaimExport, LocalObligation, LocalObligationKind,
+};
 use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
 
@@ -33,29 +35,6 @@ impl LocalObligationFrame {
     }
 }
 
-fn premise_values(premises: &[LocalPremise]) -> Vec<AcornValue> {
-    premises
-        .iter()
-        .map(|premise| premise.value().clone())
-        .collect()
-}
-
-fn conjoin_values(values: Vec<AcornValue>) -> AcornValue {
-    let mut iter = values.into_iter();
-    let Some(first) = iter.next() else {
-        return AcornValue::Bool(true);
-    };
-    iter.fold(first, AcornValue::and)
-}
-
-fn imply_premises(premises: &[LocalPremise], conclusion: AcornValue) -> AcornValue {
-    if premises.is_empty() {
-        conclusion
-    } else {
-        AcornValue::implies(conjoin_values(premise_values(premises)), conclusion)
-    }
-}
-
 impl Environment {
     pub(super) fn add_genericized_local_obligations(
         &mut self,
@@ -80,21 +59,13 @@ impl Environment {
             let frame = LocalObligationFrame::from_obligation(&obligation);
             let LocalObligation {
                 synthetic_names,
-                premises,
                 kind,
                 ..
             } = obligation;
 
             match kind {
                 LocalObligationKind::Claim { claim, export } => {
-                    self.add_local_claim_obligation(
-                        project,
-                        type_params,
-                        frame,
-                        claim,
-                        premises,
-                        export,
-                    )?;
+                    self.add_local_claim_obligation(project, type_params, frame, claim, export)?;
                 }
                 LocalObligationKind::ExistsWitness { existence, witness } => {
                     self.add_local_witness_obligation(
@@ -104,7 +75,6 @@ impl Environment {
                         synthetic_names,
                         existence,
                         witness,
-                        premises,
                     )?;
                 }
             }
@@ -117,9 +87,8 @@ impl Environment {
         project: &dyn ProjectLookup,
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
-        claim: AcornValue,
-        premises: Vec<LocalPremise>,
-        export: bool,
+        claim: GuardedLocalClaim,
+        export: LocalClaimExport,
     ) -> error::Result<()> {
         let block = Block::new(
             project,
@@ -127,26 +96,24 @@ impl Environment {
             type_params.to_vec(),
             frame.block_args,
             BlockParams::variable_satisfy_with_premises(
-                claim.clone(),
-                premises
-                    .iter()
-                    .map(LocalPremise::to_block_premise)
-                    .collect(),
+                claim.claim().clone(),
+                claim.block_premises(),
                 frame.range.clone(),
             ),
             &frame.first_token,
             &frame.last_token,
             frame.body.as_deref(),
         )?;
-        let external_fact = if export {
-            let claim = AcornValue::forall(frame.arg_types, imply_premises(&premises, claim));
-            let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
-            Some(
-                Proposition::new(claim, type_params.to_vec(), source)
-                    .with_arg_count(frame.arg_count),
-            )
-        } else {
-            None
+        let external_fact = match export {
+            LocalClaimExport::InternalOnly => None,
+            LocalClaimExport::Guarded => {
+                let claim = claim.external_value(frame.arg_types);
+                let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
+                Some(
+                    Proposition::new(claim, type_params.to_vec(), source)
+                        .with_arg_count(frame.arg_count),
+                )
+            }
         };
         let index = self.add_node(Node::block(project, self, block, external_fact));
         self.add_node_lines(index, &frame.range);
@@ -160,8 +127,7 @@ impl Environment {
         frame: LocalObligationFrame,
         synthetic_names: Vec<ConstantName>,
         existence: AcornValue,
-        witness: AcornValue,
-        premises: Vec<LocalPremise>,
+        witness: GuardedLocalClaim,
     ) -> error::Result<()> {
         // Branch premises may justify the relation we expose for the local witness, but not the
         // witness's existence. The existence proof stays unconditional so that a dead branch can't
@@ -189,7 +155,7 @@ impl Environment {
         ));
         self.add_node_lines(index, &frame.range);
 
-        let witness = AcornValue::forall(frame.arg_types, imply_premises(&premises, witness));
+        let witness = witness.external_value(frame.arg_types);
         let source = Source::anonymous(self.module_id, frame.range, self.depth);
         let prop =
             Proposition::new(witness, type_params.to_vec(), source).with_arg_count(frame.arg_count);
