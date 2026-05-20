@@ -381,73 +381,110 @@ impl Environment {
         let datatype_value_param_types = datatype_value_param_types(datatype_params);
         let explicit_value_param_types =
             explicit_value_param_types(&local_family_params.value_params);
-        let (acorn_type, value, local_obligations) = match &ls.type_expr {
-            Some(type_expr) => {
-                let mut stack = Stack::new();
-                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
-                bind_datatype_value_params(&mut stack, datatype_params);
-                let acorn_type = self
-                    .evaluator(project)
-                    .evaluate_type_with_stack(&mut stack, type_expr)?;
-                if ls.name_token.token_type == TokenType::Numeral {
-                    match &defined_name {
-                        DefinedName::Constant(constant_name) => {
-                            let (datatype_module_id, datatype_name) =
-                                match constant_name.as_attribute() {
-                                    Some((datatype_module_id, datatype_name, _)) => {
-                                        (datatype_module_id, datatype_name.to_string())
-                                    }
-                                    _ => {
-                                        return Err(ls
-                                            .name_token
-                                            .error("numeric literals must be datatype members"))
-                                    }
+        enum LetEvaluation {
+            Regular(AcornType, Option<AcornValue>, Vec<LocalObligation>),
+            Transport(error::Result<()>),
+        }
+        let evaluation: error::Result<LetEvaluation> = (|| {
+            Ok(match &ls.type_expr {
+                Some(type_expr) => {
+                    let mut stack = Stack::new();
+                    bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+                    bind_datatype_value_params(&mut stack, datatype_params);
+                    let acorn_type = self
+                        .evaluator(project)
+                        .evaluate_type_with_stack(&mut stack, type_expr)?;
+                    if ls.name_token.token_type == TokenType::Numeral {
+                        match &defined_name {
+                            DefinedName::Constant(constant_name) => {
+                                let (datatype_module_id, datatype_name) =
+                                    match constant_name.as_attribute() {
+                                        Some((datatype_module_id, datatype_name, _)) => {
+                                            (datatype_module_id, datatype_name.to_string())
+                                        }
+                                        _ => {
+                                            return Err(ls.name_token.error(
+                                                "numeric literals must be datatype members",
+                                            ))
+                                        }
+                                    };
+                                let datatype = Datatype {
+                                    module_id: datatype_module_id,
+                                    name: datatype_name,
                                 };
-                            let datatype = Datatype {
-                                module_id: datatype_module_id,
-                                name: datatype_name,
-                            };
-                            acorn_type
-                                .check_instance(&datatype, type_expr)
-                                .map_err(|_| {
-                                    type_expr.error(
-                                        "numeric datatype variables must be the datatype type",
-                                    )
-                                })?;
-                        }
-                        DefinedName::Instance(instance_name) => {
-                            acorn_type
+                                acorn_type
+                                    .check_instance(&datatype, type_expr)
+                                    .map_err(|_| {
+                                        type_expr.error(
+                                            "numeric datatype variables must be the datatype type",
+                                        )
+                                    })?;
+                            }
+                            DefinedName::Instance(instance_name) => {
+                                acorn_type
                                 .check_instance(&instance_name.datatype, type_expr)
                                 .map_err(|_| {
                                     type_expr.error(
                                         "numeric instance variables must be the instance datatype type",
                                     )
                                 })?;
+                            }
                         }
                     }
-                }
-                if let Some((transport_token, source_expr)) = transport_operand(&ls.value) {
-                    let result = self.add_transport_let_statement(
-                        project,
-                        statement,
-                        defined_name,
-                        ls,
-                        range,
-                        datatype_params,
-                        &local_family_params,
-                        &local_type_params,
-                        acorn_type,
-                        source_expr,
-                        transport_token,
-                    );
-                    for param in local_type_params.iter().rev() {
-                        self.bindings.remove_type(&param.name);
+                    if let Some((transport_token, source_expr)) = transport_operand(&ls.value) {
+                        return Ok(LetEvaluation::Transport(self.add_transport_let_statement(
+                            project,
+                            statement,
+                            defined_name.clone(),
+                            ls,
+                            range,
+                            datatype_params,
+                            &local_family_params,
+                            &local_type_params,
+                            acorn_type,
+                            source_expr,
+                            transport_token,
+                        )));
                     }
-                    return result;
+                    let (value, local_obligations) = if ls.value.is_axiom() {
+                        (None, vec![])
+                    } else {
+                        let mut stack = Stack::new();
+                        bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+                        bind_datatype_value_params(&mut stack, datatype_params);
+                        let mut evaluator = if let Some(instance_name) = defined_name.as_instance()
+                        {
+                            Evaluator::new_for_instance_member(
+                                project,
+                                &self.bindings,
+                                Some(&mut self.token_map),
+                                instance_name,
+                            )
+                        } else {
+                            self.evaluator(project)
+                        };
+                        let value = evaluator.evaluate_value_with_stack(
+                            &mut stack,
+                            &ls.value,
+                            Some(&acorn_type),
+                        )?;
+                        let local_obligations = evaluator.take_local_obligations();
+                        (Some(value), local_obligations)
+                    };
+                    LetEvaluation::Regular(acorn_type, value, local_obligations)
                 }
-                let (value, local_obligations) = if ls.value.is_axiom() {
-                    (None, vec![])
-                } else {
+                None => {
+                    if let Some((transport_token, _)) = transport_operand(&ls.value) {
+                        return Err(
+                            transport_token.error("transport requires an explicit type annotation")
+                        );
+                    }
+                    if ls.value.is_axiom() {
+                        return Err(ls
+                            .value
+                            .first_token()
+                            .error("axiom constants require explicit type annotation"));
+                    }
                     let mut stack = Stack::new();
                     bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                     bind_datatype_value_params(&mut stack, datatype_params);
@@ -461,45 +498,24 @@ impl Environment {
                     } else {
                         self.evaluator(project)
                     };
-                    let value = evaluator.evaluate_value_with_stack(
-                        &mut stack,
-                        &ls.value,
-                        Some(&acorn_type),
-                    )?;
+                    let value = evaluator.evaluate_value_with_stack(&mut stack, &ls.value, None)?;
                     let local_obligations = evaluator.take_local_obligations();
-                    (Some(value), local_obligations)
-                };
+                    let acorn_type = value.get_type();
+                    LetEvaluation::Regular(acorn_type, Some(value), local_obligations)
+                }
+            })
+        })();
+
+        for param in local_type_params.iter().rev() {
+            self.bindings.remove_type(&param.name);
+        }
+
+        let (acorn_type, value, local_obligations) = match evaluation? {
+            LetEvaluation::Regular(acorn_type, value, local_obligations) => {
                 (acorn_type, value, local_obligations)
             }
-            None => {
-                if let Some((transport_token, _)) = transport_operand(&ls.value) {
-                    return Err(
-                        transport_token.error("transport requires an explicit type annotation")
-                    );
-                }
-                if ls.value.is_axiom() {
-                    return Err(ls
-                        .value
-                        .first_token()
-                        .error("axiom constants require explicit type annotation"));
-                }
-                let mut stack = Stack::new();
-                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
-                bind_datatype_value_params(&mut stack, datatype_params);
-                let mut evaluator = if let Some(instance_name) = defined_name.as_instance() {
-                    Evaluator::new_for_instance_member(
-                        project,
-                        &self.bindings,
-                        Some(&mut self.token_map),
-                        instance_name,
-                    )
-                } else {
-                    self.evaluator(project)
-                };
-                let value = evaluator.evaluate_value_with_stack(&mut stack, &ls.value, None)?;
-                let local_obligations = evaluator.take_local_obligations();
-                let acorn_type = value.get_type();
-                (acorn_type, Some(value), local_obligations)
+            LetEvaluation::Transport(result) => {
+                return result;
             }
         };
         let acorn_type = if explicit_value_param_types.is_empty() {
@@ -516,10 +532,6 @@ impl Environment {
             value.map(|value| AcornValue::lambda(explicit_value_param_types.clone(), value))
         };
         let value = value.map(|value| lambda_over_datatype_value_params(datatype_params, value));
-
-        for param in local_type_params.iter().rev() {
-            self.bindings.remove_type(&param.name);
-        }
 
         let type_params = match datatype_params {
             Some(p) => {
@@ -935,121 +947,124 @@ impl Environment {
             + local_family_params.value_params.len() as AtomId;
         let explicit_value_param_types =
             explicit_value_param_types(&local_family_params.value_params);
-        for declaration in &vss.declarations {
-            if let Declaration::Typed(_, type_expr) = declaration {
-                let mut stack = Stack::new();
-                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
-                bind_datatype_value_params(&mut stack, datatype_params);
-                self.evaluator(project)
-                    .evaluate_type_with_stack(&mut stack, type_expr)?;
-            }
-        }
-
-        let mut stack = Stack::new();
-        bind_explicit_value_params(&mut stack, &local_family_params.value_params);
-        bind_datatype_value_params(&mut stack, datatype_params);
-        let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
-        let (quant_names, quant_types) =
-            no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
-        let general_claim_value = no_token_evaluator.evaluate_value_with_stack(
-            &mut stack,
-            &vss.condition,
-            Some(&AcornType::Bool),
-        )?;
-        let local_obligations = no_token_evaluator.take_local_obligations();
-        let general_claim =
-            AcornValue::Exists(quant_types.clone(), Box::new(general_claim_value.clone()));
-        let definition_type_params = match datatype_params {
-            Some(p) => {
-                if !local_type_params.is_empty() {
-                    return Err(vss.declarations[0]
-                        .token()
-                        .error("datatype parameters and let parameters cannot be used together"));
+        let result = (|| {
+            for declaration in &vss.declarations {
+                if let Declaration::Typed(_, type_expr) = declaration {
+                    let mut stack = Stack::new();
+                    bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+                    bind_datatype_value_params(&mut stack, datatype_params);
+                    self.evaluator(project)
+                        .evaluate_type_with_stack(&mut stack, type_expr)?;
                 }
-                p.type_params().to_vec()
-            }
-            None => local_type_params.clone(),
-        };
-        self.add_genericized_local_obligations(
-            project,
-            statement,
-            &definition_type_params,
-            local_obligations,
-        )?;
-        let mut block_args = explicit_value_block_args(&local_family_params.value_params);
-        block_args.extend(datatype_value_block_args(datatype_params));
-        let block = Block::new(
-            project,
-            &self,
-            vec![],
-            block_args,
-            BlockParams::VariableSatisfy(general_claim, vss.condition.range()),
-            &statement.first_token,
-            &statement.last_token,
-            None,
-        )?;
-
-        let mut constant_values = Vec::new();
-        for ((declaration, quant_name), quant_type) in vss
-            .declarations
-            .iter()
-            .zip(quant_names.iter())
-            .zip(quant_types.iter())
-        {
-            let defined_name = defined_name_for(quant_name);
-            if self.bindings.constant_name_in_use(&defined_name) {
-                return Err(declaration.token().error(&format!(
-                    "constant name '{}' already defined in this scope",
-                    &defined_name
-                )));
             }
 
-            let generic_value_type = quant_type.clone().genericize(&definition_type_params);
-            let constant_type = if explicit_value_param_types.is_empty() {
-                generic_value_type.clone()
-            } else {
-                AcornType::functional_from_promoted_ambient(
-                    explicit_value_param_types.clone(),
-                    generic_value_type.clone(),
-                )
-            };
-            let def_str = format!("{}: {}", quant_name, constant_type);
-            let constant_value = self.declare_witness_constant(
-                &defined_name,
-                &definition_type_params,
-                quant_type,
-                &local_family_params.value_params,
-                datatype_params,
-                vec![],
-                declaration.token().range(),
-                def_str,
-                declaration.token(),
-                "let ... satisfy cannot define instance attributes",
+            let mut stack = Stack::new();
+            bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+            bind_datatype_value_params(&mut stack, datatype_params);
+            let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
+            let (quant_names, quant_types) =
+                no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
+            let general_claim_value = no_token_evaluator.evaluate_value_with_stack(
+                &mut stack,
+                &vss.condition,
+                Some(&AcornType::Bool),
             )?;
-            constant_values.push(constant_value);
-        }
+            let local_obligations = no_token_evaluator.take_local_obligations();
+            let general_claim =
+                AcornValue::Exists(quant_types.clone(), Box::new(general_claim_value.clone()));
+            let definition_type_params = match datatype_params {
+                Some(p) => {
+                    if !local_type_params.is_empty() {
+                        return Err(vss.declarations[0].token().error(
+                            "datatype parameters and let parameters cannot be used together",
+                        ));
+                    }
+                    p.type_params().to_vec()
+                }
+                None => local_type_params.clone(),
+            };
+            self.add_genericized_local_obligations(
+                project,
+                statement,
+                &definition_type_params,
+                local_obligations,
+            )?;
+            let mut block_args = explicit_value_block_args(&local_family_params.value_params);
+            block_args.extend(datatype_value_block_args(datatype_params));
+            let block = Block::new(
+                project,
+                &self,
+                vec![],
+                block_args,
+                BlockParams::VariableSatisfy(general_claim, vss.condition.range()),
+                &statement.first_token,
+                &statement.last_token,
+                None,
+            )?;
 
-        let num_vars = quant_names.len() as AtomId;
-        let specific_claim_value = general_claim_value.bind_values(
-            family_value_param_count,
-            family_value_param_count + num_vars,
-            &constant_values,
-        );
-        let external_claim = quantify_over_explicit_value_params(
-            &local_family_params.value_params,
-            quantify_over_datatype_value_params(datatype_params, specific_claim_value),
-        )
-        .genericize(&definition_type_params);
-        let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let specific_prop = Proposition::new(external_claim, definition_type_params, source);
-        let index = self.add_node(Node::block(project, self, block, Some(specific_prop)));
-        self.add_node_lines(index, &statement.range());
+            let mut constant_values = Vec::new();
+            for ((declaration, quant_name), quant_type) in vss
+                .declarations
+                .iter()
+                .zip(quant_names.iter())
+                .zip(quant_types.iter())
+            {
+                let defined_name = defined_name_for(quant_name);
+                if self.bindings.constant_name_in_use(&defined_name) {
+                    return Err(declaration.token().error(&format!(
+                        "constant name '{}' already defined in this scope",
+                        &defined_name
+                    )));
+                }
+
+                let generic_value_type = quant_type.clone().genericize(&definition_type_params);
+                let constant_type = if explicit_value_param_types.is_empty() {
+                    generic_value_type.clone()
+                } else {
+                    AcornType::functional_from_promoted_ambient(
+                        explicit_value_param_types.clone(),
+                        generic_value_type.clone(),
+                    )
+                };
+                let def_str = format!("{}: {}", quant_name, constant_type);
+                let constant_value = self.declare_witness_constant(
+                    &defined_name,
+                    &definition_type_params,
+                    quant_type,
+                    &local_family_params.value_params,
+                    datatype_params,
+                    vec![],
+                    declaration.token().range(),
+                    def_str,
+                    declaration.token(),
+                    "let ... satisfy cannot define instance attributes",
+                )?;
+                constant_values.push(constant_value);
+            }
+
+            let num_vars = quant_names.len() as AtomId;
+            let specific_claim_value = general_claim_value.bind_values(
+                family_value_param_count,
+                family_value_param_count + num_vars,
+                &constant_values,
+            );
+            let external_claim = quantify_over_explicit_value_params(
+                &local_family_params.value_params,
+                quantify_over_datatype_value_params(datatype_params, specific_claim_value),
+            )
+            .genericize(&definition_type_params);
+            let source = Source::anonymous(self.module_id, statement.range(), self.depth);
+            let specific_prop = Proposition::new(external_claim, definition_type_params, source);
+            let index = self.add_node(Node::block(project, self, block, Some(specific_prop)));
+            self.add_node_lines(index, &statement.range());
+            Ok(())
+        })();
 
         for param in local_type_params.iter().rev() {
             self.bindings.remove_type(&param.name);
         }
 
-        Ok(())
+        result
     }
 
     pub(super) fn add_function_satisfy_statement(

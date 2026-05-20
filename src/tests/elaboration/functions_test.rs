@@ -463,6 +463,47 @@ fn test_no_recursive_simple_infinite_loops() {
 }
 
 #[test]
+fn test_failed_recursive_define_cleans_function_binding() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.bad("define bad(x: Nat) -> Nat { missing }");
+    env.add("define bad(x: Nat) -> Nat { x }");
+}
+
+#[test]
+fn test_failed_generic_define_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.bad("define bad[Thing](x: Nat) -> Nat { missing }");
+    env.add("type Thing: axiom");
+}
+
+#[test]
+fn test_failed_parameterized_let_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.bad("let bad[Thing]: Nat = missing");
+    env.add("type Thing: axiom");
+}
+
+#[test]
+fn test_failed_parameterized_let_satisfy_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.bad("let witness[Thing]: Nat satisfy { missing }");
+    env.add("type Thing: axiom");
+}
+
+#[test]
+fn test_failed_parameterized_transport_let_cleans_type_parameter() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("type Indexed[n: Nat]: axiom");
+    env.bad("let bad[Thing](n: Nat): Indexed[n] = transport missing");
+    env.add("type Thing: axiom");
+}
+
+#[test]
 fn test_no_recursive_complicated_infinite_loops() {
     let mut env = Environment::test();
     env.add(

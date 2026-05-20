@@ -32,6 +32,36 @@ impl Environment {
             }
         }
 
+        let value_param_names = value_params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut field_names = std::collections::BTreeSet::new();
+        for (field_name_token, _, _) in &ss.fields {
+            field_name_token.check_not_reserved()?;
+            if TokenType::is_magic_method_name(field_name_token.text())
+                && field_name_token.text() != "contains"
+                && field_name_token.text() != "not_contains"
+            {
+                return Err(field_name_token.error(&format!(
+                    "'{}' is a reserved word. use a different name",
+                    field_name_token.text()
+                )));
+            }
+            if value_param_names.contains(field_name_token.text()) {
+                return Err(field_name_token.error(&format!(
+                    "field name '{}' is already bound as a value parameter",
+                    field_name_token.text()
+                )));
+            }
+            if !field_names.insert(field_name_token.text()) {
+                return Err(field_name_token.error(&format!(
+                    "duplicate field name '{}'",
+                    field_name_token.text()
+                )));
+            }
+        }
+
         let mut arbitrary_params = vec![];
         for type_param in &type_params {
             arbitrary_params.push(self.bindings.add_arbitrary_type(type_param.clone()));
@@ -51,15 +81,6 @@ impl Environment {
                 .evaluator(project)
                 .evaluate_type_with_stack(&mut family_stack, field_type_expr)?;
             field_types.push(field_type.clone());
-            if TokenType::is_magic_method_name(&field_name_token.text())
-                && field_name_token.text() != "contains"
-                && field_name_token.text() != "not_contains"
-            {
-                return Err(field_name_token.error(&format!(
-                    "'{}' is a reserved word. use a different name",
-                    field_name_token.text()
-                )));
-            }
             member_fn_names.push(field_name_token.text());
             field_doc_comments.push(doc_comments.clone());
         }
@@ -581,6 +602,16 @@ impl Environment {
             end: is.name_token.end_pos(),
         };
 
+        let mut constructor_names = std::collections::BTreeSet::new();
+        for (name_token, _, _) in &is.constructors {
+            name_token.check_not_reserved()?;
+            if !constructor_names.insert(name_token.text()) {
+                return Err(name_token.error(&format!(
+                    "duplicate constructor name '{}'",
+                    name_token.text()
+                )));
+            }
+        }
         let mut arbitrary_params = vec![];
         let type_params = self
             .evaluator(project)

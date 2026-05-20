@@ -409,6 +409,44 @@ fn test_no_magic_names_for_struct_fields() {
 }
 
 #[test]
+fn test_no_duplicate_struct_fields() {
+    let mut env = Environment::test();
+    env.bad(
+        r#"
+            structure MyStruct {
+                item: Bool
+                item: Bool
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_no_reserved_names_for_struct_fields() {
+    let mut env = Environment::test();
+    env.bad(
+        r#"
+            structure MyStruct {
+                new: Bool
+            }
+        "#,
+    );
+}
+
+#[test]
+fn test_no_value_parameter_names_for_struct_fields() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.bad(
+        r#"
+            structure MyStruct[n: Nat] {
+                n: Nat
+            }
+        "#,
+    );
+}
+
+#[test]
 fn test_numerals_statement() {
     let mut env = Environment::test();
     env.add("type Foo: axiom");

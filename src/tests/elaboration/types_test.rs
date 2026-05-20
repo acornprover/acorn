@@ -29,6 +29,29 @@ fn test_inductive_statements_must_have_base_case() {
 }
 
 #[test]
+fn test_inductive_constructors_must_be_unique() {
+    let mut env = Environment::test();
+    env.bad(
+        r#"
+        inductive Bad {
+            item
+            item
+        }"#,
+    );
+}
+
+#[test]
+fn test_inductive_constructors_cannot_use_reserved_names() {
+    let mut env = Environment::test();
+    env.bad(
+        r#"
+        inductive Bad {
+            induction
+        }"#,
+    );
+}
+
+#[test]
 fn test_no_russell_paradox() {
     let mut env = Environment::test();
     env.bad(

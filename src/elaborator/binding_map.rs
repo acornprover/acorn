@@ -2146,104 +2146,118 @@ impl BindingMap {
         for param in &type_params {
             self.add_arbitrary_type(param.clone());
         }
-        let mut stack = Stack::new();
-        if let Some(value_params) = datatype_value_params {
-            for value_param in value_params {
-                stack.insert(value_param.name.clone(), value_param.value_type.clone());
-            }
-        }
-        let mut evaluator = match current_instance {
-            Some(instance_name) => Evaluator::new_for_instance_member(
-                project,
-                self,
-                token_map.as_deref_mut(),
-                instance_name,
-            ),
-            None => Evaluator::new(project, self, token_map.as_deref_mut()),
-        };
-        let (arg_names, internal_arg_types) = evaluator.bind_args(&mut stack, args, class_type)?;
-
-        // Figure out types.
-        let internal_value_type = match value_type_expr {
-            Some(e) => evaluator.evaluate_type_with_stack(&mut stack, e)?,
-            None => AcornType::Bool,
-        };
-
-        if let Some(function_name) = function_name {
-            let ambient_value_param_count = datatype_value_params
-                .map(|params| params.len() as AtomId)
-                .unwrap_or(0);
-            let mut fn_type = AcornType::functional_from_scoped_context(
-                internal_arg_types.clone(),
-                internal_value_type.clone(),
-                ambient_value_param_count,
-            );
-            // The function is bound to its name locally, to handle recursive definitions.
-            // Internally to the definition, this function is not polymorphic, but it may have
-            // type parameters from both the datatype (if it's a method) and the function itself.
-            let mut all_params = datatype_type_params.unwrap_or_default().to_vec();
-            all_params.extend(type_params.clone());
-            let datatype_value_param_types = datatype_value_params
-                .unwrap_or_default()
-                .iter()
-                .map(|value_param| value_param.value_type.clone())
-                .collect();
-
-            // If we have params, genericize the type so it uses type variables instead of arbitrary types
-            if !all_params.is_empty() {
-                fn_type = fn_type.genericize(&all_params);
-            }
-
-            self.add_constant_name(
-                function_name,
-                all_params,
-                datatype_value_param_types,
-                fn_type,
-                None,
-                None,
-                vec![],
-                None,
-                None,
-            );
-        }
-
-        // Evaluate the internal value using our modified bindings
-        let (internal_value, local_obligations) = if value_expr.is_axiom() {
-            (None, vec![])
-        } else {
-            let mut evaluator = match current_instance {
-                Some(instance_name) => {
-                    Evaluator::new_for_instance_member(project, self, token_map, instance_name)
+        let mut added_function_binding = false;
+        let scoped_result = (|| {
+            let mut stack = Stack::new();
+            if let Some(value_params) = datatype_value_params {
+                for value_param in value_params {
+                    stack.insert(value_param.name.clone(), value_param.value_type.clone());
                 }
-                None => Evaluator::new(project, self, token_map),
+            }
+            let mut evaluator = match current_instance {
+                Some(instance_name) => Evaluator::new_for_instance_member(
+                    project,
+                    self,
+                    token_map.as_deref_mut(),
+                    instance_name,
+                ),
+                None => Evaluator::new(project, self, token_map.as_deref_mut()),
             };
-            let value = evaluator.evaluate_value_with_stack(
-                &mut stack,
-                value_expr,
-                Some(&internal_value_type),
-            )?;
+            let (arg_names, internal_arg_types) =
+                evaluator.bind_args(&mut stack, args, class_type)?;
+
+            // Figure out types.
+            let internal_value_type = match value_type_expr {
+                Some(e) => evaluator.evaluate_type_with_stack(&mut stack, e)?,
+                None => AcornType::Bool,
+            };
 
             if let Some(function_name) = function_name {
-                let mut checker =
-                    TerminationChecker::new(function_name.clone(), internal_arg_types.len());
-                if !checker.check(&value) {
-                    return Err(
-                        value_expr.error("the elaborator thinks this looks like an infinite loop")
-                    );
+                let ambient_value_param_count = datatype_value_params
+                    .map(|params| params.len() as AtomId)
+                    .unwrap_or(0);
+                let mut fn_type = AcornType::functional_from_scoped_context(
+                    internal_arg_types.clone(),
+                    internal_value_type.clone(),
+                    ambient_value_param_count,
+                );
+                // The function is bound to its name locally, to handle recursive definitions.
+                // Internally to the definition, this function is not polymorphic, but it may have
+                // type parameters from both the datatype (if it's a method) and the function itself.
+                let mut all_params = datatype_type_params.unwrap_or_default().to_vec();
+                all_params.extend(type_params.clone());
+                let datatype_value_param_types = datatype_value_params
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|value_param| value_param.value_type.clone())
+                    .collect();
+
+                // If we have params, genericize the type so it uses type variables instead of arbitrary types
+                if !all_params.is_empty() {
+                    fn_type = fn_type.genericize(&all_params);
                 }
+
+                self.add_constant_name(
+                    function_name,
+                    all_params,
+                    datatype_value_param_types,
+                    fn_type,
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    None,
+                );
+                added_function_binding = true;
             }
 
-            let local_obligations = evaluator.take_local_obligations();
-            (Some(value), local_obligations)
-        };
+            // Evaluate the internal value using our modified bindings
+            let (internal_value, local_obligations) = if value_expr.is_axiom() {
+                (None, vec![])
+            } else {
+                let mut evaluator = match current_instance {
+                    Some(instance_name) => {
+                        Evaluator::new_for_instance_member(project, self, token_map, instance_name)
+                    }
+                    None => Evaluator::new(project, self, token_map),
+                };
+                let value = evaluator.evaluate_value_with_stack(
+                    &mut stack,
+                    value_expr,
+                    Some(&internal_value_type),
+                )?;
+
+                if let Some(function_name) = function_name {
+                    let mut checker =
+                        TerminationChecker::new(function_name.clone(), internal_arg_types.len());
+                    if !checker.check(&value) {
+                        return Err(value_expr
+                            .error("the elaborator thinks this looks like an infinite loop"));
+                    }
+                }
+
+                let local_obligations = evaluator.take_local_obligations();
+                (Some(value), local_obligations)
+            };
+
+            Ok((
+                arg_names,
+                internal_arg_types,
+                internal_value,
+                internal_value_type,
+                local_obligations,
+            ))
+        })();
 
         // Reset the bindings
         for param in type_params.iter().rev() {
             self.remove_type(&param.name);
         }
-        if let Some(function_name) = function_name {
+        if let Some(function_name) = function_name.filter(|_| added_function_binding) {
             self.remove_constant(function_name);
         }
+        let (arg_names, internal_arg_types, internal_value, internal_value_type, local_obligations) =
+            scoped_result?;
 
         // We might have types parameterized on this function, or they might be parameterized on the
         // datatype definition. We only want to genericize the parameters that we created.
