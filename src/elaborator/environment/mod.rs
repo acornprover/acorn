@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::Range;
 use crate::elaborator::acorn_type::{AcornType, Datatype, TypeParam};
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::block::{Block, BlockParams};
+use crate::elaborator::block::{Block, BlockParams, BlockPremise};
 use crate::elaborator::error::{self, ErrorContext};
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
@@ -431,7 +431,7 @@ impl Environment {
             &self,
             vec![],
             vec![],
-            BlockParams::Conditional(&condition, range),
+            BlockParams::Conditional(BlockPremise::new(condition.clone(), range)),
             first_token,
             last_token,
             Some(body),

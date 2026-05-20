@@ -62,16 +62,10 @@ struct LocalMatchFact {
 }
 
 #[derive(Clone, Debug)]
-struct LocalPremise {
-    value: AcornValue,
-    range: Range,
-    stack_size: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct LocalObligationPremise {
+pub struct LocalPremise {
     pub value: AcornValue,
     pub range: Range,
+    stack_size: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -142,19 +136,19 @@ impl SyntheticCaptureContext {
 pub enum LocalObligationKind {
     Claim {
         claim: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     },
     Transport {
         source_type: AcornType,
         target_type: AcornType,
         source_value: AcornValue,
         target_value: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
         transport_token: Token,
     },
 }
@@ -228,11 +222,25 @@ impl LocalObligation {
     }
 }
 
-impl LocalObligationPremise {
-    fn genericize(self, type_params: &[TypeParam]) -> LocalObligationPremise {
-        LocalObligationPremise {
+impl LocalPremise {
+    fn shifted_to_stack(&self, stack_size: usize) -> LocalPremise {
+        debug_assert!(stack_size >= self.stack_size);
+        let increment = stack_size.saturating_sub(self.stack_size) as AtomId;
+        LocalPremise {
+            value: self
+                .value
+                .clone()
+                .insert_stack(self.stack_size as AtomId, increment),
+            range: self.range,
+            stack_size,
+        }
+    }
+
+    fn genericize(self, type_params: &[TypeParam]) -> LocalPremise {
+        LocalPremise {
             value: self.value.genericize(type_params),
             range: self.range,
+            stack_size: self.stack_size,
         }
     }
 }
@@ -393,20 +401,10 @@ impl<'a> Evaluator<'a> {
         None
     }
 
-    fn local_premises_for_stack(&self, stack_size: usize) -> Vec<LocalObligationPremise> {
+    fn local_premises_for_stack(&self, stack_size: usize) -> Vec<LocalPremise> {
         self.local_premises
             .iter()
-            .map(|premise| {
-                debug_assert!(stack_size >= premise.stack_size);
-                let increment = stack_size.saturating_sub(premise.stack_size) as AtomId;
-                LocalObligationPremise {
-                    value: premise
-                        .value
-                        .clone()
-                        .insert_stack(premise.stack_size as AtomId, increment),
-                    range: premise.range,
-                }
-            })
+            .map(|premise| premise.shifted_to_stack(stack_size))
             .collect()
     }
 

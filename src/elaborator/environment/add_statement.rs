@@ -8,7 +8,7 @@ use crate::elaborator::acorn_type::{
 };
 use crate::elaborator::acorn_value::{AcornValue, BinaryOp};
 use crate::elaborator::binding_map::ConstructorInfo;
-use crate::elaborator::block::{Block, BlockParams};
+use crate::elaborator::block::{Block, BlockParams, BlockPremise};
 use crate::elaborator::error::{self, Error, ErrorContext};
 use crate::elaborator::evaluator::{AttributesTypeArgs, Evaluator, LocalObligation};
 use crate::elaborator::fact::Fact;

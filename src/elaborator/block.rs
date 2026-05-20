@@ -15,6 +15,7 @@ use crate::elaborator::potential_value::PotentialValue;
 use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::Source;
 use crate::kernel::atom::AtomId;
+use crate::module::ModuleId;
 use crate::project::ProjectLookup;
 use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Body, StatementInfo};
@@ -44,6 +45,18 @@ pub struct Block {
     pub source_range: Option<Range>,
 }
 
+#[derive(Clone, Debug)]
+pub struct BlockPremise {
+    pub value: AcornValue,
+    pub range: Range,
+}
+
+impl BlockPremise {
+    pub fn new(value: AcornValue, range: Range) -> BlockPremise {
+        BlockPremise { value, range }
+    }
+}
+
 /// The different ways to construct a block.
 /// Note that these don't necessarily have anything to do with type params.
 /// I should probably rename this object.
@@ -68,7 +81,7 @@ pub enum BlockParams<'a> {
     ),
 
     /// The assumption to be used by the block, and the range of this assumption.
-    Conditional(&'a AcornValue, Range),
+    Conditional(BlockPremise),
 
     /// (unbound goal, function return type, range of condition)
     /// This goal has one more unbound variable than the block args account for.
@@ -83,7 +96,7 @@ pub enum BlockParams<'a> {
     /// A local obligation goal with structural premises from an expression branch.
     VariableSatisfyWithPremises {
         goal: AcornValue,
-        premises: Vec<(AcornValue, Range)>,
+        premises: Vec<BlockPremise>,
         range: Range,
     },
 
@@ -120,6 +133,39 @@ fn body_contains_explicit_false(body: &Body) -> bool {
 }
 
 impl Block {
+    fn bind_block_value(value: &AcornValue, internal_args: &[AcornValue]) -> AcornValue {
+        value
+            .clone()
+            .bind_values(0, 0, internal_args)
+            .to_arbitrary()
+    }
+
+    fn add_structural_premise(
+        project: &dyn ProjectLookup,
+        subenv: &mut Environment,
+        module_id: ModuleId,
+        internal_args: &[AcornValue],
+        premise: &BlockPremise,
+    ) {
+        let bound = Self::bind_block_value(&premise.value, internal_args);
+        let source = Source::premise(module_id, premise.range, subenv.depth);
+        let prop = Proposition::new(bound, vec![], source);
+        let node = Node::structural(project, subenv, prop);
+        subenv.add_node(node);
+    }
+
+    fn add_structural_premises(
+        project: &dyn ProjectLookup,
+        subenv: &mut Environment,
+        module_id: ModuleId,
+        internal_args: &[AcornValue],
+        premises: &[BlockPremise],
+    ) {
+        for premise in premises {
+            Self::add_structural_premise(project, subenv, module_id, internal_args, premise);
+        }
+    }
+
     fn apply_with_dependent_args(
         value: AcornValue,
         args: &[AcornValue],
@@ -197,10 +243,14 @@ impl Block {
 
         let mut theorem_alias = None;
         let goal_prop = match params {
-            BlockParams::Conditional(condition, range) => {
-                let source = Source::premise(env.module_id, range, subenv.depth);
-                let prop = Proposition::new(condition.clone(), vec![], source);
-                subenv.add_node(Node::structural(project, &subenv, prop));
+            BlockParams::Conditional(ref premise) => {
+                Self::add_structural_premise(
+                    project,
+                    &mut subenv,
+                    env.module_id,
+                    &internal_args,
+                    premise,
+                );
                 None
             }
             BlockParams::Theorem(theorem_name, theorem_range, ref premise, ref unbound_goal) => {
@@ -282,15 +332,13 @@ impl Block {
                 ref premises,
                 range,
             } => {
-                for (premise, premise_range) in premises {
-                    let bound = premise
-                        .clone()
-                        .bind_values(0, 0, &internal_args)
-                        .to_arbitrary();
-                    let source = Source::premise(env.module_id, *premise_range, subenv.depth);
-                    let prop = Proposition::new(bound, vec![], source);
-                    subenv.add_node(Node::structural(project, &subenv, prop));
-                }
+                Self::add_structural_premises(
+                    project,
+                    &mut subenv,
+                    env.module_id,
+                    &internal_args,
+                    premises,
+                );
                 let bound_goal = goal
                     .clone()
                     .bind_values(0, 0, &internal_args)
@@ -320,9 +368,14 @@ impl Block {
                 // Inside the block, we can assume the pattern matches.
                 let applied = AcornValue::apply(constructor.clone(), arg_values);
                 let equality = AcornValue::equals(scrutinee.clone(), applied);
-                let source = Source::premise(env.module_id, range, subenv.depth);
-                let prop = Proposition::new(equality, vec![], source);
-                subenv.add_node(Node::structural(project, &subenv, prop));
+                let premise = BlockPremise::new(equality, range);
+                Self::add_structural_premise(
+                    project,
+                    &mut subenv,
+                    env.module_id,
+                    &internal_args,
+                    &premise,
+                );
                 None
             }
             BlockParams::TypeRequirement(ref constraints, range) => {

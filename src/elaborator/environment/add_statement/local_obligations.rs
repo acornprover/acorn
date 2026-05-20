@@ -1,18 +1,18 @@
 use super::transport::TransportBuilder;
 use super::*;
-use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind, LocalObligationPremise};
+use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind, LocalPremise};
 use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
 
 enum PreparedLocalObligation {
     Claim {
         claim: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     },
     ExistsWitness {
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     },
 }
 
@@ -46,7 +46,7 @@ impl LocalObligationFrame {
     }
 }
 
-fn premise_values(premises: &[LocalObligationPremise]) -> Vec<AcornValue> {
+fn premise_values(premises: &[LocalPremise]) -> Vec<AcornValue> {
     premises
         .iter()
         .map(|premise| premise.value.clone())
@@ -61,7 +61,7 @@ fn conjoin_values(values: Vec<AcornValue>) -> AcornValue {
     iter.fold(first, AcornValue::and)
 }
 
-fn imply_premises(premises: &[LocalObligationPremise], conclusion: AcornValue) -> AcornValue {
+fn imply_premises(premises: &[LocalPremise], conclusion: AcornValue) -> AcornValue {
     if premises.is_empty() {
         conclusion
     } else {
@@ -181,7 +181,7 @@ impl Environment {
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
         claim: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     ) -> error::Result<()> {
         let block = Block::new(
             project,
@@ -192,7 +192,7 @@ impl Environment {
                 goal: claim,
                 premises: premises
                     .iter()
-                    .map(|premise| (premise.value.clone(), premise.range))
+                    .map(|premise| BlockPremise::new(premise.value.clone(), premise.range))
                     .collect(),
                 range: frame.range.clone(),
             },
@@ -214,7 +214,7 @@ impl Environment {
         synthetic_names: Vec<ConstantName>,
         existence: AcornValue,
         witness: AcornValue,
-        premises: Vec<LocalObligationPremise>,
+        premises: Vec<LocalPremise>,
     ) -> error::Result<()> {
         // Branch premises may justify the relation we expose for the local witness, but not the
         // witness's existence. The existence proof stays unconditional so that a dead branch can't
