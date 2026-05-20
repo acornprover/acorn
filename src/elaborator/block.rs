@@ -596,3 +596,39 @@ impl Block {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elaborator::names::ConstantName;
+
+    #[test]
+    fn externalize_bool_closes_synthetic_witnesses() {
+        let outer_env = Environment::test();
+        let block = Block {
+            args: vec![],
+            env: outer_env.create_child(0),
+            source_range: None,
+        };
+        let witness = AcornValue::constant(
+            ConstantName::synthetic(ModuleId(0), 1, 2, 0),
+            vec![],
+            AcornType::Bool,
+            AcornType::Bool,
+            vec![],
+            vec![],
+        );
+        let internal = AcornValue::equals(witness.clone(), witness);
+
+        let external = block.externalize_bool(&outer_env, &internal);
+
+        assert!(
+            matches!(external, AcornValue::Exists(ref types, _) if types == &vec![AcornType::Bool])
+        );
+        assert!(
+            !external.to_string().contains("<synthetic"),
+            "externalized claim leaked a synthetic witness: {}",
+            external
+        );
+    }
+}

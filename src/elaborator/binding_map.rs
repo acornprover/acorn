@@ -2566,10 +2566,7 @@ impl BindingMap {
         match value {
             AcornValue::Variable(_, _) | AcornValue::Bool(_) => {}
             AcornValue::Constant(c) => {
-                if matches!(
-                    c.name,
-                    ConstantName::InstanceAttribute(..) | ConstantName::Synthetic(..)
-                ) {
+                if matches!(c.name, ConstantName::InstanceAttribute(..)) {
                     return;
                 }
                 if c.name.module_id() == self.module_id && !self.constant_defs.contains_key(&c.name)
