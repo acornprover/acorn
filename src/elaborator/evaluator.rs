@@ -164,6 +164,10 @@ pub struct LocalObligation {
 }
 
 impl LocalObligation {
+    pub(crate) fn needs_relational_export(&self) -> bool {
+        !self.synthetic_names.is_empty() && !self.premises.is_empty()
+    }
+
     pub(crate) fn genericize(self, type_params: &[TypeParam]) -> LocalObligation {
         LocalObligation {
             arg_names: self.arg_names,
@@ -414,6 +418,22 @@ impl<'a> Evaluator<'a> {
         let premise_count = self.local_premises.len();
         self.local_premises.push(premise);
         let result = self.evaluate_value_with_stack(stack, expression, expected_type);
+        self.local_premises.truncate(premise_count);
+        result
+    }
+
+    fn evaluate_value_relation_with_premise(
+        &mut self,
+        premise: LocalPremise,
+        stack: &mut Stack,
+        expression: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let premise_count = self.local_premises.len();
+        self.local_premises.push(premise);
+        let result =
+            self.evaluate_value_relation_with_stack(stack, expression, target, expected_type);
         self.local_premises.truncate(premise_count);
         result
     }
@@ -2669,6 +2689,502 @@ impl<'a> Evaluator<'a> {
                 self.inference()
                     .maybe_resolve_value(potential, expected_type, expression)?;
             resolved.as_value(expression)
+        })();
+        if result.is_err() {
+            self.local_obligations.truncate(obligation_count);
+        }
+        result
+    }
+
+    fn evaluate_direct_value_without_local_obligations(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        expected_type: Option<&AcornType>,
+    ) -> error::Result<AcornValue> {
+        let obligation_count = self.local_obligations.len();
+        let value = self.evaluate_value_with_stack(stack, expression, expected_type)?;
+        if self.local_obligations.len() != obligation_count {
+            self.local_obligations.truncate(obligation_count);
+            return Err(expression.error(
+                "local lets that require proofs are not supported in this expression position",
+            ));
+        }
+        Ok(value)
+    }
+
+    fn conjoin_relations(left: AcornValue, right: AcornValue) -> AcornValue {
+        match (left, right) {
+            (AcornValue::Bool(true), right) => right,
+            (left, AcornValue::Bool(true)) => left,
+            (left, right) => AcornValue::and(left, right),
+        }
+    }
+
+    fn check_local_value_name(&self, name_token: &Token, stack: &Stack) -> error::Result<String> {
+        let name = name_token.text().to_string();
+        if stack.get(&name).is_some() || self.has_local_alias(&name) {
+            return Err(name_token.error(&format!("name '{}' is already bound", name)));
+        }
+        self.bindings
+            .check_unqualified_name_available(&name, name_token)?;
+        Ok(name)
+    }
+
+    fn evaluate_local_typed_let_relation(
+        &mut self,
+        stack: &mut Stack,
+        local_let: &LocalLet,
+        value_type: AcornType,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        if local_let.body.is_some() {
+            return Err(local_let.let_token.error(
+                "proof blocks on local value lets are not supported in relational expression export",
+            ));
+        }
+        let name = self.check_local_value_name(&local_let.name_token, stack)?;
+        let local_index = stack.insert(name.clone(), value_type.clone());
+        let local_target = AcornValue::Variable(local_index, value_type.clone());
+        let value_relation = self.evaluate_value_relation_with_stack(
+            stack,
+            &local_let.value,
+            local_target,
+            &value_type,
+        );
+        let body_relation = match value_relation {
+            Ok(value_relation) => {
+                let body_relation = self.evaluate_block_relation_from(
+                    stack,
+                    local_lets,
+                    next_index,
+                    body,
+                    target,
+                    expected_type,
+                );
+                body_relation
+                    .map(|body_relation| Self::conjoin_relations(value_relation, body_relation))
+            }
+            Err(e) => Err(e),
+        };
+        stack.remove(&name);
+        Ok(AcornValue::exists(vec![value_type], body_relation?))
+    }
+
+    fn evaluate_local_satisfy_relation(
+        &mut self,
+        stack: &mut Stack,
+        local_satisfy: &LocalSatisfyLet,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        if local_satisfy.body.is_some() {
+            return Err(local_satisfy.let_token.error(
+                "proof blocks on local let-satisfy are not supported in relational expression export",
+            ));
+        }
+        let name = self.check_local_value_name(&local_satisfy.name_token, stack)?;
+        let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
+        stack.insert(name.clone(), arg_type.clone());
+        let condition = self.evaluate_direct_value_without_local_obligations(
+            stack,
+            &local_satisfy.condition,
+            Some(&AcornType::Bool),
+        );
+        let body_relation = match condition {
+            Ok(condition) => {
+                let body_relation = self.evaluate_block_relation_from(
+                    stack,
+                    local_lets,
+                    next_index,
+                    body,
+                    target,
+                    expected_type,
+                );
+                body_relation.map(|body_relation| Self::conjoin_relations(condition, body_relation))
+            }
+            Err(e) => Err(e),
+        };
+        stack.remove(&name);
+        Ok(AcornValue::exists(vec![arg_type], body_relation?))
+    }
+
+    fn evaluate_local_destructuring_relation(
+        &mut self,
+        stack: &mut Stack,
+        local_destructuring: &LocalDestructuringLet,
+        local_lets: &[LocalBlockItem],
+        next_index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        if local_destructuring.body.is_some() {
+            return Err(local_destructuring.let_token.error(
+                "proof blocks on local destructuring lets are not supported in relational expression export",
+            ));
+        }
+
+        let mut arg_names = vec![];
+        for arg_token in &local_destructuring.args {
+            Self::validate_pattern_arg_name(arg_token)?;
+            let arg_name = arg_token.text().to_string();
+            if arg_names.contains(&arg_name) {
+                return Err(arg_token.error(&format!(
+                    "duplicate argument name '{}' in destructuring pattern",
+                    arg_name
+                )));
+            }
+            if stack.get(&arg_name).is_some() || self.has_local_alias(&arg_name) {
+                return Err(arg_token.error(&format!("name '{}' is already bound", arg_name)));
+            }
+            self.bindings
+                .check_unqualified_name_available(&arg_name, arg_token)?;
+            arg_names.push(arg_name);
+        }
+
+        let value = self.evaluate_direct_value_without_local_obligations(
+            stack,
+            &local_destructuring.value,
+            None,
+        )?;
+        let value_type = value.get_type();
+        let mut function = self.evaluate_as_generic_value(stack, &local_destructuring.function)?;
+
+        let function_type_before = function.get_type();
+        let function_ftype_before = match &function_type_before {
+            AcornType::Function(ft) => ft,
+            _ => {
+                return Err(local_destructuring.function.error(&format!(
+                    "expected a function type, but got {}",
+                    function_type_before
+                )));
+            }
+        };
+
+        let return_type_before = function_ftype_before.return_type.as_ref().clone();
+        if return_type_before != value_type {
+            function = InferenceEngine::new(self.bindings).infer_function_return_type(
+                function,
+                &value_type,
+                "destructuring function return type",
+                &local_destructuring.value,
+            )?;
+        }
+
+        let function_type = function.get_type();
+        let (arg_types, return_type) = match &function_type {
+            AcornType::Function(ft) => (ft.arg_types.clone(), ft.return_type.as_ref().clone()),
+            _ => {
+                return Err(local_destructuring.function.error(&format!(
+                    "expected a function type, but got {}",
+                    function_type
+                )));
+            }
+        };
+
+        if arg_types.len() != local_destructuring.args.len() {
+            return Err(local_destructuring.let_token.error(&format!(
+                "function expects {} arguments, but {} were provided in the pattern",
+                arg_types.len(),
+                local_destructuring.args.len()
+            )));
+        }
+
+        if return_type != value_type {
+            return Err(local_destructuring.value.error(&format!(
+                "type mismatch: function returns {} but value has type {}",
+                return_type, value_type
+            )));
+        }
+
+        if arg_types.iter().any(|t| t.has_generic()) {
+            return Err(local_destructuring
+                .function
+                .error("could not infer all argument types for destructuring pattern"));
+        }
+
+        let stack_size = stack.len() as AtomId;
+        let arg_values: Vec<_> = arg_types
+            .iter()
+            .enumerate()
+            .map(|(i, arg_type)| AcornValue::Variable(stack_size + i as AtomId, arg_type.clone()))
+            .collect();
+        let obligation_value = self
+            .local_match_pattern_for_value(&value, stack.len())
+            .unwrap_or_else(|| value.clone());
+
+        for (arg_name, arg_type) in arg_names.iter().zip(&arg_types) {
+            stack.insert(arg_name.clone(), arg_type.clone());
+        }
+        let pattern_relation =
+            AcornValue::equals(AcornValue::apply(function, arg_values), obligation_value);
+        let body_relation = self.evaluate_block_relation_from(
+            stack,
+            local_lets,
+            next_index,
+            body,
+            target,
+            expected_type,
+        );
+        for arg_name in &arg_names {
+            stack.remove(arg_name);
+        }
+        let relation = Self::conjoin_relations(pattern_relation, body_relation?);
+        Ok(AcornValue::exists(arg_types, relation))
+    }
+
+    fn evaluate_block_relation_from(
+        &mut self,
+        stack: &mut Stack,
+        local_lets: &[LocalBlockItem],
+        index: usize,
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let Some(local_let) = local_lets.get(index) else {
+            return self.evaluate_value_relation_with_stack(stack, body, target, expected_type);
+        };
+        match local_let {
+            LocalBlockItem::Let(local_let) => {
+                if let Some(type_expr) = &local_let.type_expr {
+                    let value_type = self.evaluate_type_with_stack(stack, type_expr)?;
+                    self.evaluate_local_typed_let_relation(
+                        stack,
+                        local_let,
+                        value_type,
+                        local_lets,
+                        index + 1,
+                        body,
+                        target,
+                        expected_type,
+                    )
+                } else {
+                    let alias_count = self.local_aliases.len();
+                    let obligation_count = self.local_obligations.len();
+                    let result = self.evaluate_local_let(stack, local_let).and_then(|_| {
+                        if self.local_obligations.len() != obligation_count {
+                            self.local_obligations.truncate(obligation_count);
+                            return Err(local_let.value.error(
+                                "local lets that require proofs need an explicit type here",
+                            ));
+                        }
+                        self.evaluate_block_relation_from(
+                            stack,
+                            local_lets,
+                            index + 1,
+                            body,
+                            target,
+                            expected_type,
+                        )
+                    });
+                    self.local_aliases.truncate(alias_count);
+                    result
+                }
+            }
+            LocalBlockItem::Satisfy(local_satisfy) => self.evaluate_local_satisfy_relation(
+                stack,
+                local_satisfy,
+                local_lets,
+                index + 1,
+                body,
+                target,
+                expected_type,
+            ),
+            LocalBlockItem::Destructuring(local_destructuring) => self
+                .evaluate_local_destructuring_relation(
+                    stack,
+                    local_destructuring,
+                    local_lets,
+                    index + 1,
+                    body,
+                    target,
+                    expected_type,
+                ),
+        }
+    }
+
+    fn evaluate_value_block_relation_with_stack(
+        &mut self,
+        stack: &mut Stack,
+        local_lets: &[LocalBlockItem],
+        body: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let alias_count = self.local_aliases.len();
+        let result =
+            self.evaluate_block_relation_from(stack, local_lets, 0, body, target, expected_type);
+        self.local_aliases.truncate(alias_count);
+        result
+    }
+
+    pub fn evaluate_value_relation_with_stack(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        target.check_type(Some(expected_type), expression)?;
+        let obligation_count = self.local_obligations.len();
+        let result = (|| {
+            if let Some((transport_token, source_expr)) = expression.transport_operand() {
+                let source_value =
+                    self.evaluate_direct_value_without_local_obligations(stack, source_expr, None)?;
+                let source_type = source_value.get_type();
+                let transport = TransportBuilder::from_bindings(self.bindings, self.project);
+                return transport.relation(
+                    &source_type,
+                    expected_type,
+                    source_value,
+                    target,
+                    transport_token,
+                    stack.len() as AtomId,
+                );
+            }
+
+            match expression {
+                Expression::Block(local_lets, body, _) => self
+                    .evaluate_value_block_relation_with_stack(
+                        stack,
+                        local_lets,
+                        body,
+                        target,
+                        expected_type,
+                    ),
+                Expression::IfThenElse(_, cond_exp, if_exp, Some(else_exp), _) => {
+                    let cond = self.evaluate_direct_value_without_local_obligations(
+                        stack,
+                        cond_exp,
+                        Some(&AcornType::Bool),
+                    )?;
+                    let if_premise =
+                        LocalPremise::new(cond.clone(), cond_exp.range(), stack.len());
+                    let if_relation = self.evaluate_value_relation_with_premise(
+                        if_premise,
+                        stack,
+                        if_exp,
+                        target.clone(),
+                        expected_type,
+                    )?;
+                    let else_premise = LocalPremise::new(
+                        AcornValue::Not(Box::new(cond.clone())),
+                        cond_exp.range(),
+                        stack.len(),
+                    );
+                    let else_relation = self.evaluate_value_relation_with_premise(
+                        else_premise,
+                        stack,
+                        else_exp,
+                        target,
+                        expected_type,
+                    )?;
+                    Ok(AcornValue::and(
+                        AcornValue::implies(cond.clone(), if_relation),
+                        AcornValue::implies(AcornValue::Not(Box::new(cond)), else_relation),
+                    ))
+                }
+                Expression::IfThenElse(_, _, _, None, _) => Err(expression.error(
+                    "if expressions without else clauses are not supported in relational expression export",
+                )),
+                Expression::Match(_, scrutinee_exp, case_exps, _) => {
+                    let scrutinee = self.evaluate_direct_value_without_local_obligations(
+                        stack,
+                        scrutinee_exp,
+                        None,
+                    )?;
+                    let scrutinee_type = scrutinee.get_type();
+                    let mut relations = vec![];
+                    let mut indices = vec![];
+                    let mut all_cases = false;
+                    for (pattern_exp, result_exp) in case_exps {
+                        let (_, args, i, total) =
+                            self.evaluate_pattern(&scrutinee_type, pattern_exp)?;
+                        if indices.contains(&i) {
+                            return Err(pattern_exp
+                                .error("cannot have multiple cases for the same constructor"));
+                        }
+                        for (name, _) in &args {
+                            if stack.get(name).is_some() || self.has_local_alias(name) {
+                                return Err(pattern_exp
+                                    .error(&format!("name '{}' is already bound", name)));
+                            }
+                        }
+                        for (name, arg_type) in &args {
+                            stack.insert(name.clone(), arg_type.clone());
+                        }
+                        indices.push(i);
+                        if total == indices.len() {
+                            all_cases = true;
+                        }
+                        let pattern = match self.evaluate_direct_value_without_local_obligations(
+                            stack,
+                            pattern_exp,
+                            Some(&scrutinee_type),
+                        ) {
+                            Ok(pattern) => pattern,
+                            Err(e) => {
+                                for (name, _) in &args {
+                                    stack.remove(name);
+                                }
+                                return Err(e);
+                            }
+                        };
+                        let match_fact_count = self.local_match_facts.len();
+                        self.local_match_facts.push(LocalMatchFact {
+                            value: scrutinee.clone(),
+                            pattern: pattern.clone(),
+                            stack_size: stack.len(),
+                        });
+                        let equality = AcornValue::equals(scrutinee.clone(), pattern);
+                        let premise =
+                            LocalPremise::new(equality.clone(), pattern_exp.range(), stack.len());
+                        let branch_relation = self.evaluate_value_relation_with_premise(
+                            premise,
+                            stack,
+                            result_exp,
+                            target.clone(),
+                            expected_type,
+                        );
+                        self.local_match_facts.truncate(match_fact_count);
+                        let arg_types = args
+                            .iter()
+                            .map(|(_, arg_type)| arg_type.clone())
+                            .collect::<Vec<_>>();
+                        for (name, _) in &args {
+                            stack.remove(name);
+                        }
+                        let relation =
+                            AcornValue::implies(equality, branch_relation?);
+                        relations.push(AcornValue::forall(arg_types, relation));
+                    }
+                    if !all_cases {
+                        return Err(expression.error("not all constructors are covered in this match"));
+                    }
+                    let mut iter = relations.into_iter();
+                    let Some(first) = iter.next() else {
+                        return Ok(AcornValue::Bool(true));
+                    };
+                    Ok(iter.fold(first, AcornValue::and))
+                }
+                _ => {
+                    let value = self.evaluate_direct_value_without_local_obligations(
+                        stack,
+                        expression,
+                        Some(expected_type),
+                    )?;
+                    Ok(AcornValue::equals(target, value))
+                }
+            }
         })();
         if result.is_err() {
             self.local_obligations.truncate(obligation_count);

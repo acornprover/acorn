@@ -2375,6 +2375,192 @@ impl BindingMap {
         }
     }
 
+    pub fn evaluate_scoped_value_relation(
+        &mut self,
+        type_param_exprs: &[TypeParamExpr],
+        args: &[Declaration],
+        value_type_expr: &Expression,
+        value_expr: &Expression,
+        class_type: Option<&AcornType>,
+        function_name: Option<&ConstantName>,
+        current_instance: Option<&InstanceName>,
+        datatype_type_params: Option<&[TypeParam]>,
+        datatype_value_params: Option<&[crate::elaborator::acorn_type::ValueParam]>,
+        project: &dyn ProjectLookup,
+        mut token_map: Option<&mut TokenMap>,
+    ) -> error::Result<(
+        Vec<TypeParam>,
+        Vec<String>,
+        Vec<AcornType>,
+        AcornValue,
+        AcornType,
+        Vec<LocalObligation>,
+    )> {
+        let mut evaluator = match current_instance {
+            Some(instance_name) => Evaluator::new_for_instance_member(
+                project,
+                self,
+                token_map.as_deref_mut(),
+                instance_name,
+            ),
+            None => Evaluator::new(project, self, token_map.as_deref_mut()),
+        };
+        let type_params = evaluator.evaluate_type_params(type_param_exprs)?;
+        for param in &type_params {
+            self.add_arbitrary_type(param.clone());
+        }
+        let mut added_function_binding = false;
+        let scoped_result = (|| {
+            let mut stack = Stack::new();
+            if let Some(value_params) = datatype_value_params {
+                for value_param in value_params {
+                    stack.insert(value_param.name.clone(), value_param.value_type.clone());
+                }
+            }
+            let mut evaluator = match current_instance {
+                Some(instance_name) => Evaluator::new_for_instance_member(
+                    project,
+                    self,
+                    token_map.as_deref_mut(),
+                    instance_name,
+                ),
+                None => Evaluator::new(project, self, token_map.as_deref_mut()),
+            };
+            let (arg_names, internal_arg_types) =
+                evaluator.bind_args(&mut stack, args, class_type)?;
+            let internal_value_type =
+                evaluator.evaluate_type_with_stack(&mut stack, value_type_expr)?;
+
+            if let Some(function_name) = function_name {
+                let ambient_value_param_count = datatype_value_params
+                    .map(|params| params.len() as AtomId)
+                    .unwrap_or(0);
+                let mut fn_type = AcornType::functional_from_scoped_context(
+                    internal_arg_types.clone(),
+                    internal_value_type.clone(),
+                    ambient_value_param_count,
+                );
+                let mut all_params = datatype_type_params.unwrap_or_default().to_vec();
+                all_params.extend(type_params.clone());
+                let datatype_value_param_types = datatype_value_params
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|value_param| value_param.value_type.clone())
+                    .collect();
+
+                if !all_params.is_empty() {
+                    fn_type = fn_type.genericize(&all_params);
+                }
+
+                self.add_constant_name(
+                    function_name,
+                    all_params,
+                    datatype_value_param_types,
+                    fn_type,
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    None,
+                    true,
+                );
+                added_function_binding = true;
+            }
+
+            let target_index = stack.insert("\0result".to_string(), internal_value_type.clone());
+            let target = AcornValue::Variable(target_index, internal_value_type.clone());
+            let mut evaluator = match current_instance {
+                Some(instance_name) => {
+                    Evaluator::new_for_instance_member(project, self, token_map, instance_name)
+                }
+                None => Evaluator::new(project, self, token_map),
+            };
+            let relation = evaluator.evaluate_value_relation_with_stack(
+                &mut stack,
+                value_expr,
+                target,
+                &internal_value_type,
+            )?;
+            stack.remove("\0result");
+            let local_obligations = evaluator.take_local_obligations();
+
+            Ok((
+                arg_names,
+                internal_arg_types,
+                relation,
+                internal_value_type,
+                local_obligations,
+            ))
+        })();
+
+        for param in type_params.iter().rev() {
+            self.remove_type(&param.name);
+        }
+        if let Some(function_name) = function_name.filter(|_| added_function_binding) {
+            self.remove_constant(function_name);
+        }
+        let (
+            arg_names,
+            internal_arg_types,
+            internal_relation,
+            internal_value_type,
+            local_obligations,
+        ) = scoped_result?;
+
+        if type_params.is_empty() {
+            let local_obligations = match datatype_type_params {
+                Some(datatype_type_params) if !datatype_type_params.is_empty() => local_obligations
+                    .into_iter()
+                    .map(|obligation| obligation.genericize(datatype_type_params))
+                    .collect(),
+                _ => local_obligations,
+            };
+            Ok((
+                type_params,
+                arg_names,
+                internal_arg_types,
+                internal_relation,
+                internal_value_type,
+                local_obligations,
+            ))
+        } else {
+            let external_relation = if let Some(function_name) = function_name {
+                let mut all_params_for_genericize =
+                    datatype_type_params.unwrap_or_default().to_vec();
+                all_params_for_genericize.extend(type_params.clone());
+                let generic_params: Vec<_> = all_params_for_genericize
+                    .iter()
+                    .map(|param| AcornType::Variable(param.clone()))
+                    .collect();
+                let derecursed = internal_relation.set_params(function_name, &generic_params);
+                derecursed.genericize(&all_params_for_genericize)
+            } else {
+                internal_relation.genericize(&type_params)
+            };
+            let external_arg_types = internal_arg_types
+                .iter()
+                .map(|t| t.genericize(&type_params))
+                .collect();
+            let external_value_type = internal_value_type.genericize(&type_params);
+            let mut local_obligation_type_params =
+                datatype_type_params.unwrap_or_default().to_vec();
+            local_obligation_type_params.extend(type_params.clone());
+            let external_local_obligations = local_obligations
+                .into_iter()
+                .map(|obligation| obligation.genericize(&local_obligation_type_params))
+                .collect();
+
+            Ok((
+                type_params,
+                arg_names,
+                external_arg_types,
+                external_relation,
+                external_value_type,
+                external_local_obligations,
+            ))
+        }
+    }
+
     /// Finds the names of all constants that are in this module but unknown to this binding map.
     /// The unknown constants may not be polymorphic.
     pub fn find_unknown_scoped_constants(

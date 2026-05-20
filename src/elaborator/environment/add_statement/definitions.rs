@@ -86,6 +86,12 @@ fn quantify_over_explicit_value_params(
     }
 }
 
+fn local_obligations_need_relational_export(local_obligations: &[LocalObligation]) -> bool {
+    local_obligations
+        .iter()
+        .any(LocalObligation::needs_relational_export)
+}
+
 impl Environment {
     fn declare_witness_constant(
         &mut self,
@@ -168,6 +174,119 @@ impl Environment {
             constant_value = AcornValue::apply(constant_value, explicit_value_args);
         }
         Ok(constant_value)
+    }
+
+    fn add_relational_let_statement(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        defined_name: DefinedName,
+        ls: &LetStatement,
+        range: Range,
+        datatype_params: Option<&DatatypeFamilyScope>,
+        local_family_params: &LocalFamilyParams,
+        local_type_params: &[TypeParam],
+        target_type: AcornType,
+    ) -> error::Result<()> {
+        if ls.value.is_axiom() {
+            return Err(ls
+                .value
+                .first_token()
+                .error("axiom constants require direct definitions"));
+        }
+        let definition_type_params = match datatype_params {
+            Some(p) => {
+                if !local_type_params.is_empty() {
+                    return Err(ls
+                        .name_token
+                        .error("datatype parameters and let parameters cannot be used together"));
+                }
+                p.type_params().to_vec()
+            }
+            None => local_type_params.to_vec(),
+        };
+
+        for param in local_type_params {
+            self.bindings.add_arbitrary_type(param.clone());
+        }
+
+        let result = (|| {
+            let mut stack = Stack::new();
+            bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+            bind_datatype_value_params(&mut stack, datatype_params);
+            let family_value_param_count = stack.len() as AtomId;
+            let target_index = stack.insert("\0result".to_string(), target_type.clone());
+            let target = AcornValue::Variable(target_index, target_type.clone());
+            let mut evaluator = if let Some(instance_name) = defined_name.as_instance() {
+                Evaluator::new_for_instance_member(project, &self.bindings, None, instance_name)
+            } else {
+                Evaluator::new(project, &self.bindings, None)
+            };
+            let relation = evaluator.evaluate_value_relation_with_stack(
+                &mut stack,
+                &ls.value,
+                target,
+                &target_type,
+            )?;
+            stack.remove("\0result");
+            let local_obligations = evaluator.take_local_obligations();
+            self.add_genericized_local_obligations(
+                project,
+                statement,
+                &definition_type_params,
+                local_obligations,
+            )?;
+
+            let general_claim = AcornValue::exists(vec![target_type.clone()], relation.clone());
+            let mut block_args = explicit_value_block_args(&local_family_params.value_params);
+            block_args.extend(datatype_value_block_args(datatype_params));
+            let block = Block::new(
+                project,
+                &self,
+                vec![],
+                block_args,
+                BlockParams::VariableSatisfy(general_claim, ls.value.range()),
+                &statement.first_token,
+                &statement.last_token,
+                None,
+            )?;
+
+            let doc_comments = self.take_doc_comments();
+            let constant_value = self.declare_witness_constant(
+                &defined_name,
+                &definition_type_params,
+                &target_type,
+                &local_family_params.value_params,
+                datatype_params,
+                doc_comments,
+                range,
+                statement.to_string(),
+                statement,
+                "relational let cannot define instance attributes",
+            )?;
+
+            let specific_relation = relation.bind_values(
+                family_value_param_count,
+                family_value_param_count + 1,
+                &[constant_value],
+            );
+            let external_claim = quantify_over_explicit_value_params(
+                &local_family_params.value_params,
+                quantify_over_datatype_value_params(datatype_params, specific_relation),
+            )
+            .genericize(&definition_type_params);
+            let source = Source::anonymous(self.module_id, statement.range(), self.depth);
+            let prop = Proposition::new(external_claim, definition_type_params, source);
+            let index = self.add_node(Node::block(project, self, block, Some(prop)));
+            self.add_node_lines(index, &statement.range());
+            Ok(())
+        })();
+
+        for param in local_type_params.iter().rev() {
+            self.bindings.remove_type(&param.name);
+        }
+
+        result
     }
 
     fn add_transport_let_statement(
@@ -560,6 +679,19 @@ impl Environment {
                 return result;
             }
         };
+        if value.is_some() && local_obligations_need_relational_export(&local_obligations) {
+            return self.add_relational_let_statement(
+                project,
+                statement,
+                defined_name,
+                ls,
+                range,
+                datatype_params,
+                &local_family_params,
+                &local_type_params,
+                acorn_type,
+            );
+        }
         let acorn_type = if explicit_value_param_types.is_empty() {
             acorn_type
         } else {
@@ -632,6 +764,137 @@ impl Environment {
         Ok(())
     }
 
+    fn add_relational_define_from_parts(
+        &mut self,
+        project: &dyn ProjectLookup,
+        statement: &Statement,
+        defined_name: DefinedName,
+        datatype_params: Option<&DatatypeFamilyScope>,
+        ds: &DefineStatement,
+        range: Range,
+        explicit_value_param_types: Vec<AcornType>,
+        fn_type_params: Vec<TypeParam>,
+        arg_names: Vec<String>,
+        arg_types: Vec<AcornType>,
+        relation: AcornValue,
+        value_type: AcornType,
+        local_obligations: Vec<LocalObligation>,
+    ) -> error::Result<()> {
+        let datatype_value_param_types = datatype_value_param_types(datatype_params);
+        let family_value_param_count = datatype_value_param_types.len() as AtomId;
+        let mut all_type_params = datatype_params
+            .map(|params| params.type_params().to_vec())
+            .unwrap_or_default();
+        all_type_params.extend(fn_type_params.clone());
+        self.add_local_obligations(project, statement, &all_type_params, local_obligations)?;
+
+        let mut block_args = datatype_value_block_args(datatype_params);
+        block_args.extend(arg_names.iter().cloned().zip(arg_types.iter().cloned()));
+        let block = Block::new(
+            project,
+            &self,
+            fn_type_params.clone(),
+            block_args,
+            BlockParams::FunctionSatisfy(
+                relation.clone(),
+                value_type.clone(),
+                ds.return_value.range(),
+            ),
+            &statement.first_token,
+            &statement.last_token,
+            None,
+        )?;
+
+        let function_type = AcornType::functional_from_scoped_context(
+            arg_types.clone(),
+            value_type,
+            family_value_param_count,
+        );
+        let generic_function_type = function_type.clone().genericize(&all_type_params);
+        let doc_comments = self.take_doc_comments();
+        self.bindings.add_defined_name(
+            &defined_name,
+            all_type_params.clone(),
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types.clone()
+            } else {
+                explicit_value_param_types.clone()
+            },
+            generic_function_type.clone(),
+            None,
+            None,
+            doc_comments,
+            Some(range),
+            Some(statement.to_string()),
+        );
+        let const_name = defined_name
+            .as_constant()
+            .ok_or_else(|| statement.error("relational define cannot define instance attributes"))?
+            .clone();
+        let type_args: Vec<_> = all_type_params
+            .iter()
+            .map(|p| AcornType::Arbitrary(p.clone()))
+            .collect();
+        let mut function_constant = AcornValue::constant(
+            const_name,
+            type_args,
+            function_type.clone(),
+            generic_function_type,
+            vec![],
+            if explicit_value_param_types.is_empty() {
+                datatype_value_param_types.clone()
+            } else {
+                explicit_value_param_types.clone()
+            },
+        );
+        if explicit_value_param_types.is_empty() && !datatype_value_param_types.is_empty() {
+            let family_value_args = datatype_params
+                .expect("family value params should have a datatype scope")
+                .value_params()
+                .iter()
+                .enumerate()
+                .map(|(i, value_param)| {
+                    AcornValue::Variable(i as AtomId, value_param.value_type.clone())
+                })
+                .collect::<Vec<_>>();
+            function_constant =
+                function_constant.bind_value_params(&family_value_args, statement)?;
+        }
+        let function_term = AcornValue::apply(
+            function_constant.clone(),
+            arg_types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    AcornValue::Variable(family_value_param_count + i as AtomId, t.clone())
+                })
+                .collect(),
+        );
+        let return_index = family_value_param_count + arg_types.len() as AtomId;
+        let return_bound = relation.bind_values(return_index, return_index, &[function_term]);
+        let arg_count = arg_types.len();
+        let arb_condition = AcornValue::ForAll(arg_types, Box::new(return_bound));
+
+        let external_condition =
+            quantify_over_datatype_value_params(datatype_params, arb_condition)
+                .genericize(&all_type_params);
+        let generic_constant = function_constant.genericize(&all_type_params);
+
+        let source = Source::constant_definition(
+            self.module_id,
+            statement.range(),
+            self.depth,
+            Arc::new(generic_constant),
+            &defined_name.to_string(),
+        );
+        let prop =
+            Proposition::new(external_condition, all_type_params, source).with_arg_count(arg_count);
+
+        let index = self.add_node(Node::block(project, self, block, Some(prop)));
+        self.add_node_lines(index, &statement.range());
+        Ok(())
+    }
+
     pub(super) fn add_define_statement(
         &mut self,
         project: &dyn ProjectLookup,
@@ -700,6 +963,44 @@ impl Environment {
                     datatype_type, datatype_type, datatype_type, datatype_type
                 )));
             }
+        }
+
+        if unbound_value.is_some() && local_obligations_need_relational_export(&local_obligations) {
+            let (
+                rel_fn_type_params,
+                rel_arg_names,
+                rel_arg_types,
+                relation,
+                rel_value_type,
+                rel_local_obligations,
+            ) = self.bindings.evaluate_scoped_value_relation(
+                &type_param_exprs,
+                &args,
+                &ds.return_type,
+                &ds.return_value,
+                self_type,
+                recursion_name.as_ref(),
+                defined_name.as_instance(),
+                datatype_params.map(|params| params.type_params_slice()),
+                datatype_params.map(|params| params.value_params_slice()),
+                project,
+                None,
+            )?;
+            return self.add_relational_define_from_parts(
+                project,
+                statement,
+                defined_name,
+                datatype_params,
+                ds,
+                range,
+                explicit_value_param_types,
+                rel_fn_type_params,
+                rel_arg_names,
+                rel_arg_types,
+                relation,
+                rel_value_type,
+                rel_local_obligations,
+            );
         }
 
         let definition_type_params = if let Some(datatype_params) = datatype_params {

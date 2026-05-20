@@ -354,6 +354,50 @@ theorem picked_is_seed {
 }
 ```
 
+## Local Satisfy In Dead Branch Returns Else
+
+A witness that only appears in a dead branch is exported under that branch relation, not as a
+top-level inhabitant of its type.
+
+```acorn
+type Empty: axiom
+type Nat: axiom
+
+let seed: Nat = axiom
+
+define absurd(e: Empty) -> Nat {
+    axiom
+}
+
+let picked: Nat = if false {
+    let x: Empty satisfy {
+        true
+    }
+    absurd(x)
+} else {
+    seed
+}
+
+theorem picked_uses_else {
+    picked = seed
+}
+
+define choose_dead(p: Bool) -> Nat {
+    if false {
+        let x: Empty satisfy {
+            true
+        }
+        absurd(x)
+    } else {
+        seed
+    }
+}
+
+theorem choose_dead_uses_else(p: Bool) {
+    choose_dead(p) = seed
+}
+```
+
 ## Local Satisfy In Dead Branch Cannot Inhabit Empty Type
 
 Branch-local witnesses must not be exported as unconditional witnesses. In particular, a dead
