@@ -148,12 +148,7 @@ impl Environment {
                 if let Err(message) = external_claim.validate() {
                     return Err(condition.claim.error(&message));
                 }
-                self.add_genericized_local_obligations(
-                    project,
-                    statement,
-                    &type_params,
-                    local_obligations,
-                )?;
+                self.add_genericized_local_obligations(project, &type_params, local_obligations)?;
                 let lambda_claim = AcornValue::lambda(arg_types.clone(), unbound_claim.clone())
                     .genericize(&type_params);
                 let theorem_type = lambda_claim.get_type();

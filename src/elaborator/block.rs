@@ -83,13 +83,10 @@ pub enum BlockParams<'a> {
     /// The last one, we are trying to prove there exists a variable that satisfies the goal.
     FunctionSatisfy(AcornValue, AcornType, Range),
 
-    /// (unbound goal, range of condition)
+    /// (unbound goal, local premises, range of condition)
     /// Used for `let ... satisfy` witness goals that should be proved inside a block where
     /// ambient type parameters have been converted to arbitrary types.
-    VariableSatisfy(AcornValue, Range),
-
-    /// A local obligation goal with structural premises from an expression branch.
-    VariableSatisfyWithPremises {
+    VariableSatisfy {
         goal: AcornValue,
         premises: Vec<BlockPremise>,
         range: Range,
@@ -110,6 +107,28 @@ pub enum BlockParams<'a> {
 
     /// No special params needed
     ForAll,
+}
+
+impl BlockParams<'_> {
+    pub(crate) fn variable_satisfy(goal: AcornValue, range: Range) -> Self {
+        BlockParams::VariableSatisfy {
+            goal,
+            premises: vec![],
+            range,
+        }
+    }
+
+    pub(crate) fn variable_satisfy_with_premises(
+        goal: AcornValue,
+        premises: Vec<BlockPremise>,
+        range: Range,
+    ) -> Self {
+        BlockParams::VariableSatisfy {
+            goal,
+            premises,
+            range,
+        }
+    }
 }
 
 /// Checks if a statement is an explicit `false` claim.
@@ -315,16 +334,7 @@ impl Block {
                 let prop = Proposition::new(bound_goal, vec![], source);
                 Some(prop)
             }
-            BlockParams::VariableSatisfy(ref unbound_goal, range) => {
-                let bound_goal = unbound_goal
-                    .clone()
-                    .bind_values(0, 0, &internal_args)
-                    .to_arbitrary();
-                let source = Source::block_goal(env.module_id, range, subenv.depth);
-                let prop = Proposition::new(bound_goal, vec![], source);
-                Some(prop)
-            }
-            BlockParams::VariableSatisfyWithPremises {
+            BlockParams::VariableSatisfy {
                 ref goal,
                 ref premises,
                 range,

@@ -356,8 +356,8 @@ theorem picked_is_seed {
 
 ## Local Satisfy In Dead Branch Returns Else
 
-A witness that only appears in a dead branch is exported under that branch relation, not as a
-top-level inhabitant of its type.
+A witness that only appears in a dead branch is exported under that branch's result specification,
+not as a top-level inhabitant of its type.
 
 ```acorn
 type Empty: axiom

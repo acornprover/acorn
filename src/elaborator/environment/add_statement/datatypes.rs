@@ -115,12 +115,7 @@ impl Environment {
                 Some(&AcornType::Bool),
             )?;
             let local_obligations = evaluator.take_local_obligations();
-            self.add_genericized_local_obligations(
-                project,
-                statement,
-                &type_params,
-                local_obligations,
-            )?;
+            self.add_genericized_local_obligations(project, &type_params, local_obligations)?;
             // Constrained structures may be empty, so any optional proof body is
             // parsed for source compatibility but does not elaborate into a block.
             self.add_line_types(

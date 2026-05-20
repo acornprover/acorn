@@ -1,20 +1,7 @@
-use super::transport::TransportBuilder;
 use super::*;
 use crate::elaborator::evaluator::{LocalObligation, LocalObligationKind, LocalPremise};
 use crate::elaborator::fact::SyntheticWitnessFact;
 use crate::syntax::statement::Body;
-
-enum PreparedLocalObligation {
-    Claim {
-        claim: AcornValue,
-        premises: Vec<LocalPremise>,
-    },
-    ExistsWitness {
-        existence: AcornValue,
-        witness: AcornValue,
-        premises: Vec<LocalPremise>,
-    },
-}
 
 struct LocalObligationFrame {
     arg_count: usize,
@@ -49,7 +36,7 @@ impl LocalObligationFrame {
 fn premise_values(premises: &[LocalPremise]) -> Vec<AcornValue> {
     premises
         .iter()
-        .map(|premise| premise.value.clone())
+        .map(|premise| premise.value().clone())
         .collect()
 }
 
@@ -69,63 +56,10 @@ fn imply_premises(premises: &[LocalPremise], conclusion: AcornValue) -> AcornVal
     }
 }
 
-fn prepare_local_obligation(
-    env: &Environment,
-    project: &dyn ProjectLookup,
-    obligation: &LocalObligation,
-) -> error::Result<PreparedLocalObligation> {
-    match &obligation.kind {
-        LocalObligationKind::Claim { claim } => Ok(PreparedLocalObligation::Claim {
-            claim: claim.clone(),
-            premises: obligation.premises.clone(),
-        }),
-        LocalObligationKind::ExistsWitness { existence, witness } => {
-            Ok(PreparedLocalObligation::ExistsWitness {
-                existence: existence.clone(),
-                witness: witness.clone(),
-                premises: obligation.premises.clone(),
-            })
-        }
-        LocalObligationKind::Transport {
-            source_type,
-            target_type,
-            source_value,
-            target_value,
-            transport_token,
-        } => {
-            let transport = TransportBuilder::new(env, project);
-            let stack_size = obligation.arg_types.len() as AtomId;
-            let target_variable = AcornValue::Variable(stack_size, target_type.clone());
-            let existence_relation = transport.relation(
-                source_type,
-                target_type,
-                source_value.clone(),
-                target_variable,
-                transport_token,
-                stack_size + 1,
-            )?;
-            let witness_relation = transport.relation(
-                source_type,
-                target_type,
-                source_value.clone(),
-                target_value.clone(),
-                transport_token,
-                stack_size,
-            )?;
-            Ok(PreparedLocalObligation::ExistsWitness {
-                existence: AcornValue::exists(vec![target_type.clone()], existence_relation),
-                witness: witness_relation,
-                premises: obligation.premises.clone(),
-            })
-        }
-    }
-}
-
 impl Environment {
     pub(super) fn add_genericized_local_obligations(
         &mut self,
         project: &dyn ProjectLookup,
-        statement: &Statement,
         type_params: &[TypeParam],
         local_obligations: Vec<LocalObligation>,
     ) -> error::Result<()> {
@@ -133,35 +67,34 @@ impl Environment {
             .into_iter()
             .map(|obligation| obligation.genericize(type_params))
             .collect();
-        self.add_local_obligations(project, statement, type_params, local_obligations)
+        self.add_local_obligations(project, type_params, local_obligations)
     }
 
     pub(super) fn add_local_obligations(
         &mut self,
         project: &dyn ProjectLookup,
-        statement: &Statement,
         type_params: &[TypeParam],
         local_obligations: Vec<LocalObligation>,
     ) -> error::Result<()> {
         for obligation in local_obligations {
             let frame = LocalObligationFrame::from_obligation(&obligation);
-            let prepared = prepare_local_obligation(self, project, &obligation)?;
+            let LocalObligation {
+                synthetic_names,
+                premises,
+                kind,
+                ..
+            } = obligation;
 
-            match prepared {
-                PreparedLocalObligation::Claim { claim, premises } => {
+            match kind {
+                LocalObligationKind::Claim { claim } => {
                     self.add_local_claim_obligation(project, type_params, frame, claim, premises)?;
                 }
-                PreparedLocalObligation::ExistsWitness {
-                    existence,
-                    witness,
-                    premises,
-                } => {
+                LocalObligationKind::ExistsWitness { existence, witness } => {
                     self.add_local_witness_obligation(
                         project,
-                        statement,
                         type_params,
                         frame,
-                        obligation.synthetic_names,
+                        synthetic_names,
                         existence,
                         witness,
                         premises,
@@ -185,14 +118,14 @@ impl Environment {
             self,
             type_params.to_vec(),
             frame.block_args,
-            BlockParams::VariableSatisfyWithPremises {
-                goal: claim,
-                premises: premises
+            BlockParams::variable_satisfy_with_premises(
+                claim,
+                premises
                     .iter()
-                    .map(|premise| BlockPremise::new(premise.value.clone(), premise.range))
+                    .map(LocalPremise::to_block_premise)
                     .collect(),
-                range: frame.range.clone(),
-            },
+                frame.range.clone(),
+            ),
             &frame.first_token,
             &frame.last_token,
             frame.body.as_deref(),
@@ -205,7 +138,6 @@ impl Environment {
     fn add_local_witness_obligation(
         &mut self,
         project: &dyn ProjectLookup,
-        _statement: &Statement,
         type_params: &[TypeParam],
         frame: LocalObligationFrame,
         synthetic_names: Vec<ConstantName>,
@@ -221,7 +153,7 @@ impl Environment {
             self,
             type_params.to_vec(),
             frame.block_args,
-            BlockParams::VariableSatisfy(existence.clone(), frame.range.clone()),
+            BlockParams::variable_satisfy(existence.clone(), frame.range.clone()),
             &frame.first_token,
             &frame.last_token,
             frame.body.as_deref(),

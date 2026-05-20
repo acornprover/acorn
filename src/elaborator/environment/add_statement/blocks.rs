@@ -50,7 +50,7 @@ impl Environment {
         let mut evaluator = self.evaluator(project);
         let condition = evaluator.evaluate_value(&is.condition, Some(&AcornType::Bool))?;
         let local_obligations = evaluator.take_local_obligations();
-        self.add_local_obligations(project, statement, &[], local_obligations)?;
+        self.add_local_obligations(project, &[], local_obligations)?;
         let range = is.condition.range();
         let if_claim = self.add_conditional(
             project,
@@ -85,7 +85,7 @@ impl Environment {
         let mut evaluator = self.evaluator(project);
         let scrutinee = evaluator.evaluate_value(&ms.scrutinee, None)?;
         let local_obligations = evaluator.take_local_obligations();
-        self.add_local_obligations(project, statement, &[], local_obligations)?;
+        self.add_local_obligations(project, &[], local_obligations)?;
         let scrutinee_type = scrutinee.get_type();
         let mut indices = vec![];
         let mut disjuncts = vec![];

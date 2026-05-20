@@ -86,10 +86,10 @@ fn quantify_over_explicit_value_params(
     }
 }
 
-fn local_obligations_need_relational_export(local_obligations: &[LocalObligation]) -> bool {
+fn local_obligations_need_result_spec_export(local_obligations: &[LocalObligation]) -> bool {
     local_obligations
         .iter()
-        .any(LocalObligation::needs_relational_export)
+        .any(LocalObligation::requires_result_spec_export)
 }
 
 impl Environment {
@@ -176,7 +176,7 @@ impl Environment {
         Ok(constant_value)
     }
 
-    fn add_relational_let_statement(
+    fn add_result_spec_let_statement(
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
@@ -222,7 +222,7 @@ impl Environment {
             } else {
                 Evaluator::new(project, &self.bindings, None)
             };
-            let relation = evaluator.evaluate_value_relation_with_stack(
+            let spec = evaluator.evaluate_result_spec_with_stack(
                 &mut stack,
                 &ls.value,
                 target,
@@ -232,12 +232,11 @@ impl Environment {
             let local_obligations = evaluator.take_local_obligations();
             self.add_genericized_local_obligations(
                 project,
-                statement,
                 &definition_type_params,
                 local_obligations,
             )?;
 
-            let general_claim = AcornValue::exists(vec![target_type.clone()], relation.clone());
+            let general_claim = AcornValue::exists(vec![target_type.clone()], spec.clone());
             let mut block_args = explicit_value_block_args(&local_family_params.value_params);
             block_args.extend(datatype_value_block_args(datatype_params));
             let block = Block::new(
@@ -245,7 +244,7 @@ impl Environment {
                 &self,
                 vec![],
                 block_args,
-                BlockParams::VariableSatisfy(general_claim, ls.value.range()),
+                BlockParams::variable_satisfy(general_claim, ls.value.range()),
                 &statement.first_token,
                 &statement.last_token,
                 None,
@@ -262,17 +261,17 @@ impl Environment {
                 range,
                 statement.to_string(),
                 statement,
-                "relational let cannot define instance attributes",
+                "result-spec let cannot define instance attributes",
             )?;
 
-            let specific_relation = relation.bind_values(
+            let specific_spec = spec.bind_values(
                 family_value_param_count,
                 family_value_param_count + 1,
                 &[constant_value],
             );
             let external_claim = quantify_over_explicit_value_params(
                 &local_family_params.value_params,
-                quantify_over_datatype_value_params(datatype_params, specific_relation),
+                quantify_over_datatype_value_params(datatype_params, specific_spec),
             )
             .genericize(&definition_type_params);
             let source = Source::anonymous(self.module_id, statement.range(), self.depth);
@@ -351,7 +350,6 @@ impl Environment {
         );
         self.add_genericized_local_obligations(
             project,
-            statement,
             &definition_type_params,
             local_obligations,
         )?;
@@ -381,7 +379,7 @@ impl Environment {
                         &self,
                         vec![],
                         block_args.clone(),
-                        BlockParams::VariableSatisfy(claim, ls.value.range()),
+                        BlockParams::variable_satisfy(claim, ls.value.range()),
                         &statement.first_token,
                         &statement.last_token,
                         None,
@@ -430,7 +428,7 @@ impl Environment {
             &self,
             vec![],
             block_args,
-            BlockParams::VariableSatisfy(general_claim, ls.value.range()),
+            BlockParams::variable_satisfy(general_claim, ls.value.range()),
             &statement.first_token,
             &statement.last_token,
             None,
@@ -679,8 +677,8 @@ impl Environment {
                 return result;
             }
         };
-        if value.is_some() && local_obligations_need_relational_export(&local_obligations) {
-            return self.add_relational_let_statement(
+        if value.is_some() && local_obligations_need_result_spec_export(&local_obligations) {
+            return self.add_result_spec_let_statement(
                 project,
                 statement,
                 defined_name,
@@ -720,12 +718,7 @@ impl Environment {
         };
         let acorn_type = acorn_type.genericize(&type_params);
         let value = value.map(|v| v.genericize(&type_params));
-        self.add_genericized_local_obligations(
-            project,
-            statement,
-            &type_params,
-            local_obligations,
-        )?;
+        self.add_genericized_local_obligations(project, &type_params, local_obligations)?;
         let def_str = statement.to_string();
 
         if datatype_value_param_types.is_empty() && explicit_value_param_types.is_empty() {
@@ -764,7 +757,7 @@ impl Environment {
         Ok(())
     }
 
-    fn add_relational_define_from_parts(
+    fn add_result_spec_define_from_parts(
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
@@ -776,7 +769,7 @@ impl Environment {
         fn_type_params: Vec<TypeParam>,
         arg_names: Vec<String>,
         arg_types: Vec<AcornType>,
-        relation: AcornValue,
+        spec: AcornValue,
         value_type: AcornType,
         local_obligations: Vec<LocalObligation>,
     ) -> error::Result<()> {
@@ -786,7 +779,7 @@ impl Environment {
             .map(|params| params.type_params().to_vec())
             .unwrap_or_default();
         all_type_params.extend(fn_type_params.clone());
-        self.add_local_obligations(project, statement, &all_type_params, local_obligations)?;
+        self.add_local_obligations(project, &all_type_params, local_obligations)?;
 
         let mut block_args = datatype_value_block_args(datatype_params);
         block_args.extend(arg_names.iter().cloned().zip(arg_types.iter().cloned()));
@@ -795,11 +788,7 @@ impl Environment {
             &self,
             fn_type_params.clone(),
             block_args,
-            BlockParams::FunctionSatisfy(
-                relation.clone(),
-                value_type.clone(),
-                ds.return_value.range(),
-            ),
+            BlockParams::FunctionSatisfy(spec.clone(), value_type.clone(), ds.return_value.range()),
             &statement.first_token,
             &statement.last_token,
             None,
@@ -829,7 +818,7 @@ impl Environment {
         );
         let const_name = defined_name
             .as_constant()
-            .ok_or_else(|| statement.error("relational define cannot define instance attributes"))?
+            .ok_or_else(|| statement.error("result-spec define cannot define instance attributes"))?
             .clone();
         let type_args: Vec<_> = all_type_params
             .iter()
@@ -871,7 +860,7 @@ impl Environment {
                 .collect(),
         );
         let return_index = family_value_param_count + arg_types.len() as AtomId;
-        let return_bound = relation.bind_values(return_index, return_index, &[function_term]);
+        let return_bound = spec.bind_values(return_index, return_index, &[function_term]);
         let arg_count = arg_types.len();
         let arb_condition = AcornValue::ForAll(arg_types, Box::new(return_bound));
 
@@ -965,15 +954,16 @@ impl Environment {
             }
         }
 
-        if unbound_value.is_some() && local_obligations_need_relational_export(&local_obligations) {
+        if unbound_value.is_some() && local_obligations_need_result_spec_export(&local_obligations)
+        {
             let (
                 rel_fn_type_params,
                 rel_arg_names,
                 rel_arg_types,
-                relation,
+                spec,
                 rel_value_type,
                 rel_local_obligations,
-            ) = self.bindings.evaluate_scoped_value_relation(
+            ) = self.bindings.evaluate_scoped_result_spec(
                 &type_param_exprs,
                 &args,
                 &ds.return_type,
@@ -986,7 +976,7 @@ impl Environment {
                 project,
                 None,
             )?;
-            return self.add_relational_define_from_parts(
+            return self.add_result_spec_define_from_parts(
                 project,
                 statement,
                 defined_name,
@@ -997,7 +987,7 @@ impl Environment {
                 rel_fn_type_params,
                 rel_arg_names,
                 rel_arg_types,
-                relation,
+                spec,
                 rel_value_type,
                 rel_local_obligations,
             );
@@ -1014,12 +1004,7 @@ impl Environment {
         } else {
             fn_param_names.clone()
         };
-        self.add_local_obligations(
-            project,
-            statement,
-            &definition_type_params,
-            local_obligations,
-        )?;
+        self.add_local_obligations(project, &definition_type_params, local_obligations)?;
 
         if let Some(v) = unbound_value {
             let fn_type = AcornType::functional_from_scoped_context(
@@ -1158,7 +1143,7 @@ impl Environment {
         if let Err(message) = external_claim.validate_constants(&self.bindings) {
             return Err(ts.claim.error(&message));
         }
-        self.add_local_obligations(project, statement, &type_params, local_obligations)?;
+        self.add_local_obligations(project, &type_params, local_obligations)?;
 
         let (premise, goal) = match &unbound_claim {
             AcornValue::Binary(BinaryOp::Implies, left, right) => {
@@ -1328,7 +1313,6 @@ impl Environment {
             };
             self.add_genericized_local_obligations(
                 project,
-                statement,
                 &definition_type_params,
                 local_obligations,
             )?;
@@ -1339,7 +1323,7 @@ impl Environment {
                 &self,
                 vec![],
                 block_args,
-                BlockParams::VariableSatisfy(general_claim, vss.condition.range()),
+                BlockParams::variable_satisfy(general_claim, vss.condition.range()),
                 &statement.first_token,
                 &statement.last_token,
                 None,
@@ -1498,7 +1482,7 @@ impl Environment {
             .map(|params| params.type_params().to_vec())
             .unwrap_or_default();
         all_type_params.extend(fn_type_params.clone());
-        self.add_local_obligations(project, statement, &all_type_params, local_obligations)?;
+        self.add_local_obligations(project, &all_type_params, local_obligations)?;
 
         let block = Block::new(
             project,
@@ -1615,7 +1599,7 @@ impl Environment {
         let mut evaluator = self.evaluator(project);
         let claim = evaluator.evaluate_value(&cs.claim, Some(&AcornType::Bool))?;
         let local_obligations = evaluator.take_local_obligations();
-        self.add_local_obligations(project, statement, &[], local_obligations)?;
+        self.add_local_obligations(project, &[], local_obligations)?;
         if claim == AcornValue::Bool(false) {
             self.includes_explicit_false = true;
         }
@@ -1670,7 +1654,7 @@ impl Environment {
         let mut value_evaluator = self.evaluator(project);
         let value = value_evaluator.evaluate_value(&ds.value, None)?;
         let local_obligations = value_evaluator.take_local_obligations();
-        self.add_local_obligations(project, statement, &[], local_obligations)?;
+        self.add_local_obligations(project, &[], local_obligations)?;
         let value_type = value.get_type();
 
         let mut empty_stack = Stack::new();
@@ -1678,7 +1662,7 @@ impl Environment {
         let mut function =
             function_evaluator.evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
         let local_obligations = function_evaluator.take_local_obligations();
-        self.add_local_obligations(project, statement, &[], local_obligations)?;
+        self.add_local_obligations(project, &[], local_obligations)?;
 
         let function_type_before = function.get_type();
         let function_ftype_before = match &function_type_before {
@@ -1761,7 +1745,7 @@ impl Environment {
                 self,
                 vec![],
                 vec![],
-                BlockParams::VariableSatisfy(general_claim, ds.value.range()),
+                BlockParams::variable_satisfy(general_claim, ds.value.range()),
                 &statement.first_token,
                 &statement.last_token,
                 Some(body),

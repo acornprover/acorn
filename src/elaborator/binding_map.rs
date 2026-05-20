@@ -2375,7 +2375,7 @@ impl BindingMap {
         }
     }
 
-    pub fn evaluate_scoped_value_relation(
+    pub fn evaluate_scoped_result_spec(
         &mut self,
         type_param_exprs: &[TypeParamExpr],
         args: &[Declaration],
@@ -2475,7 +2475,7 @@ impl BindingMap {
                 }
                 None => Evaluator::new(project, self, token_map),
             };
-            let relation = evaluator.evaluate_value_relation_with_stack(
+            let spec = evaluator.evaluate_result_spec_with_stack(
                 &mut stack,
                 value_expr,
                 target,
@@ -2487,7 +2487,7 @@ impl BindingMap {
             Ok((
                 arg_names,
                 internal_arg_types,
-                relation,
+                spec,
                 internal_value_type,
                 local_obligations,
             ))
@@ -2499,13 +2499,8 @@ impl BindingMap {
         if let Some(function_name) = function_name.filter(|_| added_function_binding) {
             self.remove_constant(function_name);
         }
-        let (
-            arg_names,
-            internal_arg_types,
-            internal_relation,
-            internal_value_type,
-            local_obligations,
-        ) = scoped_result?;
+        let (arg_names, internal_arg_types, internal_spec, internal_value_type, local_obligations) =
+            scoped_result?;
 
         if type_params.is_empty() {
             let local_obligations = match datatype_type_params {
@@ -2519,12 +2514,12 @@ impl BindingMap {
                 type_params,
                 arg_names,
                 internal_arg_types,
-                internal_relation,
+                internal_spec,
                 internal_value_type,
                 local_obligations,
             ))
         } else {
-            let external_relation = if let Some(function_name) = function_name {
+            let external_spec = if let Some(function_name) = function_name {
                 let mut all_params_for_genericize =
                     datatype_type_params.unwrap_or_default().to_vec();
                 all_params_for_genericize.extend(type_params.clone());
@@ -2532,10 +2527,10 @@ impl BindingMap {
                     .iter()
                     .map(|param| AcornType::Variable(param.clone()))
                     .collect();
-                let derecursed = internal_relation.set_params(function_name, &generic_params);
+                let derecursed = internal_spec.set_params(function_name, &generic_params);
                 derecursed.genericize(&all_params_for_genericize)
             } else {
-                internal_relation.genericize(&type_params)
+                internal_spec.genericize(&type_params)
             };
             let external_arg_types = internal_arg_types
                 .iter()
@@ -2554,7 +2549,7 @@ impl BindingMap {
                 type_params,
                 arg_names,
                 external_arg_types,
-                external_relation,
+                external_spec,
                 external_value_type,
                 external_local_obligations,
             ))
