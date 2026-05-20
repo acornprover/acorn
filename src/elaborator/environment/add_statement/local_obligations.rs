@@ -86,8 +86,15 @@ impl Environment {
             } = obligation;
 
             match kind {
-                LocalObligationKind::Claim { claim } => {
-                    self.add_local_claim_obligation(project, type_params, frame, claim, premises)?;
+                LocalObligationKind::Claim { claim, export } => {
+                    self.add_local_claim_obligation(
+                        project,
+                        type_params,
+                        frame,
+                        claim,
+                        premises,
+                        export,
+                    )?;
                 }
                 LocalObligationKind::ExistsWitness { existence, witness } => {
                     self.add_local_witness_obligation(
@@ -112,6 +119,7 @@ impl Environment {
         frame: LocalObligationFrame,
         claim: AcornValue,
         premises: Vec<LocalPremise>,
+        export: bool,
     ) -> error::Result<()> {
         let block = Block::new(
             project,
@@ -119,7 +127,7 @@ impl Environment {
             type_params.to_vec(),
             frame.block_args,
             BlockParams::variable_satisfy_with_premises(
-                claim,
+                claim.clone(),
                 premises
                     .iter()
                     .map(LocalPremise::to_block_premise)
@@ -130,7 +138,17 @@ impl Environment {
             &frame.last_token,
             frame.body.as_deref(),
         )?;
-        let index = self.add_node(Node::Block(block, None));
+        let external_fact = if export {
+            let claim = AcornValue::forall(frame.arg_types, imply_premises(&premises, claim));
+            let source = Source::anonymous(self.module_id, frame.range.clone(), self.depth);
+            Some(
+                Proposition::new(claim, type_params.to_vec(), source)
+                    .with_arg_count(frame.arg_count),
+            )
+        } else {
+            None
+        };
+        let index = self.add_node(Node::block(project, self, block, external_fact));
         self.add_node_lines(index, &frame.range);
         Ok(())
     }

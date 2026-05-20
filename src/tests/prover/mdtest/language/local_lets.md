@@ -252,6 +252,35 @@ theorem local_satisfy_if_then(p: Bool, n: Nat, fallback: Nat) {
 }
 ```
 
+## Let Satisfy With Proof In If Branch
+
+```acorn
+type Nat: axiom
+
+axiom branch_witness_exists(p: Bool, n: Nat) {
+    p implies exists(x: Nat) {
+        x = n
+    }
+}
+
+define local_satisfy_if_with_proof(p: Bool, n: Nat, fallback: Nat) -> Nat {
+    if p {
+        let x: Nat satisfy {
+            x = n
+        } by {
+            branch_witness_exists(p, n)
+        }
+        x
+    } else {
+        fallback
+    }
+}
+
+theorem local_satisfy_if_with_proof_then(p: Bool, n: Nat, fallback: Nat) {
+    p implies local_satisfy_if_with_proof(p, n, fallback) = n
+}
+```
+
 ## Destructuring In Match Branch
 
 ```acorn

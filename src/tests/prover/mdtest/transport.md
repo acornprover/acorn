@@ -221,6 +221,41 @@ theorem local_transport_value_then(n: Nat, k: Nat, box: Box[n], fallback: Nat) {
 }
 ```
 
+## Local Let With Proof In If Expression
+
+```acorn
+type Nat: axiom
+
+structure Box[n: Nat] {
+    value: Nat
+}
+
+axiom branch_equal(p: Bool, n: Nat, k: Nat) {
+    p implies n = k
+}
+
+define local_transport_if_with_proof(p: Bool, n: Nat, k: Nat, box: Box[n], fallback: Nat) -> Nat {
+    if p {
+        let y: Box[k] = transport box by {
+            branch_equal(p, n, k)
+        }
+        y.value
+    } else {
+        fallback
+    }
+}
+
+theorem local_transport_if_with_proof_then(
+    p: Bool,
+    n: Nat,
+    k: Nat,
+    box: Box[n],
+    fallback: Nat
+) {
+    p implies local_transport_if_with_proof(p, n, k, box, fallback) = box.value
+}
+```
+
 ## Local Let With Explicit Proof
 
 ```acorn

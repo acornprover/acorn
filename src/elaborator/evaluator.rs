@@ -136,6 +136,7 @@ impl SyntheticCaptureContext {
 pub enum LocalObligationKind {
     Claim {
         claim: AcornValue,
+        export: bool,
     },
     ExistsWitness {
         existence: AcornValue,
@@ -193,7 +194,34 @@ impl LocalObligation {
             context,
             vec![],
             premises,
-            LocalObligationKind::Claim { claim },
+            LocalObligationKind::Claim {
+                claim,
+                export: false,
+            },
+            range,
+            first_token,
+            last_token,
+            body,
+        )
+    }
+
+    fn exported_claim(
+        context: LocalStackContext,
+        premises: Vec<LocalPremise>,
+        claim: AcornValue,
+        range: Range,
+        first_token: Token,
+        last_token: Token,
+        body: Option<Arc<Body>>,
+    ) -> LocalObligation {
+        LocalObligation::new(
+            context,
+            vec![],
+            premises,
+            LocalObligationKind::Claim {
+                claim,
+                export: true,
+            },
             range,
             first_token,
             last_token,
@@ -243,8 +271,9 @@ impl LocalObligation {
                 .map(|premise| premise.genericize(type_params))
                 .collect(),
             kind: match self.kind {
-                LocalObligationKind::Claim { claim } => LocalObligationKind::Claim {
+                LocalObligationKind::Claim { claim, export } => LocalObligationKind::Claim {
                     claim: claim.genericize(type_params),
+                    export,
                 },
                 LocalObligationKind::ExistsWitness { existence, witness } => {
                     LocalObligationKind::ExistsWitness {
@@ -2789,11 +2818,15 @@ impl<'a> Evaluator<'a> {
         expected_type: &AcornType,
     ) -> error::Result<AcornValue> {
         if local_let.body.is_some() {
-            return Err(local_let.let_token.error(
-                "proof blocks on local value lets are not supported in result-spec expression export",
-            ));
+            if local_let.value.transport_operand().is_none() {
+                return Err(local_let
+                    .let_token
+                    .error("proof blocks on local value lets are only supported for transport"));
+            }
         }
         let name = self.check_local_value_name(&local_let.name_token, stack)?;
+        let context = LocalStackContext::from_stack(stack);
+        let premises = self.local_premises_for_stack(stack.len());
         let local_index = stack.insert(name.clone(), value_type.clone());
         let local_target = AcornValue::Variable(local_index, value_type.clone());
         let value_spec = self.evaluate_result_spec_with_stack(
@@ -2804,6 +2837,19 @@ impl<'a> Evaluator<'a> {
         );
         let body_spec = match value_spec {
             Ok(value_spec) => {
+                if let Some(proof_body) = &local_let.body {
+                    let existence =
+                        AcornValue::exists(vec![value_type.clone()], value_spec.clone());
+                    self.local_obligations.push(LocalObligation::exported_claim(
+                        context,
+                        premises,
+                        existence,
+                        local_let.value.range(),
+                        local_let.let_token.clone(),
+                        proof_body.right_brace.clone(),
+                        local_let.body.clone(),
+                    ));
+                }
                 let body_spec = self.evaluate_block_result_spec_from(
                     stack,
                     local_lets,
@@ -2830,12 +2876,9 @@ impl<'a> Evaluator<'a> {
         target: AcornValue,
         expected_type: &AcornType,
     ) -> error::Result<AcornValue> {
-        if local_satisfy.body.is_some() {
-            return Err(local_satisfy.let_token.error(
-                "proof blocks on local let-satisfy are not supported in result-spec expression export",
-            ));
-        }
         let name = self.check_local_value_name(&local_satisfy.name_token, stack)?;
+        let context = LocalStackContext::from_stack(stack);
+        let premises = self.local_premises_for_stack(stack.len());
         let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
         stack.insert(name.clone(), arg_type.clone());
         let condition = self.evaluate_direct_value_without_local_obligations(
@@ -2845,6 +2888,18 @@ impl<'a> Evaluator<'a> {
         );
         let body_spec = match condition {
             Ok(condition) => {
+                if let Some(proof_body) = &local_satisfy.body {
+                    let existence = AcornValue::exists(vec![arg_type.clone()], condition.clone());
+                    self.local_obligations.push(LocalObligation::exported_claim(
+                        context,
+                        premises,
+                        existence,
+                        local_satisfy.condition.range(),
+                        local_satisfy.let_token.clone(),
+                        proof_body.right_brace.clone(),
+                        local_satisfy.body.clone(),
+                    ));
+                }
                 let body_spec = self.evaluate_block_result_spec_from(
                     stack,
                     local_lets,
@@ -2871,12 +2926,6 @@ impl<'a> Evaluator<'a> {
         target: AcornValue,
         expected_type: &AcornType,
     ) -> error::Result<AcornValue> {
-        if local_destructuring.body.is_some() {
-            return Err(local_destructuring.let_token.error(
-                "proof blocks on local destructuring lets are not supported in result-spec expression export",
-            ));
-        }
-
         let mut arg_names = vec![];
         for arg_token in &local_destructuring.args {
             Self::validate_pattern_arg_name(arg_token)?;
@@ -2956,6 +3005,8 @@ impl<'a> Evaluator<'a> {
                 .error("could not infer all argument types for destructuring pattern"));
         }
 
+        let context = LocalStackContext::from_stack(stack);
+        let premises = self.local_premises_for_stack(stack.len());
         let stack_size = stack.len() as AtomId;
         let arg_values: Vec<_> = arg_types
             .iter()
@@ -2971,6 +3022,18 @@ impl<'a> Evaluator<'a> {
         }
         let pattern_spec =
             AcornValue::equals(AcornValue::apply(function, arg_values), obligation_value);
+        if let Some(proof_body) = &local_destructuring.body {
+            let existence = AcornValue::exists(arg_types.clone(), pattern_spec.clone());
+            self.local_obligations.push(LocalObligation::exported_claim(
+                context,
+                premises,
+                existence,
+                local_destructuring.value.range(),
+                local_destructuring.let_token.clone(),
+                proof_body.right_brace.clone(),
+                local_destructuring.body.clone(),
+            ));
+        }
         let body_spec = self.evaluate_block_result_spec_from(
             stack,
             local_lets,
