@@ -2948,32 +2948,24 @@ impl Project {
             let goal_info = self.create_goal_info(goal, &cursor);
             goal_infos.push(goal_info);
         } else if let Some(block) = cursor.node().get_block() {
-            // This is a Block node - collect ALL block-level goal children
-            let goal_indices: Vec<usize> = block
-                .env
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(i, node)| {
-                    if node.is_block_level_goal() {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // This is a Block node. Select its immediate block-level goals if it has any;
+            // otherwise treat expression-only wrapper blocks as transparent and recurse into
+            // nested blocks that cover the selected line.
+            let mut goal_paths = vec![];
+            let mut base_path = node_path.clone();
+            crate::elaborator::environment::Environment::collect_selectable_goal_paths_in_block(
+                block,
+                &mut base_path,
+                selected_line,
+                &mut goal_paths,
+            );
 
-            if goal_indices.is_empty() {
+            if goal_paths.is_empty() {
                 return Err("no goal at this location".to_string());
             }
 
-            // Process each goal
-            for goal_index in goal_indices {
-                // Create a new cursor for each goal
-                let mut goal_cursor =
-                    crate::elaborator::node::NodeCursor::from_path(env, &node_path);
-                goal_cursor.descend(goal_index);
-
+            for goal_path in goal_paths {
+                let goal_cursor = crate::elaborator::node::NodeCursor::from_path(env, &goal_path);
                 let goal = goal_cursor
                     .goal()
                     .ok_or_else(|| "failed to get goal from goal node".to_string())?;

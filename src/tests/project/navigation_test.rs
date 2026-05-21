@@ -1162,6 +1162,82 @@ fn test_handle_selection_typeclass_attribute() {
 }
 
 #[test]
+fn test_handle_selection_goal_inside_if_expression() {
+    let mut p = Project::new_mock_ide();
+    let content = indoc! {r#"
+        type Nat: axiom
+        let seed: Nat = axiom
+
+        define pick_if(p: Bool) -> Nat {      // line 3
+            if p {                            // line 4
+                let x: Nat satisfy {          // line 5
+                    x = seed                  // line 6
+                }
+                x
+            } else {
+                seed
+            }
+        }
+
+        define pick_with_proof(dummy: Bool) -> Nat {
+            let x: Nat satisfy {
+                x = seed
+            } by {
+                seed = seed
+            }
+            x
+        }
+        "#};
+    p.mock("/mock/main.ac", content);
+    p.expect_ok("main");
+
+    let test_file = std::path::PathBuf::from(localize_mock_filename("/mock/main.ac"));
+    let line_containing = |needle: &str| -> u32 {
+        content
+            .lines()
+            .position(|line| line.contains(needle))
+            .expect("expected source line")
+            .try_into()
+            .unwrap()
+    };
+    let if_satisfy_line = line_containing("x = seed");
+    let selection = p
+        .handle_selection(&test_file, if_satisfy_line)
+        .expect("selection should find the local satisfy goal inside the if expression");
+    let (goal_infos, goal_range) = match selection {
+        SelectionInfo::Goals {
+            goal_infos,
+            goal_range,
+        } => (goal_infos, goal_range),
+        SelectionInfo::Citation(_) => panic!("expected goal selection"),
+    };
+
+    assert_eq!(goal_infos.len(), 1);
+    assert!(!goal_infos[0].goal_name.is_empty());
+    let goal_range = goal_range.expect("expected a goal range");
+    assert!(goal_range.start.line <= if_satisfy_line);
+    assert!(goal_range.end.line >= if_satisfy_line);
+
+    let proof_statement_line = line_containing("seed = seed");
+    let selection = p
+        .handle_selection(&test_file, proof_statement_line)
+        .expect("selection should find the explicit proof statement inside the local let");
+    let (goal_infos, goal_range) = match selection {
+        SelectionInfo::Goals {
+            goal_infos,
+            goal_range,
+        } => (goal_infos, goal_range),
+        SelectionInfo::Citation(_) => panic!("expected goal selection"),
+    };
+
+    assert_eq!(goal_infos.len(), 1);
+    assert_eq!(goal_infos[0].goal_name, "seed = seed");
+    let goal_range = goal_range.expect("expected a goal range");
+    assert!(goal_range.start.line <= proof_statement_line);
+    assert!(goal_range.end.line >= proof_statement_line);
+}
+
+#[test]
 fn test_handle_selection_citation_returns_expansion() {
     let temp = tempfile::tempdir().unwrap();
     let src_dir = temp.path().join("src");

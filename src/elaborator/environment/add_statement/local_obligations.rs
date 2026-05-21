@@ -9,6 +9,7 @@ struct LocalObligationFrame {
     arg_count: usize,
     block_args: Vec<(String, AcornType)>,
     range: Range,
+    selection_range: Range,
     first_token: Token,
     last_token: Token,
     body: Option<Arc<Body>>,
@@ -27,6 +28,10 @@ impl LocalObligationFrame {
             arg_count: obligation.arg_types.len(),
             block_args,
             range: obligation.range.clone(),
+            selection_range: Range {
+                start: obligation.first_token.start_pos(),
+                end: obligation.last_token.end_pos(),
+            },
             first_token: obligation.first_token.clone(),
             last_token: obligation.last_token.clone(),
             body: obligation.body.clone(),
@@ -119,7 +124,7 @@ impl Environment {
             }
         };
         let index = self.add_node(Node::block(project, self, block, external_fact));
-        self.add_node_lines(index, &frame.range);
+        self.add_node_lines(index, &frame.selection_range);
         Ok(())
     }
 
@@ -156,7 +161,7 @@ impl Environment {
             block,
             Some(existence_prop.clone()),
         ));
-        self.add_node_lines(index, &frame.range);
+        self.add_node_lines(index, &frame.selection_range);
 
         let witness = witness.external_value(frame.arg_types);
         let source = Source::anonymous(self.module_id, frame.range, self.depth);
@@ -199,7 +204,7 @@ impl Environment {
             Proposition::new(claim, type_params.to_vec(), source).with_arg_count(frame.arg_count)
         });
         let index = self.add_node(Node::block(project, self, block, external_fact));
-        self.add_node_lines(index, &frame.range);
+        self.add_node_lines(index, &frame.selection_range);
         Ok(())
     }
 }

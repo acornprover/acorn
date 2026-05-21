@@ -571,6 +571,59 @@ impl Environment {
         Some((NodeCursor::from_path(self, &path), citation))
     }
 
+    /// Collects the goal paths selectable from a block wrapper at a given zero-based line.
+    ///
+    /// If the block has immediate block-level goals, those are the selectable goals. Otherwise,
+    /// expression-only wrapper blocks are transparent and selection recurses into child blocks
+    /// that cover the selected line.
+    pub(crate) fn collect_selectable_goal_paths_in_block(
+        block: &Block,
+        base_path: &mut Vec<usize>,
+        line: u32,
+        goal_paths: &mut Vec<Vec<usize>>,
+    ) {
+        let immediate_goal_indices: Vec<usize> = block
+            .env
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, node)| {
+                if node.is_block_level_goal() {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !immediate_goal_indices.is_empty() {
+            for goal_index in immediate_goal_indices {
+                let mut goal_path = base_path.clone();
+                goal_path.push(goal_index);
+                goal_paths.push(goal_path);
+            }
+            return;
+        }
+
+        for (index, node) in block.env.nodes.iter().enumerate() {
+            let Some(child_block) = node.get_block() else {
+                continue;
+            };
+            if !child_block.env.covers_line(line) {
+                continue;
+            }
+            base_path.push(index);
+            Self::collect_selectable_goal_paths_in_block(child_block, base_path, line, goal_paths);
+            base_path.pop();
+        }
+    }
+
+    fn block_has_selectable_goal_at_line(block: &Block, line: u32) -> bool {
+        let mut goal_paths = vec![];
+        let mut base_path = vec![];
+        Self::collect_selectable_goal_paths_in_block(block, &mut base_path, line, &mut goal_paths);
+        !goal_paths.is_empty()
+    }
+
     /// Returns the path to a given zero-based line.
     /// This is a UI heuristic.
     /// Either returns a path to a proposition, or an error message explaining why this
@@ -601,13 +654,7 @@ impl Environment {
                 }
                 Some(LineType::Opening) | Some(LineType::Closing) => match block {
                     Some(block) => {
-                        // Check if the block has any block-level goal nodes
-                        let has_block_goals = block
-                            .env
-                            .nodes
-                            .iter()
-                            .any(|node| node.is_block_level_goal());
-                        if !has_block_goals {
+                        if !Self::block_has_selectable_goal_at_line(block, line) {
                             return Err(format!("no claim for block at line {}", line + 1));
                         }
                         return Ok(path);
@@ -645,13 +692,7 @@ impl Environment {
                                 // Sliding into the end of our block is okay
                                 match block {
                                     Some(block) => {
-                                        // Check if the block has any block-level goal nodes
-                                        let has_block_goals = block
-                                            .env
-                                            .nodes
-                                            .iter()
-                                            .any(|node| node.is_block_level_goal());
-                                        if !has_block_goals {
+                                        if !Self::block_has_selectable_goal_at_line(block, slide) {
                                             return Err("slide to end but no claim".to_string());
                                         }
                                         return Ok(path);
