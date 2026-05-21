@@ -58,15 +58,6 @@ struct LocalMatchFact {
     stack_size: usize,
 }
 
-#[derive(Clone, Copy)]
-enum LocalBindingValueMode {
-    /// Evaluate normally, collecting any proof obligations that appear inside the value.
-    Normal,
-    /// Evaluate without allowing local proof obligations. This is used while constructing
-    /// result specifications, where the obligation shape is represented explicitly.
-    Direct,
-}
-
 struct LocalSatisfyElaboration {
     name: String,
     arg_type: AcornType,
@@ -82,6 +73,7 @@ struct LocalLetElaboration {
 struct LocalDestructuringElaboration {
     arg_names: Vec<String>,
     arg_types: Vec<AcornType>,
+    return_type: AcornType,
     function: AcornValue,
     obligation_value: AcornValue,
     proof_site: LocalProofSite,
@@ -2230,11 +2222,7 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         local_satisfy: &LocalSatisfyLet,
     ) -> error::Result<()> {
-        let elaboration = self.evaluate_local_satisfy_binding(
-            stack,
-            local_satisfy,
-            LocalBindingValueMode::Normal,
-        )?;
+        let elaboration = self.evaluate_local_satisfy_binding(stack, local_satisfy)?;
 
         let stack_size = stack.len() as AtomId;
         if local_satisfy.body.is_none() {
@@ -2283,11 +2271,7 @@ impl<'a> Evaluator<'a> {
         stack: &mut Stack,
         local_destructuring: &LocalDestructuringLet,
     ) -> error::Result<()> {
-        let elaboration = self.evaluate_local_destructuring_binding(
-            stack,
-            local_destructuring,
-            LocalBindingValueMode::Normal,
-        )?;
+        let elaboration = self.evaluate_local_destructuring_binding(stack, local_destructuring)?;
 
         let general_arg_values: Vec<_> = elaboration
             .arg_types
@@ -2520,41 +2504,17 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    fn evaluate_local_binding_value(
-        &mut self,
-        stack: &mut Stack,
-        expression: &Expression,
-        expected_type: Option<&AcornType>,
-        mode: LocalBindingValueMode,
-    ) -> error::Result<AcornValue> {
-        match mode {
-            LocalBindingValueMode::Normal => {
-                self.evaluate_value_with_stack(stack, expression, expected_type)
-            }
-            LocalBindingValueMode::Direct => self.evaluate_direct_value_without_local_obligations(
-                stack,
-                expression,
-                expected_type,
-            ),
-        }
-    }
-
     fn evaluate_local_satisfy_binding(
         &mut self,
         stack: &mut Stack,
         local_satisfy: &LocalSatisfyLet,
-        mode: LocalBindingValueMode,
     ) -> error::Result<LocalSatisfyElaboration> {
         let name = self.check_local_value_name(&local_satisfy.name_token, stack)?;
         let context = LocalStackContext::from_stack(stack);
         let arg_type = self.evaluate_type_with_stack(stack, &local_satisfy.type_expr)?;
         stack.insert(name.clone(), arg_type.clone());
-        let condition = self.evaluate_local_binding_value(
-            stack,
-            &local_satisfy.condition,
-            Some(&AcornType::Bool),
-            mode,
-        );
+        let condition =
+            self.evaluate_value_with_stack(stack, &local_satisfy.condition, Some(&AcornType::Bool));
         stack.remove(&name);
         let proof_site = LocalProofSite::new(
             context,
@@ -2605,11 +2565,9 @@ impl<'a> Evaluator<'a> {
         &mut self,
         stack: &mut Stack,
         local_destructuring: &LocalDestructuringLet,
-        mode: LocalBindingValueMode,
     ) -> error::Result<LocalDestructuringElaboration> {
         let arg_names = self.check_local_destructuring_arg_names(stack, local_destructuring)?;
-        let value =
-            self.evaluate_local_binding_value(stack, &local_destructuring.value, None, mode)?;
+        let value = self.evaluate_value_with_stack(stack, &local_destructuring.value, None)?;
         let value_type = value.get_type();
         let mut function = self.evaluate_as_generic_value(stack, &local_destructuring.function)?;
 
@@ -2685,6 +2643,7 @@ impl<'a> Evaluator<'a> {
         Ok(LocalDestructuringElaboration {
             arg_names,
             arg_types,
+            return_type,
             function,
             obligation_value,
             proof_site,
@@ -2748,13 +2707,31 @@ impl<'a> Evaluator<'a> {
         target: AcornValue,
         expected_type: &AcornType,
     ) -> error::Result<AcornValue> {
-        let elaboration = self.evaluate_local_satisfy_binding(
-            stack,
-            local_satisfy,
-            LocalBindingValueMode::Direct,
-        )?;
+        let obligation_count = self.local_obligations.len();
+        let elaboration = self.evaluate_local_satisfy_binding(stack, local_satisfy)?;
+        let condition_obligations = self.take_local_obligations_since(obligation_count);
         stack.insert(elaboration.name.clone(), elaboration.arg_type.clone());
-        let condition = elaboration.condition.clone();
+        let condition = if condition_obligations
+            .iter()
+            .any(LocalObligation::requires_result_spec_export)
+        {
+            self.evaluate_result_spec_with_stack(
+                stack,
+                &local_satisfy.condition,
+                AcornValue::Bool(true),
+                &AcornType::Bool,
+            )
+        } else {
+            self.local_obligations.extend(condition_obligations);
+            Ok(elaboration.condition.clone())
+        };
+        let condition = match condition {
+            Ok(condition) => condition,
+            Err(e) => {
+                stack.remove(&elaboration.name);
+                return Err(e);
+            }
+        };
         if local_satisfy.body.is_some() {
             let existence =
                 AcornValue::exists(vec![elaboration.arg_type.clone()], condition.clone());
@@ -2784,11 +2761,9 @@ impl<'a> Evaluator<'a> {
         target: AcornValue,
         expected_type: &AcornType,
     ) -> error::Result<AcornValue> {
-        let elaboration = self.evaluate_local_destructuring_binding(
-            stack,
-            local_destructuring,
-            LocalBindingValueMode::Direct,
-        )?;
+        let obligation_count = self.local_obligations.len();
+        let elaboration = self.evaluate_local_destructuring_binding(stack, local_destructuring)?;
+        let value_obligations = self.take_local_obligations_since(obligation_count);
 
         let arg_values: Vec<_> = elaboration
             .arg_types
@@ -2802,10 +2777,33 @@ impl<'a> Evaluator<'a> {
         for (arg_name, arg_type) in elaboration.arg_names.iter().zip(&elaboration.arg_types) {
             stack.insert(arg_name.clone(), arg_type.clone());
         }
-        let pattern_spec = AcornValue::equals(
-            AcornValue::apply(elaboration.function, arg_values),
-            elaboration.obligation_value,
-        );
+        let pattern_value = AcornValue::apply(elaboration.function, arg_values);
+        let pattern_spec = if value_obligations
+            .iter()
+            .any(LocalObligation::requires_result_spec_export)
+        {
+            self.evaluate_result_spec_with_stack(
+                stack,
+                &local_destructuring.value,
+                pattern_value,
+                &elaboration.return_type,
+            )
+        } else {
+            self.local_obligations.extend(value_obligations);
+            Ok(AcornValue::equals(
+                pattern_value,
+                elaboration.obligation_value,
+            ))
+        };
+        let pattern_spec = match pattern_spec {
+            Ok(pattern_spec) => pattern_spec,
+            Err(e) => {
+                for arg_name in &elaboration.arg_names {
+                    stack.remove(arg_name);
+                }
+                return Err(e);
+            }
+        };
         if local_destructuring.body.is_some() {
             let existence = AcornValue::exists(elaboration.arg_types.clone(), pattern_spec.clone());
             self.local_obligations
@@ -2936,6 +2934,87 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn evaluate_match_result_spec_cases(
+        &mut self,
+        stack: &mut Stack,
+        expression: &Expression,
+        scrutinee: AcornValue,
+        case_exps: &[(Expression, Expression)],
+        target: AcornValue,
+        expected_type: &AcornType,
+    ) -> error::Result<AcornValue> {
+        let scrutinee_type = scrutinee.get_type();
+        let mut specs = vec![];
+        let mut indices = vec![];
+        let mut all_cases = false;
+        for (pattern_exp, result_exp) in case_exps {
+            let (_, args, i, total) = self.evaluate_pattern(&scrutinee_type, pattern_exp)?;
+            if indices.contains(&i) {
+                return Err(
+                    pattern_exp.error("cannot have multiple cases for the same constructor")
+                );
+            }
+            for (name, _) in &args {
+                if stack.get(name).is_some() || self.has_local_alias(name) {
+                    return Err(pattern_exp.error(&format!("name '{}' is already bound", name)));
+                }
+            }
+            for (name, arg_type) in &args {
+                stack.insert(name.clone(), arg_type.clone());
+            }
+            indices.push(i);
+            if total == indices.len() {
+                all_cases = true;
+            }
+            let pattern = match self.evaluate_direct_value_without_local_obligations(
+                stack,
+                pattern_exp,
+                Some(&scrutinee_type),
+            ) {
+                Ok(pattern) => pattern,
+                Err(e) => {
+                    for (name, _) in &args {
+                        stack.remove(name);
+                    }
+                    return Err(e);
+                }
+            };
+            let match_fact_count = self.local_match_facts.len();
+            self.local_match_facts.push(LocalMatchFact {
+                value: scrutinee.clone(),
+                pattern: pattern.clone(),
+                stack_size: stack.len(),
+            });
+            let equality = AcornValue::equals(scrutinee.clone(), pattern);
+            let premise = LocalPremise::new(equality.clone(), pattern_exp.range());
+            let branch_spec = self.evaluate_result_spec_branch_with_block(
+                stack,
+                premise,
+                result_exp,
+                target.clone(),
+                expected_type,
+            );
+            self.local_match_facts.truncate(match_fact_count);
+            let arg_types = args
+                .iter()
+                .map(|(_, arg_type)| arg_type.clone())
+                .collect::<Vec<_>>();
+            for (name, _) in &args {
+                stack.remove(name);
+            }
+            let spec = AcornValue::implies(equality, branch_spec?);
+            specs.push(AcornValue::forall(arg_types, spec));
+        }
+        if !all_cases {
+            return Err(expression.error("not all constructors are covered in this match"));
+        }
+        let mut iter = specs.into_iter();
+        let Some(first) = iter.next() else {
+            return Ok(AcornValue::Bool(true));
+        };
+        Ok(iter.fold(first, AcornValue::and))
+    }
+
     pub fn evaluate_result_spec_with_stack(
         &mut self,
         stack: &mut Stack,
@@ -2947,10 +3026,39 @@ impl<'a> Evaluator<'a> {
         let obligation_count = self.local_obligations.len();
         let result = (|| {
             if let Some((transport_token, source_expr)) = expression.transport_operand() {
-                let source_value =
-                    self.evaluate_direct_value_without_local_obligations(stack, source_expr, None)?;
+                let source_obligation_count = self.local_obligations.len();
+                let source_value = self.evaluate_value_with_stack(stack, source_expr, None)?;
+                let source_obligations = self.take_local_obligations_since(source_obligation_count);
                 let source_type = source_value.get_type();
                 let transport = TransportBuilder::from_bindings(self.bindings, self.project);
+                if source_obligations
+                    .iter()
+                    .any(LocalObligation::requires_result_spec_export)
+                {
+                    let source_name = format!("\0transport_source_{}", stack.len());
+                    let source_index = stack.insert(source_name.clone(), source_type.clone());
+                    let source_target = AcornValue::Variable(source_index, source_type.clone());
+                    let source_spec = self.evaluate_result_spec_with_stack(
+                        stack,
+                        source_expr,
+                        source_target.clone(),
+                        &source_type,
+                    );
+                    let relation = transport.relation(
+                        &source_type,
+                        expected_type,
+                        source_target,
+                        target,
+                        transport_token,
+                        stack.len() as AtomId,
+                    );
+                    stack.remove(&source_name);
+                    let source_spec = source_spec?;
+                    let relation = relation?;
+                    let spec = Self::conjoin_result_specs(source_spec, relation);
+                    return Ok(AcornValue::exists(vec![source_type], spec));
+                }
+                self.local_obligations.extend(source_obligations);
                 return transport.relation(
                     &source_type,
                     expected_type,
@@ -2970,11 +3078,58 @@ impl<'a> Evaluator<'a> {
                     expected_type,
                 ),
                 Expression::IfThenElse(_, cond_exp, if_exp, Some(else_exp), _) => {
-                    let cond = self.evaluate_direct_value_without_local_obligations(
-                        stack,
-                        cond_exp,
-                        Some(&AcornType::Bool),
-                    )?;
+                    let cond_obligation_count = self.local_obligations.len();
+                    let cond =
+                        self.evaluate_value_with_stack(stack, cond_exp, Some(&AcornType::Bool))?;
+                    let cond_obligations =
+                        self.take_local_obligations_since(cond_obligation_count);
+                    if cond_obligations
+                        .iter()
+                        .any(LocalObligation::requires_result_spec_export)
+                    {
+                        let cond_name = format!("\0if_condition_{}", stack.len());
+                        let cond_index = stack.insert(cond_name.clone(), AcornType::Bool);
+                        let cond = AcornValue::Variable(cond_index, AcornType::Bool);
+                        let cond_spec = self.evaluate_result_spec_with_stack(
+                            stack,
+                            cond_exp,
+                            cond.clone(),
+                            &AcornType::Bool,
+                        );
+                        let result = (|| {
+                            let cond_spec = cond_spec?;
+                            let if_premise = LocalPremise::new(cond.clone(), cond_exp.range());
+                            let if_spec = self.evaluate_result_spec_branch_with_block(
+                                stack,
+                                if_premise,
+                                if_exp,
+                                target.clone(),
+                                expected_type,
+                            )?;
+                            let else_premise = LocalPremise::new(
+                                AcornValue::Not(Box::new(cond.clone())),
+                                cond_exp.range(),
+                            );
+                            let else_spec = self.evaluate_result_spec_branch_with_block(
+                                stack,
+                                else_premise,
+                                else_exp,
+                                target,
+                                expected_type,
+                            )?;
+                            let branch_spec = AcornValue::and(
+                                AcornValue::implies(cond.clone(), if_spec),
+                                AcornValue::implies(AcornValue::Not(Box::new(cond)), else_spec),
+                            );
+                            Ok(AcornValue::exists(
+                                vec![AcornType::Bool],
+                                Self::conjoin_result_specs(cond_spec, branch_spec),
+                            ))
+                        })();
+                        stack.remove(&cond_name);
+                        return result;
+                    }
+                    self.local_obligations.extend(cond_obligations);
                     let if_premise = LocalPremise::new(cond.clone(), cond_exp.range());
                     let if_spec = self.evaluate_result_spec_branch_with_block(
                         stack,
@@ -3003,82 +3158,53 @@ impl<'a> Evaluator<'a> {
                     "if expressions without else clauses are not supported in result-spec expression export",
                 )),
                 Expression::Match(_, scrutinee_exp, case_exps, _) => {
-                    let scrutinee = self.evaluate_direct_value_without_local_obligations(
-                        stack,
-                        scrutinee_exp,
-                        None,
-                    )?;
+                    let scrutinee_obligation_count = self.local_obligations.len();
+                    let scrutinee = self.evaluate_value_with_stack(stack, scrutinee_exp, None)?;
+                    let scrutinee_obligations =
+                        self.take_local_obligations_since(scrutinee_obligation_count);
                     let scrutinee_type = scrutinee.get_type();
-                    let mut specs = vec![];
-                    let mut indices = vec![];
-                    let mut all_cases = false;
-                    for (pattern_exp, result_exp) in case_exps {
-                        let (_, args, i, total) =
-                            self.evaluate_pattern(&scrutinee_type, pattern_exp)?;
-                        if indices.contains(&i) {
-                            return Err(pattern_exp
-                                .error("cannot have multiple cases for the same constructor"));
-                        }
-                        for (name, _) in &args {
-                            if stack.get(name).is_some() || self.has_local_alias(name) {
-                                return Err(pattern_exp
-                                    .error(&format!("name '{}' is already bound", name)));
-                            }
-                        }
-                        for (name, arg_type) in &args {
-                            stack.insert(name.clone(), arg_type.clone());
-                        }
-                        indices.push(i);
-                        if total == indices.len() {
-                            all_cases = true;
-                        }
-                        let pattern = match self.evaluate_direct_value_without_local_obligations(
+                    if scrutinee_obligations
+                        .iter()
+                        .any(LocalObligation::requires_result_spec_export)
+                    {
+                        let scrutinee_name = format!("\0match_scrutinee_{}", stack.len());
+                        let scrutinee_index =
+                            stack.insert(scrutinee_name.clone(), scrutinee_type.clone());
+                        let scrutinee_target =
+                            AcornValue::Variable(scrutinee_index, scrutinee_type.clone());
+                        let scrutinee_spec = self.evaluate_result_spec_with_stack(
                             stack,
-                            pattern_exp,
-                            Some(&scrutinee_type),
-                        ) {
-                            Ok(pattern) => pattern,
-                            Err(e) => {
-                                for (name, _) in &args {
-                                    stack.remove(name);
-                                }
-                                return Err(e);
-                            }
-                        };
-                        let match_fact_count = self.local_match_facts.len();
-                        self.local_match_facts.push(LocalMatchFact {
-                            value: scrutinee.clone(),
-                            pattern: pattern.clone(),
-                            stack_size: stack.len(),
-                        });
-                        let equality = AcornValue::equals(scrutinee.clone(), pattern);
-                        let premise = LocalPremise::new(equality.clone(), pattern_exp.range());
-                        let branch_spec = self.evaluate_result_spec_branch_with_block(
-                            stack,
-                            premise,
-                            result_exp,
-                            target.clone(),
-                            expected_type,
+                            scrutinee_exp,
+                            scrutinee_target.clone(),
+                            &scrutinee_type,
                         );
-                        self.local_match_facts.truncate(match_fact_count);
-                        let arg_types = args
-                            .iter()
-                            .map(|(_, arg_type)| arg_type.clone())
-                            .collect::<Vec<_>>();
-                        for (name, _) in &args {
-                            stack.remove(name);
-                        }
-                        let spec = AcornValue::implies(equality, branch_spec?);
-                        specs.push(AcornValue::forall(arg_types, spec));
+                        let result = (|| {
+                            let scrutinee_spec = scrutinee_spec?;
+                            let case_spec = self.evaluate_match_result_spec_cases(
+                                stack,
+                                expression,
+                                scrutinee_target,
+                                case_exps,
+                                target,
+                                expected_type,
+                            )?;
+                            Ok(AcornValue::exists(
+                                vec![scrutinee_type],
+                                Self::conjoin_result_specs(scrutinee_spec, case_spec),
+                            ))
+                        })();
+                        stack.remove(&scrutinee_name);
+                        return result;
                     }
-                    if !all_cases {
-                        return Err(expression.error("not all constructors are covered in this match"));
-                    }
-                    let mut iter = specs.into_iter();
-                    let Some(first) = iter.next() else {
-                        return Ok(AcornValue::Bool(true));
-                    };
-                    Ok(iter.fold(first, AcornValue::and))
+                    self.local_obligations.extend(scrutinee_obligations);
+                    self.evaluate_match_result_spec_cases(
+                        stack,
+                        expression,
+                        scrutinee,
+                        case_exps,
+                        target,
+                        expected_type,
+                    )
                 }
                 _ => {
                     let value = self.evaluate_direct_value_without_local_obligations(

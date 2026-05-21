@@ -281,6 +281,32 @@ theorem local_transport_with_proof_value(n: Nat, k: Nat, box: Box[n]) {
 }
 ```
 
+## Local Transport Source With Branch-Local Satisfy
+
+The source expression of a local transport can itself contain branch-local local witnesses.
+
+```acorn
+inductive MyOption[T] {
+    none
+    some(T)
+}
+
+type Empty: axiom
+let empty: Empty = axiom
+
+define transport_branch_local(flag: Bool) -> MyOption[Empty] {
+    let y: MyOption[Empty] = transport if true {
+        let x: Empty satisfy {
+            true
+        }
+        MyOption.some(x)
+    } else {
+        MyOption.some(empty)
+    }
+    y
+}
+```
+
 ## Local Let In Match Branch
 
 ```acorn

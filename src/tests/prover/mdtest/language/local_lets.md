@@ -481,6 +481,117 @@ let MyOption.some(y) = if true {
 }
 ```
 
+## Branch-Local Satisfy In Local Destructuring Values
+
+Local destructuring uses the same source-value result spec path.
+
+```acorn
+inductive MyOption[T] {
+    none
+    some(T)
+}
+
+type Empty: axiom
+let empty: Empty = axiom
+
+define unwrap_branch_local(flag: Bool) -> Empty {
+    let MyOption.some(y) = if true {
+        let x: Empty satisfy {
+            true
+        }
+        MyOption.some(x)
+    } else {
+        MyOption.some(empty)
+    }
+    y
+}
+```
+
+## Branch-Local Satisfy In Nested Satisfy Conditions
+
+A local `let ... satisfy` condition can itself contain branch-local local witnesses.
+
+```acorn
+type Empty: axiom
+let empty: Empty = axiom
+
+define absurd(e: Empty) -> Bool {
+    true
+}
+
+define nested_satisfy(flag: Bool) -> Bool {
+    let x: Bool satisfy {
+        if true {
+            let e: Empty satisfy {
+                true
+            }
+            absurd(e)
+        } else {
+            true
+        }
+    }
+    x
+}
+```
+
+## Branch-Local Satisfy In If Conditions
+
+If-expression conditions can contain expression blocks indirectly, such as in match branches.
+
+```acorn
+inductive MyOption[T] {
+    none
+    some(T)
+}
+
+theorem if_condition_local {
+    if match MyOption.some(true) {
+        MyOption.none {
+            false
+        }
+        MyOption.some(e) {
+            let x: Bool satisfy {
+                true
+            }
+            true
+        }
+    } {
+        true
+    } else {
+        true
+    }
+}
+```
+
+## Branch-Local Satisfy In Match Scrutinees
+
+Match scrutinees also use result-spec lowering when they contain branch-local witnesses.
+
+```acorn
+inductive MyOption[T] {
+    none
+    some(T)
+}
+
+theorem match_scrutinee_local {
+    match if true {
+        let x: Bool satisfy {
+            true
+        }
+        MyOption.some(x)
+    } else {
+        MyOption.none[Bool]
+    } {
+        MyOption.none {
+            true
+        }
+        MyOption.some(e) {
+            true
+        }
+    }
+}
+```
+
 ## Local Satisfy In Dead Branch Returns Else
 
 A witness that only appears in a dead branch is exported under that branch's result specification,
