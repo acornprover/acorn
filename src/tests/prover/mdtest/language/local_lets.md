@@ -383,6 +383,104 @@ theorem picked_is_seed {
 }
 ```
 
+## Branch-Local Satisfy In Theorem Claims
+
+Branch-local witnesses in theorem claims and proof-block claims must lower through result specs so
+certificate generation never sees the synthetic witness directly.
+
+```acorn
+type Empty: axiom
+let empty: Empty = axiom
+
+define absurd(e: Empty) -> Bool {
+    true
+}
+
+theorem theorem_claim {
+    if true {
+        let x: Empty satisfy {
+            true
+        }
+        absurd(x)
+    } else {
+        true
+    }
+}
+
+theorem proof_claim {
+    true
+} by {
+    if true {
+        let x: Empty satisfy {
+            true
+        }
+        absurd(x)
+    } else {
+        true
+    }
+}
+```
+
+## Branch-Local Satisfy In Satisfy Conditions
+
+Statement-level `let ... satisfy` and function-satisfy conditions use the same result-spec export
+path for branch-local witnesses.
+
+```acorn
+type Empty: axiom
+let empty: Empty = axiom
+
+define absurd(e: Empty) -> Bool {
+    true
+}
+
+let witness: Bool satisfy {
+    if true {
+        let x: Empty satisfy {
+            true
+        }
+        absurd(x)
+    } else {
+        true
+    }
+}
+
+let chooser(a: Bool) -> result: Bool satisfy {
+    if a {
+        let x: Empty satisfy {
+            true
+        }
+        absurd(x)
+    } else {
+        result = result
+    }
+}
+```
+
+## Branch-Local Satisfy In Destructuring Values
+
+Statement-level destructuring also has to use the source value's result spec when the value
+contains branch-local proof obligations.
+
+```acorn
+inductive MyOption[T] {
+    none
+    some(T)
+}
+
+type Empty: axiom
+let empty: Empty = axiom
+
+let MyOption.some(y) = if true {
+    let x: Empty satisfy {
+        true
+    }
+    MyOption.some(x)
+} else {
+    MyOption.some(empty)
+}
+```
+
 ## Local Satisfy In Dead Branch Returns Else
 
 A witness that only appears in a dead branch is exported under that branch's result specification,

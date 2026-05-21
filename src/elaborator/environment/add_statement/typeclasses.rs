@@ -122,7 +122,7 @@ impl Environment {
                 self.bindings
                     .check_defined_name_available(&defined_name, &condition.name_token)?;
 
-                let (bad_params, _, arg_types, unbound_claim, _, local_obligations) =
+                let (mut bad_params, _, mut arg_types, unbound_claim, _, mut local_obligations) =
                     self.bindings.evaluate_scoped_value(
                         &[],
                         &condition.args,
@@ -141,8 +141,31 @@ impl Environment {
                         .name_token
                         .error("type parameters are not allowed here"));
                 }
-                let unbound_claim = unbound_claim
+                let mut unbound_claim = unbound_claim
                     .ok_or_else(|| condition.claim.error("conditions must have values"))?;
+                if local_obligations_need_result_spec_export(&local_obligations) {
+                    let scoped_spec = self.bindings.evaluate_scoped_bool_result_spec(
+                        &[],
+                        &condition.args,
+                        &condition.claim,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        project,
+                        None,
+                    )?;
+                    bad_params = scoped_spec.0;
+                    if !bad_params.is_empty() {
+                        return Err(condition
+                            .name_token
+                            .error("type parameters are not allowed here"));
+                    }
+                    arg_types = scoped_spec.2;
+                    unbound_claim = scoped_spec.3;
+                    local_obligations = scoped_spec.4;
+                }
                 let external_claim = AcornValue::forall(arg_types.clone(), unbound_claim.clone())
                     .genericize(&type_params);
                 if let Err(message) = external_claim.validate() {

@@ -106,6 +106,12 @@ mod typeclasses;
 // This file generally contains the logic for creating an environment.
 // It would be nice for the separation to be cleaner.
 
+fn local_obligations_need_result_spec_export(local_obligations: &[LocalObligation]) -> bool {
+    local_obligations
+        .iter()
+        .any(LocalObligation::requires_result_spec_export)
+}
+
 impl Environment {
     /// Parse these tokens and add them to the environment.
     /// If project is not provided, we won't be able to handle import statements.

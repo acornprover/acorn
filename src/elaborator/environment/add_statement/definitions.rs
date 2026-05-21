@@ -86,12 +86,6 @@ fn quantify_over_explicit_value_params(
     }
 }
 
-fn local_obligations_need_result_spec_export(local_obligations: &[LocalObligation]) -> bool {
-    local_obligations
-        .iter()
-        .any(LocalObligation::requires_result_spec_export)
-}
-
 impl Environment {
     fn declare_witness_constant(
         &mut self,
@@ -1100,7 +1094,7 @@ impl Environment {
         let local_family_params = self.evaluate_local_family_params(project, &ts.type_params)?;
         let mut args = local_family_params.value_declarations;
         args.extend(ts.args.clone());
-        let (type_params, arg_names, arg_types, value, _, local_obligations) =
+        let (mut type_params, mut arg_names, mut arg_types, value, _, mut local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &local_family_params.type_param_exprs,
                 &args,
@@ -1115,8 +1109,28 @@ impl Environment {
                 Some(&mut self.token_map),
             )?;
 
-        let unbound_claim = value.ok_or_else(|| ts.claim.error("theorems must have values"))?;
+        let mut unbound_claim = value.ok_or_else(|| ts.claim.error("theorems must have values"))?;
         unbound_claim.check_type(Some(&AcornType::Bool), &ts.claim)?;
+
+        if local_obligations_need_result_spec_export(&local_obligations) {
+            let scoped_spec = self.bindings.evaluate_scoped_bool_result_spec(
+                &local_family_params.type_param_exprs,
+                &args,
+                &ts.claim,
+                None,
+                None,
+                None,
+                None,
+                None,
+                project,
+                None,
+            )?;
+            type_params = scoped_spec.0;
+            arg_names = scoped_spec.1;
+            arg_types = scoped_spec.2;
+            unbound_claim = scoped_spec.3;
+            local_obligations = scoped_spec.4;
+        }
 
         let is_citation = self.bindings.is_citation(&unbound_claim, project);
         let cited_name = if is_citation {
@@ -1293,12 +1307,26 @@ impl Environment {
             let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
             let (quant_names, quant_types) =
                 no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
-            let general_claim_value = no_token_evaluator.evaluate_value_with_stack(
+            let mut general_claim_value = no_token_evaluator.evaluate_value_with_stack(
                 &mut stack,
                 &vss.condition,
                 Some(&AcornType::Bool),
             )?;
-            let local_obligations = no_token_evaluator.take_local_obligations();
+            let mut local_obligations = no_token_evaluator.take_local_obligations();
+            if local_obligations_need_result_spec_export(&local_obligations) {
+                let mut stack = Stack::new();
+                bind_explicit_value_params(&mut stack, &local_family_params.value_params);
+                bind_datatype_value_params(&mut stack, datatype_params);
+                let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
+                no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
+                general_claim_value = no_token_evaluator.evaluate_result_spec_with_stack(
+                    &mut stack,
+                    &vss.condition,
+                    AcornValue::Bool(true),
+                    &AcornType::Bool,
+                )?;
+                local_obligations = no_token_evaluator.take_local_obligations();
+            }
             let general_claim =
                 AcornValue::Exists(quant_types.clone(), Box::new(general_claim_value.clone()));
             let definition_type_params = match datatype_params {
@@ -1448,7 +1476,7 @@ impl Environment {
         let mut declarations = local_family_params.value_declarations.clone();
         declarations.extend(fss.declarations.clone());
         let type_param_exprs = local_family_params.type_param_exprs.clone();
-        let (fn_type_params, mut arg_names, mut arg_types, condition, _, local_obligations) =
+        let (mut fn_type_params, mut arg_names, mut arg_types, condition, _, mut local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
                 &declarations,
@@ -1469,9 +1497,29 @@ impl Environment {
         let explicit_value_param_types =
             explicit_value_param_types(&local_family_params.value_params);
 
-        let unbound_condition = condition.ok_or_else(|| statement.error("missing condition"))?;
+        let mut unbound_condition =
+            condition.ok_or_else(|| statement.error("missing condition"))?;
         if unbound_condition.get_type() != AcornType::Bool {
             return Err(fss.condition.error("condition must be a boolean"));
+        }
+        if local_obligations_need_result_spec_export(&local_obligations) {
+            let scoped_spec = self.bindings.evaluate_scoped_bool_result_spec(
+                &type_param_exprs,
+                &declarations,
+                &fss.condition,
+                None,
+                recursion_name.as_ref(),
+                defined_name.as_instance(),
+                datatype_params.map(|params| params.type_params_slice()),
+                datatype_params.map(|params| params.value_params_slice()),
+                project,
+                None,
+            )?;
+            fn_type_params = scoped_spec.0;
+            arg_names = scoped_spec.1;
+            arg_types = scoped_spec.2;
+            unbound_condition = scoped_spec.3;
+            local_obligations = scoped_spec.4;
         }
 
         let _return_name = arg_names.pop().unwrap();
@@ -1598,8 +1646,19 @@ impl Environment {
         cs: &ClaimStatement,
     ) -> error::Result<()> {
         let mut evaluator = self.evaluator(project);
-        let claim = evaluator.evaluate_value(&cs.claim, Some(&AcornType::Bool))?;
-        let local_obligations = evaluator.take_local_obligations();
+        let mut claim = evaluator.evaluate_value(&cs.claim, Some(&AcornType::Bool))?;
+        let mut local_obligations = evaluator.take_local_obligations();
+        if local_obligations_need_result_spec_export(&local_obligations) {
+            let mut stack = Stack::new();
+            let mut evaluator = Evaluator::new(project, &self.bindings, None);
+            claim = evaluator.evaluate_result_spec_with_stack(
+                &mut stack,
+                &cs.claim,
+                AcornValue::Bool(true),
+                &AcornType::Bool,
+            )?;
+            local_obligations = evaluator.take_local_obligations();
+        }
         self.add_local_obligations(project, &[], local_obligations)?;
         if claim == AcornValue::Bool(false) {
             self.includes_explicit_false = true;
@@ -1654,16 +1713,14 @@ impl Environment {
 
         let mut value_evaluator = self.evaluator(project);
         let value = value_evaluator.evaluate_value(&ds.value, None)?;
-        let local_obligations = value_evaluator.take_local_obligations();
-        self.add_local_obligations(project, &[], local_obligations)?;
+        let mut value_local_obligations = value_evaluator.take_local_obligations();
         let value_type = value.get_type();
 
         let mut empty_stack = Stack::new();
         let mut function_evaluator = self.evaluator(project);
         let mut function =
             function_evaluator.evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
-        let local_obligations = function_evaluator.take_local_obligations();
-        self.add_local_obligations(project, &[], local_obligations)?;
+        let function_local_obligations = function_evaluator.take_local_obligations();
 
         let function_type_before = function.get_type();
         let function_ftype_before = match &function_type_before {
@@ -1735,9 +1792,22 @@ impl Environment {
             .collect();
 
         let general_applied = AcornValue::apply(function.clone(), general_arg_values);
-        let general_equality = AcornValue::equals(general_applied, value.clone());
+        let mut general_condition = AcornValue::equals(general_applied.clone(), value.clone());
+        if local_obligations_need_result_spec_export(&value_local_obligations) {
+            let mut spec_evaluator = Evaluator::new(project, &self.bindings, None);
+            general_condition = spec_evaluator.evaluate_result_spec_with_stack(
+                &mut stack,
+                &ds.value,
+                general_applied,
+                &return_type,
+            )?;
+            value_local_obligations = spec_evaluator.take_local_obligations();
+        }
+        self.add_local_obligations(project, &[], value_local_obligations)?;
+        self.add_local_obligations(project, &[], function_local_obligations)?;
 
-        let general_claim = AcornValue::Exists(quant_types.clone(), Box::new(general_equality));
+        let specific_condition = general_condition.clone();
+        let general_claim = AcornValue::Exists(quant_types.clone(), Box::new(general_condition));
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let general_prop = Proposition::new(general_claim.clone(), vec![], source);
         let node = if let Some(body) = &ds.body {
@@ -1790,10 +1860,10 @@ impl Environment {
             })
             .collect();
 
-        let applied = AcornValue::apply(function, arg_values);
-        let equality = AcornValue::equals(applied, value);
+        let specific_claim =
+            specific_condition.bind_values(0, quant_names.len() as AtomId, &arg_values);
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
-        let prop = Proposition::new(equality, vec![], source);
+        let prop = Proposition::new(specific_claim, vec![], source);
         self.add_node(Node::structural(project, self, prop));
 
         Ok(())
