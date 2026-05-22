@@ -236,7 +236,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     build_dir.create_dir_all().unwrap();
     build_dir
         .child("manifest.json")
-        .write_str(r#"{"version":23,"modules":{}}"#)
+        .write_str(r#"{"version":24,"modules":{}}"#)
         .unwrap();
 
     let args = ServerArgs {
@@ -249,7 +249,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses build format 23, but this version of the Acorn VS Code extension only supports up to build format 22. Please update the Acorn VS Code extension.";
+    let expected = "This version of acornlib uses build format 24, but this version of the Acorn VS Code extension only supports up to build format 23. Please update the Acorn VS Code extension.";
 
     assert_eq!(error, expected);
 
@@ -270,7 +270,7 @@ async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization(
     build_dir.create_dir_all().unwrap();
     build_dir
         .child("manifest.json")
-        .write_str(r#"{"version":21,"modules":{}}"#)
+        .write_str(r#"{"version":22,"modules":{}}"#)
         .unwrap();
 
     let args = ServerArgs {
@@ -283,7 +283,7 @@ async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization(
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses build format 21, but this version of the Acorn VS Code extension writes build format 22. Please run `acorn verify --update-version` to update acornlib's build cache.";
+    let expected = "This version of acornlib uses build format 22, but this version of the Acorn VS Code extension writes build format 23. Please run `acorn verify --update-version` to update acornlib's build cache.";
 
     assert_eq!(error, expected);
 }

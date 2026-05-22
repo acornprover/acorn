@@ -802,31 +802,31 @@ mod tests {
     #[test]
     fn project_error_formats_manifest_version_for_callers() {
         let too_new = ProjectError::from(ManifestError::VersionTooNew {
-            found: 23,
-            supported: 22,
+            found: 24,
+            supported: 23,
         });
 
         assert_eq!(
             too_new.cli_message(),
-            "This version of acornlib uses build format 23, but this version of the acorn binary only supports up to build format 22. Please run `acorn --update`."
+            "This version of acornlib uses build format 24, but this version of the acorn binary only supports up to build format 23. Please run `acorn --update`."
         );
         assert_eq!(
             too_new.vscode_message(),
-            "This version of acornlib uses build format 23, but this version of the Acorn VS Code extension only supports up to build format 22. Please update the Acorn VS Code extension."
+            "This version of acornlib uses build format 24, but this version of the Acorn VS Code extension only supports up to build format 23. Please update the Acorn VS Code extension."
         );
 
         let too_old = ProjectError::from(ManifestError::VersionTooOld {
-            found: 21,
-            supported: 22,
+            found: 22,
+            supported: 23,
         });
 
         assert_eq!(
             too_old.cli_message(),
-            "This version of acornlib uses build format 21, but this version of the acorn binary writes build format 22. Please run `acorn verify --update-version` to update acornlib's build cache."
+            "This version of acornlib uses build format 22, but this version of the acorn binary writes build format 23. Please run `acorn verify --update-version` to update acornlib's build cache."
         );
         assert_eq!(
             too_old.vscode_message(),
-            "This version of acornlib uses build format 21, but this version of the Acorn VS Code extension writes build format 22. Please run `acorn verify --update-version` to update acornlib's build cache."
+            "This version of acornlib uses build format 22, but this version of the Acorn VS Code extension writes build format 23. Please run `acorn verify --update-version` to update acornlib's build cache."
         );
     }
 
