@@ -175,6 +175,65 @@ fn test_transport_function_over_structure_family_elaborates() {
 }
 
 #[test]
+fn test_indexed_family_type_mismatch_suggests_transport() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add(
+        r#"
+        structure Box[n: Nat] {
+            value: Nat
+        }
+        "#,
+    );
+    env.add("let n: Nat = axiom");
+    env.add("let k: Nat = axiom");
+    env.add("let x: Box[n] = axiom");
+    let message = env.bad("let y: Box[k] = x");
+    assert!(message.contains("expected type Box[k], but this is Box[n]"));
+    assert!(message.contains("explicitly transport the value"));
+    assert!(message.contains("let foo: Box[n] = ..."));
+    assert!(message.contains("let bar: Box[k] = transport foo"));
+}
+
+#[test]
+fn test_indexed_family_argument_mismatch_suggests_transport() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add(
+        r#"
+        structure Box[n: Nat] {
+            value: Nat
+        }
+        "#,
+    );
+    env.add("define use_box(k: Nat, box: Box[k]) -> Nat { box.value }");
+    let message = env.bad(
+        r#"
+        define bad(n: Nat, k: Nat, box: Box[n]) -> Nat {
+            use_box(k, box)
+        }
+        "#,
+    );
+    assert!(message.contains("expected type Box["), "{}", message);
+    assert!(message.contains("but this is Box["), "{}", message);
+    assert!(
+        message.contains("explicitly transport the value"),
+        "{}",
+        message
+    );
+}
+
+#[test]
+fn test_non_transport_type_mismatch_has_no_transport_hint() {
+    let mut env = Environment::test();
+    env.add("type Nat: axiom");
+    env.add("let n: Nat = axiom");
+    let message = env.bad("let b: Bool = n");
+    assert!(message.contains("expected type Bool, but this is Nat"));
+    assert!(!message.contains("explicitly transport"));
+}
+
+#[test]
 fn test_transport_rejects_indexed_inductive_type() {
     let mut env = Environment::test();
     env.add("type Nat: axiom");

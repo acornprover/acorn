@@ -1241,10 +1241,68 @@ impl AcornType {
     pub fn check_eq(&self, expected: Option<&AcornType>, source: &dyn ErrorContext) -> Result<()> {
         if let Some(e) = expected {
             if e != self {
-                return Err(source.error(&format!("expected type {}, but this is {}", e, self)));
+                let mut message = format!("expected type {}, but this is {}", e, self);
+                if self.could_transport_to(e) {
+                    message.push_str(
+                        "\n\nif these indexed types are equivalent, explicitly transport the value. For example:\n",
+                    );
+                    message.push_str(&format!(
+                        "let foo: {} = ...\nlet bar: {} = transport foo\nthen use bar where the expected type is required",
+                        self, e
+                    ));
+                }
+                return Err(source.error(&message));
             }
         }
         Ok(())
+    }
+
+    fn dependent_args_allow_transport(
+        source_args: &[DependentTypeArg],
+        target_args: &[DependentTypeArg],
+    ) -> bool {
+        if source_args.len() != target_args.len() {
+            return false;
+        }
+        source_args
+            .iter()
+            .zip(target_args)
+            .all(|(source_arg, target_arg)| match (source_arg, target_arg) {
+                (DependentTypeArg::Type(source_type), DependentTypeArg::Type(target_type)) => {
+                    source_type == target_type
+                }
+                (DependentTypeArg::Value(source_value), DependentTypeArg::Value(target_value)) => {
+                    source_value.get_type() == target_value.get_type()
+                }
+                _ => false,
+            })
+    }
+
+    fn could_transport_to(&self, target: &AcornType) -> bool {
+        if self == target {
+            return true;
+        }
+        match (self, target) {
+            (AcornType::Function(source_fn), AcornType::Function(target_fn)) => {
+                source_fn.arg_types.len() == target_fn.arg_types.len()
+                    && source_fn
+                        .arg_types
+                        .iter()
+                        .zip(&target_fn.arg_types)
+                        .all(|(source_arg, target_arg)| source_arg.could_transport_to(target_arg))
+                    && source_fn
+                        .return_type
+                        .could_transport_to(&target_fn.return_type)
+            }
+            (
+                AcornType::Family(source_datatype, source_args),
+                AcornType::Family(target_datatype, target_args),
+            ) => {
+                source_datatype == target_datatype
+                    && AcornType::dependent_args_allow_transport(source_args, target_args)
+            }
+            _ => false,
+        }
     }
 
     pub fn check_instance(&self, datatype: &Datatype, source: &dyn ErrorContext) -> Result<()> {
