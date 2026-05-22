@@ -210,7 +210,7 @@ Actions:
 - Adopt feature behavior as default in `acorn`.
 - Remove obsolete feature-flag code paths for this migration.
 - Regenerate certs in new format:
-  - `cargo run --profile release -- verify --ignore-hash`
+  - `cargo run --profile release -- verify --ignore-hash --update-version`
 - Final validation:
   - `cargo run --profile release --features validate -- check`
 

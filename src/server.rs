@@ -357,7 +357,7 @@ impl AcornLanguageServer {
     // Determines which library to use based on the root of the current workspace.
     // If we can't find one in a logical location based on the editor, we use
     // the acornlib packaged into the binary.
-    // Returns an error if the build cache manifest version is too new.
+    // Returns an error if the build cache manifest version is incompatible.
     pub fn new(
         client: Arc<dyn LspClient>,
         args: &ServerArgs,

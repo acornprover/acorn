@@ -901,6 +901,7 @@ mod tests {
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
+            update_version: false,
         };
         let mut check = Verifier::new_for_check(
             acornlib.path().to_path_buf(),
@@ -1489,6 +1490,7 @@ mod tests {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             },
             Some("foo".to_string()),
         )
@@ -1557,6 +1559,7 @@ mod tests {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             },
             None,
         )
@@ -1614,6 +1617,7 @@ mod tests {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             },
             Some("foo".to_string()),
         )
@@ -1686,6 +1690,7 @@ mod tests {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             },
             Some("foo".to_string()),
         )
@@ -1762,6 +1767,7 @@ mod tests {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             },
             Some("foo".to_string()),
         )
@@ -1817,6 +1823,7 @@ mod tests {
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
+            update_version: false,
         };
         let mut verifier = Verifier::new(acornlib.path().to_path_buf(), config, None).unwrap();
         verifier.builder.check_hashes = false;
@@ -2915,6 +2922,7 @@ theorem later {
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
+            update_version: false,
         };
         let mut verifier2 = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -2957,6 +2965,7 @@ theorem later {
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
+            update_version: false,
         };
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -3056,6 +3065,7 @@ theorem fix_neg(a: Int) {
             use_filesystem: true,
             read_cache: false,
             write_cache: false,
+            update_version: false,
         };
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -3145,6 +3155,7 @@ theorem goal(s: Nat -> Container, h: Bool) {
             use_filesystem: true,
             read_cache: false,
             write_cache: false,
+            update_version: false,
         };
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -3198,6 +3209,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
             use_filesystem: true,
             read_cache: false,
             write_cache: true,
+            update_version: false,
         };
         let mut reprove = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -3218,6 +3230,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
+            update_version: false,
         };
         let mut check = Verifier::new(
             acornlib.path().to_path_buf(),

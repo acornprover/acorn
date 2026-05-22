@@ -47,9 +47,9 @@ define has_mark(n: Nat, p: Packet[n]) -> Bool {
 }
 
 theorem transported_packet_has_mark(n: Nat, k: Nat, x: Packet[n]) {
-    n = k implies has_mark(n, x) implies exists(y: Packet[k]) {
+    n = k implies (has_mark(n, x) implies exists(y: Packet[k]) {
         has_mark(k, y)
-    }
+    })
 } by {
     if n = k {
         if has_mark(n, x) {

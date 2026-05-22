@@ -26,6 +26,7 @@ fn main() {
             use_filesystem: true,
             read_cache: false, // Force fresh proof search
             write_cache: false,
+            update_version: false,
         };
 
         let mut verifier = Verifier::new(current_dir.clone(), config, Some(MODULE.to_string()))

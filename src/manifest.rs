@@ -15,6 +15,8 @@ pub enum ManifestError {
     Parse(serde_json::Error),
     /// Manifest version is newer than this binary supports - user must update Acorn
     VersionTooNew { found: u32, supported: u32 },
+    /// Manifest version is older than this binary writes - user must opt in to updating acornlib
+    VersionTooOld { found: u32, supported: u32 },
 }
 
 impl fmt::Display for ManifestError {
@@ -28,6 +30,12 @@ impl fmt::Display for ManifestError {
                  Please update your version of Acorn.",
                 found, supported
             ),
+            ManifestError::VersionTooOld { found, supported } => write!(
+                f,
+                "The library manifest is using build format {}, but this version of Acorn writes build format {}. \
+                 Pass --update-version to update the library build cache.",
+                found, supported
+            ),
         }
     }
 }
@@ -37,7 +45,7 @@ impl Error for ManifestError {
         match self {
             ManifestError::Io(e) => Some(e),
             ManifestError::Parse(e) => Some(e),
-            ManifestError::VersionTooNew { .. } => None,
+            ManifestError::VersionTooNew { .. } | ManifestError::VersionTooOld { .. } => None,
         }
     }
 }
@@ -57,7 +65,7 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the build format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build.
-const MANIFEST_VERSION: u32 = 22;
+pub const MANIFEST_VERSION: u32 = 22;
 
 /// A newtype wrapper for module names, created by joining parts with "."
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -121,6 +129,16 @@ impl Manifest {
             version: MANIFEST_VERSION,
             modules: BTreeMap::new(),
         }
+    }
+
+    /// The build format version written by this binary.
+    pub fn current_version() -> u32 {
+        MANIFEST_VERSION
+    }
+
+    /// Whether writing this manifest would update the library build format.
+    pub fn requires_version_update(&self) -> bool {
+        self.version < MANIFEST_VERSION
     }
 
     /// Add or update a module hash in the manifest
@@ -197,7 +215,8 @@ impl Manifest {
         match Self::load(build_dir) {
             Ok(manifest) => Ok(manifest),
             Err(ManifestError::Io(_)) | Err(ManifestError::Parse(_)) => Ok(Self::new()),
-            Err(e @ ManifestError::VersionTooNew { .. }) => Err(e),
+            Err(e @ ManifestError::VersionTooNew { .. })
+            | Err(e @ ManifestError::VersionTooOld { .. }) => Err(e),
         }
     }
 }

@@ -24,6 +24,7 @@ fn main() {
             use_filesystem: true,
             read_cache: true,
             write_cache: false,
+            update_version: false,
         };
         let mut verifier =
             Verifier::new(current_dir.clone(), config, None).expect("Failed to create verifier");

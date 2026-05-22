@@ -821,6 +821,9 @@ impl Expression {
         let (mut partials, terminator) =
             parse_partial_expressions(tokens, expected_type, termination)?;
         group_type_parameters(&mut partials)?;
+        if expected_type == ExpressionType::Value {
+            check_unparenthesized_implies(&partials)?;
+        }
         check_partial_expressions(&partials)?;
         let expression = combine_partial_expressions(partials, expected_type, &terminator)?;
         Ok((expression, terminator))
@@ -1605,6 +1608,28 @@ fn check_partial_expressions(partials: &VecDeque<PartialExpression>) -> Result<(
     Ok(())
 }
 
+fn check_unparenthesized_implies(partials: &VecDeque<PartialExpression>) -> Result<()> {
+    let mut saw_implies = false;
+    for partial in partials {
+        let PartialExpression::Binary(token) = partial else {
+            continue;
+        };
+        match token.token_type {
+            TokenType::Comma => saw_implies = false,
+            TokenType::Implies => {
+                if saw_implies {
+                    return Err(token.error(
+                        "multiple unparenthesized 'implies' operators are ambiguous; add parentheses to show the intended grouping",
+                    ));
+                }
+                saw_implies = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // Combines partial expressions into a single expression.
 // Operators work in precedence order, and left-to-right within a single precedence.
 // This algorithm is quadratic, so perhaps we should improve it at some point.
@@ -2276,6 +2301,11 @@ mod tests {
     #[test]
     fn test_implies_expression() {
         check_value("a implies b");
+        check_value("(a implies b) implies c");
+        check_value("a implies (b implies c)");
+        check_value("foo(a implies b, c implies d)");
+        check_not_value("a implies b implies c");
+        check_not_value("a implies b and c implies d");
     }
 
     #[test]

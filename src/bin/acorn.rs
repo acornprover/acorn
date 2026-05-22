@@ -21,7 +21,7 @@ fn default_jobs() -> usize {
 }
 
 fn exit_project_load_error<T>(error: ProjectError) -> T {
-    if error.is_manifest_version_too_new() {
+    if error.is_manifest_version_problem() {
         println!("{}", error.cli_message());
     } else {
         println!("Error loading project: {}", error.cli_message());
@@ -162,6 +162,7 @@ fn resolve_print_proof_line_selection(
         use_filesystem: true,
         read_cache: false,
         write_cache: false,
+        update_version: false,
     };
     let mut project = Project::new_local(start_path, config).map_err(|e| e.cli_message())?;
 
@@ -327,6 +328,14 @@ struct Args {
         value_name = "DIR"
     )]
     lib: Option<String>,
+
+    /// Allow acorn to update an older acornlib build format when writing the cache
+    #[clap(
+        long = "update-version",
+        global = true,
+        help = "Allow acorn to update an older acornlib build format when writing the cache."
+    )]
+    update_version: bool,
 
     #[clap(subcommand)]
     command: Option<Command>,
@@ -751,6 +760,8 @@ async fn main() {
         }
     };
 
+    let update_version = args.update_version;
+
     match args.command {
         Some(Command::Serve {
             workspace_root,
@@ -768,6 +779,7 @@ async fn main() {
                 &current_dir,
                 ProjectConfig {
                     usage_mode: UsageMode::Ide,
+                    write_cache: false,
                     ..ProjectConfig::default()
                 },
             )
@@ -878,6 +890,7 @@ async fn main() {
                 } else {
                     !read_only
                 },
+                update_version,
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -968,6 +981,7 @@ async fn main() {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             };
 
             let mut verifier = match Verifier::new_for_check(current_dir, config, target) {
@@ -1048,6 +1062,7 @@ async fn main() {
                 use_filesystem: true,
                 read_cache: true,
                 write_cache: false,
+                update_version: false,
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -1151,6 +1166,7 @@ async fn main() {
                 use_filesystem: true,
                 read_cache: false,
                 write_cache: save_results,
+                update_version,
             };
 
             let mut verifier = match Verifier::new(current_dir, config, target) {
@@ -1231,6 +1247,7 @@ async fn main() {
                 &current_dir,
                 ProjectConfig {
                     usage_mode: UsageMode::Ide,
+                    write_cache: false,
                     ..ProjectConfig::default()
                 },
             )
@@ -1368,6 +1385,7 @@ async fn main() {
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
+                    update_version: false,
                 },
             )
             .unwrap_or_else(exit_project_load_error);
@@ -1417,8 +1435,15 @@ async fn main() {
                     std::process::exit(1);
                 });
 
-            let project = Project::new(src_dir.clone(), build_dir, ProjectConfig::default())
-                .unwrap_or_else(exit_project_load_error);
+            let project = Project::new(
+                src_dir.clone(),
+                build_dir,
+                ProjectConfig {
+                    write_cache: false,
+                    ..ProjectConfig::default()
+                },
+            )
+            .unwrap_or_else(exit_project_load_error);
 
             let mut module_names = Vec::new();
             for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
@@ -1457,6 +1482,7 @@ async fn main() {
                     use_filesystem: true,
                     read_cache: false,
                     write_cache: false,
+                    update_version: false,
                 },
             )
             .unwrap_or_else(exit_project_load_error);
@@ -1530,6 +1556,7 @@ async fn main() {
                     use_filesystem: true,
                     read_cache: true,
                     write_cache: false,
+                    update_version: false,
                 },
             )
             .unwrap_or_else(exit_project_load_error);
@@ -1569,7 +1596,11 @@ async fn main() {
 
         // Default to do a global verify if no subcommand is provided
         None => {
-            let mut verifier = match Verifier::new(current_dir, ProjectConfig::default(), None) {
+            let config = ProjectConfig {
+                update_version,
+                ..ProjectConfig::default()
+            };
+            let mut verifier = match Verifier::new(current_dir, config, None) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("{}", e.cli_message());
@@ -1747,6 +1778,17 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_update_version_is_global_flag() {
+        let args = Args::try_parse_from(["acorn", "verify", "--update-version"])
+            .expect("global update-version flag should parse after subcommand");
+        assert!(args.update_version);
+
+        let args = Args::try_parse_from(["acorn", "--update-version", "verify"])
+            .expect("global update-version flag should parse before subcommand");
+        assert!(args.update_version);
     }
 
     #[test]

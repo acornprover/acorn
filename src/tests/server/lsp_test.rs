@@ -261,6 +261,33 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     assert_eq!(init_error.message.as_ref(), expected);
 }
 
+#[tokio::test]
+async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization() {
+    let temp_dir = TempDir::new().unwrap();
+    temp_dir.child("acorn.toml").write_str("").unwrap();
+    temp_dir.child("src").create_dir_all().unwrap();
+    let build_dir = temp_dir.child("build");
+    build_dir.create_dir_all().unwrap();
+    build_dir
+        .child("manifest.json")
+        .write_str(r#"{"version":21,"modules":{}}"#)
+        .unwrap();
+
+    let args = ServerArgs {
+        workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
+        acornlib_cache_dir: None,
+        packaged_acornlib_override: None,
+    };
+    let client = Arc::new(MockClient::new());
+    let error = match AcornLanguageServer::new(client.clone(), &args) {
+        Ok(_) => panic!("server creation should fail"),
+        Err(error) => error,
+    };
+    let expected = "This version of acornlib uses build format 21, but this version of the Acorn VS Code extension writes build format 22. Please run `acorn verify --update-version` to update acornlib's build cache.";
+
+    assert_eq!(error, expected);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_non_library_file_certificates() {
     let fx = TestFixture::new();

@@ -96,6 +96,7 @@ fn verify_and_check_succeeds(source: &str) {
         use_filesystem: true,
         read_cache: false,
         write_cache: true,
+        update_version: false,
     };
     let mut verify = Verifier::new(root.to_path_buf(), verify_config, Some("main".to_string()))
         .expect("verify should initialize");
@@ -113,6 +114,7 @@ fn verify_and_check_succeeds(source: &str) {
         use_filesystem: true,
         read_cache: true,
         write_cache: false,
+        update_version: false,
     };
     let mut check =
         Verifier::new_for_check(root.to_path_buf(), check_config, Some("main".to_string()))
