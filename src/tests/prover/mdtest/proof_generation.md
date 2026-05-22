@@ -80,6 +80,71 @@ theorem partial_constant_replay(a: Point, x: Point) {
 }
 ```
 
+## Closed Generic Typeclass Attribute Rewrite Cert Line
+
+This is a red regression test for certificate serialization of a closed generic
+claim used as a rewrite under a typeclass attribute relation. Proof search finds
+the proof, but current certificate generation fails while trying to infer an
+in-scope type argument for the closed generic claim.
+
+```acorn
+typeclass A: Add {
+    add: (A, A) -> A
+}
+
+typeclass A: Zero {
+    0: A
+}
+
+typeclass A: AddMonoid extends Add, Zero {
+    add_identity_right(x: A) {
+        x + A.0 = x
+    }
+}
+
+typeclass A: HasLe {
+    le: (A, A) -> Bool
+}
+
+attributes A: HasLe {
+    define lt(self, other: A) -> Bool {
+        A.le(self, other) and self != other
+    }
+}
+
+structure Foo {
+    value: Bool
+}
+
+instance Foo: Add {
+    let add: (Foo, Foo) -> Foo = function(x: Foo, y: Foo) {
+        x
+    }
+}
+
+instance Foo: Zero {
+    let 0: Foo = Foo.new(true)
+}
+
+instance Foo: AddMonoid
+
+instance Foo: HasLe {
+    let le: (Foo, Foo) -> Bool = function(x: Foo, y: Foo) {
+        true
+    }
+}
+
+let one: Foo = Foo.new(true)
+
+define suc(x: Foo) -> Foo {
+    one + x
+}
+
+theorem typeclass_attribute_rewrite_cert(m: Foo) {
+    m < one implies m < suc(Foo.0)
+}
+```
+
 ## Assuming Lhs Of Implication
 
 ```acorn

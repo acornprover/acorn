@@ -229,7 +229,10 @@ impl Certificate {
                     Self::collect_type_params(param, params);
                 }
                 Self::collect_type_params(&constant.instance_type, params);
-                Self::collect_type_params(&constant.generic_type, params);
+                // `generic_type` is the declaration template, not part of this particular
+                // value. A specialized typeclass attribute can have a concrete instance type
+                // while its template still mentions the receiver parameter, and collecting that
+                // template makes a closed concrete claim look spuriously generic.
                 for value_param_type in &constant.value_param_types {
                     Self::collect_type_params(value_param_type, params);
                 }
