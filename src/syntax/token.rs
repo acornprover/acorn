@@ -63,6 +63,7 @@ pub enum TokenType {
     Choose,
     Constraint,
     Implies,
+    Export,
     Typeclass,
     Instance,
     Extends,
@@ -118,6 +119,7 @@ pub fn keyword_map() -> &'static BTreeMap<&'static str, TokenType> {
             ("choose", TokenType::Choose),
             ("constraint", TokenType::Constraint),
             ("implies", TokenType::Implies),
+            ("export", TokenType::Export),
             ("typeclass", TokenType::Typeclass),
             ("instance", TokenType::Instance),
             ("extends", TokenType::Extends),
@@ -444,6 +446,7 @@ impl TokenType {
             TokenType::Choose => "choose",
             TokenType::Constraint => "constraint",
             TokenType::Implies => "implies",
+            TokenType::Export => "export",
             TokenType::Typeclass => "typeclass",
             TokenType::Instance => "instance",
             TokenType::Extends => "extends",
@@ -536,6 +539,7 @@ impl Token {
             || name == "constraint"
             || name == "choose"
             || name == "transport"
+            || name == "export"
     }
 
     /// Checks if this token is a reserved name.
@@ -675,6 +679,7 @@ impl Token {
             | TokenType::Choose
             | TokenType::Constraint
             | TokenType::Implies
+            | TokenType::Export
             | TokenType::Typeclass
             | TokenType::Instance
             | TokenType::Extends
@@ -1059,5 +1064,13 @@ mod tests {
         assert_eq!(tokens[1].token_type, TokenType::Identifier);
         assert_eq!(tokens[2].token_type, TokenType::Identifier);
         assert!(Token::is_reserved_name("transport"));
+    }
+
+    #[test]
+    fn test_export_is_keyword_and_reserved_name() {
+        let tokens = Token::scan("export exported");
+        assert_eq!(tokens[0].token_type, TokenType::Export);
+        assert_eq!(tokens[1].token_type, TokenType::Identifier);
+        assert!(Token::is_reserved_name("export"));
     }
 }
