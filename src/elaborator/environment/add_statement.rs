@@ -22,7 +22,7 @@ use crate::elaborator::proposition::Proposition;
 use crate::elaborator::source::{Source, SourceType};
 use crate::elaborator::stack::Stack;
 use crate::kernel::atom::AtomId;
-use crate::project::{ImportError, ProjectLookup};
+use crate::project::{ImportError, PackageRole, ProjectLookup};
 use crate::syntax::expression::{Declaration, Expression};
 use crate::syntax::statement::{
     AttributesStatement, ClaimStatement, DefineStatement, DestructuringStatement, ForAllStatement,
@@ -143,6 +143,31 @@ impl Environment {
         project: &dyn ProjectLookup,
         statement: &Statement,
     ) -> error::Result<()> {
+        if statement.export {
+            if self.depth > 0 || project.package_role(self.module_id) != PackageRole::Implementation
+            {
+                return Err(statement.error(
+                    "'export' is only allowed on top-level declarations in package implementation files",
+                ));
+            }
+            if !matches!(
+                &statement.statement,
+                StatementInfo::Let(_)
+                    | StatementInfo::Define(_)
+                    | StatementInfo::Theorem(_)
+                    | StatementInfo::Type(_)
+                    | StatementInfo::VariableSatisfy(_)
+                    | StatementInfo::FunctionSatisfy(_)
+                    | StatementInfo::Structure(_)
+                    | StatementInfo::Inductive(_)
+                    | StatementInfo::Attributes(_)
+                    | StatementInfo::Typeclass(_)
+                    | StatementInfo::Instance(_)
+            ) {
+                return Err(statement.error("'export' can only be used on declarations"));
+            }
+        }
+
         if self.includes_explicit_false {
             return Err(
                 statement.error("an explicit 'false' may not be followed by other statements")

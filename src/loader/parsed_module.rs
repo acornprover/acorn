@@ -77,6 +77,22 @@ impl ParsedModule {
             ModuleDescriptor::Anonymous | ModuleDescriptor::File(_) => None,
         }
     }
+
+    pub fn apply_interface_mode(&mut self) -> error::Result<()> {
+        for statement in &mut self.statements {
+            if statement.export {
+                return Err(statement.error("'export' is not allowed in interface.ac"));
+            }
+            if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.body.is_some())
+            {
+                return Err(statement.error("interface theorems cannot have proof bodies"));
+            }
+            if let StatementInfo::Theorem(theorem) = &mut statement.statement {
+                theorem.axiomatic = true;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn import_module_name(import: &ImportStatement) -> String {

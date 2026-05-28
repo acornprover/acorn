@@ -469,8 +469,9 @@ impl Verifier {
             TargetSpec::All => {
                 for descriptor in project.src_target_descriptors() {
                     let descriptor = project.add_unloaded_target_by_descriptor(&descriptor);
-                    targets.push(descriptor.clone());
-                    load_order.push(descriptor);
+                    let build_descriptors = project.build_descriptors_for_target(&descriptor);
+                    targets.extend(build_descriptors.clone());
+                    load_order.extend(build_descriptors);
                 }
                 if include_pending_dir {
                     for descriptor in project.pending_target_descriptors() {
@@ -491,14 +492,16 @@ impl Verifier {
                 } else {
                     project.add_unloaded_target_by_descriptor(&descriptor)
                 };
-                targets.push(descriptor.clone());
-                load_order.push(descriptor);
+                let build_descriptors = project.build_descriptors_for_target(&descriptor);
+                targets.extend(build_descriptors.clone());
+                load_order.extend(build_descriptors);
             }
             TargetSpec::Name(name) => {
                 let descriptor =
                     project.add_unloaded_target_by_descriptor(&ModuleDescriptor::name(&name));
-                targets.push(descriptor.clone());
-                load_order.push(descriptor);
+                let build_descriptors = project.build_descriptors_for_target(&descriptor);
+                targets.extend(build_descriptors.clone());
+                load_order.extend(build_descriptors);
             }
         }
 
@@ -1267,6 +1270,83 @@ mod tests {
             &mut kernel_context,
         )
         .expect("strict imports should allow certificate references to imported modules");
+    }
+
+    #[test]
+    fn test_package_target_verifies_implementation_modules() {
+        let (acornlib, src, _build) = setup();
+
+        let package = src.child("pkg");
+        package.create_dir_all().unwrap();
+        package
+            .child("interface.ac")
+            .write_str("let public: Bool = true\n")
+            .unwrap();
+        package
+            .child("internal.ac")
+            .write_str(
+                r#"
+                export let public: Bool = true
+
+                theorem implementation_goal {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(
+            output.status,
+            BuildStatus::Good,
+            "package target should verify its implementation modules\n{}",
+            log_text(&output)
+        );
+        assert_eq!(output.metrics.searches_success, 1);
+        assert!(output.module_timings.iter().any(|timing| {
+            timing.module == ModuleDescriptor::name("pkg.internal") && timing.searches_success == 1
+        }));
+    }
+
+    #[test]
+    fn test_parallel_all_targets_validate_package_exports() {
+        let (acornlib, src, _build) = setup();
+
+        let package = src.child("pkg");
+        package.create_dir_all().unwrap();
+        package
+            .child("interface.ac")
+            .write_str("let public: Bool = true\n")
+            .unwrap();
+        package
+            .child("internal.ac")
+            .write_str("export let public: Bool = false\n")
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+        verifier.builder.check_jobs = 2;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Error);
+        let error_text = log_text(&output);
+        assert!(
+            error_text.contains("does not match interface declaration"),
+            "parallel all-target loading should validate package exports, got: {error_text}"
+        );
     }
 
     #[test]

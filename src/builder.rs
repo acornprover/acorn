@@ -3046,6 +3046,15 @@ impl<'a> Builder<'a> {
                 ProjectViewModule::Loading | ProjectViewModule::Registered => {}
             }
         }
+        let mut extra_work = work_by_target.into_iter().collect::<Vec<_>>();
+        extra_work.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (target, lowered) in extra_work {
+            if !matches!(project.get_module(&target), ProjectViewModule::Ok(_)) {
+                continue;
+            }
+            self.lowered_module_loaded(&lowered);
+            lowered_modules.push((target, lowered));
+        }
         self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
 
         if self.status.is_error() {

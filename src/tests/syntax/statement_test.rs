@@ -43,6 +43,9 @@ mod tests {
     #[test]
     fn test_definition_statements() {
         ok("let a: int = x + 2");
+        let exported = should_parse("export let a: int = x + 2");
+        assert!(exported.export);
+        assert_eq!(exported.to_string(), "export let a: int = x + 2");
         ok("let f: int -> bool = compose(g, h)");
         ok(indoc! {"
         let f: int -> int = function(x: int) {

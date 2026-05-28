@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::elaborator::acorn_type::{AcornType, Datatype, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::environment::Environment;
-use crate::elaborator::error;
+use crate::elaborator::error::{self, Error, ErrorContext};
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
 use crate::elaborator::lowered_module::{
@@ -33,6 +33,7 @@ use crate::manifest::{Manifest, ManifestError};
 use crate::module::{LoadState, LoadedModule, Module, ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::proof_display::display_certificate_lines;
+use crate::syntax::statement::StatementInfo;
 use crate::syntax::token::Token;
 use crate::syntax::token_map::TokenInfo;
 
@@ -151,6 +152,28 @@ pub trait ProjectLookup: Sync {
     fn get_module_descriptor(&self, module_id: ModuleId) -> Option<&ModuleDescriptor>;
     fn get_module_id_by_name(&self, module_name: &str) -> Option<ModuleId>;
     fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError>;
+    fn package_role(&self, module_id: ModuleId) -> PackageRole;
+    fn validate_import_visibility(
+        &self,
+        importer: ModuleId,
+        imported: ModuleId,
+    ) -> Result<(), String>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageRole {
+    Outside,
+    Interface,
+    Implementation,
+}
+
+const PACKAGE_INTERFACE_FILE: &str = "interface.ac";
+
+#[derive(Clone)]
+struct PackageSignature {
+    text: String,
+    first_token: Token,
+    last_token: Token,
 }
 
 #[derive(Clone)]
@@ -349,6 +372,7 @@ impl ProjectView {
             .components()
             .map(|comp| comp.as_os_str().to_string_lossy())
             .collect();
+        let package_root = self.nearest_package_root_for_path(path);
         let mut parts = Vec::new();
         for (i, component) in components.iter().enumerate() {
             let part = if i + 1 == components.len() {
@@ -358,7 +382,14 @@ impl ProjectView {
                         path.display()
                     )));
                 }
-                if component == "default.ac" && i > 0 {
+                if component == PACKAGE_INTERFACE_FILE
+                    && package_root
+                        .as_ref()
+                        .is_some_and(|root| path == root.join(PACKAGE_INTERFACE_FILE))
+                {
+                    break;
+                }
+                if component == "default.ac" && i > 0 && package_root.is_none() {
                     break;
                 }
                 component[..component.len() - 3].to_string()
@@ -402,11 +433,23 @@ impl ProjectView {
             if i + 1 == parts.len() {
                 let file_path = path.join(format!("{}.ac", part));
                 let dir_path = path.join(part).join("default.ac");
+                let interface_path = path.join(part).join(PACKAGE_INTERFACE_FILE);
 
                 let file_exists = self.module_path_exists(&file_path);
                 let dir_exists = self.module_path_exists(&dir_path);
+                let interface_exists = self.module_path_exists(&interface_path);
 
-                if file_exists && dir_exists {
+                if interface_exists {
+                    if file_exists {
+                        return Err(ImportError::NotFound(format!(
+                            "ambiguous module '{}': both {} and package interface {} exist",
+                            module_name,
+                            file_path.display(),
+                            interface_path.display()
+                        )));
+                    }
+                    return Ok(interface_path);
+                } else if file_exists && dir_exists {
                     return Err(ImportError::NotFound(format!(
                         "ambiguous module '{}': both {} and {} exist",
                         module_name,
@@ -433,6 +476,48 @@ impl ProjectView {
         } else {
             self.open_file_paths.contains(path)
         }
+    }
+
+    fn nearest_package_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+        let mut current = path.parent()?;
+        while current != self.src_dir.as_ref().as_path() {
+            if self.module_path_exists(&current.join(PACKAGE_INTERFACE_FILE)) {
+                return Some(current.to_path_buf());
+            }
+            current = current.parent()?;
+        }
+        None
+    }
+
+    fn package_role_for_path(&self, path: &Path) -> PackageRole {
+        let Some(package_root) = self.nearest_package_root_for_path(path) else {
+            return PackageRole::Outside;
+        };
+        if path == package_root.join(PACKAGE_INTERFACE_FILE) {
+            PackageRole::Interface
+        } else {
+            PackageRole::Implementation
+        }
+    }
+
+    fn package_root_for_module(&self, module_id: ModuleId) -> Option<PathBuf> {
+        let descriptor = self.get_module_descriptor(module_id)?;
+        let path = self.path_from_descriptor(descriptor).ok()?;
+        self.nearest_package_root_for_path(&path)
+    }
+
+    fn package_role_for_module(&self, module_id: ModuleId) -> PackageRole {
+        let Some(descriptor) = self.get_module_descriptor(module_id) else {
+            return PackageRole::Outside;
+        };
+        self.package_role_for_descriptor(descriptor)
+    }
+
+    fn package_role_for_descriptor(&self, descriptor: &ModuleDescriptor) -> PackageRole {
+        let Ok(path) = self.path_from_descriptor(descriptor) else {
+            return PackageRole::Outside;
+        };
+        self.package_role_for_path(&path)
     }
 
     fn canonicalize_name_descriptor(&self, descriptor: &ModuleDescriptor) -> ModuleDescriptor {
@@ -531,6 +616,38 @@ impl ProjectLookup for ProjectView {
             }
         }
     }
+
+    fn package_role(&self, module_id: ModuleId) -> PackageRole {
+        self.package_role_for_module(module_id)
+    }
+
+    fn validate_import_visibility(
+        &self,
+        importer: ModuleId,
+        imported: ModuleId,
+    ) -> Result<(), String> {
+        if self.package_role_for_module(imported) != PackageRole::Implementation {
+            return Ok(());
+        }
+        if self.package_role_for_module(importer) != PackageRole::Implementation {
+            return Err(format!(
+                "module '{}' is private to its package",
+                self.get_module_descriptor(imported)
+                    .map(|descriptor| descriptor.to_string())
+                    .unwrap_or_else(|| imported.to_string())
+            ));
+        }
+        if self.package_root_for_module(importer) == self.package_root_for_module(imported) {
+            Ok(())
+        } else {
+            Err(format!(
+                "module '{}' is private to its package",
+                self.get_module_descriptor(imported)
+                    .map(|descriptor| descriptor.to_string())
+                    .unwrap_or_else(|| imported.to_string())
+            ))
+        }
+    }
 }
 
 impl From<&Project> for ProjectView {
@@ -564,6 +681,38 @@ impl ProjectLookup for Project {
 
     fn get_loaded_module_id_by_name(&self, module_name: &str) -> Result<ModuleId, ImportError> {
         Project::get_loaded_module_id_by_name(self, module_name)
+    }
+
+    fn package_role(&self, module_id: ModuleId) -> PackageRole {
+        self.package_role_for_module(module_id)
+    }
+
+    fn validate_import_visibility(
+        &self,
+        importer: ModuleId,
+        imported: ModuleId,
+    ) -> Result<(), String> {
+        if self.package_role_for_module(imported) != PackageRole::Implementation {
+            return Ok(());
+        }
+        if self.package_role_for_module(importer) != PackageRole::Implementation {
+            return Err(format!(
+                "module '{}' is private to its package",
+                self.get_module_descriptor(imported)
+                    .map(|descriptor| descriptor.to_string())
+                    .unwrap_or_else(|| imported.to_string())
+            ));
+        }
+        if self.package_root_for_module(importer) == self.package_root_for_module(imported) {
+            Ok(())
+        } else {
+            Err(format!(
+                "module '{}' is private to its package",
+                self.get_module_descriptor(imported)
+                    .map(|descriptor| descriptor.to_string())
+                    .unwrap_or_else(|| imported.to_string())
+            ))
+        }
     }
 }
 
@@ -710,12 +859,24 @@ impl ParallelProjectLoader {
             self.completed_jobs += 1;
             match result.loaded {
                 Ok(loaded) => {
+                    let descriptor = self.jobs[result.index].descriptor.clone();
                     project.modules[result.module_id.get() as usize].load_ok(
                         loaded.export,
                         Some(loaded.lowered),
                         loaded.retained_env,
                         loaded.content_hash,
                     );
+                    if project
+                        .path_from_descriptor(&descriptor)
+                        .ok()
+                        .is_some_and(|path| {
+                            project.package_role_for_path(&path) == PackageRole::Interface
+                        })
+                    {
+                        if let Err(error) = project.validate_package_exports(&descriptor) {
+                            project.modules[result.module_id.get() as usize].load_error(error);
+                        }
+                    }
                 }
                 Err(e) => {
                     project.modules[result.module_id.get() as usize].load_error(e);
@@ -1092,6 +1253,58 @@ pub fn localize_mock_filename(s: &str) -> String {
 }
 
 impl Project {
+    fn validate_package_interface_paths(
+        src_dir: &Path,
+        mut interface_paths: Vec<PathBuf>,
+    ) -> Result<(), String> {
+        interface_paths.retain(|path| path.strip_prefix(src_dir).is_ok());
+        interface_paths.sort();
+        interface_paths.dedup();
+        interface_paths.sort_by_key(|path| path.components().count());
+        let mut package_roots: Vec<PathBuf> = Vec::new();
+        for path in interface_paths {
+            let Some(package_root) = path.parent() else {
+                continue;
+            };
+            if package_root == src_dir {
+                return Err(format!("root {} is not supported", PACKAGE_INTERFACE_FILE));
+            }
+            if package_roots
+                .iter()
+                .any(|root| package_root.starts_with(root))
+            {
+                return Err(format!(
+                    "nested packages are not supported: {} is inside package {}",
+                    path.strip_prefix(src_dir).unwrap_or(&path).display(),
+                    package_roots
+                        .iter()
+                        .find(|root| package_root.starts_with(root.as_path()))
+                        .and_then(|root| root.strip_prefix(src_dir).ok())
+                        .unwrap_or(package_root)
+                        .display()
+                ));
+            }
+            package_roots.push(package_root.to_path_buf());
+            package_roots.sort();
+        }
+        Ok(())
+    }
+
+    fn validate_package_layout(src_dir: &Path) -> Result<(), ProjectError> {
+        let mut interface_paths: Vec<PathBuf> = Vec::new();
+        for entry in WalkDir::new(src_dir).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !entry.file_type().is_file()
+                || path.file_name().and_then(|name| name.to_str()) != Some(PACKAGE_INTERFACE_FILE)
+            {
+                continue;
+            }
+            interface_paths.push(path.to_path_buf());
+        }
+        Self::validate_package_interface_paths(src_dir, interface_paths)
+            .map_err(ProjectError::message)
+    }
+
     // Create a new project.
     // Returns an error if the build cache manifest version is incompatible.
     pub fn new(
@@ -1099,6 +1312,10 @@ impl Project {
         build_dir: PathBuf,
         config: ProjectConfig,
     ) -> Result<Project, ProjectError> {
+        if config.use_filesystem {
+            Self::validate_package_layout(&src_dir)?;
+        }
+
         // Load the build cache.
         // We need to load it when reading (to use cached certs) OR when writing (to preserve
         // manifest entries from other modules during partial builds).
@@ -1278,8 +1495,9 @@ impl Project {
         descriptor: &ModuleDescriptor,
     ) -> Result<(), ImportError> {
         let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
-        let result = self.load_module(&canonical_descriptor, false);
-        self.targets.insert(canonical_descriptor);
+        let build_descriptors = self.build_descriptors_for_target(&canonical_descriptor);
+        let result = self.load_build_descriptors(&build_descriptors);
+        self.targets.extend(build_descriptors);
         result.map(|_| ())
     }
 
@@ -1288,7 +1506,8 @@ impl Project {
         descriptor: &ModuleDescriptor,
     ) -> ModuleDescriptor {
         let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
-        self.targets.insert(canonical_descriptor.clone());
+        self.targets
+            .extend(self.build_descriptors_for_target(&canonical_descriptor));
         canonical_descriptor
     }
 
@@ -1308,7 +1527,30 @@ impl Project {
         descriptor: &ModuleDescriptor,
     ) -> Result<(), ImportError> {
         let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
-        self.load_module(&canonical_descriptor, false).map(|_| ())
+        self.load_build_descriptors(&self.build_descriptors_for_target(&canonical_descriptor))
+    }
+
+    fn load_build_descriptors(
+        &mut self,
+        descriptors: &[ModuleDescriptor],
+    ) -> Result<(), ImportError> {
+        let mut result = Ok(());
+        for descriptor in descriptors {
+            if let Err(error) = self.load_module(descriptor, false) {
+                result = Err(error);
+                break;
+            }
+        }
+        for descriptor in descriptors {
+            if self.package_role_for_descriptor(descriptor) == PackageRole::Interface {
+                if let Err(error) = self.load_and_validate_package(descriptor) {
+                    if let Some(module_id) = self.module_map.get(descriptor).copied() {
+                        self.modules[module_id.get() as usize].load_error(error);
+                    }
+                }
+            }
+        }
+        result.map(|_| ())
     }
 
     fn dependency_descriptors_for_target(
@@ -1691,6 +1933,9 @@ impl Project {
         if self.has_version(&path, version) {
             return Ok(false);
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some(PACKAGE_INTERFACE_FILE) {
+            self.validate_package_layout_with_open_file(&path)?;
+        }
         let descriptor = self.descriptor_from_path(&path)?;
 
         // This update might be invalidating current modules.
@@ -1701,6 +1946,33 @@ impl Project {
         self.open_files.insert(path, (content.to_string(), version));
         self.add_unloaded_target_by_descriptor(&descriptor);
         Ok(true)
+    }
+
+    fn validate_package_layout_with_open_file(&self, path: &Path) -> Result<(), ImportError> {
+        let mut interface_paths = Vec::new();
+        if self.config.use_filesystem {
+            for entry in WalkDir::new(&self.src_dir)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let entry_path = entry.path();
+                if entry.file_type().is_file()
+                    && entry_path.file_name().and_then(|name| name.to_str())
+                        == Some(PACKAGE_INTERFACE_FILE)
+                {
+                    interface_paths.push(entry_path.to_path_buf());
+                }
+            }
+        }
+        for open_path in self.open_files.keys() {
+            if open_path.file_name().and_then(|name| name.to_str()) == Some(PACKAGE_INTERFACE_FILE)
+            {
+                interface_paths.push(open_path.clone());
+            }
+        }
+        interface_paths.push(path.to_path_buf());
+        Self::validate_package_interface_paths(&self.src_dir, interface_paths)
+            .map_err(ImportError::NotFound)
     }
 
     // Reloads all current build targets. This is intentionally separate from
@@ -1912,13 +2184,20 @@ impl Project {
         };
         self.module_map.insert(descriptor.clone(), module_id);
 
-        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+        let package_role = self.package_role_for_path(&path);
+        let mut parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.modules[module_id.get() as usize].load_error(error);
                 return Ok(None);
             }
         };
+        if package_role == PackageRole::Interface {
+            if let Err(error) = parsed.apply_interface_mode() {
+                self.modules[module_id.get() as usize].load_error(error);
+                return Ok(None);
+            }
+        }
 
         let current_module_name = parsed.module_name();
         let implicit_lib_dependency_names: HashSet<_> = parsed
@@ -2034,7 +2313,10 @@ impl Project {
         &mut self,
         targets: &[ModuleDescriptor],
     ) -> Vec<(ModuleDescriptor, LoweredModule)> {
-        let target_set: HashSet<_> = targets.iter().cloned().collect();
+        let mut target_set = HashSet::new();
+        for target in targets {
+            target_set.extend(self.build_descriptors_for_target(target));
+        }
         let mut lowered = Vec::new();
         for module in &mut self.modules {
             if !target_set.contains(&module.descriptor) {
@@ -2568,6 +2850,7 @@ impl Project {
             .components()
             .map(|comp| comp.as_os_str().to_string_lossy())
             .collect();
+        let package_root = self.nearest_package_root_for_path(path);
         let mut parts = Vec::new();
         for (i, component) in components.iter().enumerate() {
             let part = if i + 1 == components.len() {
@@ -2578,7 +2861,14 @@ impl Project {
                     )));
                 }
                 // Handle the special case of default.ac
-                if component == "default.ac" && i > 0 {
+                if component == PACKAGE_INTERFACE_FILE
+                    && package_root
+                        .as_ref()
+                        .is_some_and(|root| path == root.join(PACKAGE_INTERFACE_FILE))
+                {
+                    break;
+                }
+                if component == "default.ac" && i > 0 && package_root.is_none() {
                     // The module name should be the parent directory
                     // We've already added it to parts, so we're done
                     break;
@@ -2610,6 +2900,7 @@ impl Project {
                 // For the last part, check both foo.ac and foo/default.ac
                 let file_path = path.join(format!("{}.ac", part));
                 let dir_path = path.join(part).join("default.ac");
+                let interface_path = path.join(part).join(PACKAGE_INTERFACE_FILE);
 
                 let file_exists = if self.config.use_filesystem {
                     file_path.exists()
@@ -2623,7 +2914,23 @@ impl Project {
                     self.open_files.contains_key(&dir_path)
                 };
 
-                if file_exists && dir_exists {
+                let interface_exists = if self.config.use_filesystem {
+                    interface_path.exists()
+                } else {
+                    self.open_files.contains_key(&interface_path)
+                };
+
+                if interface_exists {
+                    if file_exists {
+                        return Err(ImportError::NotFound(format!(
+                            "ambiguous module '{}': both {} and package interface {} exist",
+                            module_name,
+                            file_path.display(),
+                            interface_path.display()
+                        )));
+                    }
+                    return Ok(interface_path);
+                } else if file_exists && dir_exists {
                     return Err(ImportError::NotFound(format!(
                         "ambiguous module '{}': both {} and {} exist",
                         module_name,
@@ -2653,6 +2960,271 @@ impl Project {
         } else {
             self.open_files.contains_key(path)
         }
+    }
+
+    fn nearest_package_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+        let mut current = path.parent()?;
+        while current != self.src_dir.as_path() {
+            if self.module_path_exists(&current.join(PACKAGE_INTERFACE_FILE)) {
+                return Some(current.to_path_buf());
+            }
+            current = current.parent()?;
+        }
+        None
+    }
+
+    fn package_role_for_path(&self, path: &Path) -> PackageRole {
+        let Some(package_root) = self.nearest_package_root_for_path(path) else {
+            return PackageRole::Outside;
+        };
+        if path == package_root.join(PACKAGE_INTERFACE_FILE) {
+            PackageRole::Interface
+        } else {
+            PackageRole::Implementation
+        }
+    }
+
+    fn package_root_for_module(&self, module_id: ModuleId) -> Option<PathBuf> {
+        let descriptor = self.get_module_descriptor(module_id)?;
+        let path = self.path_from_descriptor(descriptor).ok()?;
+        self.nearest_package_root_for_path(&path)
+    }
+
+    fn package_role_for_module(&self, module_id: ModuleId) -> PackageRole {
+        let Some(descriptor) = self.get_module_descriptor(module_id) else {
+            return PackageRole::Outside;
+        };
+        self.package_role_for_descriptor(descriptor)
+    }
+
+    fn package_role_for_descriptor(&self, descriptor: &ModuleDescriptor) -> PackageRole {
+        let Ok(path) = self.path_from_descriptor(descriptor) else {
+            return PackageRole::Outside;
+        };
+        self.package_role_for_path(&path)
+    }
+
+    fn package_interface_descriptor_for_path(&self, path: &Path) -> Option<ModuleDescriptor> {
+        let package_root = self.nearest_package_root_for_path(path)?;
+        self.descriptor_from_path(&package_root.join(PACKAGE_INTERFACE_FILE))
+            .ok()
+    }
+
+    pub fn build_descriptors_for_target(
+        &self,
+        descriptor: &ModuleDescriptor,
+    ) -> Vec<ModuleDescriptor> {
+        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
+        let Ok(path) = self.path_from_descriptor(&canonical_descriptor) else {
+            return vec![canonical_descriptor];
+        };
+
+        let interface_descriptor = match self.package_role_for_path(&path) {
+            PackageRole::Outside => return vec![canonical_descriptor],
+            PackageRole::Interface => canonical_descriptor,
+            PackageRole::Implementation => self
+                .package_interface_descriptor_for_path(&path)
+                .unwrap_or(canonical_descriptor),
+        };
+
+        let mut descriptors = vec![interface_descriptor.clone()];
+        if let Ok(implementation_descriptors) =
+            self.package_implementation_descriptors(&interface_descriptor)
+        {
+            descriptors.extend(implementation_descriptors);
+        }
+        descriptors.sort();
+        descriptors.dedup();
+        descriptors
+    }
+
+    fn package_implementation_descriptors(
+        &self,
+        interface_descriptor: &ModuleDescriptor,
+    ) -> Result<Vec<ModuleDescriptor>, ImportError> {
+        let interface_path = self.path_from_descriptor(interface_descriptor)?;
+        if self.package_role_for_path(&interface_path) != PackageRole::Interface {
+            return Ok(Vec::new());
+        }
+        let Some(package_root) = interface_path.parent() else {
+            return Ok(Vec::new());
+        };
+
+        let mut paths = Vec::new();
+        if self.config.use_filesystem {
+            for entry in WalkDir::new(package_root)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let path = entry.path();
+                if entry.file_type().is_file()
+                    && path.extension() == Some(std::ffi::OsStr::new("ac"))
+                    && path != interface_path
+                {
+                    paths.push(path.to_path_buf());
+                }
+            }
+        } else {
+            for path in self.open_files.keys() {
+                if path.starts_with(package_root)
+                    && path.extension() == Some(std::ffi::OsStr::new("ac"))
+                    && path != &interface_path
+                {
+                    paths.push(path.clone());
+                }
+            }
+        }
+
+        let mut descriptors = paths
+            .into_iter()
+            .filter_map(|path| self.descriptor_from_path(&path).ok())
+            .collect::<Vec<_>>();
+        descriptors.sort();
+        descriptors.dedup();
+        Ok(descriptors)
+    }
+
+    fn collect_package_signatures(
+        &self,
+        descriptor: &ModuleDescriptor,
+        exports_only: bool,
+    ) -> error::Result<BTreeMap<String, PackageSignature>> {
+        let path = self
+            .path_from_descriptor(descriptor)
+            .map_err(|e| Token::empty().error(&e.to_string()))?;
+        let text = read_source_text(&path, |path| self.read_file(path))
+            .map_err(|e| Token::empty().error(&e))?;
+        let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
+        let mut signatures = BTreeMap::new();
+        for statement in &parsed.statements {
+            if exports_only && !statement.export {
+                continue;
+            }
+            if exports_only
+                && matches!(&statement.statement, StatementInfo::Theorem(t) if t.axiomatic)
+            {
+                return Err(statement.error("exported theorems cannot be axioms"));
+            }
+            if !exports_only {
+                if statement.export {
+                    return Err(statement.error("'export' is not allowed in interface.ac"));
+                }
+                if matches!(&statement.statement, StatementInfo::Theorem(t) if t.body.is_some()) {
+                    return Err(statement.error("interface theorems cannot have proof bodies"));
+                }
+            }
+
+            let Some((name, text)) = statement.package_signature() else {
+                if exports_only {
+                    return Err(statement.error("'export' can only be used on named declarations"));
+                }
+                if matches!(
+                    &statement.statement,
+                    StatementInfo::Import(_) | StatementInfo::DocComment(_)
+                ) {
+                    continue;
+                }
+                return Err(
+                    statement.error("interface.ac can only contain imports and declarations")
+                );
+            };
+            if signatures
+                .insert(
+                    name.clone(),
+                    PackageSignature {
+                        text,
+                        first_token: statement.first_token.clone(),
+                        last_token: statement.last_token.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(statement.error(&format!("duplicate package declaration '{}'", name)));
+            }
+        }
+        Ok(signatures)
+    }
+
+    fn validate_package_exports(
+        &self,
+        interface_descriptor: &ModuleDescriptor,
+    ) -> error::Result<()> {
+        let interface_signatures = self.collect_package_signatures(interface_descriptor, false)?;
+        let mut export_signatures = BTreeMap::new();
+        for descriptor in self
+            .package_implementation_descriptors(interface_descriptor)
+            .map_err(|e| Token::empty().error(&e.to_string()))?
+        {
+            for (name, signature) in self.collect_package_signatures(&descriptor, true)? {
+                if export_signatures
+                    .insert(name.clone(), signature.clone())
+                    .is_some()
+                {
+                    return Err(Error::new(
+                        &signature.first_token,
+                        &signature.last_token,
+                        &format!("duplicate export '{}'", name),
+                    ));
+                }
+            }
+        }
+
+        for (name, interface_signature) in &interface_signatures {
+            let Some(export_signature) = export_signatures.get(name) else {
+                return Err(Error::new(
+                    &interface_signature.first_token,
+                    &interface_signature.last_token,
+                    &format!("missing export for interface declaration '{}'", name),
+                ));
+            };
+            if export_signature.text != interface_signature.text {
+                return Err(Error::new(
+                    &export_signature.first_token,
+                    &export_signature.last_token,
+                    &format!(
+                        "export '{}' does not match interface declaration\ninterface: {}\nexport: {}",
+                        name, interface_signature.text, export_signature.text
+                    ),
+                ));
+            }
+        }
+
+        for (name, export_signature) in &export_signatures {
+            if !interface_signatures.contains_key(name) {
+                return Err(Error::new(
+                    &export_signature.first_token,
+                    &export_signature.last_token,
+                    &format!("export '{}' is not declared in interface.ac", name),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_and_validate_package(
+        &mut self,
+        interface_descriptor: &ModuleDescriptor,
+    ) -> error::Result<()> {
+        for descriptor in self
+            .package_implementation_descriptors(interface_descriptor)
+            .map_err(|e| Token::empty().error(&e.to_string()))?
+        {
+            let module_id = self
+                .load_module(&descriptor, false)
+                .map_err(|e| Token::empty().error(&e.to_string()))?;
+            if let LoadState::Error(error) = self.get_module_by_id(module_id) {
+                return Err(Error::indirect(
+                    &Token::empty(),
+                    &Token::empty(),
+                    &format!(
+                        "error in package implementation module '{}': {}",
+                        descriptor, error
+                    ),
+                ));
+            }
+        }
+        self.validate_package_exports(interface_descriptor)
     }
 
     // Resolves aliases like `foo.default` to the canonical descriptor (`foo`) when
@@ -2801,13 +3373,20 @@ impl Project {
         };
         self.module_map.insert(descriptor.clone(), module_id);
 
-        let parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
+        let package_role = self.package_role_for_path(&path);
+        let mut parsed = match ParsedModule::parse(descriptor.clone(), text, strict) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.modules[module_id.get() as usize].load_error(error);
                 return Ok(module_id);
             }
         };
+        if package_role == PackageRole::Interface {
+            if let Err(error) = parsed.apply_interface_mode() {
+                self.modules[module_id.get() as usize].load_error(error);
+                return Ok(module_id);
+            }
+        }
 
         let current_module_name = parsed.module_name();
         let dependency_names = parsed.dependency_names.clone();

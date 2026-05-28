@@ -75,6 +75,47 @@ where
 }
 
 impl Statement {
+    pub fn package_signature(&self) -> Option<(String, String)> {
+        let name = match &self.statement {
+            StatementInfo::Let(statement) => statement.name_token.text(),
+            StatementInfo::Define(statement) => statement.name_token.text(),
+            StatementInfo::Theorem(statement) => statement.name_token.as_ref()?.text(),
+            StatementInfo::Type(statement) => statement.name_token.text(),
+            StatementInfo::VariableSatisfy(statement) => {
+                if statement.declarations.len() != 1 {
+                    return None;
+                }
+                statement.declarations[0].token().text()
+            }
+            StatementInfo::FunctionSatisfy(statement) => statement.name_token.text(),
+            StatementInfo::Structure(statement) => statement.name_token.text(),
+            StatementInfo::Inductive(statement) => statement.name_token.text(),
+            StatementInfo::Attributes(statement) => statement.name_token.text(),
+            StatementInfo::Typeclass(statement) => statement.typeclass_name.text(),
+            StatementInfo::Instance(statement) => statement.type_name.text(),
+            StatementInfo::Claim(_)
+            | StatementInfo::ForAll(_)
+            | StatementInfo::If(_)
+            | StatementInfo::Import(_)
+            | StatementInfo::Numerals(_)
+            | StatementInfo::Match(_)
+            | StatementInfo::Destructuring(_)
+            | StatementInfo::DocComment(_) => return None,
+        };
+
+        let signature = match &self.statement {
+            StatementInfo::Theorem(statement) => statement.statement_string(),
+            _ => {
+                let rendered = self.to_string();
+                rendered
+                    .strip_prefix("export ")
+                    .unwrap_or(&rendered)
+                    .to_string()
+            }
+        };
+        Some((name.to_string(), signature))
+    }
+
     fn pretty_ref<'a, D, A>(
         &'a self,
         allocator: &'a D,
@@ -425,6 +466,12 @@ impl Statement {
             }
 
             StatementInfo::DocComment(s) => allocator.text("/// ").append(allocator.text(s)),
+        };
+
+        let doc = if self.export {
+            allocator.text("export ").append(doc)
+        } else {
+            doc
         };
 
         indent.append(doc)

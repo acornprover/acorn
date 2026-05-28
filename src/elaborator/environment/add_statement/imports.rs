@@ -42,6 +42,9 @@ impl Environment {
             }
             Some(bindings) => bindings,
         };
+        if let Err(message) = project.validate_import_visibility(self.module_id, module_id) {
+            return Err(statement.error(&message));
+        }
 
         self.bindings
             .import_module(full_name_vec, &bindings, &statement.first_token)?;

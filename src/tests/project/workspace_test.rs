@@ -162,6 +162,236 @@ fn test_basic_import() {
 }
 
 #[test]
+fn test_package_interface_is_public_module() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "let public: Bool = true\n");
+    p.mock("/mock/pkg/internal.ac", "export let public: Bool = true\n");
+    p.mock(
+        "/mock/main.ac",
+        indoc! {"
+            from pkg import public
+            let check: Bool = public
+        "},
+    );
+    p.expect_ok("main");
+}
+
+#[test]
+fn test_external_package_import_loads_only_interface() {
+    use std::fs;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir_all(src_dir.join("pkg")).unwrap();
+    fs::create_dir_all(&build_dir).unwrap();
+    fs::write(
+        src_dir.join("pkg/interface.ac"),
+        "let public: Bool = true\n",
+    )
+    .unwrap();
+    fs::write(
+        src_dir.join("pkg/internal.ac"),
+        "export let public: Bool = false\n",
+    )
+    .unwrap();
+    fs::write(
+        src_dir.join("main.ac"),
+        indoc! {"
+            from pkg import public
+            let check: Bool = public
+        "},
+    )
+    .unwrap();
+
+    let mut project = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
+    project
+        .add_target_by_name("main")
+        .expect("main target should load");
+    assert!(matches!(
+        project.get_module(&ModuleDescriptor::name("main")),
+        LoadState::Ok(_)
+    ));
+    assert!(matches!(
+        project.get_module(&ModuleDescriptor::name("pkg.internal")),
+        LoadState::Registered
+    ));
+}
+
+fn expect_module_error_contains(p: &mut Project, module_name: &str, expected: &str) {
+    let module_id = p.load_module_by_name(module_name).expect("load failed");
+    let LoadState::Error(error) = p.get_module_by_id(module_id) else {
+        panic!("expected module error");
+    };
+    assert!(
+        error.to_string().contains(expected),
+        "expected error containing '{}', got '{}'",
+        expected,
+        error
+    );
+}
+
+fn expect_target_error_contains(p: &mut Project, module_name: &str, expected: &str) {
+    p.add_target_by_name(module_name)
+        .expect("target load failed");
+    let module_id = p
+        .get_module_id_by_name(module_name)
+        .expect("target module should be registered");
+    let LoadState::Error(error) = p.get_module_by_id(module_id) else {
+        panic!("expected target module error");
+    };
+    assert!(
+        error.to_string().contains(expected),
+        "expected error containing '{}', got '{}'",
+        expected,
+        error
+    );
+}
+
+#[test]
+fn test_package_interface_requires_matching_export() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "let public: Bool = true\n");
+
+    expect_target_error_contains(&mut p, "pkg", "missing export");
+}
+
+#[test]
+fn test_package_rejects_extra_export() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "");
+    p.mock("/mock/pkg/internal.ac", "export let extra: Bool = true\n");
+
+    expect_target_error_contains(&mut p, "pkg", "not declared in interface.ac");
+}
+
+#[test]
+fn test_package_rejects_mismatched_export() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "let public: Bool = true\n");
+    p.mock("/mock/pkg/internal.ac", "export let public: Bool = false\n");
+
+    expect_target_error_contains(&mut p, "pkg", "does not match interface declaration");
+}
+
+#[test]
+fn test_package_interface_theorem_omits_proof() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "theorem public { true }\n");
+    p.mock(
+        "/mock/pkg/internal.ac",
+        indoc! {"
+            export theorem public { true } by {
+                true
+            }
+        "},
+    );
+
+    p.expect_ok("pkg");
+}
+
+#[test]
+fn test_package_interface_theorem_rejects_proof() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/pkg/interface.ac",
+        indoc! {"
+            theorem public { true } by {
+                true
+            }
+        "},
+    );
+    p.mock(
+        "/mock/pkg/internal.ac",
+        indoc! {"
+            export theorem public { true } by {
+                true
+            }
+        "},
+    );
+
+    expect_module_error_contains(&mut p, "pkg", "interface theorems cannot have proof bodies");
+}
+
+#[test]
+fn test_package_implementation_imports_are_private_externally() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "let public: Bool = true\n");
+    p.mock("/mock/pkg/internal.ac", "export let private: Bool = true\n");
+    p.mock("/mock/main.ac", "from pkg.internal import private\n");
+
+    let module_id = p.load_module_by_name("main").expect("load failed");
+    let LoadState::Error(error) = p.get_module_by_id(module_id) else {
+        panic!("expected import visibility error");
+    };
+    assert!(error.to_string().contains("private to its package"));
+}
+
+#[test]
+fn test_package_implementation_can_import_same_package_implementation() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "let public: Bool = true\n");
+    p.mock("/mock/pkg/internal.ac", "export let private: Bool = true\n");
+    p.mock(
+        "/mock/pkg/other.ac",
+        indoc! {"
+            from pkg.internal import private
+            export let other: Bool = private
+        "},
+    );
+    p.expect_ok("pkg.other");
+}
+
+#[test]
+fn test_export_rejected_outside_package_implementation() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/main.ac", "export let x: Bool = true\n");
+
+    let module_id = p.load_module_by_name("main").expect("load failed");
+    let LoadState::Error(error) = p.get_module_by_id(module_id) else {
+        panic!("expected export location error");
+    };
+    assert!(error.to_string().contains("package implementation files"));
+}
+
+#[test]
+fn test_nested_packages_are_rejected() {
+    use std::fs;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let src_dir = temp_dir.path().join("src");
+    let build_dir = temp_dir.path().join("build");
+    fs::create_dir_all(src_dir.join("pkg/inner")).unwrap();
+    fs::write(src_dir.join("pkg/interface.ac"), "").unwrap();
+    fs::write(src_dir.join("pkg/inner/interface.ac"), "").unwrap();
+
+    let error = match Project::new(src_dir, build_dir, ProjectConfig::default()) {
+        Ok(_) => panic!("expected nested package error"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("nested packages are not supported"));
+}
+
+#[test]
+fn test_nested_open_file_packages_are_rejected() {
+    let mut p = Project::new_mock();
+    p.mock("/mock/pkg/interface.ac", "");
+    let error = p
+        .update_file(
+            PathBuf::from(localize_mock_filename("/mock/pkg/inner/interface.ac")),
+            "",
+            0,
+        )
+        .expect_err("nested open package should be rejected");
+
+    assert!(error
+        .to_string()
+        .contains("nested packages are not supported"));
+}
+
+#[test]
 fn test_imported_structure_fields_support_transport() {
     let mut p = Project::new_mock();
     p.mock(
