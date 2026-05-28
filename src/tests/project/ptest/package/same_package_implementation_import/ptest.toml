@@ -1,2 +1,3 @@
+command = "verify_then_check"
 target = "pkg.other"
 expect = "ok"

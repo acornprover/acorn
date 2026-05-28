@@ -14,6 +14,7 @@ const CONFIG_FILE: &str = "ptest.toml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PtestCommand {
     Verify,
+    VerifyThenCheck,
     Check,
 }
 
@@ -118,6 +119,7 @@ fn parse_bool(raw: &str) -> Result<bool, String> {
 fn parse_command(value: &str) -> Result<PtestCommand, String> {
     match value {
         "verify" => Ok(PtestCommand::Verify),
+        "verify_then_check" | "verify-then-check" => Ok(PtestCommand::VerifyThenCheck),
         "check" => Ok(PtestCommand::Check),
         other => Err(format!("unknown ptest command '{other}'")),
     }
@@ -340,13 +342,59 @@ fn assert_metrics(config: &PtestConfig, output: &VerifierOutput) {
     }
 }
 
+fn check_replay_config() -> ProjectConfig {
+    ProjectConfig {
+        usage_mode: UsageMode::Check,
+        use_filesystem: true,
+        read_cache: true,
+        write_cache: false,
+        update_version: false,
+    }
+}
+
+fn run_check_replay(root: &Path, case: &PtestCase) {
+    let mut check = Verifier::new_for_check(
+        root.to_path_buf(),
+        check_replay_config(),
+        case.config.target.clone(),
+    )
+    .expect("check replay should initialize");
+    check.builder.check_hashes = false;
+    check.builder.check_mode = true;
+    if let Some(jobs) = case.config.jobs {
+        check.builder.check_jobs = jobs;
+    }
+
+    let output = check.run().expect("check replay should run");
+    let logs = log_text(&output);
+    assert_eq!(
+        output.status,
+        BuildStatus::Good,
+        "check replay after verify_then_check should succeed\n{}",
+        logs
+    );
+    assert_eq!(
+        output.metrics.searches_total, 0,
+        "check replay should not run proof search\n{}",
+        logs
+    );
+}
+
 fn run_ptest_case(case: &PtestCase) {
+    if case.config.command == PtestCommand::VerifyThenCheck {
+        assert_eq!(
+            case.config.expectation,
+            PtestExpectation::Ok,
+            "verify_then_check only supports expect = \"ok\""
+        );
+    }
+
     let temp = tempfile::TempDir::new().expect("temp ptest project should be created");
     let root = temp.path();
     copy_project_fixture(&case.fixture_dir, root).expect("ptest fixture should copy");
 
     let project_config = match case.config.command {
-        PtestCommand::Verify => ProjectConfig {
+        PtestCommand::Verify | PtestCommand::VerifyThenCheck => ProjectConfig {
             usage_mode: UsageMode::Verify,
             use_filesystem: true,
             read_cache: false,
@@ -363,7 +411,7 @@ fn run_ptest_case(case: &PtestCase) {
     };
 
     let verifier = match case.config.command {
-        PtestCommand::Verify => Verifier::new(
+        PtestCommand::Verify | PtestCommand::VerifyThenCheck => Verifier::new(
             root.to_path_buf(),
             project_config,
             case.config.target.clone(),
@@ -396,7 +444,7 @@ fn run_ptest_case(case: &PtestCase) {
     );
 
     verifier.builder.check_hashes = case.config.check_hashes;
-    if case.config.command == PtestCommand::Check {
+    if matches!(case.config.command, PtestCommand::Check) {
         verifier.builder.check_mode = true;
     }
     if let Some(jobs) = case.config.jobs {
@@ -419,6 +467,9 @@ fn run_ptest_case(case: &PtestCase) {
             );
             assert_message_contains(&case.config, &logs);
             assert_metrics(&case.config, &output);
+            if case.config.command == PtestCommand::VerifyThenCheck {
+                run_check_replay(root, case);
+            }
         }
         Err(error) => {
             assert_eq!(
@@ -522,4 +573,10 @@ fn parses_full_config() {
             }],
         }
     );
+}
+
+#[test]
+fn parses_verify_then_check_config() {
+    let config = parse_ptest_config("command = \"verify_then_check\"").unwrap();
+    assert_eq!(config.command, PtestCommand::VerifyThenCheck);
 }
