@@ -48,4 +48,5 @@
 
 ## Versioning
 
-- The "acornlib manifest version" is defined by `MANIFEST_VERSION` in `src/manifest.rs`. Bump this when making breaking changes to the build format.
+- The "acornlib project format version" is defined by `PROJECT_FORMAT_VERSION` in
+  `src/manifest.rs`. Bump this when making breaking changes to the project format.

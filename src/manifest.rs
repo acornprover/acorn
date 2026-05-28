@@ -13,9 +13,10 @@ pub enum ManifestError {
     Io(std::io::Error),
     /// JSON parse error - recoverable by starting fresh
     Parse(serde_json::Error),
-    /// Manifest version is newer than this binary supports - user must update Acorn
+    /// Project format version is newer than this binary supports - user must update Acorn
     VersionTooNew { found: u32, supported: u32 },
-    /// Manifest version is older than this binary writes - user must opt in to updating acornlib
+    /// Project format version is older than this binary writes - user must opt in to updating
+    /// acornlib
     VersionTooOld { found: u32, supported: u32 },
 }
 
@@ -26,14 +27,14 @@ impl fmt::Display for ManifestError {
             ManifestError::Parse(e) => write!(f, "Parse error loading manifest: {}", e),
             ManifestError::VersionTooNew { found, supported } => write!(
                 f,
-                "The library manifest is using build format {}, but this version of Acorn only supports up to build format {}. \
+                "The library is using project format {}, but this version of Acorn only supports up to project format {}. \
                  Please update your version of Acorn.",
                 found, supported
             ),
             ManifestError::VersionTooOld { found, supported } => write!(
                 f,
-                "The library manifest is using build format {}, but this version of Acorn writes build format {}. \
-                 Pass --update-version to update the library build cache.",
+                "The library is using project format {}, but this version of Acorn writes project format {}. \
+                 Pass --update-version to update the library project format.",
                 found, supported
             ),
         }
@@ -62,10 +63,10 @@ impl From<serde_json::Error> for ManifestError {
     }
 }
 
-/// The current version of the build format.
+/// The current version of the project format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
-/// of other components of the cached build.
-pub const MANIFEST_VERSION: u32 = 23;
+/// of other components of the cached build or project layout.
+pub const PROJECT_FORMAT_VERSION: u32 = 23;
 
 /// A newtype wrapper for module names, created by joining parts with "."
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -126,19 +127,14 @@ impl Manifest {
     /// Create a new empty manifest with the current version
     pub fn new() -> Self {
         Manifest {
-            version: MANIFEST_VERSION,
+            version: PROJECT_FORMAT_VERSION,
             modules: BTreeMap::new(),
         }
     }
 
-    /// The build format version written by this binary.
+    /// The project format version written by this binary.
     pub fn current_version() -> u32 {
-        MANIFEST_VERSION
-    }
-
-    /// Whether writing this manifest would update the library build format.
-    pub fn requires_version_update(&self) -> bool {
-        self.version < MANIFEST_VERSION
+        PROJECT_FORMAT_VERSION
     }
 
     /// Add or update a module hash in the manifest
@@ -150,7 +146,7 @@ impl Manifest {
 
     /// Check if an entry matches the given module and hash
     pub fn matches_entry(&self, parts: &[String], hash: blake3::Hash) -> bool {
-        if self.version != MANIFEST_VERSION {
+        if self.version != PROJECT_FORMAT_VERSION {
             return false;
         }
         let module_name = ModuleName::new(parts);
@@ -194,23 +190,11 @@ impl Manifest {
         file.read_to_string(&mut contents)?;
         let manifest: Manifest = serde_json::from_str(&contents)?;
 
-        // Check version compatibility
-        if manifest.version > MANIFEST_VERSION {
-            return Err(ManifestError::VersionTooNew {
-                found: manifest.version,
-                supported: MANIFEST_VERSION,
-            });
-        }
-
-        // If the manifest version is older, we can still work with it
-        // (backward compatibility - newer code can read older manifests)
-
         Ok(manifest)
     }
 
     /// Load a manifest from the build directory, or create a new one if it doesn't exist.
     /// Recoverable errors (IO, parse) result in a fresh manifest.
-    /// Returns an error only if the manifest version is too new (user must update Acorn).
     pub fn load_or_create(build_dir: &Path) -> Result<Self, ManifestError> {
         match Self::load(build_dir) {
             Ok(manifest) => Ok(manifest),

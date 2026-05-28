@@ -329,11 +329,11 @@ struct Args {
     )]
     lib: Option<String>,
 
-    /// Allow acorn to update an older acornlib build format when writing the cache
+    /// Allow acorn to update an older acornlib project format when writing the cache
     #[clap(
         long = "update-version",
         global = true,
-        help = "Allow acorn to update an older acornlib build format when writing the cache."
+        help = "Allow acorn to update an older acornlib project format when writing the cache."
     )]
     update_version: bool,
 

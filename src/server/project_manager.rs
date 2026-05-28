@@ -21,7 +21,7 @@ pub struct ProjectView<'a> {
 
 impl ProjectManager {
     /// Creates a new ProjectManager with the given project configuration.
-    /// Returns an error if the build cache manifest version is incompatible.
+    /// Returns an error if the project format version is incompatible.
     pub fn new(
         src_dir: PathBuf,
         build_dir: PathBuf,

@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use regex::Regex;
+use toml_edit::{value, DocumentMut};
 use tower_lsp::lsp_types::{self, CompletionItem, Hover, HoverContents, MarkedString, Url};
 use walkdir::WalkDir;
 
@@ -969,11 +970,11 @@ mod tests {
 
         assert_eq!(
             too_new.cli_message(),
-            "This version of acornlib uses build format 24, but this version of the acorn binary only supports up to build format 23. Please run `acorn --update`."
+            "This version of acornlib uses project format 24, but this version of the acorn binary only supports up to project format 23. Please run `acorn --update`."
         );
         assert_eq!(
             too_new.vscode_message(),
-            "This version of acornlib uses build format 24, but this version of the Acorn VS Code extension only supports up to build format 23. Please update the Acorn VS Code extension."
+            "This version of acornlib uses project format 24, but this version of the Acorn VS Code extension only supports up to project format 23. Please update the Acorn VS Code extension."
         );
 
         let too_old = ProjectError::from(ManifestError::VersionTooOld {
@@ -983,16 +984,16 @@ mod tests {
 
         assert_eq!(
             too_old.cli_message(),
-            "This version of acornlib uses build format 22, but this version of the acorn binary writes build format 23. Please run `acorn verify --update-version` to update acornlib's build cache."
+            "This version of acornlib uses project format 22, but this version of the acorn binary writes project format 23. Please run `acorn verify --update-version` to update acornlib's project format."
         );
         assert_eq!(
             too_old.vscode_message(),
-            "This version of acornlib uses build format 22, but this version of the Acorn VS Code extension writes build format 23. Please run `acorn verify --update-version` to update acornlib's build cache."
+            "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 23. Please run `acorn verify --update-version` to update acornlib's project format."
         );
     }
 
     #[test]
-    fn older_manifest_requires_update_version_before_cache_writes() {
+    fn older_manifest_version_is_back_compat_fallback() {
         let temp_dir = tempfile::tempdir().expect("temp directory should be created");
         let src_dir = temp_dir.path().join("src");
         let build_dir = temp_dir.path().join("build");
@@ -1028,6 +1029,114 @@ mod tests {
             ..ProjectConfig::default()
         };
         assert!(Project::new(src_dir, build_dir, update_config).is_ok());
+    }
+
+    #[test]
+    fn acorn_toml_project_format_version_is_primary() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let src_dir = temp_dir.path().join("src");
+        let build_dir = temp_dir.path().join("build");
+        fs::create_dir(&src_dir).expect("src directory should be created");
+        fs::create_dir(&build_dir).expect("build directory should be created");
+        fs::write(
+            temp_dir.path().join("acorn.toml"),
+            format!("project_format_version = {}\n", Manifest::current_version()),
+        )
+        .expect("acorn.toml should be written");
+
+        let future_version = Manifest::current_version() + 1;
+        fs::write(
+            build_dir.join("manifest.json"),
+            format!(r#"{{"version":{},"modules":{{}}}}"#, future_version),
+        )
+        .expect("manifest should be written");
+
+        Project::new(src_dir, build_dir, ProjectConfig::default())
+            .expect("acorn.toml project_format_version should override manifest fallback");
+    }
+
+    #[test]
+    fn older_acorn_toml_project_format_requires_update_version_before_cache_writes() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let src_dir = temp_dir.path().join("src");
+        let build_dir = temp_dir.path().join("build");
+        fs::create_dir(&src_dir).expect("src directory should be created");
+        fs::create_dir(&build_dir).expect("build directory should be created");
+        let old_version = Manifest::current_version() - 1;
+        fs::write(
+            temp_dir.path().join("acorn.toml"),
+            format!("project_format_version = {}\n", old_version),
+        )
+        .expect("acorn.toml should be written");
+
+        let error = match Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default())
+        {
+            Ok(_) => std::panic!("cache writes should require --update-version"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ProjectError::Manifest(ManifestError::VersionTooOld { found, supported })
+                if found == old_version && supported == Manifest::current_version()
+        ));
+
+        let read_only_config = ProjectConfig {
+            write_cache: false,
+            ..ProjectConfig::default()
+        };
+        assert!(Project::new(src_dir.clone(), build_dir.clone(), read_only_config).is_ok());
+
+        let update_config = ProjectConfig {
+            update_version: true,
+            ..ProjectConfig::default()
+        };
+        assert!(Project::new(src_dir, build_dir, update_config).is_ok());
+    }
+
+    #[test]
+    fn update_build_cache_writes_project_format_version_to_acorn_toml() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let src_dir = temp_dir.path().join("src");
+        let build_dir = temp_dir.path().join("build");
+        fs::create_dir(&src_dir).expect("src directory should be created");
+        fs::create_dir(&build_dir).expect("build directory should be created");
+        fs::write(
+            temp_dir.path().join("acorn.toml"),
+            "# project config\n\n[editor]\nline_width = 100\n",
+        )
+        .expect("acorn.toml should be written");
+
+        let mut project =
+            Project::new(src_dir, build_dir.clone(), ProjectConfig::default()).unwrap();
+        project.update_build_cache(BuildCache::new(build_dir), false);
+
+        let acorn_toml = fs::read_to_string(temp_dir.path().join("acorn.toml"))
+            .expect("acorn.toml should be readable");
+        assert!(
+            acorn_toml.contains(&format!(
+                "project_format_version = {}",
+                Manifest::current_version()
+            )),
+            "acorn.toml did not contain project_format_version:\n{}",
+            acorn_toml
+        );
+        assert!(
+            acorn_toml.contains("# project config"),
+            "acorn.toml did not preserve comments:\n{}",
+            acorn_toml
+        );
+        assert!(
+            acorn_toml.contains("[editor]\nline_width = 100"),
+            "acorn.toml did not preserve existing tables:\n{}",
+            acorn_toml
+        );
+        let parsed = acorn_toml
+            .parse::<DocumentMut>()
+            .expect("updated acorn.toml should remain valid TOML");
+        assert_eq!(
+            parsed["project_format_version"].as_integer(),
+            Some(i64::from(Manifest::current_version()))
+        );
     }
 
     #[test]
@@ -1090,7 +1199,7 @@ pub struct ProjectConfig {
     // Whether we should write to the cache
     pub write_cache: bool,
 
-    // Whether cache writes may update an older acornlib build format.
+    // Whether cache writes may update an older acornlib project format.
     pub update_version: bool,
 }
 
@@ -1130,11 +1239,11 @@ impl ProjectError {
     pub fn cli_message(&self) -> String {
         match self {
             Self::Manifest(ManifestError::VersionTooNew { found, supported }) => format!(
-                "This version of acornlib uses build format {}, but this version of the acorn binary only supports up to build format {}. Please run `acorn --update`.",
+                "This version of acornlib uses project format {}, but this version of the acorn binary only supports up to project format {}. Please run `acorn --update`.",
                 found, supported
             ),
             Self::Manifest(ManifestError::VersionTooOld { found, supported }) => format!(
-                "This version of acornlib uses build format {}, but this version of the acorn binary writes build format {}. Please run `acorn verify --update-version` to update acornlib's build cache.",
+                "This version of acornlib uses project format {}, but this version of the acorn binary writes project format {}. Please run `acorn verify --update-version` to update acornlib's project format.",
                 found, supported
             ),
             _ => self.to_string(),
@@ -1144,11 +1253,11 @@ impl ProjectError {
     pub fn vscode_message(&self) -> String {
         match self {
             Self::Manifest(ManifestError::VersionTooNew { found, supported }) => format!(
-                "This version of acornlib uses build format {}, but this version of the Acorn VS Code extension only supports up to build format {}. Please update the Acorn VS Code extension.",
+                "This version of acornlib uses project format {}, but this version of the Acorn VS Code extension only supports up to project format {}. Please update the Acorn VS Code extension.",
                 found, supported
             ),
             Self::Manifest(ManifestError::VersionTooOld { found, supported }) => format!(
-                "This version of acornlib uses build format {}, but this version of the Acorn VS Code extension writes build format {}. Please run `acorn verify --update-version` to update acornlib's build cache.",
+                "This version of acornlib uses project format {}, but this version of the Acorn VS Code extension writes project format {}. Please run `acorn verify --update-version` to update acornlib's project format.",
                 found, supported
             ),
             _ => self.to_string(),
@@ -1305,8 +1414,69 @@ impl Project {
             .map_err(ProjectError::message)
     }
 
+    fn acorn_toml_path_for_src_dir(src_dir: &Path) -> Option<PathBuf> {
+        src_dir.parent().map(|root| root.join("acorn.toml"))
+    }
+
+    fn load_project_format_version_from_acorn_toml(
+        acorn_toml: &Path,
+    ) -> Result<Option<u32>, ProjectError> {
+        if !acorn_toml.is_file() {
+            return Ok(None);
+        }
+
+        let text = std::fs::read_to_string(acorn_toml)?;
+        let doc = text.parse::<DocumentMut>().map_err(|error| {
+            ProjectError::message(format!("Error parsing {}: {}", acorn_toml.display(), error))
+        })?;
+        let Some(value) = doc.get("project_format_version") else {
+            return Ok(None);
+        };
+        let Some(version) = value.as_integer() else {
+            return Err(ProjectError::message(format!(
+                "{}: project_format_version must be a nonnegative integer",
+                acorn_toml.display()
+            )));
+        };
+        u32::try_from(version).map(Some).map_err(|_| {
+            ProjectError::message(format!(
+                "{}: project_format_version must be a nonnegative integer",
+                acorn_toml.display()
+            ))
+        })
+    }
+
+    fn load_project_format_version(src_dir: &Path, build_dir: &Path) -> Result<u32, ProjectError> {
+        if let Some(acorn_toml) = Self::acorn_toml_path_for_src_dir(src_dir) {
+            if let Some(version) = Self::load_project_format_version_from_acorn_toml(&acorn_toml)? {
+                return Ok(version);
+            }
+        }
+
+        if let Ok(manifest) = Manifest::load(build_dir) {
+            return Ok(manifest.version);
+        }
+
+        Ok(Manifest::current_version())
+    }
+
+    fn write_project_format_version(src_dir: &Path) -> io::Result<()> {
+        let Some(acorn_toml) = Self::acorn_toml_path_for_src_dir(src_dir) else {
+            return Ok(());
+        };
+        let existing = std::fs::read_to_string(&acorn_toml).unwrap_or_default();
+        let mut doc = existing.parse::<DocumentMut>().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Error parsing {}: {}", acorn_toml.display(), error),
+            )
+        })?;
+        doc["project_format_version"] = value(i64::from(Manifest::current_version()));
+        std::fs::write(acorn_toml, doc.to_string())
+    }
+
     // Create a new project.
-    // Returns an error if the build cache manifest version is incompatible.
+    // Returns an error if the project format version is incompatible.
     pub fn new(
         src_dir: PathBuf,
         build_dir: PathBuf,
@@ -1314,6 +1484,25 @@ impl Project {
     ) -> Result<Project, ProjectError> {
         if config.use_filesystem {
             Self::validate_package_layout(&src_dir)?;
+        }
+
+        let project_format_version = Self::load_project_format_version(&src_dir, &build_dir)?;
+        if project_format_version > Manifest::current_version() {
+            return Err(ManifestError::VersionTooNew {
+                found: project_format_version,
+                supported: Manifest::current_version(),
+            }
+            .into());
+        }
+        if config.write_cache
+            && !config.update_version
+            && project_format_version < Manifest::current_version()
+        {
+            return Err(ManifestError::VersionTooOld {
+                found: project_format_version,
+                supported: Manifest::current_version(),
+            }
+            .into());
         }
 
         // Load the build cache.
@@ -1325,16 +1514,6 @@ impl Project {
         } else {
             BuildCache::new(build_dir.clone())
         };
-        if config.write_cache
-            && !config.update_version
-            && build_cache.manifest.requires_version_update()
-        {
-            return Err(ManifestError::VersionTooOld {
-                found: build_cache.manifest.version,
-                supported: Manifest::current_version(),
-            }
-            .into());
-        }
         let cache_load_time = cache_load_start.elapsed();
 
         Ok(Project {
@@ -1420,7 +1599,8 @@ impl Project {
     }
 
     // A Project based on the provided starting path.
-    // Returns an error if we can't find an acorn library, or if the manifest version is incompatible.
+    // Returns an error if we can't find an acorn library, or if the project format version is
+    // incompatible.
     pub fn new_local(start_path: &Path, config: ProjectConfig) -> Result<Project, ProjectError> {
         let (src_dir, build_dir) =
             Project::find_local_acorn_library(start_path).ok_or_else(|| {
@@ -1468,6 +1648,7 @@ impl Project {
     /// that weren't rebuilt. If false (full build), only newly built modules are in the manifest.
     pub fn update_build_cache(&mut self, mut new_cache: BuildCache, is_partial_build: bool) {
         if self.config.write_cache {
+            let _ = Self::write_project_format_version(&self.src_dir);
             // Save and merge: writes only new JSONL files, preserves manifest based on build type,
             // and merges old certificates back into memory
             let _ = new_cache.save_merging_old(self.build_cache.as_ref(), is_partial_build);

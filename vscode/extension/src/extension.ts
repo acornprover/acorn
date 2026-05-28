@@ -427,7 +427,7 @@ export async function activate(context: vscode.ExtensionContext) {
       initFailed = true;
       let message = error.message;
       let manifestMessageStart = message.indexOf(
-        "This version of acornlib uses build format "
+        "This version of acornlib uses project format "
       );
       if (manifestMessageStart >= 0) {
         message = message.slice(manifestMessageStart);

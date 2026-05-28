@@ -30,8 +30,7 @@ impl BuildCache {
     }
 
     /// Load a build cache from a directory containing JSONL files.
-    /// Returns an error if the manifest version is too new (user must update Acorn).
-    /// Older manifests are loaded; ProjectConfig controls whether writes may update them.
+    /// Project checks the project format version before loading the cache.
     pub fn load(build_dir: PathBuf) -> Result<Self, ManifestError> {
         let mut cache = HashMap::new();
         if build_dir.exists() {
