@@ -1,0 +1,3 @@
+target = "main"
+expect = "error"
+message = "ambiguous"

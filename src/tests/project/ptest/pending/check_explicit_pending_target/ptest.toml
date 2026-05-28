@@ -1,0 +1,6 @@
+command = "check"
+target = "pending/obvious_but_unproved.ac"
+expect = "ok"
+metrics.goals_total = 0
+metrics.pending_modules_total = 1
+metrics.pending_goals_total = 1

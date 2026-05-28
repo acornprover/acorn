@@ -1,0 +1,5 @@
+export theorem public {
+    true
+} by {
+    true
+}

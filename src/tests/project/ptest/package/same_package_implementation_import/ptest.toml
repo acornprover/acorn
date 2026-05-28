@@ -1,0 +1,2 @@
+target = "pkg.other"
+expect = "ok"

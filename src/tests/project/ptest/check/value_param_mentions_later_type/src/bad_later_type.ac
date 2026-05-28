@@ -1,0 +1,5 @@
+structure Set[T] {
+    contains: T -> Bool
+}
+
+let bad[a: Set[T], T]: Bool = true

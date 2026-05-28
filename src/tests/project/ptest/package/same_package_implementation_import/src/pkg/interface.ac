@@ -1,0 +1,3 @@
+let public: Bool = true
+let private: Bool = true
+let other: Bool = true

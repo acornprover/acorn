@@ -1,0 +1,2 @@
+expect = "setup_error"
+message = "nested packages are not supported"

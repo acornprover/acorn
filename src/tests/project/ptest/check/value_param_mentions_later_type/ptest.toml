@@ -1,0 +1,4 @@
+command = "check"
+target = "bad_later_type"
+expect = "error"
+message = "expected a typeclass constraint or a value type"

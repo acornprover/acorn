@@ -1,0 +1,3 @@
+theorem bad_statement {
+    true(true)
+}

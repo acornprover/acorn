@@ -1,0 +1,2 @@
+export let public: Bool = true
+export let private: Bool = true

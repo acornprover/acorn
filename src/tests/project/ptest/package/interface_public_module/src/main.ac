@@ -1,0 +1,3 @@
+from pkg import public
+
+let check: Bool = public

@@ -1,0 +1,4 @@
+command = "check"
+target = "bad_order"
+expect = "error"
+message = "type parameters must come before value parameters"

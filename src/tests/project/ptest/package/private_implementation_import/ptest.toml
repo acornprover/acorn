@@ -1,0 +1,3 @@
+target = "main"
+expect = "error"
+message = "private to its package"

@@ -1,0 +1,2 @@
+type Nat: axiom
+let bad[n: Nat, T]: Nat = n

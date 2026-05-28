@@ -1,0 +1,7 @@
+target = "pending/not_ready.ac"
+expect = "warning"
+metrics.goals_total = 1
+metrics.goals_success = 0
+metrics.pending_modules_total = 0
+metrics.pending_goals_total = 0
+metrics.searches_total = 1

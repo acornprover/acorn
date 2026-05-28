@@ -1,0 +1,3 @@
+expect = "error"
+message = "does not match interface declaration"
+jobs = 2
