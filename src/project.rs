@@ -3301,7 +3301,9 @@ impl Project {
                 }
                 if matches!(
                     &statement.statement,
-                    StatementInfo::Import(_) | StatementInfo::DocComment(_)
+                    StatementInfo::Import(_)
+                        | StatementInfo::Numerals(_)
+                        | StatementInfo::DocComment(_)
                 ) {
                     continue;
                 }

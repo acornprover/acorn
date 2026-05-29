@@ -1,0 +1,8 @@
+export type Nat: axiom
+numerals Nat
+
+export theorem public {
+    true
+} by {
+    true
+}

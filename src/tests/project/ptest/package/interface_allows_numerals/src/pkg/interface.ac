@@ -1,0 +1,6 @@
+type Nat: axiom
+numerals Nat
+
+theorem public {
+    true
+}
