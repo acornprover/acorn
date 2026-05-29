@@ -356,6 +356,10 @@ impl BindingMap {
         self.unqualified.contains_key(name)
     }
 
+    pub fn hide_unqualified_constant_name(&mut self, name: &str) {
+        self.unqualified.remove(name);
+    }
+
     /// Returns the defined value, if there is a defined value.
     /// If there isn't, returns None.
     pub fn get_definition(&self, name: &DefinedName) -> Option<&AcornValue> {

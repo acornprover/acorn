@@ -4,6 +4,20 @@ use crate::tests::support::*;
 // General prover coverage for language features.
 
 #[test]
+fn test_lemma_can_prove_later_theorem_in_same_file() {
+    let text = r#"
+    lemma helper {
+        true
+    }
+
+    theorem goal {
+        helper
+    }
+    "#;
+    assert_eq!(verify(text).unwrap(), Outcome::Success);
+}
+
+#[test]
 fn test_structure_new_equation() {
     let text = r#"
     structure Pair {

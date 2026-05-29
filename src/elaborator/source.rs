@@ -16,6 +16,9 @@ pub enum SourceType {
     /// A theorem which may have a name.
     Theorem(Option<String>),
 
+    /// A theorem-like proposition that is visible only inside the file where it is defined.
+    Lemma(Option<String>),
+
     /// An anonymous proposition that has previously been proved
     Anonymous,
 
@@ -104,6 +107,16 @@ impl Source {
             range,
             source_type,
             importable,
+            depth,
+        }
+    }
+
+    pub fn lemma(module: ModuleId, range: Range, depth: u32, name: Option<String>) -> Source {
+        Source {
+            module_id: module,
+            range,
+            source_type: SourceType::Lemma(name),
+            importable: false,
             depth,
         }
     }
@@ -226,6 +239,10 @@ impl Source {
                 Some(name) => format!("the '{}' theorem", name),
                 None => "an anonymous theorem".to_string(),
             },
+            SourceType::Lemma(name) => match name {
+                Some(name) => format!("the '{}' lemma", name),
+                None => "an anonymous lemma".to_string(),
+            },
             SourceType::Anonymous => format!("line {}", self.user_visible_line()),
             SourceType::TypeDefinition(type_name, _) => format!("the '{}' definition", type_name),
             SourceType::ConstantDefinition(_, name) => {
@@ -253,10 +270,12 @@ impl Source {
     /// Premises and negated goals do not get names.
     pub fn name(&self) -> Option<String> {
         match &self.source_type {
-            SourceType::Axiom(name) | SourceType::Theorem(name) => match name {
-                None => Some(self.user_visible_line().to_string()),
-                Some(name) => Some(name.clone()),
-            },
+            SourceType::Axiom(name) | SourceType::Theorem(name) | SourceType::Lemma(name) => {
+                match name {
+                    None => Some(self.user_visible_line().to_string()),
+                    Some(name) => Some(name.clone()),
+                }
+            }
             SourceType::Anonymous => Some(self.user_visible_line().to_string()),
             SourceType::TypeDefinition(type_name, member) => {
                 Some(format!("{}.{}", type_name, member))

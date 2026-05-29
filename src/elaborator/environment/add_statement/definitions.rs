@@ -1193,14 +1193,19 @@ impl Environment {
         }
 
         let already_proven = ts.axiomatic || is_citation;
-        let source = Source::theorem(
-            already_proven,
-            self.module_id,
-            range,
-            true,
-            self.depth,
-            ts.name_token.as_ref().map(|t| t.text().to_string()),
-        );
+        let source_name = ts.name_token.as_ref().map(|t| t.text().to_string());
+        let source = if ts.lemma {
+            Source::lemma(self.module_id, range, self.depth, source_name)
+        } else {
+            Source::theorem(
+                already_proven,
+                self.module_id,
+                range,
+                true,
+                self.depth,
+                source_name,
+            )
+        };
         let prop =
             Proposition::new(external_claim, type_params.clone(), source).with_arg_count(arg_count);
 
@@ -1217,6 +1222,7 @@ impl Environment {
                     range,
                     premise,
                     goal,
+                    ts.lemma,
                 ),
                 &statement.first_token,
                 &statement.last_token,
@@ -1233,6 +1239,9 @@ impl Environment {
         if let Some(name_token) = &ts.name_token {
             let name = ConstantName::unqualified(self.module_id, name_token.text());
             self.bindings.mark_as_theorem(&name);
+            if ts.lemma {
+                self.hide_unqualified_name_from_export(name_token.text());
+            }
         }
 
         Ok(())

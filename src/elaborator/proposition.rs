@@ -68,7 +68,9 @@ impl Proposition {
     /// Theorems have theorem names, and so do axioms because those work like theorems.
     pub fn theorem_name(&self) -> Option<&str> {
         match &self.source.source_type {
-            SourceType::Axiom(name) | SourceType::Theorem(name) => name.as_deref(),
+            SourceType::Axiom(name) | SourceType::Theorem(name) | SourceType::Lemma(name) => {
+                name.as_deref()
+            }
             _ => None,
         }
     }

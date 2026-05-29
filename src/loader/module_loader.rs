@@ -47,7 +47,7 @@ pub fn elaborate_and_lower_module(
         env.discard_ide_metadata();
     }
 
-    let bindings = env.bindings.clone();
+    let bindings = env.export_bindings();
     let export = ModuleExport::from_lowered(bindings, &lowering.module, usage_mode);
     let export = Arc::new(export);
     let retained_env = usage_mode.keeps_ide_metadata().then_some(env);

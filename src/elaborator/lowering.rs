@@ -119,7 +119,7 @@ impl KernelContext {
     fn is_theorem_proposition(proposition: &Proposition) -> bool {
         matches!(
             proposition.source.source_type,
-            SourceType::Axiom(_) | SourceType::Theorem(_)
+            SourceType::Axiom(_) | SourceType::Theorem(_) | SourceType::Lemma(_)
         )
     }
 

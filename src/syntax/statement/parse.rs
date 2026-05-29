@@ -95,6 +95,7 @@ fn parse_theorem_statement(
     keyword: Token,
     tokens: &mut TokenIter,
     axiomatic: bool,
+    lemma: bool,
 ) -> Result<Statement> {
     let name_token = match tokens.peek_type() {
         Some(TokenType::LeftParen) | Some(TokenType::LeftBrace) => None,
@@ -112,6 +113,7 @@ fn parse_theorem_statement(
 
     let ts = TheoremStatement {
         axiomatic,
+        lemma,
         name_token,
         type_params,
         args,
@@ -1013,12 +1015,17 @@ impl Statement {
                                 keyword.error("axiom keyword is not allowed in strict mode")
                             );
                         }
-                        let s = parse_theorem_statement(keyword, tokens, true)?;
+                        let s = parse_theorem_statement(keyword, tokens, true, false)?;
                         return Ok((Some(s), None));
                     }
                     TokenType::Theorem => {
                         let keyword = tokens.next().unwrap();
-                        let s = parse_theorem_statement(keyword, tokens, false)?;
+                        let s = parse_theorem_statement(keyword, tokens, false, false)?;
+                        return Ok((Some(s), None));
+                    }
+                    TokenType::Lemma => {
+                        let keyword = tokens.next().unwrap();
+                        let s = parse_theorem_statement(keyword, tokens, false, true)?;
                         return Ok((Some(s), None));
                     }
                     TokenType::Define => {

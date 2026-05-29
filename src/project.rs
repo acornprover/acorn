@@ -3278,6 +3278,9 @@ impl Project {
         let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
         let mut signatures = BTreeMap::new();
         for statement in &parsed.statements {
+            if matches!(&statement.statement, StatementInfo::Theorem(t) if t.lemma) {
+                return Err(statement.error("interface.ac cannot contain lemmas"));
+            }
             if matches!(&statement.statement, StatementInfo::Theorem(t) if t.body.is_some()) {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
             }

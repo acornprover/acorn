@@ -117,6 +117,7 @@ impl Node {
                 prop.source.source_type,
                 crate::elaborator::source::SourceType::BlockGoal
                     | crate::elaborator::source::SourceType::Theorem(_)
+                    | crate::elaborator::source::SourceType::Lemma(_)
             )
         } else {
             false

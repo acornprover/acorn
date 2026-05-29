@@ -89,6 +89,9 @@ mod tests {
         ok(indoc! {"theorem suc_gt_zero(x: nat) {
             suc(x) > 0
         }"});
+        ok(indoc! {"lemma helper {
+            true
+        }"});
     }
 
     #[test]

@@ -49,14 +49,16 @@ pub struct DefineStatement {
     pub return_value: Expression,
 }
 
-/// There are two keywords for theorems.
+/// There are three keywords for theorem-like statements.
 /// The "axiom" keyword indicates theorems that are axiomatic.
 /// The "theorem" keyword is used for the vast majority of normal theorems.
+/// The "lemma" keyword creates a theorem-like fact that is only visible in its file.
 /// For example, in:
 ///   axiom foo(p, q): p -> (q -> p)
 /// axiomatic would be "true", the name is "foo", the args are p, q, and the claim is "p -> (q -> p)".
 pub struct TheoremStatement {
     pub axiomatic: bool,
+    pub lemma: bool,
     pub name_token: Option<Token>,
     pub type_params: Vec<TypeParamExpr>,
     pub args: Vec<Declaration>,

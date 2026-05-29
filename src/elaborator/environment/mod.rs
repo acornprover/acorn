@@ -97,6 +97,9 @@ pub struct Environment {
 
     /// Statements in this environment that are direct citations of existing theorems.
     citation_statements: Vec<CitationStatement>,
+
+    /// Unqualified constants visible while elaborating this file, but not through module imports.
+    local_unqualified_names: HashSet<String>,
 }
 
 impl Environment {
@@ -117,6 +120,7 @@ impl Environment {
             at_module_beginning: true,
             last_statement_line: None,
             citation_statements: Vec::new(),
+            local_unqualified_names: HashSet::new(),
         }
     }
 
@@ -138,7 +142,20 @@ impl Environment {
             at_module_beginning: false,      // Child environments are never at module beginning
             last_statement_line: None,
             citation_statements: Vec::new(),
+            local_unqualified_names: HashSet::new(),
         }
+    }
+
+    pub fn hide_unqualified_name_from_export(&mut self, name: &str) {
+        self.local_unqualified_names.insert(name.to_string());
+    }
+
+    pub fn export_bindings(&self) -> BindingMap {
+        let mut bindings = self.bindings.clone();
+        for name in &self.local_unqualified_names {
+            bindings.hide_unqualified_constant_name(name);
+        }
+        bindings
     }
 
     fn next_line(&self) -> u32 {
@@ -895,7 +912,7 @@ impl Environment {
                     match lower_fact(&mut current_kernel_context, fact) {
                         Ok(normalized) => {
                             let fact_id = lowered_module.add_fact(normalized);
-                            if top_level {
+                            if top_level && fact.source().importable {
                                 lowered_module.module_fact_ids.push(fact_id);
                                 if let Fact::Proposition(prop) = fact {
                                     if matches!(
@@ -936,7 +953,7 @@ impl Environment {
                             match lower_fact(&mut current_kernel_context, fact) {
                                 Ok(normalized_fact) => {
                                     let fact_id = lowered_module.add_fact(normalized_fact);
-                                    if top_level {
+                                    if top_level && fact.source().importable {
                                         lowered_module.module_fact_ids.push(fact_id);
                                     }
                                     items.push(LoweredItem::Claim {
@@ -989,7 +1006,7 @@ impl Environment {
                         match lower_fact(&mut current_kernel_context, fact) {
                             Ok(normalized) => {
                                 let fact_id = lowered_module.add_fact(normalized);
-                                if top_level {
+                                if top_level && fact.source().importable {
                                     lowered_module.module_fact_ids.push(fact_id);
                                 }
                                 external_fact_id = Some(fact_id);

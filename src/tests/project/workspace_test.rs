@@ -248,6 +248,56 @@ fn test_citation_statements_collect_nested_citations() {
 }
 
 #[test]
+fn test_lemma_is_file_local() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/foo.ac",
+        indoc! {"
+            lemma helper {
+                true
+            }
+
+            theorem public {
+                helper
+            }
+        "},
+    );
+    p.mock(
+        "/mock/main.ac",
+        indoc! {"
+            from foo import public
+
+            theorem goal {
+                public
+            }
+        "},
+    );
+    p.mock("/mock/bad.ac", "from foo import helper\n");
+
+    p.expect_ok("main");
+    p.expect_module_err("bad");
+}
+
+#[test]
+fn test_lemma_facts_are_not_exported() {
+    let mut p = Project::new_mock();
+    p.mock(
+        "/mock/foo.ac",
+        indoc! {"
+            lemma helper {
+                true
+            }
+        "},
+    );
+
+    let foo_id = p.expect_ok("foo");
+    let export = p
+        .get_module_export(foo_id)
+        .expect("foo should have a module export");
+    assert_eq!(export.fact_count(), 0);
+}
+
+#[test]
 fn test_from_import_does_not_bind_module_name() {
     let mut p = Project::new_mock();
     p.mock("/mock/foo.ac", FOO_AC);

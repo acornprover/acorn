@@ -36,7 +36,9 @@ impl TypeclassCondition {
 impl TheoremStatement {
     pub fn statement_string(&self) -> String {
         let allocator = Arena::<()>::new();
-        let mut doc = if self.axiomatic {
+        let mut doc = if self.lemma {
+            allocator.text("lemma")
+        } else if self.axiomatic {
             allocator.text("axiom")
         } else {
             allocator.text("theorem")
@@ -79,7 +81,12 @@ impl Statement {
         let name = match &self.statement {
             StatementInfo::Let(statement) => statement.name_token.text(),
             StatementInfo::Define(statement) => statement.name_token.text(),
-            StatementInfo::Theorem(statement) => statement.name_token.as_ref()?.text(),
+            StatementInfo::Theorem(statement) => {
+                if statement.lemma {
+                    return None;
+                }
+                statement.name_token.as_ref()?.text()
+            }
             StatementInfo::Type(statement) => statement.name_token.text(),
             StatementInfo::VariableSatisfy(statement) => {
                 if statement.declarations.len() != 1 {
@@ -157,7 +164,9 @@ impl Statement {
             }
 
             StatementInfo::Theorem(ts) => {
-                let mut doc = if ts.axiomatic {
+                let mut doc = if ts.lemma {
+                    allocator.text("lemma")
+                } else if ts.axiomatic {
                     allocator.text("axiom")
                 } else {
                     allocator.text("theorem")

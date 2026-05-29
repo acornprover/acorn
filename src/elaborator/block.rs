@@ -63,7 +63,7 @@ impl BlockPremise {
 /// I should probably rename this object.
 #[derive(Debug)]
 pub enum BlockParams<'a> {
-    /// (theorem name, theorem range, premise, goal)
+    /// (theorem name, theorem range, premise, goal, is lemma)
     ///
     /// The premise and goal are unbound, to be proved based on the args of the theorem.
     ///
@@ -74,7 +74,13 @@ pub enum BlockParams<'a> {
     /// The premise is optional.
     ///
     /// The premise and goal should not have type variables in them.
-    Theorem(Option<&'a str>, Range, Option<BlockPremise>, AcornValue),
+    Theorem(
+        Option<&'a str>,
+        Range,
+        Option<BlockPremise>,
+        AcornValue,
+        bool,
+    ),
 
     /// The assumption to be used by the block, and the range of this assumption.
     Conditional(BlockPremise),
@@ -305,7 +311,13 @@ impl Block {
                 );
                 None
             }
-            BlockParams::Theorem(theorem_name, theorem_range, ref premise, ref unbound_goal) => {
+            BlockParams::Theorem(
+                theorem_name,
+                theorem_range,
+                ref premise,
+                ref unbound_goal,
+                lemma,
+            ) => {
                 if let Some(name) = theorem_name {
                     // Within the theorem block, the theorem is treated like a function,
                     // with propositions to define its identity.
@@ -345,14 +357,19 @@ impl Block {
                     .bind_values(0, 0, &internal_args)
                     .to_arbitrary();
                 // This is the goal we need to prove, therefore, it is not importable.
-                let source = Source::theorem(
-                    false,
-                    env.module_id,
-                    theorem_range,
-                    false,
-                    subenv.depth,
-                    theorem_name.map(|s| s.to_string()),
-                );
+                let name = theorem_name.map(|s| s.to_string());
+                let source = if lemma {
+                    Source::lemma(env.module_id, theorem_range, subenv.depth, name)
+                } else {
+                    Source::theorem(
+                        false,
+                        env.module_id,
+                        theorem_range,
+                        false,
+                        subenv.depth,
+                        name,
+                    )
+                };
                 Some(Proposition::new(bound_goal, vec![], source))
             }
             BlockParams::FunctionSatisfy(ref unbound_goal, ref return_type, range) => {

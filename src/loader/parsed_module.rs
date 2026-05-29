@@ -80,6 +80,9 @@ impl ParsedModule {
 
     pub fn apply_interface_mode(&mut self) -> error::Result<()> {
         for statement in &mut self.statements {
+            if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.lemma) {
+                return Err(statement.error("interface.ac cannot contain lemmas"));
+            }
             if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.body.is_some())
             {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
@@ -401,17 +404,17 @@ fn parse_module_statements(text: &str, strict: bool) -> error::Result<Vec<Statem
 }
 
 fn is_exported_declaration_statement(statement: &Statement) -> bool {
-    matches!(
-        statement.statement,
+    match &statement.statement {
+        StatementInfo::Theorem(theorem) => !theorem.lemma,
         StatementInfo::Let(_)
-            | StatementInfo::Define(_)
-            | StatementInfo::Theorem(_)
-            | StatementInfo::Type(_)
-            | StatementInfo::Structure(_)
-            | StatementInfo::Inductive(_)
-            | StatementInfo::Typeclass(_)
-            | StatementInfo::Instance(_)
-    )
+        | StatementInfo::Define(_)
+        | StatementInfo::Type(_)
+        | StatementInfo::Structure(_)
+        | StatementInfo::Inductive(_)
+        | StatementInfo::Typeclass(_)
+        | StatementInfo::Instance(_) => true,
+        _ => false,
+    }
 }
 
 fn check_exported_declaration_limit(statements: &[Statement]) -> error::Result<()> {
