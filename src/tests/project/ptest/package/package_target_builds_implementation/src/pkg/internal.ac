@@ -1,4 +1,4 @@
-export let public: Bool = true
+let public: Bool = true
 
 theorem implementation_goal {
     false

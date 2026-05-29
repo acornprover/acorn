@@ -80,9 +80,6 @@ impl ParsedModule {
 
     pub fn apply_interface_mode(&mut self) -> error::Result<()> {
         for statement in &mut self.statements {
-            if statement.export {
-                return Err(statement.error("'export' is not allowed in interface.ac"));
-            }
             if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.body.is_some())
             {
                 return Err(statement.error("interface theorems cannot have proof bodies"));

@@ -63,7 +63,8 @@ pub enum TokenType {
     Choose,
     Constraint,
     Implies,
-    Export,
+    Local,
+    Lemma,
     Typeclass,
     Instance,
     Extends,
@@ -119,7 +120,8 @@ pub fn keyword_map() -> &'static BTreeMap<&'static str, TokenType> {
             ("choose", TokenType::Choose),
             ("constraint", TokenType::Constraint),
             ("implies", TokenType::Implies),
-            ("export", TokenType::Export),
+            ("local", TokenType::Local),
+            ("lemma", TokenType::Lemma),
             ("typeclass", TokenType::Typeclass),
             ("instance", TokenType::Instance),
             ("extends", TokenType::Extends),
@@ -446,7 +448,8 @@ impl TokenType {
             TokenType::Choose => "choose",
             TokenType::Constraint => "constraint",
             TokenType::Implies => "implies",
-            TokenType::Export => "export",
+            TokenType::Local => "local",
+            TokenType::Lemma => "lemma",
             TokenType::Typeclass => "typeclass",
             TokenType::Instance => "instance",
             TokenType::Extends => "extends",
@@ -539,7 +542,8 @@ impl Token {
             || name == "constraint"
             || name == "choose"
             || name == "transport"
-            || name == "export"
+            || name == "local"
+            || name == "lemma"
     }
 
     /// Checks if this token is a reserved name.
@@ -679,7 +683,8 @@ impl Token {
             | TokenType::Choose
             | TokenType::Constraint
             | TokenType::Implies
-            | TokenType::Export
+            | TokenType::Local
+            | TokenType::Lemma
             | TokenType::Typeclass
             | TokenType::Instance
             | TokenType::Extends
@@ -1067,10 +1072,13 @@ mod tests {
     }
 
     #[test]
-    fn test_export_is_keyword_and_reserved_name() {
-        let tokens = Token::scan("export exported");
-        assert_eq!(tokens[0].token_type, TokenType::Export);
-        assert_eq!(tokens[1].token_type, TokenType::Identifier);
-        assert!(Token::is_reserved_name("export"));
+    fn test_local_and_lemma_are_keywords_and_reserved_names() {
+        let tokens = Token::scan("local lemma locally lemmas");
+        assert_eq!(tokens[0].token_type, TokenType::Local);
+        assert_eq!(tokens[1].token_type, TokenType::Lemma);
+        assert_eq!(tokens[2].token_type, TokenType::Identifier);
+        assert_eq!(tokens[3].token_type, TokenType::Identifier);
+        assert!(Token::is_reserved_name("local"));
+        assert!(Token::is_reserved_name("lemma"));
     }
 }

@@ -286,7 +286,6 @@ pub struct DestructuringStatement {
 /// Acorn is a statement-based language. There are several types.
 /// Each type has its own struct.
 pub struct Statement {
-    pub export: bool,
     pub first_token: Token,
     pub last_token: Token,
     pub statement: StatementInfo,

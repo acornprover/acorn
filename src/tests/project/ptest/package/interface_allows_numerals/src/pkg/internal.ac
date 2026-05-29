@@ -1,7 +1,7 @@
-export type Nat: axiom
+type Nat: axiom
 numerals Nat
 
-export theorem public {
+theorem public {
     true
 } by {
     true

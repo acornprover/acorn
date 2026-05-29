@@ -1,4 +1,4 @@
 from pkg.internal import private
 
 let used: Bool = private
-export let other: Bool = true
+let other: Bool = true

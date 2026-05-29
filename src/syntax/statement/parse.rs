@@ -120,7 +120,6 @@ fn parse_theorem_statement(
         body,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Theorem(ts),
@@ -143,7 +142,6 @@ fn complete_variable_satisfy(
         condition,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::VariableSatisfy(es),
@@ -251,7 +249,6 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                     };
 
                     return Ok(Statement {
-                        export: false,
                         first_token: keyword,
                         last_token,
                         statement: StatementInfo::Destructuring(ds),
@@ -280,7 +277,6 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                         body,
                     };
                     return Ok(Statement {
-                        export: false,
                         first_token: keyword,
                         last_token,
                         statement: StatementInfo::FunctionSatisfy(fss),
@@ -353,7 +349,6 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
         value,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Let(ls),
@@ -378,7 +373,6 @@ fn parse_define_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
         return_value,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Define(ds),
@@ -415,7 +409,6 @@ fn parse_type_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) ->
         type_expr,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Type(ts),
@@ -433,7 +426,6 @@ fn parse_forall_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
     };
     let fas = ForAllStatement { quantifiers, body };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token: right_brace,
         statement: StatementInfo::ForAll(fas),
@@ -486,7 +478,6 @@ fn parse_if_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statemen
         token,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token: right_brace,
         statement: StatementInfo::If(is),
@@ -531,7 +522,6 @@ fn parse_structure_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
                 };
 
                 return Ok(Statement {
-                    export: false,
                     first_token: keyword,
                     last_token,
                     statement: StatementInfo::Structure(StructureStatement {
@@ -589,7 +579,6 @@ fn parse_inductive_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
                     return Err(type_token.error("inductive types must have a constructor"));
                 }
                 return Ok(Statement {
-                    export: false,
                     first_token: keyword,
                     last_token: tokens.next().unwrap(),
                     statement: StatementInfo::Inductive(InductiveStatement {
@@ -682,7 +671,6 @@ fn parse_from_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statem
     };
     let is = ImportStatement { components, names };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Import(is),
@@ -721,7 +709,6 @@ fn parse_attributes_statement(keyword: Token, tokens: &mut TokenIter) -> Result<
         body,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token: right_brace,
         statement: StatementInfo::Attributes(ats),
@@ -761,7 +748,6 @@ fn parse_match_statement(keyword: Token, tokens: &mut TokenIter) -> Result<State
     };
     let ms = MatchStatement { scrutinee, cases };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Match(ms),
@@ -852,7 +838,6 @@ fn parse_typeclass_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
         };
 
         return Ok(Statement {
-            export: false,
             first_token: keyword,
             last_token,
             statement: StatementInfo::Typeclass(TypeclassStatement {
@@ -882,7 +867,6 @@ fn parse_typeclass_statement(keyword: Token, tokens: &mut TokenIter) -> Result<S
                 }
 
                 return Ok(Statement {
-                    export: false,
                     first_token: keyword,
                     last_token: token,
                     statement: StatementInfo::Typeclass(TypeclassStatement {
@@ -991,7 +975,6 @@ fn parse_instance_statement(keyword: Token, tokens: &mut TokenIter) -> Result<St
         body,
     };
     Ok(Statement {
-        export: false,
         first_token: keyword,
         last_token,
         statement: StatementInfo::Instance(is),
@@ -1017,23 +1000,6 @@ impl Statement {
                     TokenType::NewLine => {
                         tokens.next();
                         continue;
-                    }
-                    TokenType::Export => {
-                        let export_token = tokens.next().unwrap();
-                        let (statement, maybe_right_brace) =
-                            Statement::parse(tokens, in_block, strict)?;
-                        if maybe_right_brace.is_some() {
-                            return Err(export_token.error("expected statement after 'export'"));
-                        }
-                        let Some(mut statement) = statement else {
-                            return Err(export_token.error("expected statement after 'export'"));
-                        };
-                        if statement.export {
-                            return Err(export_token.error("duplicate 'export' prefix"));
-                        }
-                        statement.export = true;
-                        statement.first_token = export_token;
-                        return Ok((Some(statement), None));
                     }
                     TokenType::Let => {
                         let keyword = tokens.next().unwrap();
@@ -1108,7 +1074,6 @@ impl Statement {
                             Expression::parse_type(tokens, Terminator::Is(TokenType::NewLine))?;
                         let ds = NumeralsStatement { type_expr };
                         let s = Statement {
-                            export: false,
                             first_token: keyword,
                             last_token,
                             statement: StatementInfo::Numerals(ds),
@@ -1147,7 +1112,6 @@ impl Statement {
                         let doc_token = tokens.next().unwrap();
                         let content = doc_token.doc_comment_content();
                         let s = Statement {
-                            export: false,
                             first_token: doc_token.clone(),
                             last_token: doc_token,
                             statement: StatementInfo::DocComment(content),
@@ -1168,7 +1132,6 @@ impl Statement {
                         let last_token = claim.last_token().clone();
                         let se = StatementInfo::Claim(ClaimStatement { claim });
                         let s = Statement {
-                            export: false,
                             first_token,
                             last_token,
                             statement: se,

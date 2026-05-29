@@ -105,13 +105,7 @@ impl Statement {
 
         let signature = match &self.statement {
             StatementInfo::Theorem(statement) => statement.statement_string(),
-            _ => {
-                let rendered = self.to_string();
-                rendered
-                    .strip_prefix("export ")
-                    .unwrap_or(&rendered)
-                    .to_string()
-            }
+            _ => self.to_string(),
         };
         Some((name.to_string(), signature))
     }
@@ -466,12 +460,6 @@ impl Statement {
             }
 
             StatementInfo::DocComment(s) => allocator.text("/// ").append(allocator.text(s)),
-        };
-
-        let doc = if self.export {
-            allocator.text("export ").append(doc)
-        } else {
-            doc
         };
 
         indent.append(doc)

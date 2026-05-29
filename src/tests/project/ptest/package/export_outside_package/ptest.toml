@@ -1,3 +1,0 @@
-target = "main"
-expect = "error"
-message = "package implementation files"

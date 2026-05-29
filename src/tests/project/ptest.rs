@@ -553,7 +553,7 @@ fn parses_full_config() {
             command = "check"
             target = "pkg"
             expect = "error"
-            message = "missing export"
+            message = "missing implementation"
             check_hashes = true
             jobs = 2
             metrics.searches_total = 0
@@ -564,7 +564,7 @@ fn parses_full_config() {
             command: PtestCommand::Check,
             target: Some("pkg".to_string()),
             expectation: PtestExpectation::Error,
-            message: Some("missing export".to_string()),
+            message: Some("missing implementation".to_string()),
             check_hashes: true,
             jobs: Some(2),
             metrics: vec![PtestMetricExpectation {

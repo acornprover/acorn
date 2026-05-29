@@ -173,6 +173,7 @@ const PACKAGE_INTERFACE_FILE: &str = "interface.ac";
 #[derive(Clone)]
 struct PackageSignature {
     text: String,
+    axiomatic_theorem: bool,
     first_token: Token,
     last_token: Token,
 }
@@ -874,7 +875,7 @@ impl ParallelProjectLoader {
                             project.package_role_for_path(&path) == PackageRole::Interface
                         })
                     {
-                        if let Err(error) = project.validate_package_exports(&descriptor) {
+                        if let Err(error) = project.validate_package_implementations(&descriptor) {
                             project.modules[result.module_id.get() as usize].load_error(error);
                         }
                     }
@@ -3265,10 +3266,9 @@ impl Project {
         Ok(descriptors)
     }
 
-    fn collect_package_signatures(
+    fn collect_interface_signatures(
         &self,
         descriptor: &ModuleDescriptor,
-        exports_only: bool,
     ) -> error::Result<BTreeMap<String, PackageSignature>> {
         let path = self
             .path_from_descriptor(descriptor)
@@ -3278,27 +3278,11 @@ impl Project {
         let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
         let mut signatures = BTreeMap::new();
         for statement in &parsed.statements {
-            if exports_only && !statement.export {
-                continue;
-            }
-            if exports_only
-                && matches!(&statement.statement, StatementInfo::Theorem(t) if t.axiomatic)
-            {
-                return Err(statement.error("exported theorems cannot be axioms"));
-            }
-            if !exports_only {
-                if statement.export {
-                    return Err(statement.error("'export' is not allowed in interface.ac"));
-                }
-                if matches!(&statement.statement, StatementInfo::Theorem(t) if t.body.is_some()) {
-                    return Err(statement.error("interface theorems cannot have proof bodies"));
-                }
+            if matches!(&statement.statement, StatementInfo::Theorem(t) if t.body.is_some()) {
+                return Err(statement.error("interface theorems cannot have proof bodies"));
             }
 
             let Some((name, text)) = statement.package_signature() else {
-                if exports_only {
-                    return Err(statement.error("'export' can only be used on named declarations"));
-                }
                 if matches!(
                     &statement.statement,
                     StatementInfo::Import(_)
@@ -3316,6 +3300,7 @@ impl Project {
                     name.clone(),
                     PackageSignature {
                         text,
+                        axiomatic_theorem: false,
                         first_token: statement.first_token.clone(),
                         last_token: statement.last_token.clone(),
                     },
@@ -3328,56 +3313,94 @@ impl Project {
         Ok(signatures)
     }
 
-    fn validate_package_exports(
+    fn collect_implementation_signatures(
+        &self,
+        descriptor: &ModuleDescriptor,
+    ) -> error::Result<Vec<(String, PackageSignature)>> {
+        let path = self
+            .path_from_descriptor(descriptor)
+            .map_err(|e| Token::empty().error(&e.to_string()))?;
+        let text = read_source_text(&path, |path| self.read_file(path))
+            .map_err(|e| Token::empty().error(&e))?;
+        let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
+        let mut signatures = Vec::new();
+        for statement in &parsed.statements {
+            let Some((name, text)) = statement.package_signature() else {
+                continue;
+            };
+            signatures.push((
+                name,
+                PackageSignature {
+                    text,
+                    axiomatic_theorem: matches!(
+                        &statement.statement,
+                        StatementInfo::Theorem(t) if t.axiomatic
+                    ),
+                    first_token: statement.first_token.clone(),
+                    last_token: statement.last_token.clone(),
+                },
+            ));
+        }
+        Ok(signatures)
+    }
+
+    fn validate_package_implementations(
         &self,
         interface_descriptor: &ModuleDescriptor,
     ) -> error::Result<()> {
-        let interface_signatures = self.collect_package_signatures(interface_descriptor, false)?;
-        let mut export_signatures = BTreeMap::new();
+        let interface_signatures = self.collect_interface_signatures(interface_descriptor)?;
+        let mut implementation_signatures: BTreeMap<String, Vec<PackageSignature>> =
+            BTreeMap::new();
         for descriptor in self
             .package_implementation_descriptors(interface_descriptor)
             .map_err(|e| Token::empty().error(&e.to_string()))?
         {
-            for (name, signature) in self.collect_package_signatures(&descriptor, true)? {
-                if export_signatures
-                    .insert(name.clone(), signature.clone())
-                    .is_some()
-                {
-                    return Err(Error::new(
-                        &signature.first_token,
-                        &signature.last_token,
-                        &format!("duplicate export '{}'", name),
-                    ));
-                }
+            for (name, signature) in self.collect_implementation_signatures(&descriptor)? {
+                implementation_signatures
+                    .entry(name)
+                    .or_default()
+                    .push(signature);
             }
         }
 
         for (name, interface_signature) in &interface_signatures {
-            let Some(export_signature) = export_signatures.get(name) else {
+            let Some(candidates) = implementation_signatures.get(name) else {
                 return Err(Error::new(
                     &interface_signature.first_token,
                     &interface_signature.last_token,
-                    &format!("missing export for interface declaration '{}'", name),
+                    &format!(
+                        "missing implementation for interface declaration '{}'",
+                        name
+                    ),
                 ));
             };
-            if export_signature.text != interface_signature.text {
+            if candidates.len() > 1 {
+                let signature = &candidates[0];
                 return Err(Error::new(
-                    &export_signature.first_token,
-                    &export_signature.last_token,
+                    &signature.first_token,
+                    &signature.last_token,
                     &format!(
-                        "export '{}' does not match interface declaration\ninterface: {}\nexport: {}",
-                        name, interface_signature.text, export_signature.text
+                        "multiple implementations found for interface declaration '{}'",
+                        name
                     ),
                 ));
             }
-        }
-
-        for (name, export_signature) in &export_signatures {
-            if !interface_signatures.contains_key(name) {
+            let implementation_signature = &candidates[0];
+            if implementation_signature.axiomatic_theorem {
                 return Err(Error::new(
-                    &export_signature.first_token,
-                    &export_signature.last_token,
-                    &format!("export '{}' is not declared in interface.ac", name),
+                    &implementation_signature.first_token,
+                    &implementation_signature.last_token,
+                    &format!("implementation theorem '{}' cannot be an axiom", name),
+                ));
+            }
+            if implementation_signature.text != interface_signature.text {
+                return Err(Error::new(
+                    &implementation_signature.first_token,
+                    &implementation_signature.last_token,
+                    &format!(
+                        "implementation '{}' does not match interface declaration\ninterface: {}\nimplementation: {}",
+                        name, interface_signature.text, implementation_signature.text
+                    ),
                 ));
             }
         }
@@ -3407,7 +3430,7 @@ impl Project {
                 ));
             }
         }
-        self.validate_package_exports(interface_descriptor)
+        self.validate_package_implementations(interface_descriptor)
     }
 
     // Resolves aliases like `foo.default` to the canonical descriptor (`foo`) when
