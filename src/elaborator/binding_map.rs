@@ -346,7 +346,7 @@ impl BindingMap {
         self.module_info.get(&module_id)
     }
 
-    /// Just use this for testing.
+    /// Includes constants that are defined in this module but not available for unqualified lookup.
     pub fn has_constant_name(&self, name: &str) -> bool {
         let constant_name = ConstantName::unqualified(self.module_id, name);
         self.constant_defs.contains_key(&constant_name)
@@ -354,6 +354,13 @@ impl BindingMap {
 
     pub fn has_unqualified_constant_name(&self, name: &str) -> bool {
         self.unqualified.contains_key(name)
+    }
+
+    fn has_exported_name(&self, name: &str) -> bool {
+        self.has_unqualified_constant_name(name)
+            || self.has_typename(name)
+            || self.has_typeclass_name(name)
+            || self.is_module(name)
     }
 
     pub fn hide_unqualified_constant_name(&mut self, name: &str) {
@@ -1973,6 +1980,22 @@ impl BindingMap {
             Some(b) => b,
             None => return Err(name_token.error("could not load bindings for imported module")),
         };
+        let module_name = project
+            .get_module_descriptor(module)
+            .map(|descriptor| descriptor.to_string())
+            .unwrap_or_else(|| module.to_string());
+        if !bindings.has_exported_name(name) {
+            if bindings.has_constant_name(name) {
+                return Err(name_token.error(&format!(
+                    "'{}' is private to module '{}'",
+                    name, module_name
+                )));
+            }
+            return Err(name_token.error(&format!(
+                "module '{}' does not export '{}'",
+                module_name, name
+            )));
+        }
         if let Some(ModuleDescriptor::Name(parts)) = project.get_module_descriptor(module) {
             // `from foo import Bar` should still carry over the source module's datatype and
             // typeclass metadata, even though it doesn't bind the module name itself.

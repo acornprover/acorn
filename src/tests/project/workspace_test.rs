@@ -273,9 +273,30 @@ fn test_lemma_is_file_local() {
         "},
     );
     p.mock("/mock/bad.ac", "from foo import helper\n");
+    p.mock("/mock/missing.ac", "from foo import nope\n");
 
     p.expect_ok("main");
-    p.expect_module_err("bad");
+    let bad_id = p.load_module_by_name("bad").expect("bad should load");
+    let LoadState::Error(error) = p.get_module_by_id(bad_id) else {
+        panic!("expected bad to have an import error");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("'helper' is private to module 'foo'"),
+        "{error}"
+    );
+
+    let missing_id = p
+        .load_module_by_name("missing")
+        .expect("missing should load");
+    let LoadState::Error(error) = p.get_module_by_id(missing_id) else {
+        panic!("expected missing to have an import error");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("module 'foo' does not export 'nope'"),
+        "{error}"
+    );
 }
 
 #[test]
