@@ -22,10 +22,6 @@ fn main() {
         "cargo:rerun-if-changed={}",
         acornlib_dir.join("src").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        acornlib_dir.join("build").display()
-    );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let archive_path = out_dir.join("acornlib.tar.gz");
@@ -46,7 +42,6 @@ fn write_archive(acornlib_dir: &Path, archive_path: &Path) -> io::Result<()> {
     let mut files = Vec::new();
     files.push(PathBuf::from("acorn.toml"));
     collect_files(&acornlib_dir.join("src"), Path::new("src"), &mut files)?;
-    collect_files(&acornlib_dir.join("build"), Path::new("build"), &mut files)?;
     files.sort();
 
     for relative_path in files {

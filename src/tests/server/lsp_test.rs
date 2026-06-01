@@ -68,7 +68,6 @@ impl LspClient for MockClient {
 struct TestFixture {
     _temp_dir: TempDir, // Must keep this alive or the directory gets deleted!
     pub src_dir: ChildPath,
-    pub build_dir: ChildPath,
     pub client: Arc<MockClient>,
     pub server: AcornLanguageServer,
 }
@@ -97,7 +96,6 @@ impl TestFixture {
         TestFixture {
             _temp_dir: temp_dir,
             src_dir,
-            build_dir,
             client,
             server,
         }
@@ -133,7 +131,6 @@ impl TestFixture {
         TestFixture {
             _temp_dir: temp_dir,
             src_dir,
-            build_dir,
             client,
             server,
         }
@@ -210,10 +207,10 @@ impl TestFixture {
         panic!("Build did not complete within 5 seconds");
     }
 
-    /// Assert that a file in the build directory will exist within 5 seconds
+    /// Assert that a root source file's certificate will exist within 5 seconds.
     async fn assert_build_file_will_exist(&self, filename: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let path = self.build_dir.child(filename);
+        let path = self.src_dir.child("certs").child(filename);
 
         while tokio::time::Instant::now() < deadline {
             if path.exists() {
@@ -236,7 +233,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     build_dir.create_dir_all().unwrap();
     build_dir
         .child("manifest.json")
-        .write_str(r#"{"version":24,"modules":{}}"#)
+        .write_str(r#"{"version":25,"modules":{}}"#)
         .unwrap();
 
     let args = ServerArgs {
@@ -249,7 +246,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 24, but this version of the Acorn VS Code extension only supports up to project format 23. Please update the Acorn VS Code extension.";
+    let expected = "This version of acornlib uses project format 25, but this version of the Acorn VS Code extension only supports up to project format 24. Please update the Acorn VS Code extension.";
 
     assert_eq!(error, expected);
 
@@ -283,7 +280,7 @@ async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization(
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 23. Please run `acorn verify --update-version` to update acornlib's project format.";
+    let expected = "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format.";
 
     assert_eq!(error, expected);
 }
@@ -350,8 +347,8 @@ async fn test_non_library_file_certificates() {
         "JSONL file should contain certificate for external_theorem"
     );
 
-    // Verify that the manifest in the build directory does NOT contain this file
-    let manifest_file = fx.build_dir.child("manifest.json");
+    // Verify that the library package manifest does NOT contain this file
+    let manifest_file = fx.src_dir.child("certs").child("manifest.json");
     if manifest_file.exists() {
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
         assert!(
@@ -708,7 +705,6 @@ async fn test_library_save_builds_saved_target_only() {
     let fx = TestFixture {
         _temp_dir: temp_dir,
         src_dir,
-        build_dir,
         client,
         server,
     };
@@ -716,7 +712,7 @@ async fn test_library_save_builds_saved_target_only() {
     fx.assert_build_file_will_exist("foo.jsonl").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !fx.build_dir.child("bar.jsonl").exists(),
+        !fx.src_dir.child("certs").child("bar.jsonl").exists(),
         "saving foo.ac should not build unrelated bar.ac"
     );
 }
@@ -780,7 +776,6 @@ async fn test_library_save_builds_dependent_targets() {
     let fx = TestFixture {
         _temp_dir: temp_dir,
         src_dir,
-        build_dir,
         client,
         server,
     };
@@ -789,7 +784,7 @@ async fn test_library_save_builds_dependent_targets() {
     fx.assert_build_file_will_exist("bar.jsonl").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !fx.build_dir.child("baz.jsonl").exists(),
+        !fx.src_dir.child("certs").child("baz.jsonl").exists(),
         "saving foo.ac should not build unrelated baz.ac"
     );
 }

@@ -1236,7 +1236,10 @@ impl<'a> Builder<'a> {
 
     pub fn begin_module_work_build(&mut self, target_count: usize) {
         self.prepare_eval_mode();
-        self.build_cache = Some(BuildCache::new(self.project().build_dir().clone()));
+        self.build_cache = Some(BuildCache::new(
+            self.project().src_dir().clone(),
+            self.project().build_dir().clone(),
+        ));
         self.log_global(format!("verifying {} modules...", target_count));
     }
 
@@ -2670,11 +2673,18 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        let dependency_hashes = if module_good {
+            self.dependency_hashes_for_module(lowered.module_id)
+        } else {
+            Vec::new()
+        };
 
-        self.build_cache
-            .as_mut()
-            .unwrap()
-            .insert(target.clone(), cert_store, content_hash);
+        self.build_cache.as_mut().unwrap().insert(
+            target.clone(),
+            cert_store,
+            content_hash,
+            &dependency_hashes,
+        );
 
         Ok(())
     }
@@ -2785,6 +2795,7 @@ impl<'a> Builder<'a> {
         config: &ModuleWorkerConfig,
     ) -> ModuleBuildResult {
         let mut events = Vec::new();
+        let src_dir = project.src_dir().clone();
         let build_dir = project.build_dir().clone();
         let mut builder =
             Builder::new_with_view(project, cancellation_token, |event| events.push(event));
@@ -2792,7 +2803,7 @@ impl<'a> Builder<'a> {
         builder.metrics.modules_total = 1;
         let goal_count = lowered.goal_count() as i32;
         builder.metrics.goals_total = goal_count;
-        builder.build_cache = Some(BuildCache::new(build_dir));
+        builder.build_cache = Some(BuildCache::new(src_dir, build_dir));
         builder.prepare_eval_mode();
 
         let skip_metrics_before = builder.metrics.clone();
@@ -3237,7 +3248,10 @@ impl<'a> Builder<'a> {
         self.prepare_eval_mode();
 
         // Initialize the build cache
-        self.build_cache = Some(BuildCache::new(self.project().build_dir().clone()));
+        self.build_cache = Some(BuildCache::new(
+            self.project().src_dir().clone(),
+            self.project().build_dir().clone(),
+        ));
 
         // Build in alphabetical order by module name for consistency.
         let mut targets = self.project().targets().iter().cloned().collect::<Vec<_>>();
@@ -3413,6 +3427,23 @@ impl<'a> Builder<'a> {
     /// Tries to skip building a module if it and all its dependencies are unchanged.
     /// If successful, copies certificates to the new build cache and returns true.
     /// This only works when check_hashes is true.
+    fn dependency_hashes_for_module(
+        &self,
+        module_id: ModuleId,
+    ) -> Vec<(ModuleDescriptor, blake3::Hash)> {
+        let mut dependencies = Vec::new();
+        for dep_id in self.project().all_dependencies(module_id) {
+            let Some(dep_descriptor) = self.project().get_module_descriptor(dep_id) else {
+                continue;
+            };
+            let Some(dep_hash) = self.project().get_module_content_hash(dep_id) else {
+                continue;
+            };
+            dependencies.push((dep_descriptor.clone(), dep_hash));
+        }
+        dependencies
+    }
+
     fn try_skip_unchanged_module(
         &mut self,
         module_id: ModuleId,
@@ -3464,15 +3495,14 @@ impl<'a> Builder<'a> {
         };
 
         // We verified that certificates exist, but we don't copy them to the new cache.
-        // They'll be handled during the merge in update_build_cache.
-        // We still need to update the manifest though.
-        if let ModuleDescriptor::Name(parts) = target {
-            self.build_cache
-                .as_mut()
-                .unwrap()
-                .manifest
-                .insert(parts, current_hash);
-        }
+        // They'll be handled during the merge in update_build_cache. We still need to record
+        // the package manifest entry for full builds, where old manifest entries are not merged.
+        let dependency_hashes = self.dependency_hashes_for_module(module_id);
+        self.build_cache.as_mut().unwrap().record_unchanged(
+            target,
+            current_hash,
+            &dependency_hashes,
+        );
 
         true
     }

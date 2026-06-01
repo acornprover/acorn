@@ -807,6 +807,33 @@ mod tests {
         (temp, src, build)
     }
 
+    fn cert_for_source(src: &ChildPath, source_rel: &str) -> ChildPath {
+        let source_rel = std::path::Path::new(source_rel);
+        let mut cert_rel = std::path::PathBuf::new();
+        if let Some(parent) = source_rel.parent() {
+            cert_rel.push(parent);
+        }
+        let stem = source_rel.file_stem().unwrap().to_string_lossy();
+        cert_rel.push("certs");
+        cert_rel.push(format!("{}.jsonl", stem));
+        src.child(cert_rel.to_string_lossy().as_ref())
+    }
+
+    fn manifest_for_package(src: &ChildPath, package_rel: &str) -> ChildPath {
+        let mut manifest_rel = std::path::PathBuf::new();
+        if !package_rel.is_empty() {
+            manifest_rel.push(package_rel);
+        }
+        manifest_rel.push("certs");
+        manifest_rel.push("manifest.json");
+        src.child(manifest_rel.to_string_lossy().as_ref())
+    }
+
+    fn save_cert_store(path: &ChildPath, store: CertificateStore) {
+        std::fs::create_dir_all(path.path().parent().unwrap()).unwrap();
+        store.save(path.path()).unwrap();
+    }
+
     fn log_text(output: &VerifierOutput) -> String {
         output
             .events
@@ -993,13 +1020,13 @@ mod tests {
         );
 
         // Check that the cert file has one line
-        let cert_file = build.child("foo.jsonl");
-        assert!(cert_file.exists(), "build/foo.jsonl should exist");
+        let cert_file = cert_for_source(&src, "foo.ac");
+        assert!(cert_file.exists(), "src/certs/foo.jsonl should exist");
         let jsonl_content = std::fs::read_to_string(cert_file.path()).unwrap();
         let line_count = jsonl_content.lines().count();
         assert_eq!(line_count, 1,);
 
-        assert!(build.child("manifest.json").exists());
+        assert!(manifest_for_package(&src, "").exists());
 
         // Verify again (all modules)
         let mut verifier2 = Verifier::new(
@@ -1026,7 +1053,7 @@ mod tests {
         assert_eq!(output2.metrics.searches_total, 0);
 
         // Check that the cert file still has one line
-        assert!(cert_file.exists(), "build/foo.jsonl should exist");
+        assert!(cert_file.exists(), "src/certs/foo.jsonl should exist");
         let jsonl_content = std::fs::read_to_string(cert_file.path()).unwrap();
         let line_count = jsonl_content.lines().count();
         assert_eq!(line_count, 1,);
@@ -1076,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_verify_parallel_cache_writes_preserve_manifest() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1108,13 +1135,13 @@ mod tests {
         assert_eq!(initial_output.status, BuildStatus::Good);
         assert_eq!(initial_output.metrics.searches_success, 2);
 
-        let manifest_file = build.child("manifest.json");
+        let manifest_file = manifest_for_package(&src, "");
         assert!(manifest_file.exists(), "manifest.json should exist");
         let read_manifest = || {
             let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-            serde_json::from_str::<crate::manifest::Manifest>(&manifest_content).unwrap()
+            serde_json::from_str::<crate::manifest::PackageManifest>(&manifest_content).unwrap()
         };
-        assert_eq!(read_manifest().modules.len(), 2);
+        assert_eq!(read_manifest().implementation.len(), 2);
 
         let mut replay = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1128,7 +1155,7 @@ mod tests {
         assert_eq!(replay_output.status, BuildStatus::Good);
         assert_eq!(replay_output.metrics.certs_cached, 2);
         assert_eq!(replay_output.metrics.searches_total, 0);
-        assert_eq!(read_manifest().modules.len(), 2);
+        assert_eq!(read_manifest().implementation.len(), 2);
 
         let mut skipped = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1140,12 +1167,12 @@ mod tests {
         let skipped_output = skipped.run().unwrap();
         assert_eq!(skipped_output.status, BuildStatus::Good);
         assert_eq!(skipped_output.metrics.modules_cached, 2);
-        assert_eq!(read_manifest().modules.len(), 2);
+        assert_eq!(read_manifest().implementation.len(), 2);
     }
 
     #[test]
     fn test_rejects_cached_certificate_unimported_lib_reference() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("util.ac")
             .write_str("let contradiction: Bool = false\n")
@@ -1154,14 +1181,16 @@ mod tests {
             .write_str("theorem goal { false }\n")
             .unwrap();
 
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "goal".to_string(),
-                vec!["lib(util).contradiction".to_string()],
-            )],
-        }
-        .save(build.child("main.jsonl").path())
-        .unwrap();
+        let cert_path = cert_for_source(&src, "main.ac");
+        save_cert_store(
+            &cert_path,
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "goal".to_string(),
+                    vec!["lib(util).contradiction".to_string()],
+                )],
+            },
+        );
 
         let mut verifier = Verifier::new_for_check(
             acornlib.path().to_path_buf(),
@@ -1223,7 +1252,7 @@ mod tests {
 
     #[test]
     fn test_verify_trims_unused_cached_cert_steps() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1235,15 +1264,16 @@ mod tests {
             )
             .unwrap();
 
-        let cert_path = build.child("foo.jsonl");
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "simple_truth".to_string(),
-                vec!["let w0: Bool satisfy { true }".to_string()],
-            )],
-        }
-        .save(cert_path.path())
-        .unwrap();
+        let cert_path = cert_for_source(&src, "foo.ac");
+        save_cert_store(
+            &cert_path,
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "simple_truth".to_string(),
+                    vec!["let w0: Bool satisfy { true }".to_string()],
+                )],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1266,7 +1296,7 @@ mod tests {
 
     #[test]
     fn test_eval_only_searches_goals_with_nonempty_cached_proofs() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1282,17 +1312,18 @@ mod tests {
             )
             .unwrap();
 
-        CertificateStore {
-            certs: vec![
-                Certificate::new(
-                    "benchmark".to_string(),
-                    vec!["dummy proof step".to_string()],
-                ),
-                Certificate::new("skipped".to_string(), vec![]),
-            ],
-        }
-        .save(build.child("foo.jsonl").path())
-        .unwrap();
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![
+                    Certificate::new(
+                        "benchmark".to_string(),
+                        vec!["dummy proof step".to_string()],
+                    ),
+                    Certificate::new("skipped".to_string(), vec![]),
+                ],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1325,7 +1356,7 @@ mod tests {
 
     #[test]
     fn test_eval_can_search_modules_in_parallel() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1346,22 +1377,24 @@ mod tests {
             )
             .unwrap();
 
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "foo_goal".to_string(),
-                vec!["dummy proof step".to_string()],
-            )],
-        }
-        .save(build.child("foo.jsonl").path())
-        .unwrap();
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "bar_goal".to_string(),
-                vec!["dummy proof step".to_string()],
-            )],
-        }
-        .save(build.child("bar.jsonl").path())
-        .unwrap();
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "foo_goal".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
+        save_cert_store(
+            &cert_for_source(&src, "bar.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "bar_goal".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1394,7 +1427,7 @@ mod tests {
 
     #[test]
     fn test_eval_skip_omits_previous_plain_proposition() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1412,14 +1445,15 @@ mod tests {
             )
             .unwrap();
 
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "p or q".to_string(),
-                vec!["dummy proof step".to_string()],
-            )],
-        }
-        .save(build.child("foo.jsonl").path())
-        .unwrap();
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "p or q".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1470,7 +1504,7 @@ mod tests {
 
     #[test]
     fn test_eval_skip_includes_empty_cached_proofs_for_nonzero_skip() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1488,11 +1522,12 @@ mod tests {
             )
             .unwrap();
 
-        CertificateStore {
-            certs: vec![Certificate::new("p or q".to_string(), vec![])],
-        }
-        .save(build.child("foo.jsonl").path())
-        .unwrap();
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new("p or q".to_string(), vec![])],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1541,7 +1576,7 @@ mod tests {
 
     #[test]
     fn test_eval_skip_respects_non_plain_barrier() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1562,14 +1597,15 @@ mod tests {
             )
             .unwrap();
 
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "p or q".to_string(),
-                vec!["dummy proof step".to_string()],
-            )],
-        }
-        .save(build.child("foo.jsonl").path())
-        .unwrap();
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "p or q".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
 
         let mut verifier = Verifier::new(
             acornlib.path().to_path_buf(),
@@ -1606,7 +1642,7 @@ mod tests {
 
     #[test]
     fn test_read_only_check_does_not_trim_cached_cert_steps() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1618,15 +1654,16 @@ mod tests {
             )
             .unwrap();
 
-        let cert_path = build.child("foo.jsonl");
-        CertificateStore {
-            certs: vec![Certificate::new(
-                "simple_truth".to_string(),
-                vec!["let w0: Bool satisfy { true }".to_string()],
-            )],
-        }
-        .save(cert_path.path())
-        .unwrap();
+        let cert_path = cert_for_source(&src, "foo.ac");
+        save_cert_store(
+            &cert_path,
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "simple_truth".to_string(),
+                    vec!["let w0: Bool satisfy { true }".to_string()],
+                )],
+            },
+        );
         let original = std::fs::read_to_string(cert_path.path()).unwrap();
 
         let config = ProjectConfig {
@@ -1659,7 +1696,7 @@ mod tests {
 
     #[test]
     fn test_verify_relative_src_path_uses_canonical_module_cache() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         src.child("foo.ac")
             .write_str(
@@ -1685,8 +1722,8 @@ mod tests {
         assert_eq!(output1.metrics.searches_total, 1);
 
         assert!(
-            build.child("foo.jsonl").exists(),
-            "relative src/ path should write the canonical build cache file"
+            cert_for_source(&src, "foo.ac").exists(),
+            "relative src/ path should write the canonical certificate file"
         );
 
         let mut verifier2 = Verifier::new(
@@ -1800,7 +1837,7 @@ instance Nat: Two
 
     #[test]
     fn test_single_line_verification_accepts_relative_stdin_append_file_target() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         let nested = src.child("nested");
         nested.create_dir_all().unwrap();
@@ -1834,7 +1871,7 @@ instance Nat: Two
         assert_eq!(output.metrics.goals_total, 2);
         assert_eq!(output.metrics.goals_success, 2);
         assert_eq!(output.metrics.searches_total, 2);
-        assert!(!build.child("nested").child("test.jsonl").exists());
+        assert!(!cert_for_source(&src, "nested/test.ac").exists());
     }
 
     #[test]
@@ -1984,7 +2021,7 @@ theorem later {
 
     #[test]
     fn test_verifier_stdin_append_target_uses_resolved_cache_path() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         let nested = src.child("nested");
         nested.create_dir_all().unwrap();
@@ -2013,8 +2050,8 @@ theorem later {
         assert_eq!(output.metrics.goals_total, 1);
         assert_eq!(output.metrics.goals_success, 1);
         assert!(
-            build.child("nested").child("test.jsonl").exists(),
-            "build/nested/test.jsonl should exist"
+            cert_for_source(&src, "nested/test.ac").exists(),
+            "src/nested/certs/test.jsonl should exist"
         );
     }
 
@@ -2194,21 +2231,20 @@ theorem later {
         assert!(output.metrics.searches_total > 0); // Should have performed at least one search
 
         // With certificates enabled, we should NOT create YAML files
-        let build_foo_dir = build.child("foo");
-        let build_file = build_foo_dir.child("bar.yaml");
+        let build_file = build.child("foo").child("bar.yaml");
         assert!(
             !build_file.exists(),
             "YAML cache file should NOT exist when using certificates"
         );
 
         // Check that we created a JSONL file for certificates in the nested directory
-        let cert_file = build_foo_dir.child("bar.jsonl");
+        let cert_file = cert_for_source(&src, "foo/bar.ac");
         assert!(
             cert_file.exists(),
-            "Certificate file should exist at build/foo/bar.jsonl"
+            "Certificate file should exist at src/foo/certs/bar.jsonl"
         );
 
-        assert!(build.child("manifest.json").exists());
+        assert!(manifest_for_package(&src, "").exists());
 
         // Verify again (all modules)
         let mut verifier2 = Verifier::new(
@@ -2382,7 +2418,7 @@ theorem later {
 
     #[test]
     fn test_module_skipping() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Create foo.ac with a theorem
         src.child("foo.ac")
@@ -2406,7 +2442,7 @@ theorem later {
         assert_eq!(output1.metrics.modules_cached, 0);
 
         // Check that manifest was created after first run
-        let manifest = build.child("manifest.json");
+        let manifest = manifest_for_package(&src, "");
         assert!(
             manifest.exists(),
             "manifest.json should exist after first build"
@@ -2442,7 +2478,7 @@ theorem later {
 
     #[test]
     fn test_unchanged_jsonl_not_rewritten() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Create foo.ac with a theorem
         src.child("foo.ac")
@@ -2464,7 +2500,7 @@ theorem later {
         assert_eq!(output1.status, BuildStatus::Good);
 
         // Get the modification time of the foo.jsonl file
-        let foo_jsonl = build.child("foo.jsonl");
+        let foo_jsonl = cert_for_source(&src, "foo.ac");
         assert!(
             foo_jsonl.exists(),
             "foo.jsonl should exist after first build"
@@ -2510,7 +2546,7 @@ theorem later {
         );
 
         // Check that bar.jsonl was created
-        let bar_jsonl = build.child("bar.jsonl");
+        let bar_jsonl = cert_for_source(&src, "bar.ac");
         assert!(
             bar_jsonl.exists(),
             "bar.jsonl should exist after second build"
@@ -2563,7 +2599,7 @@ theorem later {
 
     #[test]
     fn test_manifest_preserved_when_verifying_single_module() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Create two modules
         src.child("module_a.ac")
@@ -2600,12 +2636,13 @@ theorem later {
         assert_eq!(output1.status, BuildStatus::Good);
 
         // Check manifest has two entries
-        let manifest_file = build.child("manifest.json");
+        let manifest_file = manifest_for_package(&src, "");
         assert!(manifest_file.exists(), "manifest.json should exist");
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             2,
             "manifest should have 2 entries after verifying both modules"
         );
@@ -2623,9 +2660,10 @@ theorem later {
 
         // Check manifest STILL has two entries (this is the bug - it will only have one)
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             2,
             "BUG: manifest should still have 2 entries after verifying only module_a, but other entries were deleted"
         );
@@ -2635,7 +2673,7 @@ theorem later {
     fn test_manifest_preserved_when_reproving_single_module() {
         // This test mimics the `reprove <module> --save-results` command behavior.
         // The key difference from verify is: read_cache: false, write_cache: true
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Create two modules
         src.child("module_a.ac")
@@ -2672,12 +2710,13 @@ theorem later {
         assert_eq!(output1.status, BuildStatus::Good);
 
         // Check manifest has two entries
-        let manifest_file = build.child("manifest.json");
+        let manifest_file = manifest_for_package(&src, "");
         assert!(manifest_file.exists(), "manifest.json should exist");
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             2,
             "manifest should have 2 entries after verifying both modules"
         );
@@ -2703,9 +2742,10 @@ theorem later {
 
         // Check manifest STILL has two entries
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             2,
             "manifest should still have 2 entries after reproving only module_a"
         );
@@ -2747,12 +2787,12 @@ theorem later {
         assert_eq!(output.status, BuildStatus::Good);
 
         assert!(
-            build.child("rat.jsonl").exists(),
+            cert_for_source(&src, "rat/default.ac").exists(),
             "canonical cache file should be written for rat/default.ac"
         );
         assert!(
-            !build.child("rat").child("default.jsonl").exists(),
-            "default.jsonl should never be written for default.ac modules"
+            !build.child("rat.jsonl").exists(),
+            "legacy build/rat.jsonl should not be written for default.ac modules"
         );
 
         let mut check = Verifier::new(
@@ -3017,7 +3057,7 @@ theorem identity_lambda_preserves_op[Y: TcB] {
 
     #[test]
     fn test_deleted_module_removed_from_manifest_on_full_verify() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Create two modules
         let module_a = src.child("module_a.ac");
@@ -3056,12 +3096,13 @@ theorem identity_lambda_preserves_op[Y: TcB] {
         assert_eq!(output1.status, BuildStatus::Good);
 
         // Check manifest has two entries
-        let manifest_file = build.child("manifest.json");
+        let manifest_file = manifest_for_package(&src, "");
         assert!(manifest_file.exists(), "manifest.json should exist");
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             2,
             "manifest should have 2 entries after verifying both modules"
         );
@@ -3082,24 +3123,24 @@ theorem identity_lambda_preserves_op[Y: TcB] {
 
         // Check manifest now only has one entry (module_b should be removed)
         let manifest_content = std::fs::read_to_string(manifest_file.path()).unwrap();
-        let manifest: crate::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_content).unwrap();
         assert_eq!(
-            manifest.modules.len(),
+            manifest.implementation.len(),
             1,
             "manifest should have only 1 entry after deleting module_b and running full verify"
         );
 
         // Verify the remaining entry is module_a
-        let module_a_name = crate::manifest::ModuleName::new(&vec!["module_a".to_string()]);
         assert!(
-            manifest.modules.contains_key(&module_a_name),
+            manifest.implementation.contains_key("module_a.ac"),
             "manifest should still contain module_a"
         );
     }
 
     #[test]
     fn test_global_certificate_preservation_across_modules() {
-        let (acornlib, src, build) = setup();
+        let (acornlib, src, _build) = setup();
 
         // Phase 1: Initial build - both modules verify successfully
         src.child("module_a.ac")
@@ -3137,8 +3178,8 @@ theorem identity_lambda_preserves_op[Y: TcB] {
         assert_eq!(output1.status, BuildStatus::Good);
 
         // Check initial certificates: both modules should have 1 cert each
-        let cert_a = build.child("module_a.jsonl");
-        let cert_b = build.child("module_b.jsonl");
+        let cert_a = cert_for_source(&src, "module_a.ac");
+        let cert_b = cert_for_source(&src, "module_b.ac");
         assert!(cert_a.exists(), "module_a.jsonl should exist");
         assert!(cert_b.exists(), "module_b.jsonl should exist");
 

@@ -66,7 +66,7 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the project format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build or project layout.
-pub const PROJECT_FORMAT_VERSION: u32 = 23;
+pub const PROJECT_FORMAT_VERSION: u32 = 24;
 
 /// A newtype wrapper for module names, created by joining parts with "."
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -112,7 +112,92 @@ impl std::fmt::Display for HexHash {
     }
 }
 
+/// The per-package record of the last successful checked state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageManifest {
+    /// Hash of interface.ac for explicit packages. Omitted for the implicit global package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<HexHash>,
+
+    /// Hashes of package implementation files, keyed by package-relative source path.
+    #[serde(default)]
+    pub implementation: BTreeMap<String, HexHash>,
+
+    /// Hashes of external public APIs this package was checked against.
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, HexHash>,
+}
+
+impl PackageManifest {
+    pub fn record_interface(&mut self, hash: blake3::Hash) {
+        self.interface = Some(HexHash::new(hash));
+    }
+
+    pub fn record_implementation(&mut self, path: String, hash: blake3::Hash) {
+        self.implementation.insert(path, HexHash::new(hash));
+    }
+
+    pub fn record_dependency(&mut self, name: String, hash: blake3::Hash) {
+        self.dependencies.insert(name, HexHash::new(hash));
+    }
+
+    pub fn matches_interface(&self, hash: blake3::Hash) -> bool {
+        self.interface.as_ref() == Some(&HexHash::new(hash))
+    }
+
+    pub fn matches_implementation(&self, path: &str, hash: blake3::Hash) -> bool {
+        self.implementation
+            .get(path)
+            .is_some_and(|stored| stored == &HexHash::new(hash))
+    }
+
+    pub fn merge_missing_from(&mut self, old: &PackageManifest) {
+        if self.interface.is_none() {
+            self.interface = old.interface.clone();
+        }
+        for (path, hash) in &old.implementation {
+            self.implementation
+                .entry(path.clone())
+                .or_insert_with(|| hash.clone());
+        }
+        for (name, hash) in &old.dependencies {
+            self.dependencies
+                .entry(name.clone())
+                .or_insert_with(|| hash.clone());
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.interface.is_none() && self.implementation.is_empty() && self.dependencies.is_empty()
+    }
+
+    /// Save the package manifest atomically.
+    pub fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let Some(parent) = path.parent() else {
+            return Err("manifest path has no parent directory".into());
+        };
+        std::fs::create_dir_all(parent)?;
+        let json = serde_json::to_string_pretty(self)?;
+        let temp_path = path.with_file_name(".manifest.json.tmp");
+        let mut file = File::create(&temp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self, ManifestError> {
+        let mut file = File::open(path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        Ok(serde_json::from_str(&contents)?)
+    }
+}
+
 /// The manifest structure that stores module hashes
+/// This is the legacy root build/manifest.json format. New cache records are package-local
+/// PackageManifest files; this remains for project_format_version fallback during migration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Version of the manifest format

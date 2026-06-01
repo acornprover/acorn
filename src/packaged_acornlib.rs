@@ -108,19 +108,33 @@ fn verify_layout(acornlib_dir: &Path) -> Result<(), String> {
             acornlib_dir.join("src").display()
         ));
     }
-    if !acornlib_dir.join("build").is_dir() {
+    if !has_package_manifest(&acornlib_dir.join("src")) {
         return Err(format!(
-            "packaged acornlib is missing {}",
-            acornlib_dir.join("build").display()
-        ));
-    }
-    if !acornlib_dir.join("build").join("manifest.json").is_file() {
-        return Err(format!(
-            "packaged acornlib is missing {}",
-            acornlib_dir.join("build").join("manifest.json").display()
+            "packaged acornlib is missing package manifests under {}",
+            acornlib_dir.join("src").display()
         ));
     }
     Ok(())
+}
+
+fn has_package_manifest(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().and_then(|name| name.to_str()) == Some("certs")
+                && path.join("manifest.json").is_file()
+            {
+                return true;
+            }
+            if has_package_manifest(&path) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn write_metadata(acornlib_dir: &Path, archive_hash: &str) -> Result<(), String> {
@@ -201,7 +215,7 @@ mod tests {
         let first = get_or_extract(temp.path()).unwrap();
         assert!(first.join("acorn.toml").is_file());
         assert!(first.join("src").is_dir());
-        assert!(first.join("build").join("manifest.json").is_file());
+        assert!(has_package_manifest(&first.join("src")));
         assert!(first.join(CACHE_METADATA_FILE).is_file());
 
         let metadata = fs::read_to_string(first.join(CACHE_METADATA_FILE)).unwrap();

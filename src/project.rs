@@ -169,6 +169,12 @@ pub enum PackageRole {
 }
 
 const PACKAGE_INTERFACE_FILE: &str = "interface.ac";
+const CERTS_DIR: &str = "certs";
+
+fn path_has_certs_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == CERTS_DIR)
+}
 
 #[derive(Clone)]
 struct PackageSignature {
@@ -293,6 +299,10 @@ impl ProjectView {
 
     pub fn build_dir(&self) -> &PathBuf {
         &self.build_dir
+    }
+
+    pub fn src_dir(&self) -> &PathBuf {
+        &self.src_dir
     }
 
     pub fn build_cache(&self) -> &BuildCache {
@@ -965,31 +975,31 @@ mod tests {
     #[test]
     fn project_error_formats_manifest_version_for_callers() {
         let too_new = ProjectError::from(ManifestError::VersionTooNew {
-            found: 24,
-            supported: 23,
+            found: 25,
+            supported: 24,
         });
 
         assert_eq!(
             too_new.cli_message(),
-            "This version of acornlib uses project format 24, but this version of the acorn binary only supports up to project format 23. Please run `acorn --update`."
+            "This version of acornlib uses project format 25, but this version of the acorn binary only supports up to project format 24. Please run `acorn --update`."
         );
         assert_eq!(
             too_new.vscode_message(),
-            "This version of acornlib uses project format 24, but this version of the Acorn VS Code extension only supports up to project format 23. Please update the Acorn VS Code extension."
+            "This version of acornlib uses project format 25, but this version of the Acorn VS Code extension only supports up to project format 24. Please update the Acorn VS Code extension."
         );
 
         let too_old = ProjectError::from(ManifestError::VersionTooOld {
             found: 22,
-            supported: 23,
+            supported: 24,
         });
 
         assert_eq!(
             too_old.cli_message(),
-            "This version of acornlib uses project format 22, but this version of the acorn binary writes project format 23. Please run `acorn verify --update-version` to update acornlib's project format."
+            "This version of acornlib uses project format 22, but this version of the acorn binary writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format."
         );
         assert_eq!(
             too_old.vscode_message(),
-            "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 23. Please run `acorn verify --update-version` to update acornlib's project format."
+            "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format."
         );
     }
 
@@ -1108,8 +1118,8 @@ mod tests {
         .expect("acorn.toml should be written");
 
         let mut project =
-            Project::new(src_dir, build_dir.clone(), ProjectConfig::default()).unwrap();
-        project.update_build_cache(BuildCache::new(build_dir), false);
+            Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default()).unwrap();
+        project.update_build_cache(BuildCache::new(src_dir.clone(), build_dir), false);
 
         let acorn_toml = fs::read_to_string(temp_dir.path().join("acorn.toml"))
             .expect("acorn.toml should be readable");
@@ -1404,6 +1414,9 @@ impl Project {
         let mut interface_paths: Vec<PathBuf> = Vec::new();
         for entry in WalkDir::new(src_dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
+            if path_has_certs_component(path) {
+                continue;
+            }
             if !entry.file_type().is_file()
                 || path.file_name().and_then(|name| name.to_str()) != Some(PACKAGE_INTERFACE_FILE)
             {
@@ -1511,9 +1524,10 @@ impl Project {
         // manifest entries from other modules during partial builds).
         let cache_load_start = std::time::Instant::now();
         let build_cache = if config.read_cache || config.write_cache {
-            BuildCache::load(build_dir.clone())?
+            let load_legacy_cache = project_format_version < Manifest::current_version();
+            BuildCache::load(src_dir.clone(), build_dir.clone(), load_legacy_cache)?
         } else {
-            BuildCache::new(build_dir.clone())
+            BuildCache::new(src_dir.clone(), build_dir.clone())
         };
         let cache_load_time = cache_load_start.elapsed();
 
@@ -1932,6 +1946,9 @@ impl Project {
         {
             if entry.file_type().is_file() {
                 let path = entry.path();
+                if path_has_certs_component(path) {
+                    continue;
+                }
                 if path.extension() == Some(std::ffi::OsStr::new("ac")) {
                     paths.push(path.to_path_buf());
                 }
@@ -2007,6 +2024,9 @@ impl Project {
         {
             if entry.file_type().is_file() {
                 let path = entry.path();
+                if path_has_certs_component(path) {
+                    continue;
+                }
                 if path.extension() == Some(std::ffi::OsStr::new("ac")) {
                     paths.push(path.to_path_buf());
                 }
@@ -2138,6 +2158,9 @@ impl Project {
                 .filter_map(Result::ok)
             {
                 let entry_path = entry.path();
+                if path_has_certs_component(entry_path) {
+                    continue;
+                }
                 if entry.file_type().is_file()
                     && entry_path.file_name().and_then(|name| name.to_str())
                         == Some(PACKAGE_INTERFACE_FILE)
@@ -2147,6 +2170,9 @@ impl Project {
             }
         }
         for open_path in self.open_files.keys() {
+            if path_has_certs_component(open_path) {
+                continue;
+            }
             if open_path.file_name().and_then(|name| name.to_str()) == Some(PACKAGE_INTERFACE_FILE)
             {
                 interface_paths.push(open_path.clone());
@@ -3239,6 +3265,9 @@ impl Project {
                 .filter_map(Result::ok)
             {
                 let path = entry.path();
+                if path_has_certs_component(path) {
+                    continue;
+                }
                 if entry.file_type().is_file()
                     && path.extension() == Some(std::ffi::OsStr::new("ac"))
                     && path != interface_path
@@ -3248,6 +3277,9 @@ impl Project {
             }
         } else {
             for path in self.open_files.keys() {
+                if path_has_certs_component(path) {
+                    continue;
+                }
                 if path.starts_with(package_root)
                     && path.extension() == Some(std::ffi::OsStr::new("ac"))
                     && path != &interface_path

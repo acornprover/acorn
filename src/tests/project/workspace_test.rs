@@ -526,13 +526,15 @@ fn create_cached_certificate_secret_import_project() -> (tempfile::TempDir, Proj
 
     fs::write(src_dir.join("util.ac"), "let util_fact: Bool = true\n").unwrap();
     fs::write(src_dir.join("main.ac"), "theorem goal { true }\n").unwrap();
+    let cert_dir = src_dir.join("certs");
+    fs::create_dir(&cert_dir).unwrap();
     CertificateStore {
         certs: vec![Certificate::new(
             "goal".to_string(),
             vec!["lib(util).util_fact".to_string()],
         )],
     }
-    .save(&build_dir.join("main.jsonl"))
+    .save(&cert_dir.join("main.jsonl"))
     .unwrap();
 
     let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();
