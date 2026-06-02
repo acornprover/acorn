@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -3317,7 +3317,8 @@ impl Project {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
             }
 
-            let Some((name, text)) = statement.package_signature() else {
+            let statement_signatures = statement.package_signatures();
+            if statement_signatures.is_empty() {
                 if matches!(
                     &statement.statement,
                     StatementInfo::Import(_)
@@ -3329,20 +3330,24 @@ impl Project {
                 return Err(
                     statement.error("interface.ac can only contain imports and declarations")
                 );
-            };
-            if signatures
-                .insert(
-                    name.clone(),
-                    PackageSignature {
-                        text,
-                        axiomatic_theorem: false,
-                        first_token: statement.first_token.clone(),
-                        last_token: statement.last_token.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(statement.error(&format!("duplicate package declaration '{}'", name)));
+            }
+            for (name, text) in statement_signatures {
+                if signatures
+                    .insert(
+                        name.clone(),
+                        PackageSignature {
+                            text,
+                            axiomatic_theorem: false,
+                            first_token: statement.first_token.clone(),
+                            last_token: statement.last_token.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(
+                        statement.error(&format!("duplicate package declaration '{}'", name))
+                    );
+                }
             }
         }
         Ok(signatures)
@@ -3360,21 +3365,20 @@ impl Project {
         let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
         let mut signatures = Vec::new();
         for statement in &parsed.statements {
-            let Some((name, text)) = statement.package_signature() else {
-                continue;
-            };
-            signatures.push((
-                name,
-                PackageSignature {
-                    text,
-                    axiomatic_theorem: matches!(
-                        &statement.statement,
-                        StatementInfo::Theorem(t) if t.axiomatic
-                    ),
-                    first_token: statement.first_token.clone(),
-                    last_token: statement.last_token.clone(),
-                },
-            ));
+            for (name, text) in statement.package_signatures() {
+                signatures.push((
+                    name,
+                    PackageSignature {
+                        text,
+                        axiomatic_theorem: matches!(
+                            &statement.statement,
+                            StatementInfo::Theorem(t) if t.axiomatic
+                        ),
+                        first_token: statement.first_token.clone(),
+                        last_token: statement.last_token.clone(),
+                    },
+                ));
+            }
         }
         Ok(signatures)
     }
@@ -3466,6 +3470,46 @@ impl Project {
             }
         }
         self.validate_package_implementations(interface_descriptor)
+    }
+
+    pub fn validate_packages_for_descriptors<I>(
+        &mut self,
+        descriptors: I,
+    ) -> Vec<(ModuleDescriptor, Error)>
+    where
+        I: IntoIterator<Item = ModuleDescriptor>,
+    {
+        let mut interface_descriptors = BTreeSet::new();
+        for descriptor in descriptors {
+            let canonical_descriptor = self.canonicalize_name_descriptor(&descriptor);
+            let Ok(path) = self.path_from_descriptor(&canonical_descriptor) else {
+                continue;
+            };
+            match self.package_role_for_path(&path) {
+                PackageRole::Outside => {}
+                PackageRole::Interface => {
+                    interface_descriptors.insert(canonical_descriptor);
+                }
+                PackageRole::Implementation => {
+                    if let Some(interface_descriptor) =
+                        self.package_interface_descriptor_for_path(&path)
+                    {
+                        interface_descriptors.insert(interface_descriptor);
+                    }
+                }
+            }
+        }
+
+        let mut errors = Vec::new();
+        for interface_descriptor in interface_descriptors {
+            if let Err(error) = self.load_and_validate_package(&interface_descriptor) {
+                if let Some(module_id) = self.module_map.get(&interface_descriptor).copied() {
+                    self.modules[module_id.get() as usize].load_error(error.clone());
+                }
+                errors.push((interface_descriptor, error));
+            }
+        }
+        errors
     }
 
     // Resolves aliases like `foo.default` to the canonical descriptor (`foo`) when

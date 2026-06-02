@@ -77,8 +77,8 @@ where
 }
 
 impl Statement {
-    pub fn package_signature(&self) -> Option<(String, String)> {
-        let name = match &self.statement {
+    fn package_signature_name(&self) -> Option<&str> {
+        Some(match &self.statement {
             StatementInfo::Let(statement) => statement.name_token.text(),
             StatementInfo::Define(statement) => statement.name_token.text(),
             StatementInfo::Theorem(statement) => {
@@ -97,10 +97,10 @@ impl Statement {
             StatementInfo::FunctionSatisfy(statement) => statement.name_token.text(),
             StatementInfo::Structure(statement) => statement.name_token.text(),
             StatementInfo::Inductive(statement) => statement.name_token.text(),
-            StatementInfo::Attributes(statement) => statement.name_token.text(),
             StatementInfo::Typeclass(statement) => statement.typeclass_name.text(),
             StatementInfo::Instance(statement) => statement.type_name.text(),
-            StatementInfo::Claim(_)
+            StatementInfo::Attributes(_)
+            | StatementInfo::Claim(_)
             | StatementInfo::ForAll(_)
             | StatementInfo::If(_)
             | StatementInfo::Import(_)
@@ -108,13 +108,37 @@ impl Statement {
             | StatementInfo::Match(_)
             | StatementInfo::Destructuring(_)
             | StatementInfo::DocComment(_) => return None,
-        };
+        })
+    }
 
-        let signature = match &self.statement {
+    fn package_signature_text(&self) -> String {
+        match &self.statement {
             StatementInfo::Theorem(statement) => statement.statement_string(),
             _ => self.to_string(),
+        }
+    }
+
+    pub fn package_signatures(&self) -> Vec<(String, String)> {
+        if let StatementInfo::Attributes(statement) = &self.statement {
+            let mut signatures = Vec::new();
+            for member in &statement.body.statements {
+                let Some(member_name) = member.package_signature_name() else {
+                    continue;
+                };
+                let key = format!("{}.{}", statement.name_token.text(), member_name);
+                signatures.push((key, attribute_member_signature(statement, member)));
+            }
+            return signatures;
+        }
+
+        let Some(name) = self.package_signature_name() else {
+            return Vec::new();
         };
-        Some((name.to_string(), signature))
+        vec![(name.to_string(), self.package_signature_text())]
+    }
+
+    pub fn package_signature(&self) -> Option<(String, String)> {
+        self.package_signatures().into_iter().next()
     }
 
     fn pretty_ref<'a, D, A>(
@@ -357,16 +381,7 @@ impl Statement {
             }
 
             StatementInfo::Attributes(ats) => {
-                let mut doc = allocator.text("attributes ");
-                if let Some(instance_name) = &ats.instance_name {
-                    doc = doc
-                        .append(allocator.text(instance_name.text()))
-                        .append(allocator.text(": "))
-                        .append(allocator.text(ats.name_token.text()));
-                } else {
-                    doc = doc.append(allocator.text(ats.name_token.text()));
-                }
-                doc = write_type_params_pretty(allocator, doc, &ats.type_params);
+                let doc = write_attributes_header_pretty(allocator, ats);
                 write_block_pretty(allocator, doc, &ats.body.statements).group()
             }
 
@@ -473,6 +488,45 @@ impl Statement {
 
         indent.append(doc)
     }
+}
+
+fn write_attributes_header_pretty<'a, D, A>(
+    allocator: &'a D,
+    attributes: &'a AttributesStatement,
+) -> DocBuilder<'a, D, A>
+where
+    A: 'a,
+    D: DocAllocator<'a, A>,
+{
+    let mut doc = allocator.text("attributes ");
+    if let Some(instance_name) = &attributes.instance_name {
+        doc = doc
+            .append(allocator.text(instance_name.text()))
+            .append(allocator.text(": "))
+            .append(allocator.text(attributes.name_token.text()));
+    } else {
+        doc = doc.append(allocator.text(attributes.name_token.text()));
+    }
+    write_type_params_pretty(allocator, doc, &attributes.type_params)
+}
+
+fn attribute_member_signature(attributes: &AttributesStatement, member: &Statement) -> String {
+    let allocator = Arena::<()>::new();
+    let doc = write_attributes_header_pretty(&allocator, attributes)
+        .append(allocator.text(" {"))
+        .append(
+            allocator
+                .hardline()
+                .append(member.pretty_ref(&allocator, allocator.nil()))
+                .nest(4),
+        )
+        .append(allocator.hardline())
+        .append(allocator.text("}"))
+        .group();
+    let mut output = String::new();
+    doc.render_fmt(PRINT_WIDTH, &mut output)
+        .expect("writing attribute member signature should succeed");
+    output
 }
 
 fn write_type_params_pretty<'a, D, A>(

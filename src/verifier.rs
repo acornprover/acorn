@@ -690,6 +690,31 @@ impl Verifier {
         Ok(load_elapsed)
     }
 
+    fn validate_changed_packages(&mut self) {
+        if !self.builder.status.is_good() || self.builder.check_mode || self.builder.eval_mode {
+            return;
+        }
+        let descriptors = self
+            .builder
+            .module_timings
+            .iter()
+            .filter(|timing| !timing.skipped)
+            .map(|timing| timing.module.clone())
+            .collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return;
+        }
+
+        let errors = unsafe { (*self.project_ptr).validate_packages_for_descriptors(descriptors) };
+        if errors.is_empty() {
+            return;
+        }
+        self.builder.status = BuildStatus::Error;
+        for (_descriptor, error) in errors {
+            self.builder.log_global(error.to_string());
+        }
+    }
+
     /// Returns VerifierOutput on success or clean failure.
     /// Returns an error string if verification fails during setup.
     pub fn run(mut self) -> Result<VerifierOutput, String> {
@@ -736,6 +761,7 @@ impl Verifier {
         if !streamed {
             self.builder.build();
         }
+        self.validate_changed_packages();
         let build_total = build_start.elapsed();
         self.builder.validate_goal_filter()?;
         self.builder.metrics.print(self.builder.status);
@@ -763,10 +789,12 @@ impl Verifier {
 
         // Update the build cache if the build was successful
         // Pass is_partial_build flag: true if we have a specific target, false for full build
-        if let Some(build_cache) = self.builder.take_build_cache() {
-            let is_partial_build = self.target.is_some();
-            unsafe {
-                (*self.project_ptr).update_build_cache(build_cache, is_partial_build);
+        if !self.builder.status.is_error() {
+            if let Some(build_cache) = self.builder.take_build_cache() {
+                let is_partial_build = self.target.is_some();
+                unsafe {
+                    (*self.project_ptr).update_build_cache(build_cache, is_partial_build);
+                }
             }
         }
 
@@ -1163,6 +1191,209 @@ mod tests {
             BuildStatus::Good,
             "strict check should allow package interface theorem declarations\n{}",
             log_text(&check_output)
+        );
+    }
+
+    #[test]
+    fn test_package_interface_exports_attribute_members_individually() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                structure Box {
+                    value: Bool
+                }
+
+                attributes Box {
+                    define public(self) -> Bool {
+                        true
+                    }
+                }
+
+                attributes Box {
+                    define also_public(self) -> Bool {
+                        self.public
+                    }
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/box.ac")
+            .write_str(
+                r#"
+                structure Box {
+                    value: Bool
+                }
+
+                attributes Box {
+                    define public(self) -> Bool {
+                        true
+                    }
+
+                    define private(self) -> Bool {
+                        true
+                    }
+                }
+
+                attributes Box {
+                    define also_public(self) -> Bool {
+                        self.public
+                    }
+                }
+
+                theorem private_inside(x: Box) {
+                    x.private
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("use_public.ac")
+            .write_str(
+                r#"
+                from pkg import Box
+
+                theorem public_outside(x: Box) {
+                    x.public and x.also_public
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("use_private.ac")
+            .write_str(
+                r#"
+                from pkg import Box
+
+                theorem private_outside(x: Box) {
+                    x.private
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut package_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        package_verify.builder.check_hashes = false;
+        let package_output = package_verify.run().unwrap();
+        assert_eq!(
+            package_output.status,
+            BuildStatus::Good,
+            "package validation should allow interface-exported attributes and ignore private ones\n{}",
+            log_text(&package_output)
+        );
+
+        let mut public_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("use_public".to_string()),
+        )
+        .unwrap();
+        public_verify.builder.check_hashes = false;
+        let public_output = public_verify.run().unwrap();
+        assert_eq!(
+            public_output.status,
+            BuildStatus::Good,
+            "outside module should see attributes declared in the interface\n{}",
+            log_text(&public_output)
+        );
+
+        let mut private_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("use_private".to_string()),
+        )
+        .unwrap();
+        private_verify.builder.check_hashes = false;
+        let private_output = private_verify.run().unwrap();
+        assert_eq!(private_output.status, BuildStatus::Error);
+        assert!(
+            log_text(&private_output).contains("attribute Box.private not found"),
+            "outside module should not see implementation-only attributes\n{}",
+            log_text(&private_output)
+        );
+    }
+
+    #[test]
+    fn test_default_verify_validates_changed_package_interfaces() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                structure Box {
+                    value: Bool
+                }
+
+                attributes Box {
+                    define public(self) -> Bool {
+                        true
+                    }
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/box.ac")
+            .write_str(
+                r#"
+                structure Box {
+                    value: Bool
+                }
+
+                attributes Box {
+                    define public(self) -> Bool {
+                        true
+                    }
+                }
+                "#,
+            )
+            .unwrap();
+
+        let first_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        let first_output = first_verify.run().unwrap();
+        assert_eq!(
+            first_output.status,
+            BuildStatus::Good,
+            "initial default verify should populate caches\n{}",
+            log_text(&first_output)
+        );
+
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                structure Box {
+                    value: Bool
+                }
+
+                attributes Box {
+                    define public(self) -> Bool {
+                        self.value
+                    }
+                }
+                "#,
+            )
+            .unwrap();
+
+        let second_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        let second_output = second_verify.run().unwrap();
+        assert_eq!(second_output.status, BuildStatus::Error);
+        assert!(
+            log_text(&second_output).contains("does not match interface declaration"),
+            "default verify should validate packages affected by changed modules\n{}",
+            log_text(&second_output)
         );
     }
 
