@@ -20,6 +20,12 @@ fn default_jobs() -> usize {
         .unwrap_or(1)
 }
 
+fn configure_bare_verify(verifier: &mut Verifier) {
+    verifier.builder.check_mode = false;
+    verifier.builder.check_hashes = true;
+    verifier.builder.check_jobs = default_jobs();
+}
+
 fn exit_project_load_error<T>(error: ProjectError) -> T {
     if error.is_manifest_version_problem() {
         println!("{}", error.cli_message());
@@ -1608,8 +1614,7 @@ async fn main() {
                 }
             };
 
-            verifier.builder.check_mode = false;
-            verifier.builder.check_hashes = true;
+            configure_bare_verify(&mut verifier);
 
             match verifier.run() {
                 Err(e) => {
@@ -1634,11 +1639,13 @@ mod tests {
     use clap::{error::ErrorKind, Parser};
 
     use super::{
-        filter_selected_goals, parse_eval_skip_modes, resolve_print_proof_line_selection,
-        validate_activations_flag, validate_force_search_flags, validate_goal_flag,
-        validate_goal_requires_single_line, validate_print_proof_flag, validate_verbose_flag, Args,
-        Command, LineSelection,
+        configure_bare_verify, default_jobs, filter_selected_goals, parse_eval_skip_modes,
+        resolve_print_proof_line_selection, validate_activations_flag, validate_force_search_flags,
+        validate_goal_flag, validate_goal_requires_single_line, validate_print_proof_flag,
+        validate_verbose_flag, Args, Command, LineSelection,
     };
+    use acorn::project::ProjectConfig;
+    use acorn::verifier::Verifier;
 
     #[test]
     fn test_verbose_flag_requires_single_line() {
@@ -1662,6 +1669,18 @@ mod tests {
         temp.child("src").create_dir_all().unwrap();
         temp.child("build").create_dir_all().unwrap();
         temp
+    }
+
+    #[test]
+    fn test_bare_verify_uses_default_jobs() {
+        let temp = setup_project();
+        let mut verifier = Verifier::new(temp.path().to_path_buf(), ProjectConfig::default(), None)
+            .expect("verifier should load empty project");
+        assert_eq!(verifier.builder.check_jobs, 1);
+
+        configure_bare_verify(&mut verifier);
+
+        assert_eq!(verifier.builder.check_jobs, default_jobs());
     }
 
     #[test]
