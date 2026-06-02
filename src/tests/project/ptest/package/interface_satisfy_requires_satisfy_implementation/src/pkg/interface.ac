@@ -1,0 +1,4 @@
+let witness: Bool satisfy {
+    true
+}
+

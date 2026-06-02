@@ -1,0 +1,4 @@
+target = "pkg"
+expect = "error"
+message = "interface let-satisfy declarations cannot have proof bodies"
+

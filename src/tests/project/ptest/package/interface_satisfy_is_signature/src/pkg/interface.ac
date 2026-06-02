@@ -1,0 +1,3 @@
+let pick(flag: Bool) -> result: Bool satisfy {
+    result = result
+}

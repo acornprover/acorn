@@ -20,7 +20,7 @@ use crate::elaborator::node::NodeCursor;
 use crate::elaborator::source::SourceType;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
-use crate::project::{Project, ProjectLookup, ProjectView, ProjectViewModule};
+use crate::project::{PackageRole, Project, ProjectLookup, ProjectView, ProjectViewModule};
 use crate::proof_display::display_certificate_lines;
 use crate::prover::{Outcome, ProverMode, SearchStats};
 
@@ -1243,11 +1243,26 @@ impl<'a> Builder<'a> {
         self.log_global(format!("verifying {} modules...", target_count));
     }
 
-    pub fn add_loaded_module_work(&mut self, modules: &[(ModuleDescriptor, LoweredModule)]) {
-        for (_, lowered) in modules {
-            self.lowered_module_loaded(lowered);
+    pub fn prepare_loaded_module_work(
+        &mut self,
+        modules: Vec<(ModuleDescriptor, LoweredModule)>,
+    ) -> (
+        Vec<(ModuleDescriptor, LoweredModule)>,
+        HashSet<ModuleDescriptor>,
+    ) {
+        let mut work = Vec::new();
+        let mut skipped = HashSet::new();
+        for (target, lowered) in modules {
+            if self.project().package_role(lowered.module_id) == PackageRole::Interface {
+                self.record_validated_interface_module(lowered.module_id);
+                skipped.insert(target);
+            } else {
+                self.lowered_module_loaded(&lowered);
+                work.push((target, lowered));
+            }
         }
-        self.metrics.modules_total += modules.len() as i32;
+        self.metrics.modules_total += work.len() as i32;
+        (work, skipped)
     }
 
     pub fn process_module_work_batch(
@@ -1380,8 +1395,12 @@ impl<'a> Builder<'a> {
                             .project
                             .expect("nonempty module work batches should include a project view");
                         self.set_project_view(project.clone());
-                        self.add_loaded_module_work(&batch.modules);
-                        for (target, lowered) in batch.modules {
+                        let (modules, skipped) = self.prepare_loaded_module_work(batch.modules);
+                        processed.extend(skipped);
+                        if modules.is_empty() {
+                            continue;
+                        }
+                        for (target, lowered) in modules {
                             processed.insert(target.clone());
                             let work_estimate = self.module_work_estimate(&target, &lowered);
                             let module = PipelineQueuedModule {
@@ -1638,6 +1657,22 @@ impl<'a> Builder<'a> {
             self.metrics.pending_goals_total += goal_count;
         } else {
             self.metrics.goals_total += goal_count;
+        }
+    }
+
+    fn record_validated_interface_module(&mut self, module_id: ModuleId) {
+        if self.goal_filter.is_some() {
+            return;
+        }
+        let Some(descriptor) = self.project().get_module_descriptor(module_id).cloned() else {
+            return;
+        };
+        let Some(content_hash) = self.project().get_module_content_hash(module_id) else {
+            return;
+        };
+        let dependency_hashes = self.dependency_hashes_for_module(module_id);
+        if let Some(build_cache) = self.build_cache.as_mut() {
+            build_cache.record_unchanged(&descriptor, content_hash, &dependency_hashes);
         }
     }
 
@@ -2582,6 +2617,11 @@ impl<'a> Builder<'a> {
         target: &ModuleDescriptor,
         lowered: &LoweredModule,
     ) -> Result<(), BuildError> {
+        if self.project().package_role(lowered.module_id) == PackageRole::Interface {
+            self.record_validated_interface_module(lowered.module_id);
+            return Ok(());
+        }
+
         if self.strict {
             for range in &lowered.top_level_axiom_ranges {
                 let event = self.make_event(
@@ -3027,16 +3067,19 @@ impl<'a> Builder<'a> {
         module_work: Vec<(ModuleDescriptor, LoweredModule)>,
     ) {
         let loading_start = std::time::Instant::now();
+        let (module_work, skipped) = self.prepare_loaded_module_work(module_work);
         let mut work_by_target: HashMap<ModuleDescriptor, LoweredModule> =
             module_work.into_iter().collect();
         let mut lowered_modules = Vec::new();
         let project = self.project().clone();
         for target in &targets {
+            if skipped.contains(target) {
+                continue;
+            }
             let module = project.get_module(target);
             match module {
                 ProjectViewModule::Ok(_) => {
                     if let Some(lowered) = work_by_target.remove(target) {
-                        self.lowered_module_loaded(&lowered);
                         lowered_modules.push((target.clone(), lowered));
                     } else {
                         self.log_global(format!("error: module {} has no lowered work", target));
@@ -3063,7 +3106,6 @@ impl<'a> Builder<'a> {
             if !matches!(project.get_module(&target), ProjectViewModule::Ok(_)) {
                 continue;
             }
-            self.lowered_module_loaded(&lowered);
             lowered_modules.push((target, lowered));
         }
         self.metrics.loading_time = loading_start.elapsed().as_secs_f64();
@@ -3286,8 +3328,13 @@ impl<'a> Builder<'a> {
             match module {
                 ProjectViewModule::Ok(_) => {
                     if let Some(lowered) = project.get_lowered_module(target) {
-                        self.lowered_module_loaded(lowered);
-                        lowered_modules.push(lowered);
+                        if self.project().package_role(lowered.module_id) == PackageRole::Interface
+                        {
+                            self.record_validated_interface_module(lowered.module_id);
+                        } else {
+                            self.lowered_module_loaded(lowered);
+                            lowered_modules.push(lowered);
+                        }
                     } else {
                         self.log_global(format!("error: module {} has no lowered work", target));
                     }

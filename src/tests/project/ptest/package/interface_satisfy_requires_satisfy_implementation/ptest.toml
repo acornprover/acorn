@@ -1,0 +1,4 @@
+target = "pkg"
+expect = "error"
+message = "implementation 'witness' does not match interface declaration"
+

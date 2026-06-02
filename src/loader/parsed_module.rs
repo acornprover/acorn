@@ -90,6 +90,21 @@ impl ParsedModule {
             if let StatementInfo::Theorem(theorem) = &mut statement.statement {
                 theorem.trusted = true;
             }
+            if matches!(&statement.statement, StatementInfo::FunctionSatisfy(fss) if fss.body.is_some())
+            {
+                return Err(
+                    statement.error("interface let-satisfy declarations cannot have proof bodies")
+                );
+            }
+            if let StatementInfo::Attributes(attributes) = &statement.statement {
+                for member in &attributes.body.statements {
+                    if matches!(&member.statement, StatementInfo::FunctionSatisfy(fss) if fss.body.is_some())
+                    {
+                        return Err(member
+                            .error("interface let-satisfy declarations cannot have proof bodies"));
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -656,7 +656,8 @@ impl Verifier {
                 let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
                 self.builder.set_project_view(project_view);
             }
-            self.builder.add_loaded_module_work(&work);
+            let (work, skipped) = self.builder.prepare_loaded_module_work(work);
+            processed.extend(skipped);
             for (descriptor, _) in &work {
                 processed.insert(descriptor.clone());
             }

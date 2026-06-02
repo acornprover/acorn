@@ -3307,7 +3307,8 @@ impl Project {
             .map_err(|e| Token::empty().error(&e.to_string()))?;
         let text = read_source_text(&path, |path| self.read_file(path))
             .map_err(|e| Token::empty().error(&e))?;
-        let parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
+        let mut parsed = ParsedModule::parse(descriptor.clone(), text, false)?;
+        parsed.apply_interface_mode()?;
         let mut signatures = BTreeMap::new();
         for statement in &parsed.statements {
             if matches!(&statement.statement, StatementInfo::Theorem(t) if t.lemma) {

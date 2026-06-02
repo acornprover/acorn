@@ -57,6 +57,18 @@ impl TheoremStatement {
     }
 }
 
+impl FunctionSatisfyStatement {
+    pub fn statement_string(&self) -> String {
+        let allocator = Arena::<()>::new();
+        let doc = write_function_satisfy_pretty(&allocator, self, false);
+
+        let mut output = String::new();
+        doc.render_fmt(PRINT_WIDTH, &mut output)
+            .expect("writing function satisfy statement string should succeed");
+        output
+    }
+}
+
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let allocator = Arena::<()>::new();
@@ -114,6 +126,7 @@ impl Statement {
     fn package_signature_text(&self) -> String {
         match &self.statement {
             StatementInfo::Theorem(statement) => statement.statement_string(),
+            StatementInfo::FunctionSatisfy(statement) => statement.statement_string(),
             _ => self.to_string(),
         }
     }
@@ -265,30 +278,7 @@ impl Statement {
             }
 
             StatementInfo::FunctionSatisfy(fss) => {
-                let mut doc = allocator
-                    .text("let ")
-                    .append(allocator.text(fss.name_token.text()));
-                doc = write_type_params_pretty(allocator, doc, &fss.type_params);
-                let i = fss.declarations.len() - 1;
-                doc = write_args_pretty(allocator, doc, &fss.declarations[..i]);
-                doc = doc
-                    .append(allocator.text(" -> "))
-                    .append(fss.declarations[i].pretty_ref(allocator, false))
-                    .append(allocator.text(" satisfy {"))
-                    .append(
-                        allocator
-                            .hardline()
-                            .nest(4)
-                            .append(fss.condition.pretty_ref(allocator, false))
-                            .nest(4),
-                    )
-                    .append(allocator.hardline())
-                    .append(allocator.text("}"));
-                if let Some(body) = &fss.body {
-                    doc = doc.append(allocator.text(" by"));
-                    doc = write_block_pretty(allocator, doc, &body.statements);
-                }
-                doc.group()
+                write_function_satisfy_pretty(allocator, fss, true).group()
             }
 
             StatementInfo::Structure(ss) => {
@@ -512,14 +502,15 @@ where
 
 fn attribute_member_signature(attributes: &AttributesStatement, member: &Statement) -> String {
     let allocator = Arena::<()>::new();
+    let member_doc = match &member.statement {
+        StatementInfo::FunctionSatisfy(fss) => {
+            write_function_satisfy_pretty(&allocator, fss, false)
+        }
+        _ => member.pretty_ref(&allocator, allocator.nil()),
+    };
     let doc = write_attributes_header_pretty(&allocator, attributes)
         .append(allocator.text(" {"))
-        .append(
-            allocator
-                .hardline()
-                .append(member.pretty_ref(&allocator, allocator.nil()))
-                .nest(4),
-        )
+        .append(allocator.hardline().append(member_doc).nest(4))
         .append(allocator.hardline())
         .append(allocator.text("}"))
         .group();
@@ -527,6 +518,43 @@ fn attribute_member_signature(attributes: &AttributesStatement, member: &Stateme
     doc.render_fmt(PRINT_WIDTH, &mut output)
         .expect("writing attribute member signature should succeed");
     output
+}
+
+fn write_function_satisfy_pretty<'a, D, A>(
+    allocator: &'a D,
+    fss: &'a FunctionSatisfyStatement,
+    include_body: bool,
+) -> DocBuilder<'a, D, A>
+where
+    A: 'a,
+    D: DocAllocator<'a, A>,
+{
+    let mut doc = allocator
+        .text("let ")
+        .append(allocator.text(fss.name_token.text()));
+    doc = write_type_params_pretty(allocator, doc, &fss.type_params);
+    let i = fss.declarations.len() - 1;
+    doc = write_args_pretty(allocator, doc, &fss.declarations[..i]);
+    doc = doc
+        .append(allocator.text(" -> "))
+        .append(fss.declarations[i].pretty_ref(allocator, false))
+        .append(allocator.text(" satisfy {"))
+        .append(
+            allocator
+                .hardline()
+                .nest(4)
+                .append(fss.condition.pretty_ref(allocator, false))
+                .nest(4),
+        )
+        .append(allocator.hardline())
+        .append(allocator.text("}"));
+    if include_body {
+        if let Some(body) = &fss.body {
+            doc = doc.append(allocator.text(" by"));
+            doc = write_block_pretty(allocator, doc, &body.statements);
+        }
+    }
+    doc
 }
 
 fn write_type_params_pretty<'a, D, A>(
