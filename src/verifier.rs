@@ -1102,6 +1102,71 @@ mod tests {
     }
 
     #[test]
+    fn test_strict_check_allows_package_interface_theorem_declarations() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                theorem public {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/internal.ac")
+            .write_str(
+                r#"
+                theorem public {
+                    true
+                } by {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        verify.builder.check_hashes = false;
+        let verify_output = verify.run().unwrap();
+        assert_eq!(
+            verify_output.status,
+            BuildStatus::Good,
+            "verify should write package certificates before strict replay\n{}",
+            log_text(&verify_output)
+        );
+
+        let check_config = ProjectConfig {
+            usage_mode: UsageMode::Check,
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+            update_version: false,
+        };
+        let mut check = Verifier::new_for_check(
+            acornlib.path().to_path_buf(),
+            check_config,
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        check.builder.check_mode = true;
+        check.builder.check_hashes = false;
+        check.builder.strict = true;
+        let check_output = check.run().unwrap();
+        assert_eq!(
+            check_output.status,
+            BuildStatus::Good,
+            "strict check should allow package interface theorem declarations\n{}",
+            log_text(&check_output)
+        );
+    }
+
+    #[test]
     fn test_verify_parallel_cache_writes_preserve_manifest() {
         let (acornlib, src, _build) = setup();
 

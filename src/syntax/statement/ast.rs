@@ -57,7 +57,13 @@ pub struct DefineStatement {
 ///   axiom foo(p, q): p -> (q -> p)
 /// axiomatic would be "true", the name is "foo", the args are p, q, and the claim is "p -> (q -> p)".
 pub struct TheoremStatement {
+    /// True when this theorem was declared with the explicit `axiom` keyword.
     pub axiomatic: bool,
+
+    /// True when this theorem is accepted without a local proof for non-axiom reasons,
+    /// such as a package interface declaration.
+    pub trusted: bool,
+
     pub lemma: bool,
     pub name_token: Option<Token>,
     pub type_params: Vec<TypeParamExpr>,

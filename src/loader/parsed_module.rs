@@ -88,7 +88,7 @@ impl ParsedModule {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
             }
             if let StatementInfo::Theorem(theorem) = &mut statement.statement {
-                theorem.axiomatic = true;
+                theorem.trusted = true;
             }
         }
         Ok(())

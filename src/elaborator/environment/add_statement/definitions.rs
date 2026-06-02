@@ -1192,13 +1192,13 @@ impl Environment {
             );
         }
 
-        let already_proven = ts.axiomatic || is_citation;
+        let already_proven = ts.axiomatic || ts.trusted || is_citation;
         let source_name = ts.name_token.as_ref().map(|t| t.text().to_string());
         let source = if ts.lemma {
             Source::lemma(self.module_id, range, self.depth, source_name)
         } else {
             Source::theorem(
-                already_proven,
+                ts.axiomatic,
                 self.module_id,
                 range,
                 true,

@@ -71,4 +71,4 @@ jobs:
         run: cargo test
 
       - name: Validate acornlib
-        run: cargo run --profile release --features validate -- --lib acornlib check
+        run: cargo run --profile release --features validate -- --lib acornlib check --strict

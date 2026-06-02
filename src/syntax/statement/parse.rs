@@ -113,6 +113,7 @@ fn parse_theorem_statement(
 
     let ts = TheoremStatement {
         axiomatic,
+        trusted: false,
         lemma,
         name_token,
         type_params,
