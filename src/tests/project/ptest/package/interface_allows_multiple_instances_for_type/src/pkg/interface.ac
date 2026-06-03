@@ -1,0 +1,9 @@
+from base import Element, HasLeft, HasRight
+
+instance Element: HasLeft {
+    let left: Element = Element.token
+}
+
+instance Element: HasRight {
+    let right: Element = Element.token
+}

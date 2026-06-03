@@ -1,0 +1,5 @@
+from base import Box
+
+attributes Box {
+    let marker: Bool = true
+}

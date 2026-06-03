@@ -1,0 +1,3 @@
+target = "pkg"
+expect = "error"
+message = "only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies"

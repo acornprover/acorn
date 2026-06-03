@@ -80,34 +80,283 @@ impl ParsedModule {
 
     pub fn apply_interface_mode(&mut self) -> error::Result<()> {
         for statement in &mut self.statements {
-            if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.lemma) {
+            apply_interface_statement_mode(statement, false)?;
+        }
+        Ok(())
+    }
+}
+
+fn apply_interface_statement_mode(
+    statement: &mut Statement,
+    in_attributes: bool,
+) -> error::Result<()> {
+    if in_attributes
+        && !matches!(
+            &statement.statement,
+            StatementInfo::Let(_)
+                | StatementInfo::Define(_)
+                | StatementInfo::VariableSatisfy(_)
+                | StatementInfo::FunctionSatisfy(_)
+                | StatementInfo::DocComment(_)
+        )
+    {
+        return Err(statement.error(
+            "only let, let ... satisfy, define, and doc comment statements are allowed in attributes bodies",
+        ));
+    }
+
+    match &mut statement.statement {
+        StatementInfo::Let(ls) => {
+            check_interface_type_params(&ls.type_params)?;
+            if let Some(type_expr) = &ls.type_expr {
+                check_interface_expression(type_expr)?;
+            }
+            check_interface_expression(&ls.value)?;
+        }
+        StatementInfo::Define(ds) => {
+            check_interface_type_params(&ds.type_params)?;
+            check_interface_declarations(&ds.args)?;
+            check_interface_expression(&ds.return_type)?;
+            check_interface_expression(&ds.return_value)?;
+        }
+        StatementInfo::Theorem(theorem) => {
+            if theorem.lemma {
                 return Err(statement.error("interface.ac cannot contain lemmas"));
             }
-            if matches!(&statement.statement, StatementInfo::Theorem(theorem) if theorem.body.is_some())
-            {
+            if theorem.body.is_some() {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
             }
-            if let StatementInfo::Theorem(theorem) = &mut statement.statement {
-                theorem.trusted = true;
+            theorem.trusted = true;
+            check_interface_type_params(&theorem.type_params)?;
+            check_interface_declarations(&theorem.args)?;
+            check_interface_expression(&theorem.claim)?;
+        }
+        StatementInfo::Claim(cs) => {
+            check_interface_expression(&cs.claim)?;
+        }
+        StatementInfo::Type(ts) => {
+            check_interface_type_params(&ts.type_params)?;
+            check_interface_expression(&ts.type_expr)?;
+        }
+        StatementInfo::ForAll(fas) => {
+            check_interface_declarations(&fas.quantifiers)?;
+            check_interface_body(&mut fas.body)?;
+        }
+        StatementInfo::If(is) => {
+            check_interface_expression(&is.condition)?;
+            check_interface_body(&mut is.body)?;
+            if let Some(else_body) = &mut is.else_body {
+                check_interface_body(else_body)?;
             }
-            if matches!(&statement.statement, StatementInfo::FunctionSatisfy(fss) if fss.body.is_some())
-            {
+        }
+        StatementInfo::VariableSatisfy(vss) => {
+            check_interface_type_params(&vss.type_params)?;
+            check_interface_declarations(&vss.declarations)?;
+            check_interface_expression(&vss.condition)?;
+        }
+        StatementInfo::FunctionSatisfy(fss) => {
+            if fss.body.is_some() {
                 return Err(
                     statement.error("interface let-satisfy declarations cannot have proof bodies")
                 );
             }
-            if let StatementInfo::Attributes(attributes) = &statement.statement {
-                for member in &attributes.body.statements {
-                    if matches!(&member.statement, StatementInfo::FunctionSatisfy(fss) if fss.body.is_some())
-                    {
-                        return Err(member
-                            .error("interface let-satisfy declarations cannot have proof bodies"));
-                    }
+            check_interface_type_params(&fss.type_params)?;
+            check_interface_declarations(&fss.declarations)?;
+            check_interface_expression(&fss.condition)?;
+        }
+        StatementInfo::Structure(ss) => {
+            if ss.body.is_some() {
+                return Err(statement.error("interface structures cannot have proof bodies"));
+            }
+            check_interface_type_params(&ss.type_params)?;
+            for (_, field_type, _) in &ss.fields {
+                check_interface_expression(field_type)?;
+            }
+            if let Some(constraint) = &ss.constraint {
+                check_interface_expression(constraint)?;
+            }
+        }
+        StatementInfo::Inductive(is) => {
+            check_interface_type_params(&is.type_params)?;
+            for (_, constructor, _) in &is.constructors {
+                if let Some(constructor) = constructor {
+                    check_interface_expression(constructor)?;
                 }
             }
         }
-        Ok(())
+        StatementInfo::Import(_) => {}
+        StatementInfo::Attributes(attributes) => {
+            check_interface_type_params(&attributes.type_params)?;
+            for member in &mut attributes.body.statements {
+                apply_interface_statement_mode(member, true)?;
+            }
+        }
+        StatementInfo::Numerals(ns) => {
+            check_interface_expression(&ns.type_expr)?;
+        }
+        StatementInfo::Match(ms) => {
+            check_interface_expression(&ms.scrutinee)?;
+            for (pattern, body) in &mut ms.cases {
+                check_interface_expression(pattern)?;
+                check_interface_body(body)?;
+            }
+        }
+        StatementInfo::Typeclass(ts) => {
+            for extend in &ts.extends {
+                check_interface_expression(extend)?;
+            }
+            for (_, constant_type, _) in &ts.constants {
+                check_interface_expression(constant_type)?;
+            }
+            for condition in &ts.conditions {
+                check_interface_declarations(&condition.args)?;
+                check_interface_expression(&condition.claim)?;
+            }
+        }
+        StatementInfo::Instance(is) => {
+            if is.body.is_some() {
+                return Err(statement.error("interface instances cannot have proof bodies"));
+            }
+            check_interface_type_params(&is.type_params)?;
+            check_interface_expression(&is.typeclass)?;
+            if let Some(definitions) = &mut is.definitions {
+                check_interface_instance_definitions(definitions)?;
+            }
+        }
+        StatementInfo::Destructuring(ds) => {
+            if ds.body.is_some() {
+                return Err(statement.error("interfaces cannot contain by blocks"));
+            }
+            check_interface_expression(&ds.function)?;
+            check_interface_expression(&ds.value)?;
+        }
+        StatementInfo::DocComment(_) => {}
     }
+    Ok(())
+}
+
+fn check_interface_body(body: &mut Body) -> error::Result<()> {
+    for statement in &mut body.statements {
+        apply_interface_statement_mode(statement, false)?;
+    }
+    Ok(())
+}
+
+fn check_interface_instance_definitions(body: &mut Body) -> error::Result<()> {
+    for statement in &mut body.statements {
+        if !matches!(
+            &statement.statement,
+            StatementInfo::Let(_) | StatementInfo::Define(_)
+        ) {
+            return Err(
+                statement.error("only let and define statements are allowed in instance bodies")
+            );
+        }
+        apply_interface_statement_mode(statement, false)?;
+    }
+    Ok(())
+}
+
+fn check_interface_type_params(type_params: &[TypeParamExpr]) -> error::Result<()> {
+    for type_param in type_params {
+        if let Some(type_expr) = &type_param.type_expr {
+            check_interface_expression(type_expr)?;
+        }
+        if let Some(typeclass) = &type_param.typeclass {
+            check_interface_expression(typeclass)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_interface_declarations(declarations: &[Declaration]) -> error::Result<()> {
+    for declaration in declarations {
+        if let Declaration::Typed(_, type_expr) = declaration {
+            check_interface_expression(type_expr)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_interface_expression(expression: &Expression) -> error::Result<()> {
+    match expression {
+        Expression::Singleton(_) => {}
+        Expression::Unary(_, inner) => check_interface_expression(inner)?,
+        Expression::Binary(left, _, right) => {
+            check_interface_expression(left)?;
+            check_interface_expression(right)?;
+        }
+        Expression::Concatenation(left, right) => {
+            check_interface_expression(left)?;
+            check_interface_expression(right)?;
+        }
+        Expression::Grouping(_, inner, _) => check_interface_expression(inner)?,
+        Expression::Binder(_, declarations, body, _) => {
+            check_interface_declarations(declarations)?;
+            check_interface_expression(body)?;
+        }
+        Expression::GenericBinder(_, type_params, declarations, body, _) => {
+            check_interface_type_params(type_params)?;
+            check_interface_declarations(declarations)?;
+            check_interface_expression(body)?;
+        }
+        Expression::IfThenElse(_, condition, then_branch, else_branch, _) => {
+            check_interface_expression(condition)?;
+            check_interface_expression(then_branch)?;
+            if let Some(else_branch) = else_branch {
+                check_interface_expression(else_branch)?;
+            }
+        }
+        Expression::Match(_, scrutinee, cases, _) => {
+            check_interface_expression(scrutinee)?;
+            for (pattern, body) in cases {
+                check_interface_expression(pattern)?;
+                check_interface_expression(body)?;
+            }
+        }
+        Expression::Block(items, result, _) => {
+            for item in items {
+                check_interface_local_item(item)?;
+            }
+            check_interface_expression(result)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_interface_local_item(item: &LocalBlockItem) -> error::Result<()> {
+    match item {
+        LocalBlockItem::Let(local_let) => {
+            if local_let.body.is_some() {
+                return Err(local_let
+                    .let_token
+                    .error("interfaces cannot contain by blocks"));
+            }
+            if let Some(type_expr) = &local_let.type_expr {
+                check_interface_expression(type_expr)?;
+            }
+            check_interface_expression(&local_let.value)?;
+        }
+        LocalBlockItem::Satisfy(local_satisfy) => {
+            if local_satisfy.body.is_some() {
+                return Err(local_satisfy
+                    .let_token
+                    .error("interfaces cannot contain by blocks"));
+            }
+            check_interface_expression(&local_satisfy.type_expr)?;
+            check_interface_expression(&local_satisfy.condition)?;
+        }
+        LocalBlockItem::Destructuring(local_destructuring) => {
+            if local_destructuring.body.is_some() {
+                return Err(local_destructuring
+                    .let_token
+                    .error("interfaces cannot contain by blocks"));
+            }
+            check_interface_expression(&local_destructuring.function)?;
+            check_interface_expression(&local_destructuring.value)?;
+        }
+    }
+    Ok(())
 }
 
 fn import_module_name(import: &ImportStatement) -> String {

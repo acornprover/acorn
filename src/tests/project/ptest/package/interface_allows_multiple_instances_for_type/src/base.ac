@@ -1,0 +1,11 @@
+inductive Element {
+    token
+}
+
+typeclass T: HasLeft {
+    left: T
+}
+
+typeclass T: HasRight {
+    right: T
+}

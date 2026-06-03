@@ -1,0 +1,9 @@
+inductive Element {
+    token
+}
+
+typeclass T: Truthy {
+    ok {
+        true
+    }
+}

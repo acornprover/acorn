@@ -1,0 +1,6 @@
+from base import Element, Truthy
+
+instance Element: Truthy {
+} by {
+    true
+}

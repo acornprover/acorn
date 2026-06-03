@@ -69,6 +69,41 @@ impl FunctionSatisfyStatement {
     }
 }
 
+impl StructureStatement {
+    pub fn statement_string(&self) -> String {
+        let allocator = Arena::<()>::new();
+        let doc = write_structure_pretty(&allocator, self, false);
+
+        let mut output = String::new();
+        doc.render_fmt(PRINT_WIDTH, &mut output)
+            .expect("writing structure statement string should succeed");
+        output
+    }
+}
+
+impl InstanceStatement {
+    fn package_signature_name(&self) -> String {
+        let type_params = if self.type_params.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "[{}]",
+                self.type_params
+                    .iter()
+                    .map(|param| param.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        format!(
+            "{}{}: {}",
+            self.type_name.text(),
+            type_params,
+            self.typeclass
+        )
+    }
+}
+
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let allocator = Arena::<()>::new();
@@ -89,28 +124,28 @@ where
 }
 
 impl Statement {
-    fn package_signature_name(&self) -> Option<&str> {
+    fn package_signature_name(&self) -> Option<String> {
         Some(match &self.statement {
-            StatementInfo::Let(statement) => statement.name_token.text(),
-            StatementInfo::Define(statement) => statement.name_token.text(),
+            StatementInfo::Let(statement) => statement.name_token.text().to_string(),
+            StatementInfo::Define(statement) => statement.name_token.text().to_string(),
             StatementInfo::Theorem(statement) => {
                 if statement.lemma {
                     return None;
                 }
-                statement.name_token.as_ref()?.text()
+                statement.name_token.as_ref()?.text().to_string()
             }
-            StatementInfo::Type(statement) => statement.name_token.text(),
+            StatementInfo::Type(statement) => statement.name_token.text().to_string(),
             StatementInfo::VariableSatisfy(statement) => {
                 if statement.declarations.len() != 1 {
                     return None;
                 }
-                statement.declarations[0].token().text()
+                statement.declarations[0].token().text().to_string()
             }
-            StatementInfo::FunctionSatisfy(statement) => statement.name_token.text(),
-            StatementInfo::Structure(statement) => statement.name_token.text(),
-            StatementInfo::Inductive(statement) => statement.name_token.text(),
-            StatementInfo::Typeclass(statement) => statement.typeclass_name.text(),
-            StatementInfo::Instance(statement) => statement.type_name.text(),
+            StatementInfo::FunctionSatisfy(statement) => statement.name_token.text().to_string(),
+            StatementInfo::Structure(statement) => statement.name_token.text().to_string(),
+            StatementInfo::Inductive(statement) => statement.name_token.text().to_string(),
+            StatementInfo::Typeclass(statement) => statement.typeclass_name.text().to_string(),
+            StatementInfo::Instance(statement) => statement.package_signature_name(),
             StatementInfo::Attributes(_)
             | StatementInfo::Claim(_)
             | StatementInfo::ForAll(_)
@@ -127,6 +162,7 @@ impl Statement {
         match &self.statement {
             StatementInfo::Theorem(statement) => statement.statement_string(),
             StatementInfo::FunctionSatisfy(statement) => statement.statement_string(),
+            StatementInfo::Structure(statement) => statement.statement_string(),
             _ => self.to_string(),
         }
     }
@@ -147,7 +183,7 @@ impl Statement {
         let Some(name) = self.package_signature_name() else {
             return Vec::new();
         };
-        vec![(name.to_string(), self.package_signature_text())]
+        vec![(name, self.package_signature_text())]
     }
 
     pub fn package_signature(&self) -> Option<(String, String)> {
@@ -281,42 +317,7 @@ impl Statement {
                 write_function_satisfy_pretty(allocator, fss, true).group()
             }
 
-            StatementInfo::Structure(ss) => {
-                let mut doc = allocator
-                    .text("structure ")
-                    .append(allocator.text(ss.name_token.text()));
-                doc = write_type_params_pretty(allocator, doc, &ss.type_params);
-                doc = doc.append(allocator.text(" {"));
-                let mut fields_inner = allocator.nil();
-                for (name, type_expr, _doc_comments) in &ss.fields {
-                    fields_inner = fields_inner
-                        .append(allocator.hardline())
-                        .append(allocator.text(name.text()))
-                        .append(allocator.text(": "))
-                        .append(type_expr.pretty_ref(allocator, false));
-                }
-                doc = doc
-                    .append(fields_inner.nest(4))
-                    .append(allocator.hardline())
-                    .append(allocator.text("}"));
-                if let Some(constraint) = &ss.constraint {
-                    doc = doc
-                        .append(allocator.text(" constraint {"))
-                        .append(
-                            allocator
-                                .hardline()
-                                .append(constraint.pretty_ref(allocator, false))
-                                .nest(4),
-                        )
-                        .append(allocator.hardline())
-                        .append(allocator.text("}"));
-                }
-                if let Some(body) = &ss.body {
-                    doc = doc.append(allocator.text(" by"));
-                    doc = write_block_pretty(allocator, doc, &body.statements);
-                }
-                doc.group()
-            }
+            StatementInfo::Structure(ss) => write_structure_pretty(allocator, ss, true).group(),
 
             StatementInfo::Inductive(is) => {
                 let mut doc = allocator
@@ -518,6 +519,53 @@ fn attribute_member_signature(attributes: &AttributesStatement, member: &Stateme
     doc.render_fmt(PRINT_WIDTH, &mut output)
         .expect("writing attribute member signature should succeed");
     output
+}
+
+fn write_structure_pretty<'a, D, A>(
+    allocator: &'a D,
+    ss: &'a StructureStatement,
+    include_body: bool,
+) -> DocBuilder<'a, D, A>
+where
+    A: 'a,
+    D: DocAllocator<'a, A>,
+{
+    let mut doc = allocator
+        .text("structure ")
+        .append(allocator.text(ss.name_token.text()));
+    doc = write_type_params_pretty(allocator, doc, &ss.type_params);
+    doc = doc.append(allocator.text(" {"));
+    let mut fields_inner = allocator.nil();
+    for (name, type_expr, _doc_comments) in &ss.fields {
+        fields_inner = fields_inner
+            .append(allocator.hardline())
+            .append(allocator.text(name.text()))
+            .append(allocator.text(": "))
+            .append(type_expr.pretty_ref(allocator, false));
+    }
+    doc = doc
+        .append(fields_inner.nest(4))
+        .append(allocator.hardline())
+        .append(allocator.text("}"));
+    if let Some(constraint) = &ss.constraint {
+        doc = doc
+            .append(allocator.text(" constraint {"))
+            .append(
+                allocator
+                    .hardline()
+                    .append(constraint.pretty_ref(allocator, false))
+                    .nest(4),
+            )
+            .append(allocator.hardline())
+            .append(allocator.text("}"));
+    }
+    if include_body {
+        if let Some(body) = &ss.body {
+            doc = doc.append(allocator.text(" by"));
+            doc = write_block_pretty(allocator, doc, &body.statements);
+        }
+    }
+    doc
 }
 
 fn write_function_satisfy_pretty<'a, D, A>(

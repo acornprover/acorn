@@ -1,0 +1,7 @@
+from base import Box
+
+attributes Box {
+    theorem marker {
+        true
+    }
+}

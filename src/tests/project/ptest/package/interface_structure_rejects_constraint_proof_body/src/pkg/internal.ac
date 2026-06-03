@@ -1,0 +1,7 @@
+structure Box {
+    value: Bool
+} constraint {
+    true
+} by {
+    true
+}
