@@ -1319,6 +1319,131 @@ mod tests {
     }
 
     #[test]
+    fn test_package_interface_exports_destructuring_let_bound_name() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                inductive Option[T] {
+                    none
+                    some(T)
+                }
+
+                let Option.some(public_flag) = Option.some(true)
+
+                theorem public_flag_reflexive {
+                    public_flag = public_flag
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/internal.ac")
+            .write_str(
+                r#"
+                inductive Option[T] {
+                    none
+                    some(T)
+                }
+
+                let Option.some(public_flag) = Option.some(true) by {
+                    true
+                }
+
+                theorem public_flag_reflexive {
+                    public_flag = public_flag
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("use_public.ac")
+            .write_str(
+                r#"
+                from pkg import public_flag
+
+                theorem use_public_flag {
+                    public_flag = public_flag
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut package_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        package_verify.builder.check_hashes = false;
+        let package_output = package_verify.run().unwrap();
+        assert_eq!(
+            package_output.status,
+            BuildStatus::Good,
+            "package validation should allow interface-exported destructuring lets\n{}",
+            log_text(&package_output)
+        );
+
+        let mut public_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("use_public".to_string()),
+        )
+        .unwrap();
+        public_verify.builder.check_hashes = false;
+        let public_output = public_verify.run().unwrap();
+        assert_eq!(
+            public_output.status,
+            BuildStatus::Good,
+            "outside module should see names bound by interface destructuring lets\n{}",
+            log_text(&public_output)
+        );
+    }
+
+    #[test]
+    fn test_package_interface_requires_destructuring_let_implementation() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                inductive Option[T] {
+                    none
+                    some(T)
+                }
+
+                let Option.some(public_flag) = Option.some(true)
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/internal.ac")
+            .write_str(
+                r#"
+                inductive Option[T] {
+                    none
+                    some(T)
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut package_verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pkg".to_string()),
+        )
+        .unwrap();
+        package_verify.builder.check_hashes = false;
+        let package_output = package_verify.run().unwrap();
+        assert_eq!(package_output.status, BuildStatus::Error);
+        assert!(
+            log_text(&package_output)
+                .contains("missing implementation for interface declaration 'public_flag'"),
+            "package validation should require destructuring-bound interface names\n{}",
+            log_text(&package_output)
+        );
+    }
+
+    #[test]
     fn test_default_verify_validates_changed_package_interfaces() {
         let (acornlib, src, _build) = setup();
         src.child("pkg").create_dir_all().unwrap();

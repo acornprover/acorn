@@ -81,6 +81,18 @@ impl StructureStatement {
     }
 }
 
+impl DestructuringStatement {
+    pub fn statement_string(&self) -> String {
+        let allocator = Arena::<()>::new();
+        let doc = write_destructuring_pretty(&allocator, self, false);
+
+        let mut output = String::new();
+        doc.render_fmt(PRINT_WIDTH, &mut output)
+            .expect("writing destructuring statement string should succeed");
+        output
+    }
+}
+
 impl InstanceStatement {
     fn package_signature_name(&self) -> String {
         let type_params = if self.type_params.is_empty() {
@@ -154,6 +166,11 @@ impl Statement {
                 vec![statement.typeclass_name.text().to_string()]
             }
             StatementInfo::Instance(statement) => vec![statement.package_signature_name()],
+            StatementInfo::Destructuring(statement) => statement
+                .args
+                .iter()
+                .map(|token| token.text().to_string())
+                .collect(),
             StatementInfo::Attributes(_)
             | StatementInfo::Claim(_)
             | StatementInfo::ForAll(_)
@@ -161,7 +178,6 @@ impl Statement {
             | StatementInfo::Import(_)
             | StatementInfo::Numerals(_)
             | StatementInfo::Match(_)
-            | StatementInfo::Destructuring(_)
             | StatementInfo::DocComment(_) => vec![],
         }
     }
@@ -171,6 +187,7 @@ impl Statement {
             StatementInfo::Theorem(statement) => statement.statement_string(),
             StatementInfo::FunctionSatisfy(statement) => statement.statement_string(),
             StatementInfo::Structure(statement) => statement.statement_string(),
+            StatementInfo::Destructuring(statement) => statement.statement_string(),
             _ => self.to_string(),
         }
     }
@@ -461,27 +478,7 @@ impl Statement {
                 doc.group()
             }
 
-            StatementInfo::Destructuring(ds) => {
-                let mut doc = allocator
-                    .text("let ")
-                    .append(ds.function.pretty_ref(allocator, false))
-                    .append(allocator.text("("));
-                for (i, arg) in ds.args.iter().enumerate() {
-                    if i > 0 {
-                        doc = doc.append(allocator.text(", "));
-                    }
-                    doc = doc.append(allocator.text(arg.text()));
-                }
-                doc = doc
-                    .append(allocator.text(") = "))
-                    .append(ds.value.pretty_ref(allocator, false));
-
-                if let Some(body) = &ds.body {
-                    doc = doc.append(allocator.text(" by"));
-                    doc = write_block_pretty(allocator, doc, &body.statements);
-                }
-                doc
-            }
+            StatementInfo::Destructuring(ds) => write_destructuring_pretty(allocator, ds, true),
 
             StatementInfo::DocComment(s) => allocator.text("/// ").append(allocator.text(s)),
         };
@@ -528,6 +525,38 @@ fn attribute_member_signature(attributes: &AttributesStatement, member: &Stateme
     doc.render_fmt(PRINT_WIDTH, &mut output)
         .expect("writing attribute member signature should succeed");
     output
+}
+
+fn write_destructuring_pretty<'a, D, A>(
+    allocator: &'a D,
+    ds: &'a DestructuringStatement,
+    include_body: bool,
+) -> DocBuilder<'a, D, A>
+where
+    A: 'a,
+    D: DocAllocator<'a, A>,
+{
+    let mut doc = allocator
+        .text("let ")
+        .append(ds.function.pretty_ref(allocator, false))
+        .append(allocator.text("("));
+    for (i, arg) in ds.args.iter().enumerate() {
+        if i > 0 {
+            doc = doc.append(allocator.text(", "));
+        }
+        doc = doc.append(allocator.text(arg.text()));
+    }
+    doc = doc
+        .append(allocator.text(") = "))
+        .append(ds.value.pretty_ref(allocator, false));
+
+    if include_body {
+        if let Some(body) = &ds.body {
+            doc = doc.append(allocator.text(" by"));
+            doc = write_block_pretty(allocator, doc, &body.statements);
+        }
+    }
+    doc
 }
 
 fn write_structure_pretty<'a, D, A>(
