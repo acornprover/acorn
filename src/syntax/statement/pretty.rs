@@ -124,28 +124,36 @@ where
 }
 
 impl Statement {
-    fn package_signature_name(&self) -> Option<String> {
-        Some(match &self.statement {
-            StatementInfo::Let(statement) => statement.name_token.text().to_string(),
-            StatementInfo::Define(statement) => statement.name_token.text().to_string(),
+    fn package_signature_names(&self) -> Vec<String> {
+        match &self.statement {
+            StatementInfo::Let(statement) => vec![statement.name_token.text().to_string()],
+            StatementInfo::Define(statement) => vec![statement.name_token.text().to_string()],
             StatementInfo::Theorem(statement) => {
                 if statement.lemma {
-                    return None;
+                    vec![]
+                } else {
+                    statement
+                        .name_token
+                        .as_ref()
+                        .map(|token| vec![token.text().to_string()])
+                        .unwrap_or_default()
                 }
-                statement.name_token.as_ref()?.text().to_string()
             }
-            StatementInfo::Type(statement) => statement.name_token.text().to_string(),
-            StatementInfo::VariableSatisfy(statement) => {
-                if statement.declarations.len() != 1 {
-                    return None;
-                }
-                statement.declarations[0].token().text().to_string()
+            StatementInfo::Type(statement) => vec![statement.name_token.text().to_string()],
+            StatementInfo::VariableSatisfy(statement) => statement
+                .declarations
+                .iter()
+                .map(|declaration| declaration.token().text().to_string())
+                .collect(),
+            StatementInfo::FunctionSatisfy(statement) => {
+                vec![statement.name_token.text().to_string()]
             }
-            StatementInfo::FunctionSatisfy(statement) => statement.name_token.text().to_string(),
-            StatementInfo::Structure(statement) => statement.name_token.text().to_string(),
-            StatementInfo::Inductive(statement) => statement.name_token.text().to_string(),
-            StatementInfo::Typeclass(statement) => statement.typeclass_name.text().to_string(),
-            StatementInfo::Instance(statement) => statement.package_signature_name(),
+            StatementInfo::Structure(statement) => vec![statement.name_token.text().to_string()],
+            StatementInfo::Inductive(statement) => vec![statement.name_token.text().to_string()],
+            StatementInfo::Typeclass(statement) => {
+                vec![statement.typeclass_name.text().to_string()]
+            }
+            StatementInfo::Instance(statement) => vec![statement.package_signature_name()],
             StatementInfo::Attributes(_)
             | StatementInfo::Claim(_)
             | StatementInfo::ForAll(_)
@@ -154,8 +162,8 @@ impl Statement {
             | StatementInfo::Numerals(_)
             | StatementInfo::Match(_)
             | StatementInfo::Destructuring(_)
-            | StatementInfo::DocComment(_) => return None,
-        })
+            | StatementInfo::DocComment(_) => vec![],
+        }
     }
 
     fn package_signature_text(&self) -> String {
@@ -171,19 +179,20 @@ impl Statement {
         if let StatementInfo::Attributes(statement) = &self.statement {
             let mut signatures = Vec::new();
             for member in &statement.body.statements {
-                let Some(member_name) = member.package_signature_name() else {
-                    continue;
-                };
-                let key = format!("{}.{}", statement.name_token.text(), member_name);
-                signatures.push((key, attribute_member_signature(statement, member)));
+                let member_text = attribute_member_signature(statement, member);
+                for member_name in member.package_signature_names() {
+                    let key = format!("{}.{}", statement.name_token.text(), member_name);
+                    signatures.push((key, member_text.clone()));
+                }
             }
             return signatures;
         }
 
-        let Some(name) = self.package_signature_name() else {
-            return Vec::new();
-        };
-        vec![(name, self.package_signature_text())]
+        let text = self.package_signature_text();
+        self.package_signature_names()
+            .into_iter()
+            .map(|name| (name, text.clone()))
+            .collect()
     }
 
     pub fn package_signature(&self) -> Option<(String, String)> {

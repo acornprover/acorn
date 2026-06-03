@@ -1,0 +1,9 @@
+structure Box {
+    value: Bool
+}
+
+attributes Box {
+    let (left: Bool, right: Bool) satisfy {
+        true
+    }
+}

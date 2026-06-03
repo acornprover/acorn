@@ -1,0 +1,4 @@
+command = "verify_then_check"
+target = "pkg"
+expect = "ok"
+metrics.searches_total = 1

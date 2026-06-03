@@ -123,6 +123,9 @@ fn apply_interface_statement_mode(
             if theorem.lemma {
                 return Err(statement.error("interface.ac cannot contain lemmas"));
             }
+            if theorem.axiomatic {
+                return Err(statement.error("interface axioms are not allowed"));
+            }
             if theorem.body.is_some() {
                 return Err(statement.error("interface theorems cannot have proof bodies"));
             }
