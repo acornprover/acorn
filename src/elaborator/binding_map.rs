@@ -174,15 +174,126 @@ impl BindingMap {
             .map_or(false, |info| info.attributes.contains_key(var_name))
     }
 
+    fn merge_typeclass_attr_candidate<'a>(
+        attr_name: &str,
+        candidate: &mut Option<(ModuleId, &'a Typeclass)>,
+        module_id: ModuleId,
+        typeclass: &'a Typeclass,
+    ) -> Result<(), String> {
+        if let Some((_existing_module, existing_typeclass)) = candidate {
+            if *existing_typeclass != typeclass {
+                return Err(format!(
+                    "attribute '{}' is ambiguous: defined in multiple typeclasses: {}, {}",
+                    attr_name, existing_typeclass.name, typeclass.name
+                ));
+            }
+        } else {
+            *candidate = Some((module_id, typeclass));
+        }
+        Ok(())
+    }
+
+    fn typeclass_attr_entry<'a>(
+        &'a self,
+        typeclass: &Typeclass,
+        attr_name: &str,
+    ) -> Result<Option<(ModuleId, &'a Typeclass)>, String> {
+        let Some(info) = self.typeclass_defs.get(typeclass) else {
+            return Ok(None);
+        };
+
+        let mut candidate = None;
+        if let Some((module_id, defining_typeclass)) = info.attributes.get(attr_name) {
+            if defining_typeclass == typeclass {
+                return Ok(Some((*module_id, defining_typeclass)));
+            }
+            Self::merge_typeclass_attr_candidate(
+                attr_name,
+                &mut candidate,
+                *module_id,
+                defining_typeclass,
+            )?;
+        }
+
+        let mut bases: Vec<_> = info.extends.iter().collect();
+        bases.sort();
+        for base in bases {
+            let Some(base_info) = self.typeclass_defs.get(base) else {
+                continue;
+            };
+            if let Some((module_id, defining_typeclass)) = base_info.attributes.get(attr_name) {
+                Self::merge_typeclass_attr_candidate(
+                    attr_name,
+                    &mut candidate,
+                    *module_id,
+                    defining_typeclass,
+                )?;
+            }
+        }
+        Ok(candidate)
+    }
+
     /// For a given typeclass attribute, find the typeclass that defines it.
     /// This can return the typeclass argument itself, or a base typeclass that it extends.
     /// Returns None if there is no such attribute.
     pub fn typeclass_attr_lookup(&self, typeclass: &Typeclass, attr: &str) -> Option<&Typeclass> {
+        self.typeclass_attr_entry(typeclass, attr)
+            .ok()
+            .flatten()
+            .map(|(_, typeclass)| typeclass)
+    }
+
+    /// Looks only at the attribute map already stored on this typeclass.
+    /// This preserves the existing definition-time behavior for subclasses that were
+    /// declared before a superclass gained a same-named attribute.
+    pub fn cached_typeclass_attr_lookup(
+        &self,
+        typeclass: &Typeclass,
+        attr: &str,
+    ) -> Option<&Typeclass> {
         self.typeclass_defs
             .get(typeclass)?
             .attributes
             .get(attr)
             .map(|(_, tc)| tc)
+    }
+
+    pub fn typeclass_attr_lookup_checked(
+        &self,
+        typeclass: &Typeclass,
+        attr: &str,
+    ) -> Result<Option<&Typeclass>, String> {
+        self.typeclass_attr_entry(typeclass, attr)
+            .map(|entry| entry.map(|(_, typeclass)| typeclass))
+    }
+
+    fn typeclass_extends(&self, typeclass: &Typeclass, base: &Typeclass) -> bool {
+        self.typeclass_defs
+            .get(typeclass)
+            .is_some_and(|info| info.extends.contains(base))
+    }
+
+    fn merge_receiver_typeclass_attr_candidate(
+        &self,
+        attr_name: &str,
+        candidate: &Typeclass,
+        selected: &mut Option<Typeclass>,
+    ) -> Result<(), String> {
+        let Some(existing) = selected else {
+            *selected = Some(candidate.clone());
+            return Ok(());
+        };
+        if existing == candidate || self.typeclass_extends(existing, candidate) {
+            return Ok(());
+        }
+        if self.typeclass_extends(candidate, existing) {
+            *selected = Some(candidate.clone());
+            return Ok(());
+        }
+        Err(format!(
+            "attribute '{}' is ambiguous: defined in multiple typeclasses: {}, {}",
+            attr_name, existing.name, candidate.name
+        ))
     }
 
     /// Gets the local alias to use for a given constant.
@@ -520,28 +631,18 @@ impl BindingMap {
 
         // If no direct type attribute, check if this datatype is an instance
         // of any typeclass that has this attribute
-        let mut base_typeclass: Option<&Typeclass> = None;
+        let mut base_typeclass: Option<Typeclass> = None;
 
         for typeclass in self.get_instance_typeclasses(datatype) {
-            let Some(base_tc) = self.typeclass_attr_lookup(typeclass, attr_name) else {
+            let Some(base_tc) = self.typeclass_attr_lookup_checked(typeclass, attr_name)? else {
                 continue;
             };
-            if let Some(existing_base) = base_typeclass {
-                // If we find a different base typeclass, it's ambiguous
-                if existing_base != base_tc {
-                    return Err(format!(
-                        "attribute '{}' is ambiguous: defined in multiple typeclasses: {}, {}",
-                        attr_name, existing_base.name, base_tc.name
-                    ));
-                }
-            } else {
-                base_typeclass = Some(base_tc);
-            }
+            self.merge_receiver_typeclass_attr_candidate(attr_name, base_tc, &mut base_typeclass)?;
         }
 
         match base_typeclass {
             Some(typeclass) => self
-                .resolve_typeclass_attr(typeclass, attr_name)
+                .resolve_typeclass_attr(&typeclass, attr_name)
                 .ok_or_else(|| {
                     format!(
                         "attribute {}.{} not found via typeclass {}",
@@ -622,19 +723,10 @@ impl BindingMap {
 
         let mut base_typeclass: Option<Typeclass> = None;
         for typeclass in self.get_instance_typeclasses_for_type(receiver_type) {
-            let Some(base_tc) = self.typeclass_attr_lookup(&typeclass, attr_name) else {
+            let Some(base_tc) = self.typeclass_attr_lookup_checked(&typeclass, attr_name)? else {
                 continue;
             };
-            if let Some(existing_base) = &base_typeclass {
-                if existing_base != base_tc {
-                    return Err(format!(
-                        "attribute '{}' is ambiguous: defined in multiple typeclasses: {}, {}",
-                        attr_name, existing_base.name, base_tc.name
-                    ));
-                }
-            } else {
-                base_typeclass = Some(base_tc.clone());
-            }
+            self.merge_receiver_typeclass_attr_candidate(attr_name, base_tc, &mut base_typeclass)?;
         }
 
         match base_typeclass {
@@ -660,11 +752,23 @@ impl BindingMap {
         typeclass: &Typeclass,
         attr_name: &str,
     ) -> Option<(ModuleId, ConstantName)> {
-        // Check if this attribute is defined anywhere (including inherited ones)
-        let info = self.typeclass_defs.get(typeclass)?;
-        let (attr_module_id, attr_typeclass) = info.attributes.get(attr_name)?;
-        let name = ConstantName::typeclass_attr(*attr_module_id, attr_typeclass.clone(), attr_name);
-        Some((*attr_module_id, name))
+        self.resolve_typeclass_attr_checked(typeclass, attr_name)
+            .ok()
+            .flatten()
+    }
+
+    pub fn resolve_typeclass_attr_checked(
+        &self,
+        typeclass: &Typeclass,
+        attr_name: &str,
+    ) -> Result<Option<(ModuleId, ConstantName)>, String> {
+        let Some((attr_module_id, attr_typeclass)) =
+            self.typeclass_attr_entry(typeclass, attr_name)?
+        else {
+            return Ok(None);
+        };
+        let name = ConstantName::typeclass_attr(attr_module_id, attr_typeclass.clone(), attr_name);
+        Ok(Some((attr_module_id, name)))
     }
 
     /// Figures out where this name was originally defined.
@@ -716,11 +820,10 @@ impl BindingMap {
         typeclass: &Typeclass,
         attribute: &str,
     ) -> Option<ModuleId> {
-        self.typeclass_defs.get(typeclass).and_then(|def| {
-            def.attributes
-                .get(attribute)
-                .map(|(module_id, _)| *module_id)
-        })
+        self.resolve_typeclass_attr_checked(typeclass, attribute)
+            .ok()
+            .flatten()
+            .map(|(module_id, _)| module_id)
     }
 
     /// Checks against names for both types and typeclasses because they can conflict.

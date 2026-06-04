@@ -1,0 +1,35 @@
+type Nat: axiom
+
+typeclass B: Base {
+    seed: B
+}
+
+typeclass E: EarlyChild extends Base {
+    early_self_eq(a: E) {
+        a = a
+    }
+}
+
+attributes B: Base {
+    define pow(self, exp: Nat) -> B {
+        self
+    }
+}
+
+typeclass L: LateChild extends Base {
+    late_self_eq(a: L) {
+        a = a
+    }
+}
+
+let exact_base_lookup[B: Base]: (B, Nat) -> B = function(a: B, n: Nat) {
+    a.pow(n)
+}
+
+let late_child_lookup[L: LateChild]: (L, Nat) -> L = function(a: L, n: Nat) {
+    a.pow(n)
+}
+
+let early_child_lookup[E: EarlyChild]: (E, Nat) -> E = function(a: E, n: Nat) {
+    a.pow(n)
+}

@@ -54,7 +54,7 @@ impl Environment {
             for (attr_name, type_expr, doc_comments) in &ts.constants {
                 if let Some(existing_tc) = self
                     .bindings
-                    .typeclass_attr_lookup(&typeclass, attr_name.text())
+                    .cached_typeclass_attr_lookup(&typeclass, attr_name.text())
                 {
                     return Err(attr_name.error(&format!(
                         "attribute '{}' is already defined via base typeclass '{}'",

@@ -1673,7 +1673,10 @@ impl<'a> Evaluator<'a> {
         attr_name: &str,
         source: &dyn ErrorContext,
     ) -> error::Result<PotentialValue> {
-        if let Some((module_id, name)) = self.bindings.resolve_typeclass_attr(typeclass, attr_name)
+        if let Some((module_id, name)) = self
+            .bindings
+            .resolve_typeclass_attr_checked(typeclass, attr_name)
+            .map_err(|e| source.error(&e))?
         {
             // Get the bindings from the module where this attribute was actually defined
             let bindings = self.get_bindings(module_id);

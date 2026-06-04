@@ -56,8 +56,9 @@ impl Environment {
         self.check_attribute_body_names_unique(body)?;
         for statement in &body.statements {
             for token in attribute_name_tokens(statement) {
-                if let Some(existing_tc) =
-                    self.bindings.typeclass_attr_lookup(typeclass, token.text())
+                if let Some(existing_tc) = self
+                    .bindings
+                    .cached_typeclass_attr_lookup(typeclass, token.text())
                 {
                     return Err(token.error(&format!(
                         "attribute '{}' is already defined via typeclass '{}'",
