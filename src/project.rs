@@ -92,9 +92,11 @@ pub struct Project {
     // The module names that we want to build.
     pub targets: HashSet<ModuleDescriptor>,
 
-    // Targets that should be elaborated but not proved. This is used for pending/
-    // files that record intended theorem statements and proof attempts.
+    // Targets that should be elaborated but not proved.
     surface_check_targets: HashSet<ModuleDescriptor>,
+
+    // Project-root-relative directories that check mode elaborates without proof search.
+    surface_check_dirs: Vec<PathBuf>,
 
     // The last known-good build cache.
     // This is different from the Builder's build cache, which is created during a build.
@@ -170,6 +172,7 @@ pub enum PackageRole {
 
 const PACKAGE_INTERFACE_FILE: &str = "interface.ac";
 const CERTS_DIR: &str = "certs";
+const DEFAULT_SURFACE_CHECK_DIR: &str = "pending";
 
 fn path_has_certs_component(path: &Path) -> bool {
     path.components()
@@ -208,6 +211,7 @@ pub struct ProjectView {
     config: ProjectConfig,
     src_dir: Arc<PathBuf>,
     build_dir: Arc<PathBuf>,
+    surface_check_dirs: Arc<Vec<PathBuf>>,
     build_cache: Arc<BuildCache>,
     targets: Arc<HashSet<ModuleDescriptor>>,
     surface_check_targets: Arc<HashSet<ModuleDescriptor>>,
@@ -272,6 +276,7 @@ impl ProjectView {
             config: project.config.clone(),
             src_dir: Arc::new(project.src_dir.clone()),
             build_dir: Arc::new(project.build_dir.clone()),
+            surface_check_dirs: Arc::new(project.surface_check_dirs.clone()),
             build_cache: Arc::clone(&project.build_cache),
             targets: Arc::new(project.targets.clone()),
             surface_check_targets: Arc::new(project.surface_check_targets.clone()),
@@ -362,6 +367,17 @@ impl ProjectView {
     pub fn url_from_descriptor(&self, descriptor: &ModuleDescriptor) -> Option<Url> {
         let path = self.path_from_descriptor(descriptor).ok()?;
         Url::from_file_path(path).ok()
+    }
+
+    pub fn is_surface_check_path(&self, path: &Path) -> bool {
+        self.surface_check_dirs
+            .iter()
+            .any(|dir| path.strip_prefix(dir).is_ok())
+    }
+
+    pub fn suppresses_certificate_for(&self, descriptor: &ModuleDescriptor) -> bool {
+        self.path_from_descriptor(descriptor)
+            .is_ok_and(|path| self.is_surface_check_path(&path))
     }
 
     // Yields (url, version) for all open files.
@@ -1067,6 +1083,51 @@ mod tests {
     }
 
     #[test]
+    fn surface_check_dirs_default_to_pending() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let src_dir = temp_dir.path().join("src");
+        let build_dir = temp_dir.path().join("build");
+        fs::create_dir(&src_dir).expect("src directory should be created");
+        fs::create_dir(&build_dir).expect("build directory should be created");
+
+        let project = Project::new(src_dir, build_dir, ProjectConfig::default())
+            .expect("project should load with default surface-check dirs");
+
+        assert_eq!(
+            project.surface_check_dirs,
+            vec![temp_dir.path().join("pending")]
+        );
+        assert!(project.is_surface_check_path(&temp_dir.path().join("pending/foo.ac")));
+    }
+
+    #[test]
+    fn acorn_toml_surface_check_dirs_override_default_pending() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let src_dir = temp_dir.path().join("src");
+        let build_dir = temp_dir.path().join("build");
+        fs::create_dir(&src_dir).expect("src directory should be created");
+        fs::create_dir(&build_dir).expect("build directory should be created");
+        fs::write(
+            temp_dir.path().join("acorn.toml"),
+            "surface_check_dirs = [\"drafts\", \"experiments\"]\n",
+        )
+        .expect("acorn.toml should be written");
+
+        let project = Project::new(src_dir, build_dir, ProjectConfig::default())
+            .expect("project should load configured surface-check dirs");
+
+        assert_eq!(
+            project.surface_check_dirs,
+            vec![
+                temp_dir.path().join("drafts"),
+                temp_dir.path().join("experiments")
+            ]
+        );
+        assert!(project.is_surface_check_path(&temp_dir.path().join("drafts/foo.ac")));
+        assert!(!project.is_surface_check_path(&temp_dir.path().join("pending/foo.ac")));
+    }
+
+    #[test]
     fn older_acorn_toml_project_format_requires_update_version_before_cache_writes() {
         let temp_dir = tempfile::tempdir().expect("temp directory should be created");
         let src_dir = temp_dir.path().join("src");
@@ -1432,6 +1493,77 @@ impl Project {
         src_dir.parent().map(|root| root.join("acorn.toml"))
     }
 
+    fn default_surface_check_dirs(src_dir: &Path) -> Vec<PathBuf> {
+        src_dir
+            .parent()
+            .map(|root| vec![root.join(DEFAULT_SURFACE_CHECK_DIR)])
+            .unwrap_or_default()
+    }
+
+    fn surface_check_dirs_value<'a>(doc: &'a DocumentMut) -> Option<&'a toml_edit::Item> {
+        doc.get("surface_check_dirs").or_else(|| {
+            doc.get("check")
+                .and_then(|check| check.get("surface_check_dirs"))
+        })
+    }
+
+    fn resolve_surface_check_dir(root: &Path, path: &str) -> Result<PathBuf, ProjectError> {
+        if path.is_empty() {
+            return Err(ProjectError::message(
+                "surface_check_dirs entries must not be empty",
+            ));
+        }
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Ok(root.join(path))
+        }
+    }
+
+    fn load_surface_check_dirs_from_acorn_toml(
+        src_dir: &Path,
+    ) -> Result<Vec<PathBuf>, ProjectError> {
+        let default_dirs = Self::default_surface_check_dirs(src_dir);
+        let Some(acorn_toml) = Self::acorn_toml_path_for_src_dir(src_dir) else {
+            return Ok(default_dirs);
+        };
+        if !acorn_toml.is_file() {
+            return Ok(default_dirs);
+        }
+
+        let text = std::fs::read_to_string(&acorn_toml)?;
+        let doc = text.parse::<DocumentMut>().map_err(|error| {
+            ProjectError::message(format!("Error parsing {}: {}", acorn_toml.display(), error))
+        })?;
+        let Some(value) = Self::surface_check_dirs_value(&doc) else {
+            return Ok(default_dirs);
+        };
+        let Some(array) = value.as_array() else {
+            return Err(ProjectError::message(format!(
+                "{}: surface_check_dirs must be an array of strings",
+                acorn_toml.display()
+            )));
+        };
+        let Some(root) = src_dir.parent() else {
+            return Ok(Vec::new());
+        };
+
+        let mut dirs = Vec::new();
+        for entry in array {
+            let Some(path) = entry.as_str() else {
+                return Err(ProjectError::message(format!(
+                    "{}: surface_check_dirs entries must be strings",
+                    acorn_toml.display()
+                )));
+            };
+            dirs.push(Self::resolve_surface_check_dir(root, path)?);
+        }
+        dirs.sort();
+        dirs.dedup();
+        Ok(dirs)
+    }
+
     fn load_project_format_version_from_acorn_toml(
         acorn_toml: &Path,
     ) -> Result<Option<u32>, ProjectError> {
@@ -1530,6 +1662,7 @@ impl Project {
             BuildCache::new(src_dir.clone(), build_dir.clone())
         };
         let cache_load_time = cache_load_start.elapsed();
+        let surface_check_dirs = Self::load_surface_check_dirs_from_acorn_toml(&src_dir)?;
 
         Ok(Project {
             config,
@@ -1540,6 +1673,7 @@ impl Project {
             dependency_load_errors: HashMap::new(),
             targets: HashSet::new(),
             surface_check_targets: HashSet::new(),
+            surface_check_dirs,
             build_cache: Arc::new(build_cache),
             cache_load_time,
             build_dir,
@@ -2048,54 +2182,51 @@ impl Project {
         descriptors
     }
 
-    fn pending_dir(&self) -> Option<PathBuf> {
-        self.src_dir.parent().map(|parent| parent.join("pending"))
+    pub fn is_surface_check_path(&self, path: &Path) -> bool {
+        self.surface_check_dirs
+            .iter()
+            .any(|dir| path.strip_prefix(dir).is_ok())
     }
 
-    pub fn is_pending_path(&self, path: &Path) -> bool {
-        self.pending_dir()
-            .is_some_and(|pending_dir| path.strip_prefix(pending_dir).is_ok())
-    }
-
-    // Adds a surface-check target for all files in the optional 'pending' directory.
-    pub fn add_pending_targets(&mut self) {
+    // Adds a surface-check target for all files in configured surface-check directories.
+    pub fn add_surface_check_dir_targets(&mut self) {
         if !self.config.use_filesystem {
-            panic!("cannot add_pending_targets without filesystem access")
+            panic!("cannot add_surface_check_dir_targets without filesystem access")
         }
 
-        for path in self.pending_target_paths() {
+        for path in self.surface_check_target_paths() {
             let _ = self.add_surface_target_by_path(&path);
         }
     }
 
-    pub fn pending_target_paths(&self) -> Vec<PathBuf> {
-        let Some(pending_dir) = self.pending_dir() else {
-            return Vec::new();
-        };
-        if !pending_dir.is_dir() {
-            return Vec::new();
-        }
-
+    pub fn surface_check_target_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = Vec::new();
-        for entry in WalkDir::new(&pending_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() {
-                let path = entry.path();
-                if path.extension() == Some(std::ffi::OsStr::new("ac")) {
-                    paths.push(path.to_path_buf());
+        for surface_check_dir in &self.surface_check_dirs {
+            if !surface_check_dir.is_dir() {
+                continue;
+            }
+            for entry in WalkDir::new(surface_check_dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file() {
+                    let path = entry.path();
+                    if path.extension() == Some(std::ffi::OsStr::new("ac")) {
+                        paths.push(path.to_path_buf());
+                    }
                 }
             }
         }
         paths.sort();
+        paths.dedup();
         paths
     }
 
-    pub fn pending_target_descriptors(&self) -> Vec<ModuleDescriptor> {
-        self.pending_target_paths()
+    pub fn surface_check_target_descriptors(&self) -> Vec<ModuleDescriptor> {
+        self.surface_check_target_paths()
             .into_iter()
             .filter_map(|path| self.descriptor_from_path(&path).ok())
+            .map(|descriptor| self.canonicalize_name_descriptor(&descriptor))
             .collect()
     }
 

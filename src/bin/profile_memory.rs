@@ -185,7 +185,7 @@ fn main() {
 
     let load_start = Instant::now();
     project.add_src_targets();
-    project.add_pending_targets();
+    project.add_surface_check_dir_targets();
     let load_time = load_start.elapsed();
     sample("after full check-style load", &mut samples);
 

@@ -489,7 +489,7 @@ enum Command {
         /// Target module or file to check (can be a filename, module name, or module:line)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to check. Supports TARGET:LINE syntax. If not provided, checks src/ and elaborates pending/ if present."
+            help = "Module or filename to check. Supports TARGET:LINE syntax. If not provided, checks src/ and elaborates surface_check_dirs if present (default: pending/)."
         )]
         target: Option<String>,
 

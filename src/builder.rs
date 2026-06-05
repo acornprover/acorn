@@ -1045,12 +1045,6 @@ impl BuildMetrics {
             ));
         } else {
             lines.push(format!("{}/{} OK", self.goals_success, self.goals_total));
-            if self.pending_modules_total > 0 {
-                lines.push(format!(
-                    "{} pending goals elaborated in {} modules",
-                    self.pending_goals_total, self.pending_modules_total
-                ));
-            }
         }
 
         lines
@@ -2702,6 +2696,10 @@ impl<'a> Builder<'a> {
 
         self.metrics.certs_unused += worklist.unused() as i32;
 
+        if self.project().suppresses_certificate_for(target) {
+            return Ok(());
+        }
+
         let used_cert_count = new_certs.len();
         let mut cert_store = CertificateStore { certs: new_certs };
         cert_store.append(&worklist);
@@ -3588,7 +3586,7 @@ mod tests {
     };
 
     #[test]
-    fn test_info_lines_put_pending_elaboration_after_ok() {
+    fn test_info_lines_hide_pending_elaboration_summary() {
         let metrics = BuildMetrics {
             goals_total: 2,
             goals_success: 2,
@@ -3602,12 +3600,13 @@ mod tests {
             .iter()
             .position(|line| line == "2/2 OK")
             .expect("OK summary should be present");
-        let pending_index = lines
-            .iter()
-            .position(|line| line == "3 pending goals elaborated in 1 modules")
-            .expect("pending elaboration summary should be present");
-
-        assert!(pending_index > ok_index);
+        assert_eq!(ok_index, lines.len() - 1);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("pending goals elaborated")),
+            "pending elaboration summary should not be printed: {lines:?}"
+        );
     }
 
     #[test]

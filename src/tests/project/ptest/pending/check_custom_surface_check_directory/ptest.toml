@@ -1,0 +1,8 @@
+command = "check"
+expect = "ok"
+metrics.goals_total = 0
+metrics.goals_success = 0
+metrics.pending_modules_total = 1
+metrics.pending_goals_total = 1
+metrics.searches_total = 0
+metrics.cert_checks_total = 0

@@ -320,8 +320,8 @@ pub struct Verifier {
 
     target_spec: TargetSpec,
 
-    include_pending_dir: bool,
-    surface_check_pending_targets: bool,
+    include_surface_check_dirs: bool,
+    surface_check_explicit_targets: bool,
 
     /// Optional line selection (1-based, external) to verify specific goal(s).
     /// If this is set, target must be as well.
@@ -374,8 +374,8 @@ impl Verifier {
         config: ProjectConfig,
         target: Option<String>,
         stdin_override: Option<&str>,
-        include_pending_dir: bool,
-        surface_check_pending_targets: bool,
+        include_surface_check_dirs: bool,
+        surface_check_explicit_targets: bool,
     ) -> Result<Self, VerifierSetupError> {
         let setup_start = std::time::Instant::now();
         let mut project = Project::new_local(&start_path, config.clone())?;
@@ -428,8 +428,8 @@ impl Verifier {
             project_ptr,
             target: normalized_target,
             target_spec,
-            include_pending_dir,
-            surface_check_pending_targets,
+            include_surface_check_dirs,
+            surface_check_explicit_targets,
             line_selection: None,
             goal_index: None,
             exit_on_warning: false,
@@ -459,8 +459,8 @@ impl Verifier {
         &mut self,
     ) -> Result<(Vec<ModuleDescriptor>, Vec<ModuleDescriptor>), String> {
         let target_spec = self.target_spec.clone();
-        let include_pending_dir = self.include_pending_dir;
-        let surface_check_pending_targets = self.surface_check_pending_targets;
+        let include_surface_check_dirs = self.include_surface_check_dirs;
+        let surface_check_explicit_targets = self.surface_check_explicit_targets;
         let project = self.project_mut();
         let mut targets = Vec::new();
         let mut load_order = Vec::new();
@@ -473,8 +473,8 @@ impl Verifier {
                     targets.extend(build_descriptors.clone());
                     load_order.extend(build_descriptors);
                 }
-                if include_pending_dir {
-                    for descriptor in project.pending_target_descriptors() {
+                if include_surface_check_dirs {
+                    for descriptor in project.surface_check_target_descriptors() {
                         let descriptor =
                             project.add_unloaded_surface_target_by_descriptor(&descriptor);
                         targets.push(descriptor.clone());
@@ -486,12 +486,12 @@ impl Verifier {
                 let descriptor = project
                     .descriptor_from_path(&path)
                     .map_err(|e| format!("Error resolving target '{}': {}", path.display(), e))?;
-                let descriptor = if surface_check_pending_targets && project.is_pending_path(&path)
-                {
-                    project.add_unloaded_surface_target_by_descriptor(&descriptor)
-                } else {
-                    project.add_unloaded_target_by_descriptor(&descriptor)
-                };
+                let descriptor =
+                    if surface_check_explicit_targets && project.is_surface_check_path(&path) {
+                        project.add_unloaded_surface_target_by_descriptor(&descriptor)
+                    } else {
+                        project.add_unloaded_target_by_descriptor(&descriptor)
+                    };
                 let build_descriptors = project.build_descriptors_for_target(&descriptor);
                 targets.extend(build_descriptors.clone());
                 load_order.extend(build_descriptors);
@@ -521,18 +521,18 @@ impl Verifier {
     fn load_targets_regular(&mut self) -> Result<Duration, String> {
         let start = std::time::Instant::now();
         let target_spec = self.target_spec.clone();
-        let include_pending_dir = self.include_pending_dir;
-        let surface_check_pending_targets = self.surface_check_pending_targets;
+        let include_surface_check_dirs = self.include_surface_check_dirs;
+        let surface_check_explicit_targets = self.surface_check_explicit_targets;
         let project = self.project_mut();
         match target_spec {
             TargetSpec::All => {
                 project.add_src_targets();
-                if include_pending_dir {
-                    project.add_pending_targets();
+                if include_surface_check_dirs {
+                    project.add_surface_check_dir_targets();
                 }
             }
             TargetSpec::Path(path) => {
-                if surface_check_pending_targets && project.is_pending_path(&path) {
+                if surface_check_explicit_targets && project.is_surface_check_path(&path) {
                     project
                         .add_surface_target_by_path(&path)
                         .map_err(|e| format!("Error loading target '{}': {}", path.display(), e))?;
@@ -1112,6 +1112,38 @@ mod tests {
         assert_eq!(output3.metrics.certs_unused, 0);
         // In check mode, we should never reach the search phase
         assert_eq!(output3.metrics.searches_total, 0);
+    }
+
+    #[test]
+    fn test_explicit_surface_check_target_does_not_write_jsonl() {
+        let (acornlib, _src, _build) = setup();
+        let pending = acornlib.child("pending");
+        pending.create_dir_all().unwrap();
+        pending
+            .child("ready.ac")
+            .write_str(
+                r#"
+                theorem ready {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            Some("pending/ready.ac".to_string()),
+        )
+        .unwrap();
+        verifier.builder.check_hashes = false;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert!(
+            !pending.child("ready.jsonl").exists(),
+            "surface-check directory targets should not write sidecar JSONL files"
+        );
     }
 
     #[test]
