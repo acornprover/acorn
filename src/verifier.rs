@@ -3206,7 +3206,7 @@ theorem later {
     }
 
     #[test]
-    fn test_reprove_default_alias_writes_canonical_cache_path() {
+    fn test_reprove_default_file_writes_ordinary_cache_path() {
         let (acornlib, src, build) = setup();
 
         src.child("rat").create_dir_all().unwrap();
@@ -3242,11 +3242,11 @@ theorem later {
 
         assert!(
             cert_for_source(&src, "rat/default.ac").exists(),
-            "canonical cache file should be written for rat/default.ac"
+            "cache file should be written for rat/default.ac"
         );
         assert!(
             !build.child("rat.jsonl").exists(),
-            "legacy build/rat.jsonl should not be written for default.ac modules"
+            "default.ac should not be treated as the parent module cache"
         );
 
         let mut check = Verifier::new(

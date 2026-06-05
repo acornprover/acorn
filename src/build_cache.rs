@@ -200,7 +200,7 @@ impl BuildCache {
             .collect::<Vec<_>>();
         let last = parts.pop()?;
         match last.as_str() {
-            PACKAGE_INTERFACE_FILE | "default.ac" => {}
+            PACKAGE_INTERFACE_FILE => {}
             _ => parts.push(last.strip_suffix(".ac")?.to_string()),
         }
         if parts.is_empty() {
@@ -223,16 +223,12 @@ impl BuildCache {
         }
         let last = parts.last()?;
         let file_path = directory.join(format!("{}.ac", last));
-        let module_dir = directory.join(last);
-        let interface_path = module_dir.join(PACKAGE_INTERFACE_FILE);
-        let default_path = module_dir.join("default.ac");
+        let interface_path = directory.join(last).join(PACKAGE_INTERFACE_FILE);
 
         if interface_path.is_file() {
             Some(interface_path)
         } else if file_path.is_file() {
             Some(file_path)
-        } else if default_path.is_file() {
-            Some(default_path)
         } else {
             Some(file_path)
         }

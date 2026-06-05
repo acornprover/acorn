@@ -82,10 +82,6 @@ fn lint_module(
         .map_err(|e| e.to_string())?;
     let source = project.read_file(&path).map_err(|e| e.to_string())?;
     let statements = parse_statements(&source)?;
-    let allow_default_reexports = path.file_name().and_then(|name| name.to_str())
-        == Some("default.ac")
-        && is_reexport_default_module(&statements);
-
     let mut imports = Vec::new();
     collect_imports(&statements, &mut imports, true);
 
@@ -96,9 +92,6 @@ fn lint_module(
     let display_path = project.display_path(descriptor);
     let mut warnings = Vec::new();
     for import in imports {
-        if allow_default_reexports && import.top_level {
-            continue;
-        }
         let entity = find_tracked_entity(env, import.key).ok_or_else(|| {
             format!(
                 "could not resolve imported name '{}' at {}:{}:{}",
@@ -128,15 +121,6 @@ fn parse_statements(source: &str) -> Result<Vec<Statement>, String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-}
-
-fn is_reexport_default_module(statements: &[Statement]) -> bool {
-    statements.iter().all(|statement| {
-        matches!(
-            statement.statement,
-            StatementInfo::Import(_) | StatementInfo::DocComment(_)
-        )
-    })
 }
 
 fn collect_imports(statements: &[Statement], imports: &mut Vec<ImportBinding>, top_level: bool) {
@@ -338,15 +322,17 @@ mod tests {
     }
 
     #[test]
-    fn test_default_module_allows_unused_top_level_reexport_import() {
+    fn test_default_module_flags_unused_top_level_import() {
         let mut project = Project::new_mock_ide();
         project.mock("/mock/foo.ac", "let bar: Bool = true\n");
         project.mock("/mock/pkg/default.ac", "from foo import bar\n");
-        project.add_target_by_name("pkg").unwrap();
+        project.add_target_by_name("pkg.default").unwrap();
 
         assert!(project.errors().is_empty());
-        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg")]).unwrap();
-        assert!(warnings.is_empty());
+        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg.default")]).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].path, "pkg/default.ac");
+        assert_eq!(warnings[0].import_name, "bar");
     }
 
     #[test]
@@ -357,10 +343,10 @@ mod tests {
             "/mock/pkg/default.ac",
             "from foo import bar\n\ntheorem goal { true }\n",
         );
-        project.add_target_by_name("pkg").unwrap();
+        project.add_target_by_name("pkg.default").unwrap();
 
         assert!(project.errors().is_empty());
-        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg")]).unwrap();
+        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg.default")]).unwrap();
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].path, "pkg/default.ac");
         assert_eq!(warnings[0].import_name, "bar");
@@ -374,10 +360,10 @@ mod tests {
             "/mock/pkg/default.ac",
             "if true {\n    from foo import bar\n}\n",
         );
-        project.add_target_by_name("pkg").unwrap();
+        project.add_target_by_name("pkg.default").unwrap();
 
         assert!(project.errors().is_empty());
-        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg")]).unwrap();
+        let warnings = lint_targets(&project, &[ModuleDescriptor::name("pkg.default")]).unwrap();
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].path, "pkg/default.ac");
         assert_eq!(warnings[0].import_name, "bar");

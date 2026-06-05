@@ -450,11 +450,11 @@ fn test_import_default_ac() {
         "#,
     );
 
-    // Import from foo should find foo/default.ac
+    // default.ac is an ordinary module named foo.default.
     p.mock(
         "/mock/main.ac",
         r#"
-        from foo import Foo, foo_value
+        from foo.default import Foo, foo_value
         let x: Foo = foo_value
         "#,
     );
@@ -482,13 +482,28 @@ fn test_import_from_default_ac() {
     p.mock(
         "/mock/main.ac",
         r#"
-        from bar import Bar, bar_constant
+        from bar.default import Bar, bar_constant
         let b1: Bar = Bar.bar1
         let b2: Bar = bar_constant
         "#,
     );
 
     p.expect_ok("main");
+}
+
+#[test]
+fn test_default_ac_is_not_parent_module_alias() {
+    let mut p = Project::new_mock_ide();
+
+    p.mock(
+        "/mock/foo/default.ac",
+        r#"
+        type Foo: axiom
+        "#,
+    );
+
+    p.expect_load_err("foo");
+    p.expect_ok("foo.default");
 }
 
 #[test]
@@ -1437,7 +1452,7 @@ fn test_citation_expansion_prefers_operator_syntax_for_imported_instances() {
     .unwrap();
 
     let main_content = indoc! {r#"
-        from myint import Int, division_theorem
+        from myint.default import Int, division_theorem
         from order import PartialOrder
 
         let m: Int = axiom
@@ -1464,7 +1479,7 @@ fn test_citation_expansion_prefers_operator_syntax_for_imported_instances() {
     .unwrap();
     project.add_target_by_path(&main_path).unwrap();
     project.expect_ok("myint.lattice");
-    project.expect_ok("myint");
+    project.expect_ok("myint.default");
     project.expect_ok("main");
     build_allowing_warnings(&mut project);
 

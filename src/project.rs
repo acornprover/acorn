@@ -417,9 +417,6 @@ impl ProjectView {
                 {
                     break;
                 }
-                if component == "default.ac" && i > 0 && package_root.is_none() {
-                    break;
-                }
                 component[..component.len() - 3].to_string()
             } else {
                 component.to_string()
@@ -460,11 +457,9 @@ impl ProjectView {
 
             if i + 1 == parts.len() {
                 let file_path = path.join(format!("{}.ac", part));
-                let dir_path = path.join(part).join("default.ac");
                 let interface_path = path.join(part).join(PACKAGE_INTERFACE_FILE);
 
                 let file_exists = self.module_path_exists(&file_path);
-                let dir_exists = self.module_path_exists(&dir_path);
                 let interface_exists = self.module_path_exists(&interface_path);
 
                 if interface_exists {
@@ -477,17 +472,8 @@ impl ProjectView {
                         )));
                     }
                     return Ok(interface_path);
-                } else if file_exists && dir_exists {
-                    return Err(ImportError::NotFound(format!(
-                        "ambiguous module '{}': both {} and {} exist",
-                        module_name,
-                        file_path.display(),
-                        dir_path.display()
-                    )));
                 } else if file_exists {
                     return Ok(file_path);
-                } else if dir_exists {
-                    return Ok(dir_path);
                 } else {
                     return Ok(file_path);
                 }
@@ -3199,17 +3185,11 @@ impl Project {
                         path.display()
                     )));
                 }
-                // Handle the special case of default.ac
                 if component == PACKAGE_INTERFACE_FILE
                     && package_root
                         .as_ref()
                         .is_some_and(|root| path == root.join(PACKAGE_INTERFACE_FILE))
                 {
-                    break;
-                }
-                if component == "default.ac" && i > 0 && package_root.is_none() {
-                    // The module name should be the parent directory
-                    // We've already added it to parts, so we're done
                     break;
                 }
                 component[..component.len() - 3].to_string()
@@ -3236,21 +3216,13 @@ impl Project {
             check_valid_module_part(part, module_name)?;
 
             if i + 1 == parts.len() {
-                // For the last part, check both foo.ac and foo/default.ac
                 let file_path = path.join(format!("{}.ac", part));
-                let dir_path = path.join(part).join("default.ac");
                 let interface_path = path.join(part).join(PACKAGE_INTERFACE_FILE);
 
                 let file_exists = if self.config.use_filesystem {
                     file_path.exists()
                 } else {
                     self.open_files.contains_key(&file_path)
-                };
-
-                let dir_exists = if self.config.use_filesystem {
-                    dir_path.exists()
-                } else {
-                    self.open_files.contains_key(&dir_path)
                 };
 
                 let interface_exists = if self.config.use_filesystem {
@@ -3269,17 +3241,8 @@ impl Project {
                         )));
                     }
                     return Ok(interface_path);
-                } else if file_exists && dir_exists {
-                    return Err(ImportError::NotFound(format!(
-                        "ambiguous module '{}': both {} and {} exist",
-                        module_name,
-                        file_path.display(),
-                        dir_path.display()
-                    )));
                 } else if file_exists {
                     return Ok(file_path);
-                } else if dir_exists {
-                    return Ok(dir_path);
                 } else {
                     // Default to the file path for the error message
                     return Ok(file_path);
@@ -3644,8 +3607,7 @@ impl Project {
         errors
     }
 
-    // Resolves aliases like `foo.default` to the canonical descriptor (`foo`) when
-    // the named module file exists.
+    // Normalizes descriptors that resolve through package interface files.
     fn canonicalize_name_descriptor(&self, descriptor: &ModuleDescriptor) -> ModuleDescriptor {
         let ModuleDescriptor::Name(_) = descriptor else {
             return descriptor.clone();
