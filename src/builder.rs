@@ -2616,7 +2616,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
 
-        if self.strict {
+        let is_surface_check_target = self.project().is_surface_check_target(target);
+        if self.strict && !is_surface_check_target {
             for range in &lowered.top_level_axiom_ranges {
                 let event = self.make_event(
                     *range,
@@ -2646,7 +2647,7 @@ impl<'a> Builder<'a> {
         }
         let mut new_certs = vec![];
 
-        if self.project().is_surface_check_target(target) {
+        if is_surface_check_target {
             return Ok(());
         }
 

@@ -1147,6 +1147,40 @@ mod tests {
     }
 
     #[test]
+    fn test_strict_check_allows_surface_check_axiom_statements() {
+        let (acornlib, _src, _build) = setup();
+        let pending = acornlib.child("pending");
+        pending.create_dir_all().unwrap();
+        pending
+            .child("draft.ac")
+            .write_str(
+                r#"
+                axiom draft_axiom {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let check_config = ProjectConfig {
+            usage_mode: UsageMode::Check,
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+            update_version: false,
+        };
+        let mut verifier =
+            Verifier::new_for_check(acornlib.path().to_path_buf(), check_config, None).unwrap();
+        verifier.builder.check_mode = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.strict = true;
+
+        let output = verifier.run().unwrap();
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.pending_modules_total, 1);
+    }
+
+    #[test]
     fn test_strict_replay_imported_dependent_constructor() {
         let (acornlib, src, _build) = setup();
         write_imported_dependent_structure_repro(&src);
