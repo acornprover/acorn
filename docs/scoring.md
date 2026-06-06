@@ -1,8 +1,8 @@
 # Prover Scoring
 
-This document records what we learned from the May 2026 eval instrumentation pass and
-the current shape of the prover scoring code. It is meant as context for future work on
-proof-search heuristics.
+This document records what we learned from the June 2026 eval instrumentation and
+policy-ablation pass, plus the current shape of the prover scoring code. It is meant as
+context for future work on proof-search heuristics.
 
 ## Summary
 
@@ -18,79 +18,125 @@ especially fewer irrelevant factual assumption activations. That directly attack
 runtime bucket while keeping the proof search more complete than an early retrieval filter.
 
 This should not be interpreted as "replace the ONNX file and call it done." The current ONNX
-model is only one small part of the activation policy. The policy also has hardcoded ordering,
-very limited features, no runtime configurability, no ability to reject or budget facts, and old
+model is only one small part of the activation policy. The policy also has hardcoded ordering in
+the default configuration, very limited features, no ability to reject or budget facts, and old
 training infrastructure that is not eval-driven.
+
+The first configurability step has now landed: `acorn eval --policy` can run several activation
+policies without code edits. That immediately exposed two important facts:
+
+- `depth-first` currently beats the default ONNX policy by a large margin on the full eval.
+- alternate policies are not yet robust enough for routine use; they exposed certificate and
+  stack-overflow bugs that should be fixed before deeper scorer work.
 
 ## Eval Baseline
 
-The regular eval run on May 7, 2026 used the default `acorn eval` settings:
+The regular eval run on June 6, 2026 used the default `acorn eval` settings:
 
 - force-search eval mode
 - default timeout of 1 second per search
 - default skip modes `0` and `1`
 - goals drawn from eligible cached proofs
+- default scoring policy `onnx`
 
 The run produced this aggregate summary:
 
-- 43,870 benchmark proofs with eligible cached proofs
-- 21,590 benchmark proofs with empty cached proofs, omitted for `skip=0`
-- 43,870 benchmark goals matched current source
-- 41,487 searches performed
-- 32,251 searches succeeded
-- 77.74% search success rate
-- 414.2 ms average search time
-- 9,229 timeouts and 7 inconsistent searches
-- `skip=0`: 17,589 / 22,280 searches succeeded, 411.5 ms average
-- `skip=1`: 14,662 / 19,207 searches succeeded, 24,663 ineligible, 417.3 ms average
+- 74,671 benchmark proofs with eligible cached proofs
+- 38,622 benchmark proofs with empty cached proofs, omitted for `skip=0`
+- 74,671 benchmark goals matched current source
+- 69,726 searches performed
+- 39,920 searches succeeded
+- 57.25% search success rate
+- 598.9 ms average search time
+- 29,799 timeouts and 7 inconsistent searches
+- `skip=0`: 20,745 / 36,049 searches succeeded, 611.6 ms average
+- `skip=1`: 19,175 / 33,677 searches succeeded, 40,994 ineligible, 585.3 ms average
 
 The new search instrumentation reported:
 
-- 2,918.2 initial passive clauses per search on average
-- 5,230.3 max passive clauses per search on average
-- 33,623 peak passive clauses in one search
-- 5,090.6 final passive clauses per search on average
-- 94,483,115 factual activations, or 2,277.4 per search
-- 806,785 non-factual activations, or 19.4 per search
-- 192,231,357 generated candidates, or 4,633.5 per search
-- 186,253,845 accepted generated steps
-- 491,698 auto-rejected generated steps
-- 4,829,145 simplified-away generated steps
-- 159,086 passive simplifications
+- 2,967.0 initial passive clauses per search on average
+- 9,707.0 max passive clauses per search on average
+- 44,350 peak passive clauses in one search
+- 9,632.8 final passive clauses per search on average
+- 128,097,294 factual activations, or 1,837.2 per search
+- 1,190,376 non-factual activations, or 17.1 per search
+- 660,394,684 generated candidates, or 9,471.3 per search
+- 595,273,049 accepted generated steps
+- 488,361 auto-rejected generated steps
+- 63,833,238 simplified-away generated steps
+- 165,898 passive simplifications
 
 The timing split was:
 
-- 316.2 ms active inference per search
-- 16.3 ms active simplification per search
-- 37.2 ms passive simplification per search
-- 10.1 ms scoring per search
-- 26.4 ms passive indexing per search
+- 490.8 ms active inference per search
+- 37.2 ms active simplification per search
+- 26.9 ms passive simplification per search
+- 8.3 ms scoring per search
+- 32.0 ms passive indexing per search
 
 The activated rule counts were heavily dominated by facts:
 
-- 81,880,708 `Assumption`
-- 10,075,740 `Boolean Reduction`
-- 1,833,384 `Extensionality`
-- 909,799 `Equality Resolution`
-- 276,817 `Rewrite`
-- 112,544 `Equality Factoring`
-- 200,908 other
+- 109,918,354 `Assumption`
+- 17,520,061 `Boolean Reduction`
+- 846,282 `Extensionality`
+- 700,534 `Equality Resolution`
+- 158,008 `Rewrite`
+- 46,601 `Simplification`
+- 97,830 other
 
 Generated candidates were dominated by:
 
-- 92,674,669 `Rewrite`
-- 45,662,411 `Resolution`
-- 43,667,771 `Boolean Reduction`
-- 5,698,699 `Extensionality`
-- 2,891,293 `Equality Resolution`
-- 1,225,128 `Injectivity`
-- 411,386 other
+- 532,748,487 `Boolean Reduction`
+- 73,385,930 `Rewrite`
+- 38,782,142 `Resolution`
+- 7,848,062 `Extensionality`
+- 5,388,655 `Equality Resolution`
+- 1,678,238 `Injectivity`
+- 563,170 other
 
 The important interpretation is that passive-set operations are not free, but they are not
 currently the main measured cost. The expensive event is activating a clause, because activation
 runs the active inference machinery and can generate thousands of new candidates. The eval data
 shows many more factual activations than non-factual activations, and most activations are
 assumption steps. That makes activation ordering a high-leverage target.
+
+The default full eval took about 47 minutes wall time on this machine. Most of that was proof
+search: 2,814.670 seconds measured wall time, with 41,756.640 seconds of summed per-search proof
+time across worker threads.
+
+## Policy Ablation Results
+
+After adding `--policy`, the standard eval was run across four policies:
+
+| policy | result | success | average search | measured wall time |
+| --- | --- | ---: | ---: | ---: |
+| `onnx` | completed with failed searches | 39,920 / 69,726 = 57.25% | 598.9 ms | 2,815.059s |
+| `depth-first` | completed with failed searches | 54,377 / 69,726 = 77.99% | 278.1 ms | 1,155.152s |
+| `handcrafted` | build failed during eval | partial: 27,018 / 43,722 = 61.79% | 678.0 ms | 2,235.264s |
+| `onnx-no-shallow` | crashed during full eval | no aggregate | n/a | immediate stack overflow |
+
+The `depth-first` result is the most important clean ablation. It proves 14,457 more searches
+than the default ONNX policy and finishes about 2.4x faster. It also does much less search work:
+
+- 311.5M generated candidates versus 660.4M for `onnx`
+- 3,944.9 average max passive clauses versus 9,707.0 for `onnx`
+- 243.4 ms active inference per search versus 490.8 ms for `onnx`
+- 10.1 ms passive indexing per search versus 32.0 ms for `onnx`
+
+The `handcrafted` run is not directly comparable because it hit certificate-generation failures
+before completing the full corpus. The logged failures were:
+
+- `number_theory/arithmetic_functions.ac`, line 154: certificate claim map type mismatch
+- `fin_matrix_det.ac`, line 225: generated certificate code expected a type but found a value
+
+Those failures are still useful: alternate search paths are finding proofs that expose
+certificate-generation bugs.
+
+The `onnx-no-shallow` run currently cannot answer whether shallow-first is hurting ONNX. Full
+eval stack-overflowed immediately, including a retry with `RUST_MIN_STACK=67108864`. A narrow
+`acorn eval category --policy onnx-no-shallow --timing -j1` run completed, so the policy is not
+trivially broken, but some full-library search path is triggering unbounded recursion or stack
+growth.
 
 ## Current Eval Harness
 
@@ -99,6 +145,7 @@ assumption steps. That makes activation ordering a high-leverage target.
 - forces prover search instead of trusting cached proofs
 - disables module hash skipping
 - runs configured skip modes, defaulting to `0` and `1`
+- accepts `--policy` to select the activation queue policy
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
 
@@ -115,16 +162,32 @@ This makes eval a better metric than offline training loss. A scoring change sho
 eval success rate, average search time, activation counts, generated candidates, and the timing
 buckets above.
 
+The current policy options are:
+
+- `onnx`: the default embedded ONNX scorer, with shallow-first ordering
+- `handcrafted`: the old hand-written scorer, with shallow-first ordering
+- `depth-first`: constant scorer, so queue ties fall back to insertion/order structure, with
+  shallow-first ordering
+- `onnx-no-shallow`: the embedded ONNX scorer with shallow status removed from the ordinary
+  ordering key
+
+The policy is threaded through `Builder`, `Processor`, `Prover`, and `PassiveSet`. This is enough
+for eval ablations, but the alternate policies should still be treated as experimental until the
+bugs above are fixed.
+
 ## Current Scoring Architecture
 
 The activation queue lives in `PassiveSet`. New proof steps are scored in batches:
 
 1. `PassiveSet::push_batch` builds `Features` for each `ProofStep`.
-2. `Score::batch` asks the configured `Scorer` for a float score.
+2. `Score::batch` asks the configured `Scorer` for a float score and applies the configured
+   `ScoringPolicy`.
 3. `PassiveSet` stores `(Score, clause_id)` in a `BTreeSet`.
-4. `PassiveSet::pop_with_shallow` pops the highest ordered score for activation.
+4. `PassiveSet::pop_with_shallow` pops the highest ordered score for normal activation.
+5. `PassiveSet::pop_shallow` is used by shallow proof mode to find shallow work even when the
+   ordinary policy does not prioritize it.
 
-The default scorer is hardcoded:
+The default scorer is still the embedded ONNX model:
 
 ```rust
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
@@ -138,16 +201,19 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx")
 ```
 
-There are also old alternative scorers in `src/prover/scorer.rs`:
+`ScoringPolicy` now exposes these choices:
 
-- `HandcraftedScorer`
-- `DepthFirstScorer`
+- `Onnx`
+- `Handcrafted`
+- `DepthFirst`
+- `OnnxNoShallow`
 
-They are not exposed as normal eval/runtime options.
+The eval CLI exposes them as `onnx`, `handcrafted`, `depth-first`, and `onnx-no-shallow`.
 
-## Hardcoded Policy Around The Model
+## Policy Around The Model
 
-The model score is not the whole ordering. `Score` orders proof steps lexicographically by:
+The model score is not the whole ordering. Under the default `onnx` policy, `Score` orders proof
+steps lexicographically by:
 
 1. whether the step is a contradiction
 2. `ShallowStatus`
@@ -162,6 +228,10 @@ So the current policy hardcodes:
 This matters because an ONNX replacement cannot learn to activate a useful deep step before an
 unhelpful shallow step. That choice is made outside the model. The shallow heuristic is useful for
 some proof-validation behavior, but it is also acting as a global search policy.
+
+`onnx-no-shallow` was added to ablate this ordering. It preserves whether a step is shallow for
+shallow proof mode, but neutralizes shallow status in the ordinary queue ordering. Full eval
+currently stack-overflows under this policy, so the ablation is blocked on a bug fix.
 
 Future work should separate:
 
@@ -225,11 +295,11 @@ Adding everything to the passive set is cheaper than activating everything, but 
 Insertion requires scoring and indexing, and passive clauses can later be simplified when a
 single-literal clause is activated.
 
-The May 2026 eval numbers suggest this rough split per search:
+The June 2026 default ONNX eval numbers suggest this rough split per search:
 
-- scoring plus passive indexing: 36.5 ms
-- passive simplification: 37.2 ms
-- active inference: 316.2 ms
+- scoring plus passive indexing: 40.3 ms
+- passive simplification: 26.9 ms
+- active inference: 490.8 ms
 
 So it is plausible that premise selection would help, especially as the library grows. However,
 the current bottleneck is not the ONNX call or passive insertion. The current bottleneck is the
@@ -262,8 +332,8 @@ immediately for inference, but they are all candidates for later activation unde
 queue ordering.
 
 The activation cap currently counts non-factual activations. Factual activations can therefore
-be very large in a timeout search. The eval run had about 117 factual activations for every
-non-factual activation.
+be very large in a timeout search. The default ONNX eval run had about 108 factual activations
+for every non-factual activation.
 
 ## Current Activation Cost
 
@@ -286,7 +356,7 @@ boolean reduction, extensionality, resolution, and rewrite handling. The eval ge
 counts show that rewrite, resolution, and boolean reduction dominate candidate generation.
 
 This is why better activation ordering can be valuable even though scoring itself is cheap. A
-better scorer is not saving 10 ms of scoring time; it is trying to avoid hundreds of milliseconds
+better scorer is not saving 8 ms of scoring time; it is trying to avoid hundreds of milliseconds
 of unnecessary active inference.
 
 ## Current Training Code
@@ -320,14 +390,15 @@ making activation order worse.
 
 Scoring first makes sense for four reasons.
 
-First, active inference dominates measured runtime. The eval run spent 316.2 ms/search in active
-inference, versus 10.1 ms/search scoring and 26.4 ms/search passive indexing. The largest win is
-probably not making the scorer cheaper; it is activating fewer bad clauses before finding the
-goal.
+First, active inference dominates measured runtime. The default ONNX eval run spent 490.8
+ms/search in active inference, versus 8.3 ms/search scoring and 32.0 ms/search passive indexing.
+The largest win is probably not making the scorer cheaper; it is activating fewer bad clauses
+before finding the goal.
 
-Second, factual activations dominate. The prover activated about 94.5M factual steps and 0.8M
-non-factual steps in the eval run. Most activations were assumptions. A policy that delays or
-limits irrelevant factual assumptions could reduce the amount of active inference substantially.
+Second, factual activations dominate. The prover activated about 128.1M factual steps and 1.2M
+non-factual steps in the default ONNX eval run. Most activations were assumptions. A policy that
+delays or limits irrelevant factual assumptions could reduce the amount of active inference
+substantially.
 
 Third, scoring experiments can be incremental. We can keep all existing facts in the passive set,
 preserving recall, while testing alternative activation orderings under `acorn eval`. Retrieval
@@ -337,12 +408,17 @@ Fourth, the current code already has a narrow abstraction point. `Scorer` and `S
 and `PassiveSet` already batch-scores steps. It should be feasible to add configurable policies
 and richer instrumentation before making larger premise-selection changes.
 
+The `depth-first` result makes this more concrete. It changed activation order without changing
+retrieval, proved 14,457 more searches than the default ONNX policy, and cut measured wall time
+from about 47 minutes to about 19 minutes.
+
 ## Why Not Just Swap The ONNX Model
 
 Swapping the ONNX file alone is unlikely to be enough.
 
-The model is boxed in by hardcoded policy. The final ordering is contradiction, then shallow
-status, then model score. A better model cannot override shallow-first behavior.
+The default model is boxed in by policy. The default ordering is contradiction, then shallow
+status, then model score. A better model cannot override shallow-first behavior unless we choose
+a policy that lets it do so.
 
 The model input is too sparse. Nine scalar features cannot express most of what a premise
 selector or activation policy needs to know, such as goal relevance, symbol overlap, module
@@ -356,34 +432,57 @@ The training data is not eval-shaped. The old dataset labels whether activated s
 the final proof. It does not directly encode decision-time ranking among candidates, counterfactual
 choices the prover did not activate, success under timeout, or activation counts.
 
-The model is not runtime-configurable. The default scorer always loads the embedded model, so
-comparing policies requires code changes rather than clean eval runs.
+Eval policy selection now exists, but only for a small set of hardcoded choices. It is enough for
+basic ablations, not enough for richer search policies that defer, reject, threshold, or budget
+activations.
 
-For these reasons, the first useful "scoring" work is really policy and measurement work:
-make policies configurable, make shallow ordering optional or learnable, export better data, and
-evaluate with `acorn eval`.
+For these reasons, the useful "scoring" work is really policy and measurement work: keep policies
+configurable, make shallow ordering optional or learnable, export better data, and evaluate with
+`acorn eval`. The immediate next step is to fix the bugs exposed by the new alternate policies so
+the ablations are stable.
 
 ## Recommended Next Work
 
-1. Make activation policy configurable.
+1. Fix the alternate-policy bugs exposed by eval.
 
-Add a way for eval to select among at least:
+The policy flag did its job: it found real failures outside the default proof paths. Stabilizing
+these should come before interpreting more scorer ablations.
 
-- current ONNX baseline
-- handcrafted scorer
-- depth-first scorer
-- ONNX without shallow-first priority
-- shallow status as a model feature rather than an outer ordering key
+Known issues:
 
-This gives quick ablations for how much the hardcoded shallow ordering matters.
+- `onnx-no-shallow` full eval stack-overflows immediately. A narrow `category -j1` eval works, so
+  find the first module/search that blows the stack and reduce it to a focused repro.
+- `handcrafted` can find proofs whose generated certificates are invalid. The current full run
+  hit failures in `number_theory/arithmetic_functions.ac` line 154 and `fin_matrix_det.ac` line
+  225.
 
-2. Separate shallow proof mode from shallow ordering.
+Both classes of bugs should get narrow regression coverage once reduced. These are probably not
+"scorer bugs" in isolation; alternate scorers are exercising proof and certificate paths the
+default policy rarely reaches.
+
+2. Finish activation-policy configurability.
+
+The first slice is done for eval:
+
+- `onnx`
+- `handcrafted`
+- `depth-first`
+- `onnx-no-shallow`
+
+Next, decide how broadly this should apply outside eval. It may be enough for now to keep
+alternate policies eval-only, but the plumbing should remain clean enough that targeted verify
+repros can select a policy when debugging scorer-specific behavior.
+
+3. Separate shallow proof mode from shallow ordering.
 
 `ProverMode::Shallow` still needs to stop at the shallow frontier. That does not require every
 normal search policy to rank all shallow clauses above all deep clauses. Make this distinction
 explicit in the code.
 
-3. Add richer features.
+`onnx-no-shallow` is the first attempt at this separation, but the full-eval stack overflow means
+the ablation is not yet trustworthy.
+
+4. Add richer features.
 
 Useful candidates include:
 
@@ -404,7 +503,7 @@ Useful candidates include:
 Goal-aware and source-aware features are especially important if we want the scorer to behave
 partly like soft premise selection.
 
-4. Export eval-shaped training traces.
+5. Export eval-shaped training traces.
 
 For each search, record enough information to reconstruct ranking decisions:
 
@@ -424,7 +523,7 @@ A lightweight first version can log only activated steps plus their features and
 version should include candidate snapshots, because scoring is a ranking problem, not just a
 used-vs-unused classification problem.
 
-5. Evaluate by live prover behavior.
+6. Evaluate by live prover behavior.
 
 Use `acorn eval` as the main metric. Track at least:
 
@@ -439,19 +538,19 @@ Use `acorn eval` as the main metric. Track at least:
 
 Offline loss can be a development signal, but it should not decide whether a policy is better.
 
-6. Use module-based train/test splits.
+7. Use module-based train/test splits.
 
 Avoid training and evaluating on nearly identical local proof contexts. Module-level or
 dependency-aware splits should give a better signal about whether the policy generalizes.
 
-7. Consider factual activation budgets.
+8. Consider factual activation budgets.
 
 The current activation cap counts non-factual activations. Since factual activations dominate,
 future policy experiments should consider a separate factual budget, a per-source budget, or a
 threshold that delays low-value factual assumptions. This is a natural bridge between scoring and
 retrieval.
 
-8. Return to retrieval after scoring baselines are understood.
+9. Return to retrieval after scoring baselines are understood.
 
 Retrieval is still important, especially as the library grows. But it should come after we know
 how much can be gained from better activation order with all facts still available. The scoring
@@ -460,7 +559,10 @@ useful under successful searches.
 
 ## Open Questions
 
-- How much of the timeout set is caused by shallow-first ordering specifically?
+- Why does `depth-first` outperform the default ONNX policy so strongly on the current eval?
+- Which full-library search triggers the `onnx-no-shallow` stack overflow?
+- After `onnx-no-shallow` is stable, how much of the timeout set is caused by shallow-first
+  ordering specifically?
 - Are successful proofs usually found after activating a small number of relevant facts, or do
   they genuinely need broad factual saturation?
 - Would a factual activation budget improve average behavior, or would it create many brittle
@@ -470,6 +572,7 @@ useful under successful searches.
 - Should the scorer own only ranking, or should the abstraction become a broader search policy
   that can defer, reject, or budget activations?
 
-The next concrete milestone should be a configurable eval policy framework plus ablations of the
-current shallow-first behavior. That will tell us whether the obvious policy constraints are
-already costing many searches before we invest in larger training and retrieval systems.
+The next concrete milestone should be to reduce and fix the `onnx-no-shallow` stack overflow and
+the `handcrafted` certificate failures, then rerun the same four-policy eval. Once the alternate
+policies are stable, the ablations can tell us which policy constraints are costing searches
+before we invest in larger training and retrieval systems.
