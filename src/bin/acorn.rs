@@ -6,6 +6,7 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, ProjectError, SelectionInfo, UsageMode};
+use acorn::prover::ScoringPolicy;
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -272,6 +273,11 @@ fn parse_eval_skip_modes(raw: Option<&str>) -> Result<Vec<usize>, String> {
     modes.sort_unstable();
     modes.dedup();
     Ok(modes)
+}
+
+fn parse_eval_policy(raw: &str) -> Result<ScoringPolicy, String> {
+    raw.parse::<ScoringPolicy>()
+        .map_err(|e| format!("invalid --policy: {}", e))
 }
 
 fn validate_force_search_flags(
@@ -592,6 +598,15 @@ enum Command {
             value_name = "SKIPS"
         )]
         skip: String,
+
+        /// Activation queue policy to use for proof search
+        #[clap(
+            long,
+            default_value = "onnx",
+            help = "Activation queue policy. Options: onnx, handcrafted, depth-first, onnx-no-shallow.",
+            value_name = "POLICY"
+        )]
+        policy: String,
 
         /// Print phase timing information
         #[clap(
@@ -1044,6 +1059,7 @@ async fn main() {
             shallow,
             jobs,
             skip,
+            policy,
             timing,
         }) => {
             if let Err(e) = validate_activations_flag(activations) {
@@ -1052,6 +1068,13 @@ async fn main() {
             }
             let skip_modes = match parse_eval_skip_modes(Some(&skip)) {
                 Ok(modes) => modes,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let scoring_policy = match parse_eval_policy(&policy) {
+                Ok(policy) => policy,
                 Err(e) => {
                     println!("Error: {}", e);
                     std::process::exit(1);
@@ -1084,6 +1107,7 @@ async fn main() {
             verifier.builder.force_search = true;
             verifier.builder.eval_mode = true;
             verifier.builder.eval_skip_modes = skip_modes;
+            verifier.builder.scoring_policy = scoring_policy;
             verifier.builder.shallow_search = shallow;
             verifier.builder.check_jobs = eval_jobs;
             verifier.builder.operation_verb = "proved";
@@ -1634,15 +1658,16 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use acorn::interfaces::GoalInfo;
+    use acorn::prover::ScoringPolicy;
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
     use clap::{error::ErrorKind, Parser};
 
     use super::{
-        configure_bare_verify, default_jobs, filter_selected_goals, parse_eval_skip_modes,
-        resolve_print_proof_line_selection, validate_activations_flag, validate_force_search_flags,
-        validate_goal_flag, validate_goal_requires_single_line, validate_print_proof_flag,
-        validate_verbose_flag, Args, Command, LineSelection,
+        configure_bare_verify, default_jobs, filter_selected_goals, parse_eval_policy,
+        parse_eval_skip_modes, resolve_print_proof_line_selection, validate_activations_flag,
+        validate_force_search_flags, validate_goal_flag, validate_goal_requires_single_line,
+        validate_print_proof_flag, validate_verbose_flag, Args, Command, LineSelection,
     };
     use acorn::project::ProjectConfig;
     use acorn::verifier::Verifier;
@@ -1886,6 +1911,8 @@ mod tests {
             "3",
             "--skip",
             "01",
+            "--policy",
+            "onnx-no-shallow",
             "--timing",
         ])
         .expect("eval command should parse");
@@ -1899,6 +1926,7 @@ mod tests {
                 shallow,
                 jobs,
                 skip,
+                policy,
                 timing,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
@@ -1908,6 +1936,7 @@ mod tests {
                 assert!(shallow);
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
+                assert_eq!(policy, "onnx-no-shallow");
                 assert!(timing);
             }
             _ => panic!("unexpected command"),
@@ -1922,6 +1951,24 @@ mod tests {
             Some(Command::Eval { timeout, .. }) => assert_eq!(timeout, 1.0),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_eval_policy() {
+        assert_eq!(parse_eval_policy("onnx").unwrap(), ScoringPolicy::Onnx);
+        assert_eq!(
+            parse_eval_policy("handcrafted").unwrap(),
+            ScoringPolicy::Handcrafted
+        );
+        assert_eq!(
+            parse_eval_policy("depth-first").unwrap(),
+            ScoringPolicy::DepthFirst
+        );
+        assert_eq!(
+            parse_eval_policy("onnx-no-shallow").unwrap(),
+            ScoringPolicy::OnnxNoShallow
+        );
+        assert!(parse_eval_policy("unknown").is_err());
     }
 
     #[test]

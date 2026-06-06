@@ -1,57 +1,158 @@
 use ordered_float::OrderedFloat;
+use std::cmp::Ordering;
 
 use super::features::Features;
-use super::scorer::Scorer;
+use super::scorer::{Scorer, ScoringPolicy};
 use crate::kernel::proof_step::ShallowStatus;
 
 // Each proof step has a score, which encapsulates all heuristic judgments about
 // the proof step.
 // The better the score, the more we want to activate this proof step.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Score {
-    // Contradictions are the most important thing
+struct ScoreKey {
     contradiction: bool,
-
-    // Among non-contradictions, activate the shallowest steps first.
     shallow_status: ShallowStatus,
-
-    // Higher scores are preferred.
     score: OrderedFloat<f32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Score {
+    key: ScoreKey,
+    is_shallow: bool,
+}
+
 impl Score {
-    // The logic here is logic that we want to use regardless of the policy.
-    pub fn new(scorer: &dyn Scorer, features: &Features) -> Score {
+    fn shallow_order(policy: ScoringPolicy, features: &Features) -> ShallowStatus {
+        if policy.uses_shallow_ordering() {
+            features.shallow_status
+        } else {
+            ShallowStatus::Unspent
+        }
+    }
+
+    pub fn new(policy: ScoringPolicy, scorer: &dyn Scorer, features: &Features) -> Score {
         if features.is_contradiction {
             return Score {
-                contradiction: true,
-                shallow_status: features.shallow_status,
-                score: OrderedFloat(0.0),
+                key: ScoreKey {
+                    contradiction: true,
+                    shallow_status: Self::shallow_order(policy, features),
+                    score: OrderedFloat(0.0),
+                },
+                is_shallow: features.is_shallow,
             };
         }
         let score = scorer.score(features).unwrap();
         Score {
-            contradiction: false,
-            shallow_status: features.shallow_status,
-            score: OrderedFloat(score),
+            key: ScoreKey {
+                contradiction: false,
+                shallow_status: Self::shallow_order(policy, features),
+                score: OrderedFloat(score),
+            },
+            is_shallow: features.is_shallow,
         }
     }
 
     // Do a whole batch of scoring at once.
-    pub fn batch(scorer: &dyn Scorer, features: &[Features]) -> Vec<Score> {
+    pub fn batch(policy: ScoringPolicy, scorer: &dyn Scorer, features: &[Features]) -> Vec<Score> {
         let floats = scorer.score_batch(features).unwrap();
         features
             .iter()
             .zip(floats.iter())
             .map(|(f, &s)| Score {
-                contradiction: f.is_contradiction,
-                shallow_status: f.shallow_status,
-                score: OrderedFloat(s),
+                key: ScoreKey {
+                    contradiction: f.is_contradiction,
+                    shallow_status: Self::shallow_order(policy, f),
+                    score: OrderedFloat(s),
+                },
+                is_shallow: f.is_shallow,
             })
             .collect()
     }
 
     pub fn is_shallow(&self) -> bool {
-        self.shallow_status.is_shallow()
+        self.is_shallow
+    }
+}
+
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for Score {}
+
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ConstantScorer;
+
+    impl Scorer for ConstantScorer {
+        fn score(&self, _features: &Features) -> Result<f32, Box<dyn std::error::Error>> {
+            Ok(1.0)
+        }
+    }
+
+    fn features(shallow_status: ShallowStatus) -> Features {
+        Features {
+            is_contradiction: false,
+            is_shallow: shallow_status.is_shallow(),
+            shallow_status,
+            atom_count: 1,
+            is_counterfactual: false,
+            is_hypothetical: false,
+            is_factual: true,
+            is_assumption: true,
+            is_negated_goal: false,
+            proof_size: 1,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn shallow_status_orders_scores_by_default() {
+        let scorer = ConstantScorer;
+        let deep = Score::new(ScoringPolicy::Onnx, &scorer, &features(ShallowStatus::Deep));
+        let shallow = Score::new(
+            ScoringPolicy::Onnx,
+            &scorer,
+            &features(ShallowStatus::Unspent),
+        );
+
+        assert!(shallow > deep);
+        assert!(!deep.is_shallow());
+        assert!(shallow.is_shallow());
+    }
+
+    #[test]
+    fn onnx_no_shallow_keeps_shallow_status_out_of_ordering() {
+        let scorer = ConstantScorer;
+        let deep = Score::new(
+            ScoringPolicy::OnnxNoShallow,
+            &scorer,
+            &features(ShallowStatus::Deep),
+        );
+        let shallow = Score::new(
+            ScoringPolicy::OnnxNoShallow,
+            &scorer,
+            &features(ShallowStatus::Unspent),
+        );
+
+        assert_eq!(deep.cmp(&shallow), Ordering::Equal);
+        assert!(!deep.is_shallow());
+        assert!(shallow.is_shallow());
     }
 }

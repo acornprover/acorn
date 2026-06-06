@@ -1,7 +1,7 @@
 use super::active_set::ActiveSet;
 use super::features::Features;
 use super::score::Score;
-use super::scorer::{default_scorer, Scorer};
+use super::scorer::{Scorer, ScoringPolicy};
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::fingerprint::FingerprintSpecializer;
@@ -67,6 +67,8 @@ pub struct PassiveSet {
     // For now this doesn't really matter, but maybe in the future the scorer will have a large model,
     // some affiliated GPU state, something like that.
     scorer: Arc<dyn Scorer + Send + Sync>,
+
+    scoring_policy: ScoringPolicy,
 }
 
 // Returns the specialization map when (left1, right1) can be mapped to
@@ -177,6 +179,10 @@ fn make_simplified(
 
 impl PassiveSet {
     pub fn new() -> PassiveSet {
+        Self::with_policy(ScoringPolicy::default())
+    }
+
+    pub fn with_policy(scoring_policy: ScoringPolicy) -> PassiveSet {
         PassiveSet {
             clauses: vec![],
             queue: BTreeSet::new(),
@@ -184,7 +190,8 @@ impl PassiveSet {
             singles: HashMap::new(),
             contradiction: None,
             all_shallow: true,
-            scorer: default_scorer().into(),
+            scorer: scoring_policy.make_scorer().into(),
+            scoring_policy,
         }
     }
 
@@ -200,7 +207,7 @@ impl PassiveSet {
         let pushed_steps = steps.len();
         let scoring_start = Instant::now();
         let features = steps.iter().map(Features::new).collect::<Vec<_>>();
-        let scores = Score::batch(self.scorer.as_ref(), &features);
+        let scores = Score::batch(self.scoring_policy, self.scorer.as_ref(), &features);
         let scoring_time_secs = scoring_start.elapsed().as_secs_f64();
 
         let indexing_start = Instant::now();
@@ -278,10 +285,21 @@ impl PassiveSet {
         if !self.all_shallow {
             return false;
         }
-        if let Some((score, _)) = self.queue.iter().next_back() {
-            score.is_shallow()
-        } else {
-            false
+        self.next_shallow_entry().is_some()
+    }
+
+    fn next_shallow_entry(&self) -> Option<(Score, usize)> {
+        self.queue
+            .iter()
+            .rev()
+            .find(|(score, _)| score.is_shallow())
+            .copied()
+    }
+
+    fn take_entry(&mut self, id: usize) -> ProofStep {
+        match self.clauses[id].take() {
+            Some((step, _)) => step,
+            None => panic!("Queue and clauses are out of sync"),
         }
     }
 
@@ -293,10 +311,13 @@ impl PassiveSet {
         if !score.is_shallow() {
             self.all_shallow = false;
         }
-        match self.clauses[id].take() {
-            Some((step, _)) => Some((step, was_shallow)),
-            None => panic!("Queue and clauses are out of sync"),
-        }
+        Some((self.take_entry(id), was_shallow))
+    }
+
+    pub fn pop_shallow(&mut self) -> Option<ProofStep> {
+        let (score, id) = self.next_shallow_entry()?;
+        self.queue.remove(&(score, id));
+        Some(self.take_entry(id))
     }
 
     pub fn pop(&mut self) -> Option<ProofStep> {

@@ -8,6 +8,7 @@ use tracing::trace;
 use super::active_set::ActiveSet;
 use super::passive_set::{PassivePushStats, PassiveSet};
 use super::proof::Proof;
+use super::scorer::ScoringPolicy;
 use super::synthetic::WitnessRegistry;
 use crate::certificate::Certificate;
 use crate::code_generator::{CodeGenerator, Error};
@@ -147,9 +148,14 @@ impl Prover {
     /// Creates a new Prover instance.
     /// The prover must stop when any of its cancellation tokens are canceled.
     pub fn new(tokens: Vec<CancellationToken>) -> Prover {
+        Self::with_policy(tokens, ScoringPolicy::default())
+    }
+
+    /// Creates a new Prover instance with a specific scoring policy.
+    pub fn with_policy(tokens: Vec<CancellationToken>, scoring_policy: ScoringPolicy) -> Prover {
         Prover {
             active_set: ActiveSet::new(),
-            passive_set: PassiveSet::new(),
+            passive_set: PassiveSet::with_policy(scoring_policy),
             final_step: None,
             cancellation_tokens: tokens,
             useful_passive: vec![],
@@ -714,7 +720,12 @@ impl Prover {
             return true;
         }
 
-        let (step, was_shallow) = match self.passive_set.pop_with_shallow() {
+        let next_step = if shallow_only {
+            self.passive_set.pop_shallow().map(|step| (step, true))
+        } else {
+            self.passive_set.pop_with_shallow()
+        };
+        let (step, was_shallow) = match next_step {
             Some(step) => step,
             None => {
                 // We're out of clauses to process, so we can't make any more progress.

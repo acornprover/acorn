@@ -1,4 +1,6 @@
 use std::error::Error;
+use std::fmt;
+use std::str::FromStr;
 
 use super::features::Features;
 use super::scoring_model::ScoringModel;
@@ -13,6 +15,68 @@ pub trait Scorer {
 
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
     Box::new(ScoringModel::load().unwrap())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScoringPolicy {
+    Onnx,
+    Handcrafted,
+    DepthFirst,
+    OnnxNoShallow,
+}
+
+impl Default for ScoringPolicy {
+    fn default() -> Self {
+        Self::Onnx
+    }
+}
+
+impl ScoringPolicy {
+    pub fn make_scorer(self) -> Box<dyn Scorer + Send + Sync> {
+        match self {
+            Self::Onnx | Self::OnnxNoShallow => Box::new(ScoringModel::load().unwrap()),
+            Self::Handcrafted => Box::new(HandcraftedScorer),
+            Self::DepthFirst => Box::new(DepthFirstScorer),
+        }
+    }
+
+    pub fn uses_shallow_ordering(self) -> bool {
+        !matches!(self, Self::OnnxNoShallow)
+    }
+
+    pub fn options() -> &'static str {
+        "onnx, handcrafted, depth-first, onnx-no-shallow"
+    }
+}
+
+impl fmt::Display for ScoringPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Onnx => "onnx",
+            Self::Handcrafted => "handcrafted",
+            Self::DepthFirst => "depth-first",
+            Self::OnnxNoShallow => "onnx-no-shallow",
+        };
+        f.write_str(name)
+    }
+}
+
+impl FromStr for ScoringPolicy {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "onnx" => Ok(Self::Onnx),
+            "handcrafted" => Ok(Self::Handcrafted),
+            "depth-first" => Ok(Self::DepthFirst),
+            "onnx-no-shallow" => Ok(Self::OnnxNoShallow),
+            _ => Err(format!(
+                "unknown policy '{}'. Expected one of: {}",
+                raw,
+                Self::options()
+            )),
+        }
+    }
 }
 
 // Developed before I had any other framework for policies.

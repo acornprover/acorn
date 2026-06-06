@@ -15,7 +15,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
 use crate::project::ProjectView;
-use crate::prover::{Outcome, Prover, ProverMode, SearchStats};
+use crate::prover::{Outcome, Prover, ProverMode, ScoringPolicy, SearchStats};
 use tokio_util::sync::CancellationToken;
 
 /// The processor represents what we do with a stream of facts.
@@ -30,11 +30,12 @@ impl Processor {
     fn new_with_optional_prover(
         cancellation_token: Option<CancellationToken>,
         prover: bool,
+        scoring_policy: ScoringPolicy,
     ) -> Processor {
         Processor {
             prover: prover.then(|| match cancellation_token {
-                Some(token) => Prover::new(vec![token]),
-                None => Prover::new(vec![]),
+                Some(token) => Prover::with_policy(vec![token], scoring_policy),
+                None => Prover::with_policy(vec![], scoring_policy),
             }),
             checker: Checker::new(),
             imported_modules: HashSet::new(),
@@ -66,11 +67,11 @@ impl Processor {
     }
 
     pub fn new() -> Processor {
-        Self::new_with_optional_prover(None, true)
+        Self::new_with_optional_prover(None, true, ScoringPolicy::default())
     }
 
     pub fn with_token(cancellation_token: CancellationToken) -> Processor {
-        Self::new_with_optional_prover(Some(cancellation_token), true)
+        Self::new_with_optional_prover(Some(cancellation_token), true, ScoringPolicy::default())
     }
 
     /// Creates a new Processor with the imports visible through these bindings.
@@ -79,7 +80,22 @@ impl Processor {
         bindings: &BindingMap,
         project: impl Into<ProjectView>,
     ) -> Result<Processor, BuildError> {
-        let mut processor = Self::new_with_optional_prover(cancellation_token, true);
+        Self::with_imports_and_policy(
+            cancellation_token,
+            bindings,
+            project,
+            ScoringPolicy::default(),
+        )
+    }
+
+    pub fn with_imports_and_policy(
+        cancellation_token: Option<CancellationToken>,
+        bindings: &BindingMap,
+        project: impl Into<ProjectView>,
+        scoring_policy: ScoringPolicy,
+    ) -> Result<Processor, BuildError> {
+        let mut processor =
+            Self::new_with_optional_prover(cancellation_token, true, scoring_policy);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
     }
@@ -90,7 +106,8 @@ impl Processor {
         bindings: &BindingMap,
         project: impl Into<ProjectView>,
     ) -> Result<Processor, BuildError> {
-        let mut processor = Self::new_with_optional_prover(cancellation_token, false);
+        let mut processor =
+            Self::new_with_optional_prover(cancellation_token, false, ScoringPolicy::default());
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
     }

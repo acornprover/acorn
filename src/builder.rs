@@ -22,7 +22,7 @@ use crate::module::{ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::project::{PackageRole, Project, ProjectLookup, ProjectView, ProjectViewModule};
 use crate::proof_display::display_certificate_lines;
-use crate::prover::{Outcome, ProverMode, SearchStats};
+use crate::prover::{Outcome, ProverMode, ScoringPolicy, SearchStats};
 
 static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
 const MAX_CHECK_CERT_ERROR_CHARS: usize = 600;
@@ -254,6 +254,9 @@ pub struct Builder<'a> {
     /// Eval skip modes to run for each benchmark goal.
     pub eval_skip_modes: Vec<usize>,
 
+    /// Activation queue policy for prover search.
+    pub scoring_policy: ScoringPolicy,
+
     /// Owned module-local work for batch builds. When present, the Project only retains
     /// module exports and the builder consumes these lowered work packets.
     module_work: Option<Vec<(ModuleDescriptor, LoweredModule)>>,
@@ -400,6 +403,7 @@ struct ModuleWorkerConfig {
     force_search: bool,
     eval_mode: bool,
     eval_skip_modes: Vec<usize>,
+    scoring_policy: ScoringPolicy,
     operation_verb: &'static str,
     shallow_search: bool,
     timeout_secs: f32,
@@ -416,6 +420,7 @@ impl ModuleWorkerConfig {
             force_search: builder.force_search,
             eval_mode: builder.eval_mode,
             eval_skip_modes: builder.eval_skip_modes.clone(),
+            scoring_policy: builder.scoring_policy,
             operation_verb: builder.operation_verb,
             shallow_search: builder.shallow_search,
             timeout_secs: builder.timeout_secs,
@@ -431,6 +436,7 @@ impl ModuleWorkerConfig {
         builder.force_search = self.force_search;
         builder.eval_mode = self.eval_mode;
         builder.eval_skip_modes = self.eval_skip_modes.clone();
+        builder.scoring_policy = self.scoring_policy;
         builder.operation_verb = self.operation_verb;
         builder.shallow_search = self.shallow_search;
         builder.timeout_secs = self.timeout_secs;
@@ -1196,6 +1202,7 @@ impl<'a> Builder<'a> {
             force_search: false,
             eval_mode: false,
             eval_skip_modes: vec![0, 1],
+            scoring_policy: ScoringPolicy::default(),
             module_work: None,
             current_module: None,
             single_line_goal_count: 0,
@@ -2660,10 +2667,11 @@ impl<'a> Builder<'a> {
                     self.project(),
                 )?
             } else {
-                Processor::with_imports(
+                Processor::with_imports_and_policy(
                     Some(self.cancellation_token.clone()),
                     &lowered.initial_bindings,
                     self.project(),
+                    self.scoring_policy,
                 )?
             };
             let mut processor = Rc::new(processor);
