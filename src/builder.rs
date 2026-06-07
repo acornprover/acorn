@@ -2411,13 +2411,14 @@ impl<'a> Builder<'a> {
         single_line_goal_count: &mut usize,
         goal: &Goal,
         filter: &GoalFilter,
+        eval_mode: bool,
     ) -> bool {
         match filter {
             GoalFilter::SingleLine {
                 line, goal_index, ..
             } => {
                 if goal.first_line < *line {
-                    return true;
+                    return !eval_mode;
                 }
                 if goal.first_line > *line {
                     return false;
@@ -2429,7 +2430,9 @@ impl<'a> Builder<'a> {
                     None => true,
                 }
             }
-            GoalFilter::LineRange { end, .. } => goal.first_line <= *end,
+            GoalFilter::LineRange { start, end, .. } => {
+                goal.first_line <= *end && (!eval_mode || goal.first_line >= *start)
+            }
         }
     }
 
@@ -2472,8 +2475,12 @@ impl<'a> Builder<'a> {
         let normalized_goal = &entry.lowered_goal;
         let goal = &normalized_goal.goal;
         if let Some(ref filter) = self.goal_filter {
-            if !Self::should_verify_for_line_filter(&mut self.single_line_goal_count, goal, filter)
-            {
+            if !Self::should_verify_for_line_filter(
+                &mut self.single_line_goal_count,
+                goal,
+                filter,
+                self.eval_mode,
+            ) {
                 return Ok(());
             }
         }

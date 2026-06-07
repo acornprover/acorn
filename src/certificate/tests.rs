@@ -702,6 +702,37 @@ fn test_emit_named_function_witness_keeps_explicit_specialized_claim() {
 }
 
 #[test]
+fn test_named_function_witness_does_not_anchor_to_claim_that_mentions_it() {
+    let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
+    let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);
+    let (&symbol, _) = witness_registry
+        .iter()
+        .next()
+        .expect("expected one named witness");
+    let Symbol::ScopedConstant(local_id) = symbol else {
+        panic!("expected a scoped witness symbol");
+    };
+    let claim = claim_specializing_local_to_scoped_constant(&source_clause, local_id);
+
+    let emitted = Certificate::emit_named_witnesses(
+        vec![CertificateStep::Claim(claim.clone())],
+        &witness_registry,
+        &kernel_context,
+    )
+    .expect("self-referential witness claim should emit without cycling");
+
+    assert!(
+        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
+        "expected a standalone witness declaration before the claim"
+    );
+    assert_eq!(
+        emitted.get(1),
+        Some(&CertificateStep::Claim(claim)),
+        "expected the original claim to remain after the witness declaration"
+    );
+}
+
+#[test]
 fn test_named_function_witness_uses_fresh_result_binder_name() {
     let source_clause = bool_exists_source_clause(witness_body_equating_ambient_bool());
     let (kernel_context, witness_registry, _opening) = open_named_witness(&source_clause);

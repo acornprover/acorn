@@ -1843,6 +1843,62 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_line_selection_searches_only_selected_benchmark_goal() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem first {
+                    true
+                }
+
+                theorem second {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![
+                    Certificate::new("first".to_string(), vec!["dummy proof step".to_string()]),
+                    Certificate::new("second".to_string(), vec!["dummy proof step".to_string()]),
+                ],
+            },
+        );
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+        verifier.line_selection = Some(LineSelection::Single(6));
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.eval_corpus_total, 2);
+        assert_eq!(output.metrics.eval_corpus_matched, 1);
+        assert_eq!(output.metrics.eval_corpus_unmatched, 1);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.searches_success, 1);
+    }
+
+    #[test]
     fn test_eval_can_search_modules_in_parallel() {
         let (acornlib, src, _build) = setup();
 

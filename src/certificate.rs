@@ -1637,6 +1637,7 @@ struct WitnessEmitter<'a> {
     declared: HashSet<Symbol>,
     buffered: Vec<usize>,
     emitted: Vec<bool>,
+    steps_in_progress: HashSet<usize>,
     in_progress: HashSet<Symbol>,
     emitted_witnesses: Vec<Symbol>,
     output: Vec<CertificateStep>,
@@ -1691,6 +1692,7 @@ impl<'a> WitnessEmitter<'a> {
             declared: HashSet::new(),
             buffered: Vec::new(),
             emitted: vec![false; num_steps],
+            steps_in_progress: HashSet::new(),
             in_progress: HashSet::new(),
             emitted_witnesses: Vec::new(),
             output: Vec::new(),
@@ -1739,23 +1741,32 @@ impl<'a> WitnessEmitter<'a> {
             return Ok(());
         }
 
-        if let Some(symbol) = self.claim_replacements.get(&index).copied() {
-            self.emit_witness(symbol)?;
-            self.emitted[index] = true;
-            self.emit_anchors_for_step(index)?;
-            return Ok(());
+        if !self.steps_in_progress.insert(index) {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "cyclic named witness placement involving proof step {}",
+                index + 1
+            )));
         }
 
-        if self.step_needs_future_witness(index, current_index) {
+        let result = if let Some(symbol) = self.claim_replacements.get(&index).copied() {
+            match self.emit_witness(symbol) {
+                Ok(()) => {
+                    self.emitted[index] = true;
+                    self.emit_anchors_for_step(index)
+                }
+                Err(err) => Err(err),
+            }
+        } else if self.step_needs_future_witness(index, current_index) {
             self.buffered.push(index);
-            return Ok(());
-        }
-
-        self.emit_ready_step(index, current_index)?;
-
-        self.emit_anchors_for_step(index)?;
-
-        Ok(())
+            Ok(())
+        } else {
+            match self.emit_ready_step(index, current_index) {
+                Ok(()) => self.emit_anchors_for_step(index),
+                Err(err) => Err(err),
+            }
+        };
+        self.steps_in_progress.remove(&index);
+        result
     }
 
     /// Emit a step once every witness it references can already be declared.
@@ -1839,7 +1850,7 @@ impl<'a> WitnessEmitter<'a> {
         }
 
         let general_clause = witness.general_clause.clone();
-        let placement = self.find_witness_placement(&general_clause, &witness.name)?;
+        let placement = self.find_witness_placement(symbol, &general_clause, &witness.name)?;
         let justification = match placement {
             WitnessPlacement::Anchor(index) => {
                 let CertificateStep::Claim(claim) = &self.ordered_steps[index] else {
@@ -2259,6 +2270,7 @@ impl<'a> WitnessEmitter<'a> {
 
     fn find_witness_placement(
         &self,
+        symbol: Symbol,
         general_clause: &Clause,
         _witness_name: &impl std::fmt::Display,
     ) -> Result<WitnessPlacement, CodeGenError> {
@@ -2267,7 +2279,9 @@ impl<'a> WitnessEmitter<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, clause)| {
-                (clause.as_ref() == Some(general_clause)).then_some(index)
+                (clause.as_ref() == Some(general_clause)
+                    && !self.referenced_symbols[index].contains(&symbol))
+                .then_some(index)
             })
             .collect();
         if exact_specialized_matches.len() == 1 {
@@ -2285,7 +2299,9 @@ impl<'a> WitnessEmitter<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, clause)| {
-                (clause.as_ref() == Some(general_clause)).then_some(index)
+                (clause.as_ref() == Some(general_clause)
+                    && !self.referenced_symbols[index].contains(&symbol))
+                .then_some(index)
             })
             .collect();
         if let Some(index) = exact_generic_matches.first().copied() {
@@ -2301,6 +2317,9 @@ impl<'a> WitnessEmitter<'a> {
             .enumerate()
             .filter_map(|(index, clause)| {
                 if self.claim_replacements.contains_key(&index) {
+                    return None;
+                }
+                if self.referenced_symbols[index].contains(&symbol) {
                     return None;
                 }
                 let clause = clause.as_ref()?;

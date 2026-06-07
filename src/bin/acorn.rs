@@ -37,7 +37,7 @@ fn exit_project_load_error<T>(error: ProjectError) -> T {
 }
 
 /// Represents a line selection: either a single line or a range.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LineSelection {
     /// A single line number (1-based, external)
     Single(u32),
@@ -546,10 +546,10 @@ enum Command {
 
     /// Evaluate prover search on goals with cached proof targets
     Eval {
-        /// Target module or file to evaluate (can be a filename or module name)
+        /// Target module or file to evaluate (can be a filename, module name, or module:line)
         #[clap(
             value_name = "TARGET",
-            help = "Module or filename to evaluate. If not provided, evaluates all files in the library."
+            help = "Module or filename to evaluate. Supports TARGET:LINE and TARGET:START-END syntax. If not provided, evaluates all files in the library."
         )]
         target: Option<String>,
 
@@ -1062,6 +1062,13 @@ async fn main() {
             policy,
             timing,
         }) => {
+            let (target, line_sel) = match parse_target_and_line(target, None, None) {
+                Ok(result) => result,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
             if let Err(e) = validate_activations_flag(activations) {
                 println!("Error: {}", e);
                 std::process::exit(1);
@@ -1085,6 +1092,13 @@ async fn main() {
                 println!("Error: --jobs must be at least 1");
                 std::process::exit(1);
             }
+            let line_selection = match line_sel {
+                Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
+                Some(LineSelection::Range(start, end)) => {
+                    Some(VerifierLineSelection::Range(start, end))
+                }
+                None => None,
+            };
 
             let config = ProjectConfig {
                 usage_mode: UsageMode::Verify,
@@ -1111,6 +1125,7 @@ async fn main() {
             verifier.builder.shallow_search = shallow;
             verifier.builder.check_jobs = eval_jobs;
             verifier.builder.operation_verb = "proved";
+            verifier.line_selection = line_selection;
             verifier.exit_on_warning = fail_fast;
             verifier.builder.timeout_secs = timeout;
             if let Some(limit) = activations {
@@ -1665,9 +1680,10 @@ mod tests {
 
     use super::{
         configure_bare_verify, default_jobs, filter_selected_goals, parse_eval_policy,
-        parse_eval_skip_modes, resolve_print_proof_line_selection, validate_activations_flag,
-        validate_force_search_flags, validate_goal_flag, validate_goal_requires_single_line,
-        validate_print_proof_flag, validate_verbose_flag, Args, Command, LineSelection,
+        parse_eval_skip_modes, parse_target_and_line, resolve_print_proof_line_selection,
+        validate_activations_flag, validate_force_search_flags, validate_goal_flag,
+        validate_goal_requires_single_line, validate_print_proof_flag, validate_verbose_flag, Args,
+        Command, LineSelection,
     };
     use acorn::project::ProjectConfig;
     use acorn::verifier::Verifier;
@@ -1941,6 +1957,14 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_eval_target_line_syntax_parses() {
+        let (target, line_selection) =
+            parse_target_and_line(Some("functions:1013".to_string()), None, None).unwrap();
+        assert_eq!(target.as_deref(), Some("functions"));
+        assert_eq!(line_selection, Some(LineSelection::Single(1013)));
     }
 
     #[test]
