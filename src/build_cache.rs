@@ -447,6 +447,44 @@ impl BuildCache {
         }
     }
 
+    pub fn dependency_manifests_needing_update(
+        &self,
+        old_cache: &BuildCache,
+        preserve_old_manifest_entries: bool,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        for (package_root, manifest) in &self.manifests {
+            let expected_dependencies = if preserve_old_manifest_entries {
+                let mut dependencies = old_cache
+                    .manifests
+                    .get(package_root)
+                    .map(|manifest| manifest.dependencies.clone())
+                    .unwrap_or_default();
+                for (name, hash) in &manifest.dependencies {
+                    dependencies.insert(name.clone(), hash.clone());
+                }
+                dependencies
+            } else {
+                manifest.dependencies.clone()
+            };
+
+            let old_dependencies = old_cache
+                .manifests
+                .get(package_root)
+                .map(|manifest| &manifest.dependencies);
+            let dependencies_match = match old_dependencies {
+                Some(old_dependencies) => old_dependencies == &expected_dependencies,
+                None => expected_dependencies.is_empty(),
+            };
+            if !dependencies_match {
+                paths.push(Self::package_manifest_path(package_root));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     fn cert_path_for_descriptor(&self, descriptor: &ModuleDescriptor) -> Option<PathBuf> {
         match descriptor {
             ModuleDescriptor::Name(_) => {

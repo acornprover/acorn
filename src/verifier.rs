@@ -763,6 +763,9 @@ impl Verifier {
             self.builder.build();
         }
         self.validate_changed_packages();
+        let is_partial_build = self.target.is_some();
+        self.builder
+            .validate_strict_dependency_manifests(is_partial_build);
         let build_total = build_start.elapsed();
         self.builder.validate_goal_filter()?;
         self.builder.metrics.print(self.builder.status);
@@ -792,7 +795,6 @@ impl Verifier {
         // Pass is_partial_build flag: true if we have a specific target, false for full build
         if !self.builder.status.is_error() {
             if let Some(build_cache) = self.builder.take_build_cache() {
-                let is_partial_build = self.target.is_some();
                 unsafe {
                     (*self.project_ptr).update_build_cache(build_cache, is_partial_build);
                 }
@@ -1258,6 +1260,109 @@ mod tests {
             BuildStatus::Good,
             "strict check should allow package interface theorem declarations\n{}",
             log_text(&check_output)
+        );
+    }
+
+    #[test]
+    fn test_strict_check_rejects_stale_dependency_hashes() {
+        let (acornlib, src, _build) = setup();
+        src.child("pkg").create_dir_all().unwrap();
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+                theorem public {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("pkg/internal.ac")
+            .write_str(
+                r#"
+                theorem public {
+                    true
+                } by {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+        src.child("use_public.ac")
+            .write_str(
+                r#"
+                from pkg import public
+
+                theorem use_public {
+                    public
+                }
+                "#,
+            )
+            .unwrap();
+
+        let mut verify = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig::default(),
+            None,
+        )
+        .unwrap();
+        verify.builder.check_hashes = false;
+        let verify_output = verify.run().unwrap();
+        assert_eq!(
+            verify_output.status,
+            BuildStatus::Good,
+            "verify should write dependency hashes before strict replay\n{}",
+            log_text(&verify_output)
+        );
+
+        let manifest_file = manifest_for_package(&src, "");
+        let manifest_before = std::fs::read_to_string(manifest_file.path()).unwrap();
+        let manifest: crate::manifest::PackageManifest =
+            serde_json::from_str(&manifest_before).unwrap();
+        assert!(
+            manifest.dependencies.contains_key("pkg"),
+            "root manifest should record the imported package dependency"
+        );
+
+        src.child("pkg/interface.ac")
+            .write_str(
+                r#"
+
+                theorem public {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        let check_config = ProjectConfig {
+            usage_mode: UsageMode::Check,
+            use_filesystem: true,
+            read_cache: true,
+            write_cache: false,
+            update_version: false,
+        };
+        let mut check =
+            Verifier::new_for_check(acornlib.path().to_path_buf(), check_config, None).unwrap();
+        check.builder.check_mode = true;
+        check.builder.check_hashes = false;
+        check.builder.strict = true;
+        let check_output = check.run().unwrap();
+        assert_eq!(check_output.status, BuildStatus::Error);
+        let log = log_text(&check_output);
+        assert!(
+            log.contains("dependency hashes in package manifests are out of date"),
+            "strict check should explain the stale dependency hash\n{}",
+            log
+        );
+        assert!(
+            log.contains("acorn verify"),
+            "strict check should tell users how to update dependency hashes\n{}",
+            log
+        );
+        assert_eq!(
+            std::fs::read_to_string(manifest_file.path()).unwrap(),
+            manifest_before,
+            "check should not rewrite manifest files"
         );
     }
 

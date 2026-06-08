@@ -1549,6 +1549,39 @@ impl<'a> Builder<'a> {
         }
     }
 
+    pub fn validate_strict_dependency_manifests(&mut self, preserve_old_manifest_entries: bool) {
+        if !self.check_mode
+            || !self.strict
+            || !self.status.is_good()
+            || self.goal_filter.is_some()
+            || self.cert_override.is_some()
+        {
+            return;
+        }
+
+        let paths = {
+            let Some(build_cache) = self.build_cache.as_ref() else {
+                return;
+            };
+            build_cache.dependency_manifests_needing_update(
+                self.project().build_cache(),
+                preserve_old_manifest_entries,
+            )
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        self.status = BuildStatus::Error;
+        self.log_global(
+            "error: dependency hashes in package manifests are out of date; run `acorn verify` to update them."
+                .to_string(),
+        );
+        for path in paths {
+            self.log_global(format!("  {}", path.display()));
+        }
+    }
+
     pub fn log_unprocessed_target_states(
         &mut self,
         targets: &[ModuleDescriptor],
