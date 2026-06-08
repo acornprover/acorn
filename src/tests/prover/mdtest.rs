@@ -1,5 +1,6 @@
 use crate::builder::BuildStatus;
 use crate::project::{ProjectConfig, UsageMode};
+use crate::prover::ScoringPolicy;
 use crate::tests::support::verify_fails;
 use crate::verifier::{Verifier, VerifierOutput};
 use std::env;
@@ -15,6 +16,10 @@ const FILTER_ENV: &str = "ACORN_MDTEST_FILTER";
 enum MdExpectation {
     Success,
     Fail,
+    Eval {
+        policy: ScoringPolicy,
+        skip_modes: Vec<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +74,10 @@ fn parse_checkable_language(language: &str) -> Option<MdExpectation> {
             Some(MdExpectation::Success)
         }
         ["ac" | "acorn", "fail" | "fails" | "should-fail"] => Some(MdExpectation::Fail),
+        ["ac" | "acorn", "eval-handcrafted"] => Some(MdExpectation::Eval {
+            policy: ScoringPolicy::Handcrafted,
+            skip_modes: vec![0],
+        }),
         _ => None,
     }
 }
@@ -127,6 +136,59 @@ fn verify_and_check_succeeds(source: &str) {
         BuildStatus::Good,
         "check should replay the certificate written by verify\n{}",
         log_text(&check_output)
+    );
+}
+
+fn verify_and_eval_succeeds(source: &str, policy: ScoringPolicy, skip_modes: Vec<usize>) {
+    let temp = tempfile::TempDir::new().expect("temp project should be created");
+    let root = temp.path();
+    fs::write(root.join("acorn.toml"), "").expect("acorn.toml should be written");
+    fs::create_dir(root.join("src")).expect("src directory should be created");
+    fs::create_dir(root.join("build")).expect("build directory should be created");
+    fs::write(root.join("src/main.ac"), source).expect("main.ac should be written");
+
+    let verify_config = ProjectConfig {
+        usage_mode: UsageMode::Verify,
+        use_filesystem: true,
+        read_cache: false,
+        write_cache: true,
+        update_version: false,
+    };
+    let mut verify = Verifier::new(root.to_path_buf(), verify_config, Some("main".to_string()))
+        .expect("verify should initialize");
+    verify.builder.check_hashes = false;
+    let verify_output = verify.run().expect("verify should run");
+    assert_eq!(
+        verify_output.status,
+        BuildStatus::Good,
+        "verify should succeed before eval replay\n{}",
+        log_text(&verify_output)
+    );
+
+    let eval_config = ProjectConfig {
+        usage_mode: UsageMode::Verify,
+        use_filesystem: true,
+        read_cache: true,
+        write_cache: false,
+        update_version: false,
+    };
+    let mut eval = Verifier::new(root.to_path_buf(), eval_config, Some("main".to_string()))
+        .expect("eval should initialize");
+    eval.builder.check_mode = false;
+    eval.builder.check_hashes = false;
+    eval.builder.force_search = true;
+    eval.builder.eval_mode = true;
+    eval.builder.eval_skip_modes = skip_modes;
+    eval.builder.scoring_policy = policy;
+    eval.builder.check_jobs = 1;
+    eval.builder.operation_verb = "proved";
+    let eval_output = eval.run().expect("eval should run");
+    assert_eq!(
+        eval_output.status,
+        BuildStatus::Good,
+        "eval should succeed under {:?}\n{}",
+        policy,
+        log_text(&eval_output)
     );
 }
 
@@ -247,6 +309,9 @@ fn mdtests() {
             let result = catch_unwind(AssertUnwindSafe(|| match case.expectation {
                 MdExpectation::Success => verify_and_check_succeeds(&case.source),
                 MdExpectation::Fail => verify_fails(&case.source),
+                MdExpectation::Eval { policy, skip_modes } => {
+                    verify_and_eval_succeeds(&case.source, policy, skip_modes)
+                }
             }));
             if let Err(payload) = result {
                 let message = panic_message(payload);
@@ -376,6 +441,27 @@ fn parses_expected_failure_case() {
             start_line: 2,
             source: "theorem nope { false }".to_string(),
             expectation: MdExpectation::Fail,
+        }]
+    );
+}
+
+#[test]
+fn parses_eval_handcrafted_case() {
+    let cases = parse_cases(
+        Path::new("eval.md"),
+        "```acorn eval-handcrafted\ntheorem { true }\n```",
+    )
+    .expect("markdown should parse");
+    assert_eq!(
+        cases,
+        vec![MdCase {
+            id: "eval.md".to_string(),
+            start_line: 2,
+            source: "theorem { true }".to_string(),
+            expectation: MdExpectation::Eval {
+                policy: ScoringPolicy::Handcrafted,
+                skip_modes: vec![0],
+            },
         }]
     );
 }

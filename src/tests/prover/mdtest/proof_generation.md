@@ -80,6 +80,72 @@ theorem partial_constant_replay(a: Point, x: Point) {
 }
 ```
 
+## Eval Handcrafted Nested Pointwise Function Argument Cert
+
+The handcrafted eval policy can find a proof that unfolds a pointwise function
+whose second argument is itself a pointwise function. Certificate generation must
+serialize the function-valued argument, not its application at the current point.
+
+```acorn eval-handcrafted
+type Nat: axiom
+
+let mul: (Nat, Nat) -> Nat = axiom
+
+axiom mul_assoc(a: Nat, b: Nat, c: Nat) {
+    mul(mul(a, b), c) = mul(a, mul(b, c))
+}
+
+axiom mul_comm(a: Nat, b: Nat) {
+    mul(a, b) = mul(b, a)
+}
+
+define pointwise_mul(f: Nat -> Nat, g: Nat -> Nat) -> (Nat -> Nat) {
+    function(n: Nat) { mul(f(n), g(n)) }
+}
+
+theorem mul_swap_middle(a: Nat, b: Nat, c: Nat, d: Nat) {
+    mul(mul(a, b), mul(c, d)) = mul(mul(a, c), mul(b, d))
+} by {
+    mul(mul(a, b), mul(c, d)) = mul(a, mul(b, mul(c, d)))
+    mul(b, mul(c, d)) = mul(mul(b, c), d)
+    mul(b, c) = mul(c, b)
+    mul(mul(b, c), d) = mul(mul(c, b), d)
+    mul(mul(c, b), d) = mul(c, mul(b, d))
+    mul(b, mul(c, d)) = mul(c, mul(b, d))
+    mul(a, mul(b, mul(c, d))) = mul(a, mul(c, mul(b, d)))
+    mul(a, mul(c, mul(b, d))) = mul(mul(a, c), mul(b, d))
+}
+
+theorem pointwise_mul_product(
+    f: Nat -> Nat, g: Nat -> Nat, a: Nat, b: Nat
+) {
+    pointwise_mul(f, g)(mul(a, b)) = mul(f(mul(a, b)), g(mul(a, b)))
+}
+
+theorem pointwise_mul_preserves_product(
+    f: Nat -> Nat, g: Nat -> Nat, a: Nat, b: Nat
+) {
+    f(mul(a, b)) = mul(f(a), f(b)) and
+    g(mul(a, b)) = mul(g(a), g(b))
+        implies pointwise_mul(f, g)(mul(a, b)) =
+            mul(pointwise_mul(f, g)(a), pointwise_mul(f, g)(b))
+} by {
+    if f(mul(a, b)) = mul(f(a), f(b)) and
+        g(mul(a, b)) = mul(g(a), g(b)) {
+        pointwise_mul(f, g)(mul(a, b)) = mul(f(mul(a, b)), g(mul(a, b)))
+        pointwise_mul(f, g)(a) = mul(f(a), g(a))
+        pointwise_mul(f, g)(b) = mul(f(b), g(b))
+        mul(f(mul(a, b)), g(mul(a, b))) =
+            mul(mul(f(a), f(b)), mul(g(a), g(b)))
+        mul_swap_middle(f(a), f(b), g(a), g(b))
+        mul(mul(f(a), f(b)), mul(g(a), g(b))) =
+            mul(mul(f(a), g(a)), mul(f(b), g(b)))
+        pointwise_mul(f, g)(mul(a, b)) =
+            mul(pointwise_mul(f, g)(a), pointwise_mul(f, g)(b))
+    }
+}
+```
+
 ## Closed Generic Typeclass Attribute Rewrite Cert Line
 
 This is a red regression test for certificate serialization of a closed generic

@@ -53,7 +53,8 @@ fn test_foreign_scoped_constant_in_claim_codegen_is_rejected() {
 }
 
 #[test]
-fn test_incompatible_claim_mapping_is_rejected() {
+fn test_incompatible_closed_claim_mapping_falls_back_to_direct_claim() {
+    use crate::kernel::certificate_step::CertificateStep;
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::VariableMap;
     use crate::processor::Processor;
@@ -67,7 +68,7 @@ fn test_incompatible_claim_mapping_is_rejected() {
 
     let mut generator = CodeGenerator::new(&bindings);
     let mut steps = vec![];
-    let err = generator
+    generator
         .specialization_to_certificate_steps(
             &generic,
             &bad_map,
@@ -75,16 +76,16 @@ fn test_incompatible_claim_mapping_is_rejected() {
             &mut kernel_context,
             &mut steps,
         )
-        .expect_err("incompatible mappings should fail certificate specialization");
-    assert!(
-        steps.is_empty(),
-        "failing specialization should not emit steps"
-    );
-    assert!(
-        err.to_string()
-            .contains("certificate claim map type mismatch"),
-        "unexpected error: {}",
-        err
+        .expect("closed incompatible mappings should fall back to a direct concrete claim");
+
+    assert_eq!(steps.len(), 1, "expected one generated claim step");
+    let CertificateStep::Claim(claim) = &steps[0] else {
+        panic!("expected a claim step");
+    };
+    assert_eq!(
+        claim.var_map().len(),
+        0,
+        "fallback claim should not keep the incompatible claim map"
     );
 }
 
