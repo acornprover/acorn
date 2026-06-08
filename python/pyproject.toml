@@ -1,14 +1,17 @@
 [project]
-name = "acorn"
+name = "acorn-training"
 version = "0.1.0"
-description = "Add your description here"
+description = "Training utilities for Acorn proof-step scoring models"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "ipykernel>=6.29.5",
-    "matplotlib>=3.9.2",
-    "numpy>=2.1.1",
     "onnx>=1.16.2",
-    "scipy>=1.14.1",
     "torch>=2.4.1",
 ]
+
+[project.scripts]
+acorn-train-scorer = "acorn_training.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

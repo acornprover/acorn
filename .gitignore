@@ -7,7 +7,7 @@ profile.json*
 .intentionally-empty-file.o
 *vsix
 /tmp
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 
 **/.claude/settings.local.json
