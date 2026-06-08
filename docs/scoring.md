@@ -26,8 +26,9 @@ The first configurability step has now landed: `acorn eval --policy` can run sev
 policies without code edits. That immediately exposed two important facts:
 
 - `depth-first` currently beats the default ONNX policy by a large margin on the full eval.
-- alternate policies are not yet robust enough for routine use; they exposed certificate and
-  stack-overflow bugs that should be fixed before deeper scorer work.
+- alternate policies exercised proof and certificate paths the default policy rarely reached.
+  The initially reduced certificate and stack-growth bugs have now been fixed, but the full
+  four-policy eval has not yet been rerun after those fixes.
 
 ## Eval Baseline
 
@@ -138,6 +139,22 @@ eval stack-overflowed immediately, including a retry with `RUST_MIN_STACK=671088
 trivially broken, but some full-library search path is triggering unbounded recursion or stack
 growth.
 
+Status after the follow-up fixes: the reduced bugs found from these failures are fixed and have
+regression coverage. Specifically:
+
+- the `onnx-no-shallow` stack-growth path was reduced to certificate witness placement cycling
+  around a claim that mentioned the witness being placed
+- the `fin_matrix_det.ac` certificate failure was reduced to closed generic typeclass-attribute
+  claim serialization
+- the `number_theory/arithmetic_functions.ac` failure was reduced to reversed passive
+  simplification/PDT variable-map IDs escaping in the wrong variable numbering
+- a later cleanup of that path removed a direct-claim fallback and fixed claim context capture
+  for surviving replacement-context type locals
+
+Those fixes have passed the focused mdtests, `cargo test`, `cargo check`, and full cached
+certificate replay. The historical table above should not be reinterpreted as current policy
+performance; rerun the same policy ablation before drawing new conclusions.
+
 ## Current Eval Harness
 
 `acorn eval` is a useful outer benchmark for scoring work. In eval mode, `Builder`:
@@ -172,8 +189,8 @@ The current policy options are:
   ordering key
 
 The policy is threaded through `Builder`, `Processor`, `Prover`, and `PassiveSet`. This is enough
-for eval ablations, but the alternate policies should still be treated as experimental until the
-bugs above are fixed.
+for eval ablations. The alternate policies should still be treated as experimental until the full
+policy ablation is rerun on top of the bug fixes above.
 
 ## Current Scoring Architecture
 
@@ -230,8 +247,9 @@ unhelpful shallow step. That choice is made outside the model. The shallow heuri
 some proof-validation behavior, but it is also acting as a global search policy.
 
 `onnx-no-shallow` was added to ablate this ordering. It preserves whether a step is shallow for
-shallow proof mode, but neutralizes shallow status in the ordinary queue ordering. Full eval
-currently stack-overflows under this policy, so the ablation is blocked on a bug fix.
+shallow proof mode, but neutralizes shallow status in the ordinary queue ordering. The first full
+eval attempt hit a stack-growth bug that is now fixed in reduced form, so this ablation should be
+rerun.
 
 Future work should separate:
 
@@ -438,27 +456,26 @@ activations.
 
 For these reasons, the useful "scoring" work is really policy and measurement work: keep policies
 configurable, make shallow ordering optional or learnable, export better data, and evaluate with
-`acorn eval`. The immediate next step is to fix the bugs exposed by the new alternate policies so
-the ablations are stable.
+`acorn eval`. The immediate next step is to rerun the policy ablations now that the first wave of
+alternate-policy bugs has been fixed.
 
 ## Recommended Next Work
 
-1. Fix the alternate-policy bugs exposed by eval.
+1. Rerun the four-policy eval after the bug fixes.
 
-The policy flag did its job: it found real failures outside the default proof paths. Stabilizing
-these should come before interpreting more scorer ablations.
+The policy flag did its job: it found real failures outside the default proof paths. The reduced
+bugs from the first ablation pass are now fixed:
 
-Known issues:
+- `onnx-no-shallow` stack growth from cyclic named-witness placement
+- `handcrafted` certificate generation for the `number_theory/arithmetic_functions.ac` line 154
+  proof path
+- `handcrafted` certificate generation for the `fin_matrix_det.ac` line 225 proof path
+- claim context capture when a claim-map term refers to a surviving replacement-context type local
 
-- `onnx-no-shallow` full eval stack-overflows immediately. A narrow `category -j1` eval works, so
-  find the first module/search that blows the stack and reduce it to a focused repro.
-- `handcrafted` can find proofs whose generated certificates are invalid. The current full run
-  hit failures in `number_theory/arithmetic_functions.ac` line 154 and `fin_matrix_det.ac` line
-  225.
-
-Both classes of bugs should get narrow regression coverage once reduced. These are probably not
-"scorer bugs" in isolation; alternate scorers are exercising proof and certificate paths the
-default policy rarely reaches.
+The next useful data is a fresh run of the same four policies (`onnx`, `depth-first`,
+`handcrafted`, `onnx-no-shallow`) under the same timeout/skip settings. If the rerun exposes new
+crashes or certificate failures, reduce those next; otherwise, use the updated success and timing
+numbers as the new baseline for scorer work.
 
 2. Finish activation-policy configurability.
 
@@ -479,8 +496,8 @@ repros can select a policy when debugging scorer-specific behavior.
 normal search policy to rank all shallow clauses above all deep clauses. Make this distinction
 explicit in the code.
 
-`onnx-no-shallow` is the first attempt at this separation, but the full-eval stack overflow means
-the ablation is not yet trustworthy.
+`onnx-no-shallow` is the first attempt at this separation. The known stack-growth repro has been
+fixed, but the full-eval ablation needs to be rerun before trusting the result.
 
 4. Add richer features.
 
@@ -560,9 +577,10 @@ useful under successful searches.
 ## Open Questions
 
 - Why does `depth-first` outperform the default ONNX policy so strongly on the current eval?
-- Which full-library search triggers the `onnx-no-shallow` stack overflow?
-- After `onnx-no-shallow` is stable, how much of the timeout set is caused by shallow-first
+- After rerunning `onnx-no-shallow`, how much of the timeout set is caused by shallow-first
   ordering specifically?
+- Will the fixed `handcrafted` run now complete the full corpus, and how does it compare to
+  `depth-first`?
 - Are successful proofs usually found after activating a small number of relevant facts, or do
   they genuinely need broad factual saturation?
 - Would a factual activation budget improve average behavior, or would it create many brittle
@@ -572,7 +590,6 @@ useful under successful searches.
 - Should the scorer own only ranking, or should the abstraction become a broader search policy
   that can defer, reject, or budget activations?
 
-The next concrete milestone should be to reduce and fix the `onnx-no-shallow` stack overflow and
-the `handcrafted` certificate failures, then rerun the same four-policy eval. Once the alternate
-policies are stable, the ablations can tell us which policy constraints are costing searches
-before we invest in larger training and retrieval systems.
+The next concrete milestone should be to rerun the same four-policy eval after the current fixes.
+Once the alternate policies complete cleanly, the ablations can tell us which policy constraints
+are costing searches before we invest in larger training and retrieval systems.
