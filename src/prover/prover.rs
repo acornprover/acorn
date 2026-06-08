@@ -10,6 +10,7 @@ use super::passive_set::{PassivePushStats, PassiveSet};
 use super::proof::Proof;
 use super::scorer::ScoringPolicy;
 use super::synthetic::WitnessRegistry;
+use super::trace::{SearchTrace, TraceActivatedStepRecord, TraceSearchMeta};
 use crate::certificate::Certificate;
 use crate::code_generator::{CodeGenerator, Error};
 use crate::elaborator::acorn_type::TypeParam;
@@ -74,6 +75,15 @@ pub struct Prover {
 
     /// Instrumentation from the most recent completed search.
     last_search_stats: Option<SearchStats>,
+
+    /// Whether to record activated steps for the current search.
+    trace_enabled: bool,
+
+    /// Trace for the search currently in progress.
+    search_trace: Option<SearchTrace>,
+
+    /// Trace from the most recent completed search.
+    last_search_trace: Option<SearchTrace>,
 }
 
 impl Prover {
@@ -165,11 +175,35 @@ impl Prover {
             witness_registry: WitnessRegistry::new(),
             search_stats: SearchStats::default(),
             last_search_stats: None,
+            trace_enabled: false,
+            search_trace: None,
+            last_search_trace: None,
         }
     }
 
     pub fn last_search_stats(&self) -> Option<&SearchStats> {
         self.last_search_stats.as_ref()
+    }
+
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        self.trace_enabled = enabled;
+    }
+
+    pub fn trace_records(
+        &self,
+        meta: TraceSearchMeta,
+        outcome: Outcome,
+    ) -> Option<Vec<TraceActivatedStepRecord>> {
+        let final_step = self.final_step.as_ref()?;
+        let trace = self.last_search_trace.as_ref()?;
+        let mut useful_active = HashSet::new();
+        self.active_set
+            .find_upstream(final_step, false, &mut useful_active);
+        for step in &self.useful_passive {
+            self.active_set
+                .find_upstream(step, false, &mut useful_active);
+        }
+        Some(trace.records(meta, outcome, &useful_active))
     }
 
     fn record_passive_push_stats(&mut self, stats: PassivePushStats) {
@@ -185,6 +219,7 @@ impl Prover {
         self.search_stats.final_passive_len = self.passive_set.len();
         self.search_stats.final_active_len = self.active_set.len();
         self.last_search_stats = Some(self.search_stats.clone());
+        self.last_search_trace = self.search_trace.take();
         outcome
     }
 
@@ -721,11 +756,13 @@ impl Prover {
         }
 
         let next_step = if shallow_only {
-            self.passive_set.pop_shallow().map(|step| (step, true))
+            self.passive_set
+                .pop_shallow_entry()
+                .map(|entry| (entry, true))
         } else {
-            self.passive_set.pop_with_shallow()
+            self.passive_set.pop_entry_with_shallow()
         };
-        let (step, was_shallow) = match next_step {
+        let (entry, was_shallow) = match next_step {
             Some(step) => step,
             None => {
                 // We're out of clauses to process, so we can't make any more progress.
@@ -738,6 +775,17 @@ impl Prover {
                 return true;
             }
         };
+        let selected_active_id = self.active_set.next_id();
+        let selected_finishes_proof = entry.step.finishes_proof();
+        if let Some(trace) = &mut self.search_trace {
+            trace.record_activation(
+                entry.id,
+                (!selected_finishes_proof).then_some(selected_active_id),
+                &entry.score,
+                &entry.step,
+            );
+        }
+        let step = entry.step;
         self.search_stats.record_activation(&step);
 
         trace!(
@@ -972,6 +1020,8 @@ impl Prover {
     ) -> Outcome {
         self.search_stats = SearchStats::new(self.passive_set.len(), self.active_set.len());
         self.last_search_stats = None;
+        self.search_trace = self.trace_enabled.then(SearchTrace::new);
+        self.last_search_trace = None;
 
         // Convert mode to actual parameters
         let (activation_limit, seconds, shallow_only) = match mode {

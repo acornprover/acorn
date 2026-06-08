@@ -169,12 +169,23 @@ performance; rerun the same policy ablation before drawing new conclusions.
 - disables module hash skipping
 - runs configured skip modes, defaulting to `0` and `1`
 - accepts `--policy` to select the activation queue policy
+- accepts `--trace-out` to write successful search traces as JSONL
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
 
 Eval success counts successful prover outcomes. That includes `Outcome::Success` and
 `Outcome::Inconsistent`; finding an inconsistency is useful evidence that the prover reached a
 decisive result. Regular verify/search behavior still treats unexpected inconsistencies as warnings.
+
+The first trace exporter is intentionally eval-shaped:
+
+- `--trace-out PATH` writes one JSON object per activated step from successful eval searches
+- each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
+  active id, queue score/order fields, current feature vectors, rule, truthiness, and a
+  `used_in_final_proof` label derived from the final proof dependency closure
+- unactivated passive candidates are not labeled, because we do not know whether they would have
+  been useful if selected later
+- `Outcome::Inconsistent` traces are exported when eval counts them as successful prover outcomes
 
 The skip modes give two related benchmark shapes:
 
@@ -532,23 +543,24 @@ partly like soft premise selection.
 
 5. Export eval-shaped training traces.
 
-For each search, record enough information to reconstruct ranking decisions:
+The first version exists via `acorn eval --trace-out PATH`. It records enough information to start
+training an activated-step classifier or ranker:
 
 - goal identity
 - search outcome
-- timeout and activation limit
-- passive queue candidates at selected decision points
 - activated step features
 - score and final ordered key
 - activation order
 - rule and truthiness
-- source/module metadata for assumptions
 - whether the step appeared in the final proof
-- generated-candidate counts caused by the activation
 
-A lightweight first version can log only activated steps plus their features and outcome. A better
-version should include candidate snapshots, because scoring is a ranking problem, not just a
-used-vs-unused classification problem.
+Remaining trace improvements:
+
+- include timeout and activation-limit metadata
+- include source/module metadata for assumptions
+- include generated-candidate counts caused by each activation
+- add richer goal-aware and source-aware features
+- optionally add sampled candidate snapshots for later pairwise/reranking experiments
 
 6. Evaluate by live prover behavior.
 

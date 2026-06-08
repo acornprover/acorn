@@ -22,6 +22,7 @@ use crate::module::{ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::project::{PackageRole, Project, ProjectLookup, ProjectView, ProjectViewModule};
 use crate::proof_display::display_certificate_lines;
+use crate::prover::trace::{SearchTraceWriter, TraceSearchMeta};
 use crate::prover::{Outcome, ProverMode, ScoringPolicy, SearchStats};
 
 static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
@@ -257,6 +258,9 @@ pub struct Builder<'a> {
     /// Activation queue policy for prover search.
     pub scoring_policy: ScoringPolicy,
 
+    /// Optional writer for eval search traces.
+    pub trace_writer: Option<SearchTraceWriter>,
+
     /// Owned module-local work for batch builds. When present, the Project only retains
     /// module exports and the builder consumes these lowered work packets.
     module_work: Option<Vec<(ModuleDescriptor, LoweredModule)>>,
@@ -404,6 +408,7 @@ struct ModuleWorkerConfig {
     eval_mode: bool,
     eval_skip_modes: Vec<usize>,
     scoring_policy: ScoringPolicy,
+    trace_writer: Option<SearchTraceWriter>,
     operation_verb: &'static str,
     shallow_search: bool,
     timeout_secs: f32,
@@ -421,6 +426,7 @@ impl ModuleWorkerConfig {
             eval_mode: builder.eval_mode,
             eval_skip_modes: builder.eval_skip_modes.clone(),
             scoring_policy: builder.scoring_policy,
+            trace_writer: builder.trace_writer.clone(),
             operation_verb: builder.operation_verb,
             shallow_search: builder.shallow_search,
             timeout_secs: builder.timeout_secs,
@@ -437,6 +443,7 @@ impl ModuleWorkerConfig {
         builder.eval_mode = self.eval_mode;
         builder.eval_skip_modes = self.eval_skip_modes.clone();
         builder.scoring_policy = self.scoring_policy;
+        builder.trace_writer = self.trace_writer.clone();
         builder.operation_verb = self.operation_verb;
         builder.shallow_search = self.shallow_search;
         builder.timeout_secs = self.timeout_secs;
@@ -1219,6 +1226,7 @@ impl<'a> Builder<'a> {
             eval_mode: false,
             eval_skip_modes: vec![0, 1],
             scoring_policy: ScoringPolicy::default(),
+            trace_writer: None,
             module_work: None,
             current_module: None,
             single_line_goal_count: 0,
@@ -1908,6 +1916,41 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn write_eval_search_trace(
+        &mut self,
+        processor: &Processor,
+        goal: &Goal,
+        outcome: Outcome,
+        eval_skip: Option<usize>,
+    ) -> Result<(), BuildError> {
+        let Some(writer) = &self.trace_writer else {
+            return Ok(());
+        };
+        if !self.eval_mode || !matches!(outcome, Outcome::Success | Outcome::Inconsistent) {
+            return Ok(());
+        }
+        let module = self
+            .current_module
+            .as_ref()
+            .map(|module| module.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let meta = TraceSearchMeta {
+            module,
+            goal: goal.name.clone(),
+            goal_first_line: goal.first_line + 1,
+            goal_last_line: goal.last_line + 1,
+            skip: eval_skip,
+            policy: self.scoring_policy.to_string(),
+        };
+        let Some(records) = processor.search_trace_records(meta, outcome) else {
+            return Ok(());
+        };
+        writer
+            .write_records(&records)
+            .map_err(|e| BuildError::goal(goal, format!("failed to write search trace: {}", e)))?;
+        Ok(())
+    }
+
     /// Logs a successful verification.
     /// This can either be a proof, or something that doesn't require proving.
     pub fn log_verified(&mut self, first_line: u32, last_line: u32) {
@@ -2258,6 +2301,7 @@ impl<'a> Builder<'a> {
                 activation_limit: self.activation_limit,
             }
         };
+        processor.set_search_trace_enabled(self.trace_writer.is_some());
         let outcome = processor.search(mode, goal_kernel_context);
         if self.eval_mode {
             if let Some(stats) = processor.last_search_stats() {
@@ -2269,6 +2313,7 @@ impl<'a> Builder<'a> {
                 .prover()
                 .print_active_steps(outcome, bindings, goal_kernel_context);
         }
+        self.write_eval_search_trace(processor, goal, outcome, eval_skip)?;
         if outcome == Outcome::Success {
             let cert_result = catch_unwind(AssertUnwindSafe(|| {
                 processor.make_cert(bindings, goal_kernel_context, self.print_found_proof)

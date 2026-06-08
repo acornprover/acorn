@@ -6,12 +6,14 @@ use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, ProjectError, SelectionInfo, UsageMode};
+use acorn::prover::trace::SearchTraceWriter;
 use acorn::prover::ScoringPolicy;
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use walkdir::WalkDir;
 
@@ -608,6 +610,14 @@ enum Command {
         )]
         policy: String,
 
+        /// Write successful eval search traces to this JSONL file
+        #[clap(
+            long = "trace-out",
+            help = "Write successful eval search traces to this JSONL file.",
+            value_name = "PATH"
+        )]
+        trace_out: Option<PathBuf>,
+
         /// Print phase timing information
         #[clap(
             long = "timing",
@@ -1060,6 +1070,7 @@ async fn main() {
             jobs,
             skip,
             policy,
+            trace_out,
             timing,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, None, None) {
@@ -1092,6 +1103,20 @@ async fn main() {
                 println!("Error: --jobs must be at least 1");
                 std::process::exit(1);
             }
+            let trace_writer = match trace_out.as_ref() {
+                Some(path) => match SearchTraceWriter::create(path) {
+                    Ok(writer) => Some(writer),
+                    Err(e) => {
+                        println!(
+                            "Error: could not create trace file {}: {}",
+                            path.display(),
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
             let line_selection = match line_sel {
                 Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
                 Some(LineSelection::Range(start, end)) => {
@@ -1122,6 +1147,7 @@ async fn main() {
             verifier.builder.eval_mode = true;
             verifier.builder.eval_skip_modes = skip_modes;
             verifier.builder.scoring_policy = scoring_policy;
+            verifier.builder.trace_writer = trace_writer;
             verifier.builder.shallow_search = shallow;
             verifier.builder.check_jobs = eval_jobs;
             verifier.builder.operation_verb = "proved";
@@ -1131,6 +1157,7 @@ async fn main() {
             if let Some(limit) = activations {
                 verifier.builder.activation_limit = limit as i32;
             }
+            let trace_writer_for_flush = verifier.builder.trace_writer.clone();
 
             match verifier.run() {
                 Err(e) => {
@@ -1141,6 +1168,12 @@ async fn main() {
                     if timing {
                         output.print_timing_breakdown("Eval", "proof search", false);
                         output.print_verify_module_timing();
+                    }
+                    if let Some(writer) = &trace_writer_for_flush {
+                        if let Err(e) = writer.flush() {
+                            println!("Error: could not flush trace file: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                     if output.status.is_error() {
                         std::process::exit(1);
@@ -1929,6 +1962,8 @@ mod tests {
             "01",
             "--policy",
             "onnx-no-shallow",
+            "--trace-out",
+            "/tmp/acorn-trace.jsonl",
             "--timing",
         ])
         .expect("eval command should parse");
@@ -1943,6 +1978,7 @@ mod tests {
                 jobs,
                 skip,
                 policy,
+                trace_out,
                 timing,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
@@ -1953,6 +1989,10 @@ mod tests {
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert_eq!(policy, "onnx-no-shallow");
+                assert_eq!(
+                    trace_out.as_deref(),
+                    Some(std::path::Path::new("/tmp/acorn-trace.jsonl"))
+                );
                 assert!(timing);
             }
             _ => panic!("unexpected command"),

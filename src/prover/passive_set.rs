@@ -31,6 +31,12 @@ impl PassivePushStats {
     }
 }
 
+pub struct PassiveEntry {
+    pub id: usize,
+    pub step: ProofStep,
+    pub score: Score,
+}
+
 // The PassiveSet stores a bunch of clauses.
 // A clause in the passive set can be activated, and it can be simplified, but to do
 // anything more complicated it needs to be activated first.
@@ -301,15 +307,15 @@ impl PassiveSet {
             .copied()
     }
 
-    fn take_entry(&mut self, id: usize) -> ProofStep {
+    fn take_entry(&mut self, id: usize) -> PassiveEntry {
         match self.clauses[id].take() {
-            Some((step, _)) => step,
+            Some((step, score)) => PassiveEntry { id, step, score },
             None => panic!("Queue and clauses are out of sync"),
         }
     }
 
     // Returns the next step to activate, along with whether its score was still shallow.
-    pub fn pop_with_shallow(&mut self) -> Option<(ProofStep, bool)> {
+    pub fn pop_entry_with_shallow(&mut self) -> Option<(PassiveEntry, bool)> {
         // Remove the largest entry from queue
         let (score, id) = self.queue.pop_last()?;
         let was_shallow = score.is_shallow();
@@ -319,10 +325,19 @@ impl PassiveSet {
         Some((self.take_entry(id), was_shallow))
     }
 
-    pub fn pop_shallow(&mut self) -> Option<ProofStep> {
+    pub fn pop_with_shallow(&mut self) -> Option<(ProofStep, bool)> {
+        self.pop_entry_with_shallow()
+            .map(|(entry, was_shallow)| (entry.step, was_shallow))
+    }
+
+    pub fn pop_shallow_entry(&mut self) -> Option<PassiveEntry> {
         let (score, id) = self.next_shallow_entry()?;
         self.queue.remove(&(score, id));
         Some(self.take_entry(id))
+    }
+
+    pub fn pop_shallow(&mut self) -> Option<ProofStep> {
+        self.pop_shallow_entry().map(|entry| entry.step)
     }
 
     pub fn pop(&mut self) -> Option<ProofStep> {

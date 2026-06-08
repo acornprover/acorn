@@ -15,6 +15,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
 use crate::project::ProjectView;
+use crate::prover::trace::{TraceActivatedStepRecord, TraceSearchMeta};
 use crate::prover::{Outcome, Prover, ProverMode, ScoringPolicy, SearchStats};
 use tokio_util::sync::CancellationToken;
 
@@ -275,6 +276,20 @@ impl Processor {
 
     pub fn last_search_stats(&self) -> Option<&SearchStats> {
         self.prover.as_ref()?.last_search_stats()
+    }
+
+    pub fn set_search_trace_enabled(&mut self, enabled: bool) {
+        if let Some(prover) = self.prover.as_mut() {
+            prover.set_trace_enabled(enabled);
+        }
+    }
+
+    pub fn search_trace_records(
+        &self,
+        meta: TraceSearchMeta,
+        outcome: Outcome,
+    ) -> Option<Vec<TraceActivatedStepRecord>> {
+        self.prover.as_ref()?.trace_records(meta, outcome)
     }
 
     /// Creates a certificate from the current proof state.

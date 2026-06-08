@@ -821,6 +821,7 @@ impl Drop for Verifier {
 mod tests {
     use super::*;
     use crate::certificate::{Certificate, CertificateStore};
+    use crate::prover::trace::SearchTraceWriter;
     use assert_fs::fixture::ChildPath;
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
@@ -2012,6 +2013,84 @@ mod tests {
         let info = output.metrics.info_lines().join("\n");
         assert!(info.contains("1 searches found inconsistent assumptions"));
         assert!(!info.contains("search failures"));
+    }
+
+    #[test]
+    fn test_eval_writes_successful_search_trace() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem excluded_middle(b: Bool) {
+                    b = true or b = false
+                }
+                "#,
+            )
+            .unwrap();
+
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "excluded_middle".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
+
+        let trace_file = build.child("trace.jsonl");
+        let trace_writer =
+            SearchTraceWriter::create(trace_file.path()).expect("trace writer should open");
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+        verifier.builder.trace_writer = Some(trace_writer.clone());
+
+        let output = verifier.run().expect("eval should run");
+        trace_writer.flush().expect("trace should flush");
+        assert_eq!(output.status, BuildStatus::Good);
+
+        let trace = std::fs::read_to_string(trace_file.path()).expect("trace file should exist");
+        assert!(!trace.trim().is_empty(), "trace file should not be empty");
+
+        let mut saw_positive = false;
+        for line in trace.lines() {
+            let record: serde_json::Value =
+                serde_json::from_str(line).expect("trace line should be valid JSON");
+            assert_eq!(record["schema"], "acorn-activated-step-trace-v1");
+            assert_eq!(record["module"], "foo");
+            assert_eq!(record["goal"], "excluded_middle");
+            assert_eq!(record["skip"], 0);
+            assert_eq!(record["policy"], "onnx");
+            assert!(record["activation_index"].as_u64().is_some());
+            assert!(record["passive_id"].as_u64().is_some());
+            assert!(record["active_id"].is_u64() || record["active_id"].is_null());
+            assert!(record["feature_vector"]
+                .as_array()
+                .is_some_and(|values| !values.is_empty()));
+            assert!(record["features"]["atom_count"].as_i64().is_some());
+            saw_positive |= record["used_in_final_proof"].as_bool() == Some(true);
+        }
+        assert!(
+            saw_positive,
+            "trace should contain at least one positive label"
+        );
     }
 
     #[test]

@@ -72,6 +72,18 @@ impl Score {
     pub fn is_shallow(&self) -> bool {
         self.is_shallow
     }
+
+    pub fn raw_score(&self) -> f32 {
+        self.key.score.0
+    }
+
+    pub fn prioritizes_contradiction(&self) -> bool {
+        self.key.contradiction
+    }
+
+    pub fn ordered_shallow_status(&self) -> ShallowStatus {
+        self.key.shallow_status
+    }
 }
 
 impl PartialEq for Score {

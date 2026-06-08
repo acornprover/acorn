@@ -14,6 +14,7 @@ pub mod score;
 pub mod scorer;
 pub mod scoring_model;
 pub(crate) mod synthetic;
+pub mod trace;
 
 // Re-export the main public types
 pub use prover::Prover;
