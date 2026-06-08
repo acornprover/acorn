@@ -46,12 +46,18 @@ The run produced this aggregate summary:
 - 38,622 benchmark proofs with empty cached proofs, omitted for `skip=0`
 - 74,671 benchmark goals matched current source
 - 69,726 searches performed
-- 39,920 searches succeeded
-- 57.25% search success rate
+- 39,927 searches found a successful prover outcome
+- 57.26% search success rate
 - 598.9 ms average search time
 - 29,799 timeouts and 7 inconsistent searches
-- `skip=0`: 20,745 / 36,049 searches succeeded, 611.6 ms average
-- `skip=1`: 19,175 / 33,677 searches succeeded, 40,994 ineligible, 585.3 ms average
+- old per-skip success counts before counting inconsistent outcomes:
+  - `skip=0`: 20,745 / 36,049 searches succeeded, 611.6 ms average
+  - `skip=1`: 19,175 / 33,677 searches succeeded, 40,994 ineligible, 585.3 ms average
+
+The original CLI output for this run counted only `Outcome::Success` in the numerator, giving
+39,920 successes. Current eval semantics also count `Outcome::Inconsistent` as a successful prover
+outcome while still reporting it as a separate outcome bucket. The old notes do not record how the
+7 inconsistent outcomes split across skip modes.
 
 The new search instrumentation reported:
 
@@ -165,6 +171,10 @@ performance; rerun the same policy ablation before drawing new conclusions.
 - accepts `--policy` to select the activation queue policy
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
+
+Eval success counts successful prover outcomes. That includes `Outcome::Success` and
+`Outcome::Inconsistent`; finding an inconsistency is useful evidence that the prover reached a
+decisive result. Regular verify/search behavior still treats unexpected inconsistencies as warnings.
 
 The skip modes give two related benchmark shapes:
 

@@ -1948,6 +1948,73 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_counts_inconsistent_search_as_success() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                type Nat: axiom
+                let zero: Nat = axiom
+                let foo: Nat -> Bool = axiom
+                let bar: Nat -> Bool = axiom
+                axiom foo_true { foo(zero) }
+                axiom foo_false { not foo(zero) }
+                theorem goal { bar(zero) }
+                "#,
+            )
+            .unwrap();
+
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "goal".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.searches_total, 1);
+        assert_eq!(output.metrics.searches_success, 1);
+        assert_eq!(output.metrics.searches_inconsistent, 1);
+
+        let skip0 = output
+            .metrics
+            .eval_skip_metrics
+            .iter()
+            .find(|metrics| metrics.skip == 0)
+            .expect("skip=0 metrics should exist");
+        assert_eq!(skip0.searches_total, 1);
+        assert_eq!(skip0.searches_success, 1);
+        assert_eq!(skip0.searches_inconsistent, 1);
+
+        let info = output.metrics.info_lines().join("\n");
+        assert!(info.contains("1 searches found inconsistent assumptions"));
+        assert!(!info.contains("search failures"));
+    }
+
+    #[test]
     fn test_eval_line_selection_searches_only_selected_benchmark_goal() {
         let (acornlib, src, _build) = setup();
 

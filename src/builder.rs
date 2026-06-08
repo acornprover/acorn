@@ -594,7 +594,10 @@ impl EvalSkipMetrics {
             Outcome::ShallowExhausted => self.searches_shallow_exhausted += 1,
             Outcome::ShallowExplosion => self.searches_shallow_explosion += 1,
             Outcome::Exhausted => self.searches_exhausted += 1,
-            Outcome::Inconsistent => self.searches_inconsistent += 1,
+            Outcome::Inconsistent => {
+                self.searches_success += 1;
+                self.searches_inconsistent += 1;
+            }
             Outcome::Timeout => self.searches_timeout += 1,
             Outcome::Interrupted => self.searches_interrupted += 1,
             Outcome::ActivationCap => self.searches_activation_cap += 1,
@@ -608,7 +611,7 @@ impl EvalSkipMetrics {
             self.searches_activation_cap,
             self.searches_shallow_exhausted,
             self.searches_shallow_explosion,
-            self.searches_inconsistent,
+            0,
             self.searches_interrupted,
         )
     }
@@ -958,6 +961,12 @@ impl BuildMetrics {
             let search_time_ms = 1000.0 * self.search_time / self.searches_total as f64;
             lines.push(format!("{:.1} ms average search time", search_time_ms));
         }
+        if self.eval_mode && self.searches_inconsistent > 0 {
+            lines.push(format!(
+                "{} searches found inconsistent assumptions",
+                self.searches_inconsistent
+            ));
+        }
         let failures = self.searches_total - self.searches_success;
         if failures > 0 {
             let buckets = search_failure_buckets(
@@ -966,7 +975,11 @@ impl BuildMetrics {
                 self.searches_activation_cap,
                 self.searches_shallow_exhausted,
                 self.searches_shallow_explosion,
-                self.searches_inconsistent,
+                if self.eval_mode {
+                    0
+                } else {
+                    self.searches_inconsistent
+                },
                 self.searches_interrupted,
             );
             if !buckets.is_empty() {
@@ -1032,6 +1045,9 @@ impl BuildMetrics {
                     let search_time_ms =
                         1000.0 * metrics.search_time / metrics.searches_total as f64;
                     line.push_str(&format!(", {:.1} ms average", search_time_ms));
+                }
+                if metrics.searches_inconsistent > 0 {
+                    line.push_str(&format!(", {} inconsistent", metrics.searches_inconsistent));
                 }
                 lines.push(line);
                 let buckets = metrics.failure_buckets();
@@ -1848,10 +1864,20 @@ impl<'a> Builder<'a> {
             }
             Outcome::Inconsistent => {
                 self.metrics.searches_inconsistent += 1;
-                self.log_warning(
-                    &goal,
-                    &format!("prover found inconsistent assumptions{}", skip_phrase),
-                )
+                if self.eval_mode {
+                    if counts_goal_progress {
+                        self.metrics.goals_success += 1;
+                    }
+                    self.metrics.searches_success += 1;
+                    if counts_goal_progress {
+                        self.log_verified(goal.first_line, goal.last_line);
+                    }
+                } else {
+                    self.log_warning(
+                        &goal,
+                        &format!("prover found inconsistent assumptions{}", skip_phrase),
+                    )
+                }
             }
             Outcome::Timeout => {
                 self.metrics.searches_timeout += 1;
