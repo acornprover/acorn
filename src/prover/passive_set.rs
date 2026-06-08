@@ -104,12 +104,26 @@ fn pair_specialization_map(
     matched.then_some(var_map)
 }
 
+fn remap_var_map_keys(var_map: VariableMap, var_ids: Option<&[AtomId]>) -> Option<VariableMap> {
+    let Some(var_ids) = var_ids else {
+        return Some(var_map);
+    };
+    let mut remapped = VariableMap::new();
+    for (new_id, term) in var_map.iter() {
+        let original_id = *var_ids.get(new_id)?;
+        remapped.set(original_id, term.clone());
+    }
+    Some(remapped)
+}
+
 // Makes a new clause by simplifying a bunch of literals with respect to a given literal.
 // left and right do not have to have variables normalized.
 // We only check against the left->right direction.
 // We already know literals[index] can be obtained from the given literal through variable substitution.
 // Returns None if the clause is tautologically implied by the literal we are simplifying with.
-// activated_context is for left/right, passive_context is for literals.
+// activated_context is for left/right, passive_context is for literals. If left/right are a
+// normalized reversed view of the activated literal, activated_var_ids maps those normalized
+// variable ids back to the activated proof step's original local ids.
 fn make_simplified(
     activated_context: &LocalContext,
     _activated_literal: &Literal,
@@ -118,35 +132,28 @@ fn make_simplified(
     left: &Term,
     right: &Term,
     positive: bool,
-    caller_flipped: bool,
+    activated_var_ids: Option<&[AtomId]>,
     literals: Vec<Literal>,
 ) -> Option<(Clause, Vec<AtomId>, Vec<VariableMap>)> {
-    // Note: When caller_flipped is true, left and right have already been swapped
-    // by the caller. So any flip we compute here is relative to the swapped order.
-    // The final flip must be XORed with caller_flipped to get the flip relative
-    // to the original activating literal orientation.
     let mut new_literals = vec![];
     let mut simp_var_maps = vec![];
     for literal in literals.into_iter() {
         // Check both directions consistently for all literals.
-        // The flip value must be determined by which direction actually matches,
-        // not by which direction was used to find the initial match.
-        let (eliminated, match_flipped, match_var_map) = if let Some(var_map) =
-            pair_specialization_map(
-                activated_context,
-                passive_context,
-                kernel_context,
-                left,
-                right,
-                &literal.left,
-                &literal.right,
-            ) {
+        let (eliminated, match_var_map) = if let Some(var_map) = pair_specialization_map(
+            activated_context,
+            passive_context,
+            kernel_context,
+            left,
+            right,
+            &literal.left,
+            &literal.right,
+        ) {
             if literal.positive == positive {
                 // The whole clause is implied by the literal we are simplifying with.
                 return None;
             }
             // This specific literal is unsatisfiable.
-            (true, false, Some(var_map))
+            (true, remap_var_map_keys(var_map, activated_var_ids))
         } else if let Some(var_map) = pair_specialization_map(
             activated_context,
             passive_context,
@@ -161,14 +168,12 @@ fn make_simplified(
                 return None;
             }
             // This specific literal is unsatisfiable with flipped matching.
-            (true, true, Some(var_map))
+            (true, remap_var_map_keys(var_map, activated_var_ids))
         } else {
-            (false, false, None)
+            (false, None)
         };
         if eliminated {
-            // XOR with caller_flipped to get the flip relative to original orientation
-            let _literal_flipped = match_flipped != caller_flipped;
-            simp_var_maps.push(match_var_map.expect("eliminated literal should have a var map"));
+            simp_var_maps.push(match_var_map?);
         } else {
             new_literals.push(literal);
         }
@@ -341,7 +346,7 @@ impl PassiveSet {
         left: &Term,
         right: &Term,
         positive: bool,
-        flipped: bool,
+        activated_var_ids: Option<&[AtomId]>,
     ) -> PassivePushStats {
         let mut new_steps = vec![];
         for &(clause_id, literal_index) in
@@ -401,7 +406,7 @@ impl PassiveSet {
                 left,
                 right,
                 positive,
-                flipped,
+                activated_var_ids,
                 step.clause.literals.clone(),
             ) else {
                 continue;
@@ -503,10 +508,11 @@ impl PassiveSet {
             &literal.left,
             &literal.right,
             literal.positive,
-            false,
+            None,
         );
         if !literal.strict_kbo() {
             let (right, left, reversed_context) = literal.normalized_reversed(local_context);
+            let reversed_var_ids = literal.reversed_var_ids(local_context);
             let reversed_stats = self.simplify_one_direction(
                 activated_id,
                 &step,
@@ -516,7 +522,7 @@ impl PassiveSet {
                 &right,
                 &left,
                 literal.positive,
-                true,
+                Some(&reversed_var_ids),
             );
             stats.add(reversed_stats);
         }
@@ -570,6 +576,48 @@ mod tests {
 
         let step = passive_set.pop().unwrap();
         assert_eq!(step.clause.to_string(), "<empty>");
+    }
+
+    #[test]
+    fn test_reversed_passive_simplification_remaps_activated_var_ids() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Nat")
+            .parse_constant("g0", "(Nat, Nat) -> Nat")
+            .parse_constant("g1", "(Nat -> Nat, Nat -> Nat, Nat) -> Nat")
+            .parse_constant("c0", "Nat -> Nat")
+            .parse_constant("c1", "Nat -> Nat")
+            .parse_constants(&["c2", "c3"], "Nat");
+
+        let active_context = kctx.parse_local(&["Nat -> Nat", "Nat -> Nat", "Nat"]);
+        let active_literal = Literal::equals(
+            kctx.parse_term("g1(x0, x1, x2)"),
+            kctx.parse_term("g0(x0(x2), x1(x2))"),
+        );
+        let (right, left, reversed_context) = active_literal.normalized_reversed(&active_context);
+        let reversed_var_ids = active_literal.reversed_var_ids(&active_context);
+
+        let passive_context = LocalContext::empty();
+        let passive_literal = Literal::not_equals(
+            kctx.parse_term("g0(c0(g0(c2, c3)), c1(g0(c2, c3)))"),
+            kctx.parse_term("g1(c0, c1, g0(c2, c3))"),
+        );
+        let (_new_clause, _var_ids, simp_var_maps) = make_simplified(
+            &reversed_context,
+            &active_literal,
+            &passive_context,
+            &kctx,
+            &right,
+            &left,
+            true,
+            Some(&reversed_var_ids),
+            vec![passive_literal],
+        )
+        .expect("reversed active literal should simplify the passive literal");
+
+        let var_map = &simp_var_maps[0];
+        assert_eq!(var_map.get_mapping(0), Some(&kctx.parse_term("c0")));
+        assert_eq!(var_map.get_mapping(1), Some(&kctx.parse_term("c1")));
+        assert_eq!(var_map.get_mapping(2), Some(&kctx.parse_term("g0(c2, c3)")));
     }
 
     #[test]

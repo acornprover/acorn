@@ -1148,15 +1148,6 @@ impl CodeGenerator<'_> {
             mapped_concrete,
         )) = incompatible_mapping
         {
-            let concretized_clause =
-                replacement_type_map.specialize_clause_with_compact_vars(&clause, kernel_context);
-            if Self::clause_has_only_type_param_locals(&concretized_clause) {
-                // A closed concrete claim is safer than serializing a lossy function-valued map.
-                let claim = Claim::new(concretized_clause, VariableMap::new())
-                    .map_err(Error::GeneratedBadCode)?;
-                steps.push(CertificateStep::Claim(claim));
-                return Ok(());
-            }
             return Err(Error::GeneratedBadCode(format!(
                 "certificate claim map type mismatch for x{}: expected type '{}' (specialized '{}'), \
                  mapped term '{}' has type '{}' (specialized '{}'); generic clause '{}'; concrete clause '{}'",

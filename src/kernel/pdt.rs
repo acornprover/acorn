@@ -1954,6 +1954,68 @@ mod tests {
     }
 
     #[test]
+    fn test_literal_set_rejects_reversed_higher_order_value_boundary_match() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Nat")
+            .parse_constant("g0", "(Nat, Nat) -> Nat")
+            .parse_constant("g1", "(Nat -> Nat, Nat -> Nat, Nat) -> Nat")
+            .parse_constant("c1", "Nat -> Nat")
+            .parse_constants(&["c2", "c3", "c4"], "Nat");
+
+        let pattern_context = kctx.parse_local(&["Nat -> Nat", "Nat -> Nat", "Nat"]);
+        let pattern = Literal::equals(
+            kctx.parse_term("g1(x0, x1, x2)"),
+            kctx.parse_term("g0(x0(x2), x1(x2))"),
+        );
+        let mut literals = LiteralSet::new();
+        literals.insert(&pattern, 0, &pattern_context);
+
+        let query_context = LocalContext::empty();
+        let query = Literal::equals(
+            kctx.parse_term("g0(c1(c2), g0(c3, c4, c2))"),
+            kctx.parse_term("g1(c1, g0(c3, c4), c2)"),
+        );
+
+        assert_eq!(
+            literals.find_generalization_with_map(&query, &query_context, &kctx),
+            None,
+            "reversed equality matching must not bind a function-typed variable to a value"
+        );
+    }
+
+    #[test]
+    fn test_literal_set_reversed_higher_order_match_restores_original_var_ids() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Nat")
+            .parse_constant("g0", "(Nat, Nat) -> Nat")
+            .parse_constant("g1", "(Nat -> Nat, Nat -> Nat, Nat) -> Nat")
+            .parse_constants(&["c1", "c2"], "Nat -> Nat")
+            .parse_constants(&["c3", "c4"], "Nat");
+
+        let pattern_context = kctx.parse_local(&["Nat -> Nat", "Nat -> Nat", "Nat"]);
+        let pattern = Literal::equals(
+            kctx.parse_term("g1(x0, x1, x2)"),
+            kctx.parse_term("g0(x0(x2), x1(x2))"),
+        );
+        let mut literals = LiteralSet::new();
+        literals.insert(&pattern, 0, &pattern_context);
+
+        let query_context = LocalContext::empty();
+        let point = kctx.parse_term("g0(c3, c4)");
+        let query = Literal::equals(
+            kctx.parse_term("g0(c1(g0(c3, c4)), c2(g0(c3, c4)))"),
+            kctx.parse_term("g1(c1, c2, g0(c3, c4))"),
+        );
+        let found = literals
+            .find_generalization_with_map(&query, &query_context, &kctx)
+            .expect("valid reversed equality should match");
+
+        assert_eq!(found.3.get_mapping(0), Some(&kctx.parse_term("c1")));
+        assert_eq!(found.3.get_mapping(1), Some(&kctx.parse_term("c2")));
+        assert_eq!(found.3.get_mapping(2), Some(&point));
+    }
+
+    #[test]
     fn test_pdt_typesort_should_not_match_type_variable() {
         // Tests that TypeSort (Type itself) should NOT match a pattern type variable.
         //
