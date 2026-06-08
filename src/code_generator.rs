@@ -13,6 +13,7 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
@@ -71,18 +72,6 @@ impl CodeGenerator<'_> {
             c.type_param_names.clone(),
             c.value_param_types.clone(),
         ))
-    }
-
-    fn clause_has_only_type_param_locals(clause: &Clause) -> bool {
-        clause
-            .get_local_context()
-            .get_var_types()
-            .iter()
-            .all(|var_type| {
-                var_type
-                    .as_ref()
-                    .is_some_and(|term| term.as_ref().is_type_param_kind())
-            })
     }
 
     /// Render a binary expression while preserving the operand grouping required by precedence.
@@ -944,6 +933,22 @@ impl CodeGenerator<'_> {
         kernel_context: &mut KernelContext,
         steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
+        let replacement_scope_error = var_map.iter().find_map(|(var_id, term)| {
+            term.max_variable()
+                .filter(|id| *id as usize >= replacement_context.len())
+                .map(|max_id| (var_id, term.clone(), max_id))
+        });
+        if let Some((var_id, term, max_id)) = replacement_scope_error {
+            return Err(Error::GeneratedBadCode(format!(
+                "certificate specialization map has out-of-scope term for x{}: '{}' references replacement x{} (replacement context size {}); generic clause '{}'",
+                var_id,
+                term,
+                max_id,
+                replacement_context.len(),
+                generic
+            )));
+        }
+
         let mut clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
             &generic,
             replacement_context,
@@ -1104,27 +1109,107 @@ impl CodeGenerator<'_> {
             )));
         }
 
+        let generic_type_prefix_len = generic_context
+            .get_var_types()
+            .iter()
+            .take_while(|var_type| {
+                var_type
+                    .as_ref()
+                    .is_some_and(|term| term.as_ref().is_type_param_kind())
+            })
+            .count();
+        let mut combined_context = generic_context.clone();
+        let mut replacement_output_map = VariableMap::new();
+        let mut replacement_type_vars = vec![];
+        let mut replacement_value_vars = vec![];
+        let mut used_replacement_var_ids = vec![];
+        for (_, term) in claim_var_map.iter() {
+            let mut term = term.clone();
+            term.normalize_var_ids_with_context(&mut used_replacement_var_ids, replacement_context);
+        }
+        for &var_id in &used_replacement_var_ids {
+            let var_type = replacement_context
+                .get_var_type(var_id as usize)
+                .expect("used replacement variables should have declared types");
+            let combined_id = generic_len + var_id as usize;
+            replacement_output_map.set(
+                var_id,
+                Term::atom(Atom::FreeVariable(combined_id as AtomId)),
+            );
+            if var_type.as_ref().is_type_param_kind() {
+                replacement_type_vars.push(combined_id as AtomId);
+            } else {
+                replacement_value_vars.push(combined_id as AtomId);
+            }
+        }
+        for &var_id in &used_replacement_var_ids {
+            let var_type = replacement_context
+                .get_var_type(var_id as usize)
+                .expect("used replacement variables should have declared types");
+            combined_context.set_type(
+                generic_len + var_id as usize,
+                apply_to_term(var_type.as_ref(), &replacement_output_map),
+            );
+        }
+        let mut claim_var_ids: Vec<AtomId> = (0..generic_type_prefix_len)
+            .map(|id| id as AtomId)
+            .collect();
+        claim_var_ids.extend(replacement_type_vars);
+        claim_var_ids.extend((generic_type_prefix_len..generic_len).map(|id| id as AtomId));
+        claim_var_ids.extend(replacement_value_vars);
+
+        let mut remapped_claim_var_map = VariableMap::new();
+        for (old_key, term) in claim_var_map.iter() {
+            let Some(new_key) = claim_var_ids
+                .iter()
+                .position(|old_id| *old_id as usize == old_key)
+            else {
+                continue;
+            };
+            let shifted = apply_to_term(term.as_ref(), &replacement_output_map);
+            remapped_claim_var_map.set(
+                new_key as AtomId,
+                shifted.renumber_variables(&claim_var_ids),
+            );
+        }
+        claim_var_map = remapped_claim_var_map;
+
+        let claim_literals = generic
+            .literals
+            .iter()
+            .map(|literal| {
+                Literal::new(
+                    literal.positive,
+                    literal.left.renumber_variables(&claim_var_ids),
+                    literal.right.renumber_variables(&claim_var_ids),
+                )
+            })
+            .collect();
+        let claim_context = combined_context.remap(&claim_var_ids);
+        let claim_generic = Clause::from_literals_unnormalized(claim_literals, &claim_context);
+        let claim_context = claim_generic.get_local_context();
+        let claim_context_len = claim_context.len();
+
         let out_of_scope_mapping = claim_var_map.iter().find_map(|(var_id, term)| {
             term.max_variable()
-                .filter(|id| *id as usize >= generic_len)
+                .filter(|id| *id as usize >= claim_context_len)
                 .map(|max_id| (var_id, term.clone(), max_id))
         });
         if let Some((var_id, term, max_id)) = out_of_scope_mapping {
             return Err(Error::GeneratedBadCode(format!(
                 "certificate claim map has out-of-scope term for x{}: '{}' references x{} (generic context size {}); generic clause '{}'; concrete clause '{}'",
-                var_id, term, max_id, generic_len, generic, clause
+                var_id, term, max_id, claim_context_len, generic, clause
             )));
         }
 
         let incompatible_mapping = claim_var_map.iter().find_map(|(var_id, term)| {
-            let expected_type = generic_context.get_var_type(var_id).cloned()?;
+            let expected_type = claim_context.get_var_type(var_id).cloned()?;
             if expected_type.as_ref().is_type_param_kind() {
                 return None;
             }
 
             let expected_concrete = apply_to_term(expected_type.as_ref(), &claim_var_map);
-            let mapped_type =
-                Self::term_type_for_certificate(term, generic_context, kernel_context);
+            let mapped_type = Self::term_type_for_certificate(term, claim_context, kernel_context);
             let mapped_concrete = apply_to_term(mapped_type.as_ref(), &claim_var_map);
             if expected_concrete != mapped_concrete {
                 Some((
@@ -1161,24 +1246,19 @@ impl CodeGenerator<'_> {
                 clause
             )));
         }
-        let replayed = claim_var_map.specialize_clause_with_compact_vars(generic, kernel_context);
+        let replayed =
+            claim_var_map.specialize_clause_with_compact_vars(&claim_generic, kernel_context);
         // Compare against the concrete clause after only applying inferred replacement-type
         // substitutions; applying claim_var_map here can incorrectly capture overlapping IDs.
         let concretized_clause =
             replacement_type_map.specialize_clause_with_compact_vars(&clause, kernel_context);
         if replayed != concretized_clause {
-            if Self::clause_has_only_type_param_locals(&concretized_clause) {
-                let claim = Claim::new(concretized_clause, VariableMap::new())
-                    .map_err(Error::GeneratedBadCode)?;
-                steps.push(CertificateStep::Claim(claim));
-                return Ok(());
-            }
             return Err(Error::GeneratedBadCode(format!(
                 "certificate claim map replay mismatch: generic clause '{}' with map '{}' replays to '{}', but concretized clause is '{}' (raw specialized clause '{}')",
                 generic, claim_var_map, replayed, concretized_clause, clause
             )));
         }
-        let claim = Claim::new(generic.clone(), claim_var_map).map_err(Error::GeneratedBadCode)?;
+        let claim = Claim::new(claim_generic, claim_var_map).map_err(Error::GeneratedBadCode)?;
 
         steps.push(CertificateStep::Claim(claim));
         Ok(())

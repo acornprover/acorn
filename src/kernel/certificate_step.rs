@@ -34,23 +34,43 @@ impl Claim {
     /// term in the `var_map` is term-normalized and rewritten to the clause's normalized
     /// variable numbering.
     pub fn new(clause: Clause, mut var_map: VariableMap) -> Result<Claim, String> {
-        let trace =
-            Clause::normalize_with_trace(clause.literals.clone(), clause.get_local_context());
+        let input_context = clause.get_local_context().clone();
+        let pinned_type_params = input_context
+            .get_var_types()
+            .iter()
+            .take_while(|var_type| {
+                var_type
+                    .as_ref()
+                    .is_some_and(|term| term.as_ref().is_type_param_kind())
+            })
+            .count();
+        let trace = Clause::normalize_with_trace_pinned(
+            clause.literals.clone(),
+            clause.get_local_context(),
+            pinned_type_params,
+        );
         var_map.apply_to_all(normalize_term);
-        let renumber_map = VariableMap::from_var_ids(&trace.var_ids);
-        let mut normalized_var_map = VariableMap::new();
-        for (new_id, old_id) in trace.var_ids.iter().enumerate() {
-            let Some(term) = var_map.get_mapping(*old_id) else {
-                continue;
-            };
-            normalized_var_map.set(
-                new_id as AtomId,
-                apply_to_term(term.as_ref(), &renumber_map),
-            );
+
+        let mut var_ids = trace.var_ids.clone();
+        let mut renumbered_terms = HashMap::new();
+        for (old_id, term) in var_map.iter() {
+            let mut term = term.clone();
+            term.normalize_var_ids_with_context(&mut var_ids, &input_context);
+            renumbered_terms.insert(old_id as AtomId, term);
         }
 
+        let mut normalized_var_map = VariableMap::new();
+        for (new_id, old_id) in var_ids.iter().enumerate() {
+            let Some(term) = renumbered_terms.get(old_id) else {
+                continue;
+            };
+            normalized_var_map.set(new_id as AtomId, term.clone());
+        }
+
+        let mut normalized_clause = trace.clause;
+        normalized_clause.context = input_context.remap(&var_ids);
         let claim = Claim {
-            clause: trace.clause,
+            clause: normalized_clause,
             var_map: normalized_var_map,
         };
         claim.validate_var_map_scope()?;
@@ -242,7 +262,10 @@ impl Claim {
         kernel_context: &KernelContext,
     ) -> Result<Clause, String> {
         self.validate_var_map_scope()?;
-        Ok(self.var_map.specialize_clause(&self.clause, kernel_context))
+        Ok(self
+            .var_map
+            .specialize_clause(&self.clause, kernel_context)
+            .compacted_var_ids_preserving_literal_shape())
     }
 
     pub fn normalized_specialized_clause(
@@ -639,6 +662,40 @@ mod tests {
         assert_eq!(claim.normalized_generic_clause(), expected);
         assert_eq!(claim.var_map.get_mapping(0), Some(&Term::new_true()));
         assert_eq!(claim.var_map.get_mapping(1), Some(&Term::new_false()));
+    }
+
+    #[test]
+    fn test_claim_new_preserves_type_local_used_only_in_var_map_term() {
+        let mut kernel_context = KernelContext::new();
+        kernel_context.parse_typeclass("FiniteGroup");
+        kernel_context.parse_polymorphic_constant("g0", "T: Type", "Bool -> Bool");
+        kernel_context.parse_polymorphic_constant("g1", "T: Type", "T -> Bool");
+
+        let clause = Clause::from_literals_unnormalized(
+            vec![Literal::positive(kernel_context.parse_term("g1(x0, x2)"))],
+            &LocalContext::from_types(vec![
+                Term::type_sort(),
+                kernel_context.parse_type("FiniteGroup"),
+                Term::new_variable(0),
+            ]),
+        );
+        let mut var_map = VariableMap::new();
+        var_map.set(0, Term::bool_type());
+        var_map.set(2, kernel_context.parse_term("g0(x1, false)"));
+
+        let claim = Claim::new(clause, var_map).expect("claim should normalize");
+
+        assert_eq!(
+            claim.clause.get_local_context().get_var_type(1),
+            Some(&kernel_context.parse_type("FiniteGroup"))
+        );
+        assert_eq!(
+            claim.var_map.get_mapping(2),
+            Some(&kernel_context.parse_term("g0(x1, false)"))
+        );
+        claim
+            .validate_normalized_shape(&kernel_context)
+            .expect("claim should have normalized shape");
     }
 
     #[test]

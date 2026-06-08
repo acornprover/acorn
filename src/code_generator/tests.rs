@@ -100,8 +100,8 @@ fn test_out_of_scope_claim_mapping_is_rejected() {
     let generic = kernel_context.parse_clause("x0 = x0", &["Bool"]);
 
     let mut bad_map = VariableMap::new();
-    bad_map.set(0, Term::new_variable(1));
-    let replacement_context = LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
+    bad_map.set(0, Term::new_variable(2));
+    let replacement_context = LocalContext::from_types(vec![Term::bool_type()]);
 
     let mut generator = CodeGenerator::new(&bindings);
     let mut steps = vec![];
@@ -162,14 +162,14 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
             crate::kernel::certificate_step::CertificateStep::Satisfy(_) => None,
         })
         .expect("expected claim step");
-    let mapped_x1 = claim
+    let mapped_value = claim
         .var_map()
         .get_mapping(1)
-        .expect("expected x1 mapping in claim");
+        .expect("expected value mapping in claim");
     assert!(
-        mapped_x1.max_variable().is_none(),
+        mapped_value.max_variable().is_none(),
         "mapped term should have no free replacement vars left, got {}",
-        mapped_x1
+        mapped_value
     );
 }
 
@@ -219,15 +219,15 @@ fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
         panic!("expected a claim step");
     };
     assert_eq!(
-        claim.clause().get_local_context().get_var_type(0),
+        claim.clause().get_local_context().get_var_type(1),
         replacement_context.get_var_type(0),
-        "generated claim should keep the replacement-context kind on the surviving type local"
+        "generated claim should keep the replacement-context kind on a non-capturing local"
     );
-    assert_eq!(
-        claim.var_map().len(),
-        0,
-        "fallback claim should serialize as a direct claim rather than a lossy claim map"
-    );
+    let mapped_x1 = claim
+        .var_map()
+        .get_mapping(2)
+        .expect("expected a mapping for the generic value local");
+    assert_eq!(mapped_x1, &kernel_context.parse_term("g0(x1, false)"));
     let displayed = claim
         .specialized_clause_for_display(&kernel_context)
         .expect("generated claim should specialize for display");

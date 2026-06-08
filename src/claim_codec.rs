@@ -609,7 +609,12 @@ impl ClaimCodec {
             .lower_clause(&quoted_clause, NewConstantType::Local, type_var_map)
             .map_err(CodeGenError::GeneratedBadCode)?;
         let var_map = kernel_context
-            .lower_claim_var_map(type_args, args)
+            .lower_claim_var_map_for_type_params(
+                type_param_names,
+                type_param_constraints,
+                type_args,
+                args,
+            )
             .map_err(CodeGenError::GeneratedBadCode)?;
         Self::claim_with_var_map(clause, var_map)
     }
@@ -655,7 +660,14 @@ impl ClaimCodec {
         let clause = kernel_context
             .lower_clause(&generic_value, NewConstantType::Local, type_var_map)
             .map_err(CodeGenError::GeneratedBadCode)?;
-        Self::claim_with_args_from_clause(clause, &function_value.type_args, &args, kernel_context)
+        Self::claim_with_args_from_clause(
+            clause,
+            &function_value.type_param_names,
+            &function_value.type_param_constraints,
+            &function_value.type_args,
+            &args,
+            kernel_context,
+        )
     }
 
     /// Deserialize a roundtrip value built from an already-evaluated function and arg list.
@@ -1066,12 +1078,19 @@ impl ClaimCodec {
     /// Build a claim from a quoted clause and its separately lowered argument list.
     fn claim_with_args_from_clause(
         clause: Clause,
+        type_param_names: &[String],
+        type_param_constraints: &[Option<Typeclass>],
         type_args: &[AcornType],
         args: &[AcornValue],
         kernel_context: &mut KernelContext,
     ) -> Result<Claim, CodeGenError> {
         let var_map = kernel_context
-            .lower_claim_var_map(type_args, args)
+            .lower_claim_var_map_for_type_params(
+                type_param_names,
+                type_param_constraints,
+                type_args,
+                args,
+            )
             .map_err(CodeGenError::GeneratedBadCode)?;
         Self::claim_with_var_map(clause, var_map)
     }

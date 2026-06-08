@@ -1940,8 +1940,8 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
     let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
 
     let mut bad_map = VariableMap::new();
-    bad_map.set(0, Term::new_variable(1));
-    let replacement_context = LocalContext::from_types(vec![Term::bool_type(), Term::type_sort()]);
+    bad_map.set(0, Term::new_variable(2));
+    let replacement_context = LocalContext::from_types(vec![Term::bool_type()]);
     let concrete_steps = vec![ConcreteStep {
         generic,
         var_maps: vec![(bad_map, replacement_context)],
@@ -2084,7 +2084,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         .expect("parsed claim should already be normalized");
 
     assert_eq!(
-        claim.clause().get_local_context().get_var_type(0),
+        claim.clause().get_local_context().get_var_type(1),
         replacement_context.get_var_type(0),
         "parsed claim should preserve the replacement-context typeclass kind"
     );

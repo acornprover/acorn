@@ -254,7 +254,7 @@ impl Certificate {
             .map_err(CodeGenError::GeneratedBadCode)?;
         if !specialized_clause.get_local_context().is_empty() {
             return Err(CodeGenError::GeneratedBadCode(
-                "closed generic claim fallback requires a closed clause".to_string(),
+                "closed generic claim serialization requires a closed clause".to_string(),
             ));
         }
 
@@ -738,10 +738,10 @@ impl Certificate {
                         })?
                 } else {
                     Self::serialize_closed_generic_claim_step(claim, kernel_context, bindings)
-                        .map_err(|fallback| {
+                        .map_err(|err| {
                             CodeGenError::GeneratedBadCode(format!(
                                 "closed generic certificate step serialization failed: {}",
-                                fallback
+                                err
                             ))
                         })?
                 }

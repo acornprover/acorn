@@ -22,7 +22,7 @@
 //! kernel clause/clausifier layers.
 
 use crate::builder::BuildError;
-use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_type::{AcornType, TypeParam, Typeclass};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::goal::Goal;
@@ -290,11 +290,48 @@ impl KernelContext {
         type_args: &[AcornType],
         args: &[AcornValue],
     ) -> Result<VariableMap, String> {
-        let mut var_map = VariableMap::new();
+        self.lower_claim_var_map_with_type_var_map(TypeVarMap::new(), type_args, args, true)
+    }
+
+    /// Lower claim-with-args using explicit claim-function type parameter names.
+    pub(crate) fn lower_claim_var_map_for_type_params(
+        &mut self,
+        type_param_names: &[String],
+        type_param_constraints: &[Option<Typeclass>],
+        type_args: &[AcornType],
+        args: &[AcornValue],
+    ) -> Result<VariableMap, String> {
         let mut type_var_map = TypeVarMap::new();
+        for (var_id, (name, constraint)) in type_param_names
+            .iter()
+            .zip(type_param_constraints.iter())
+            .enumerate()
+        {
+            let kind_term = if let Some(typeclass) = constraint {
+                let typeclass_id = self.type_store.add_typeclass(typeclass);
+                Term::typeclass(typeclass_id)
+            } else {
+                Term::type_sort()
+            };
+            type_var_map.insert(name.clone(), (var_id as AtomId, kind_term));
+        }
+        self.lower_claim_var_map_with_type_var_map(type_var_map, type_args, args, false)
+    }
+
+    fn lower_claim_var_map_with_type_var_map(
+        &mut self,
+        mut type_var_map: TypeVarMap,
+        type_args: &[AcornType],
+        args: &[AcornValue],
+        bind_variable_type_args_by_position: bool,
+    ) -> Result<VariableMap, String> {
+        let mut var_map = VariableMap::new();
         for (var_id, acorn_type) in type_args.iter().enumerate() {
             let type_term = match acorn_type {
-                AcornType::Variable(type_param) => {
+                AcornType::Variable(type_param)
+                    if bind_variable_type_args_by_position
+                        && !type_var_map.contains_key(&type_param.name) =>
+                {
                     let kind_term = if let Some(typeclass) = &type_param.typeclass {
                         let typeclass_id = self.type_store.add_typeclass(typeclass);
                         Term::typeclass(typeclass_id)
@@ -304,7 +341,10 @@ impl KernelContext {
                     type_var_map.insert(type_param.name.clone(), (var_id as AtomId, kind_term));
                     Term::atom(Atom::FreeVariable(var_id as AtomId))
                 }
-                _ => lower_type_to_term(self, acorn_type, None),
+                _ => {
+                    let type_var_map = (!type_var_map.is_empty()).then_some(&type_var_map);
+                    lower_type_to_term(self, acorn_type, type_var_map)
+                }
             };
             var_map.set(var_id as AtomId, type_term);
         }
@@ -653,10 +693,13 @@ impl KernelContext {
     fn check_quote_roundtrip(&mut self, clause: &Clause) {
         let quoted = self.quote_clause(clause, None, None, false);
         if let Err(e) = quoted.validate() {
-            eprintln!("DEBUG: clause = {}", clause);
-            eprintln!("DEBUG: clause context = {:?}", clause.get_local_context());
-            eprintln!("DEBUG: quoted = {}", quoted);
-            panic!("quoted clause should validate: {:?}", e);
+            panic!(
+                "quoted clause should validate: {:?}\nclause: {}\ncontext: {:?}\nquoted: {}",
+                e,
+                clause,
+                clause.get_local_context(),
+                quoted
+            );
         }
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let lowered_again = self
@@ -962,5 +1005,30 @@ mod tests {
             var_map.get_mapping(1),
             Some(&Term::not(Term::new_variable(0)))
         );
+    }
+
+    #[test]
+    fn test_lower_claim_var_map_treats_arbitrary_type_args_as_claim_locals() {
+        let mut kernel_context = KernelContext::new();
+        let type_param = TypeParam {
+            name: "T0".to_string(),
+            typeclass: None,
+        };
+
+        let var_map = kernel_context
+            .lower_claim_var_map_for_type_params(
+                &["T0".to_string()],
+                &[None],
+                &[AcornType::Arbitrary(type_param.clone())],
+                &[],
+            )
+            .expect("claim type-arg lowering should succeed");
+
+        assert_eq!(var_map.get_mapping(0), Some(&Term::new_variable(0)));
+
+        let ambient_var_map = kernel_context
+            .lower_claim_var_map(&[AcornType::Arbitrary(type_param)], &[])
+            .expect("ambient arbitrary type lowering should succeed");
+        assert_ne!(ambient_var_map.get_mapping(0), Some(&Term::new_variable(0)));
     }
 }

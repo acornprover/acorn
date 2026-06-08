@@ -244,6 +244,23 @@ impl Clause {
         }
     }
 
+    /// Normalize literals into a clause while keeping the first `pinned` local variables fixed.
+    pub(crate) fn normalize_with_trace_pinned(
+        literals: Vec<Literal>,
+        context: &LocalContext,
+        pinned: usize,
+    ) -> NormalizedClauseTrace {
+        let pre_norm_context = context.clone();
+        let pinned_var_ids = (0..pinned as AtomId).collect();
+        let (clause, var_ids) =
+            Self::normalize_with_var_ids_prefilled(literals, &pre_norm_context, pinned_var_ids);
+        NormalizedClauseTrace {
+            clause,
+            var_ids,
+            pre_norm_context,
+        }
+    }
+
     /// Sorts literals.
     /// Removes any duplicate or impossible literals.
     /// An empty clause indicates an impossible clause.

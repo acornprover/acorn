@@ -38,6 +38,7 @@ This document uses the Rust boundary names directly. The boundary surface today 
 - `KernelContext::lower_proposition_to_clauses(...)`
 - `KernelContext::lower_clause(...)`
 - `KernelContext::lower_claim_var_map(...)`
+- `KernelContext::lower_claim_var_map_for_type_params(...)`
 - `KernelContext::quote_term_with_context(...)`
 - `KernelContext::quote_clause(...)`
 
@@ -81,6 +82,10 @@ is the `KernelContext` surface above.
   already available as free variables
 - it produces the canonical `VariableMap` expected by `Claim`
 
+`lower_claim_var_map_for_type_params` is the same codec operation when the claim expression has
+explicit function type-parameter names. It uses those names to distinguish claim-local type
+arguments from ambient arbitrary types with similar surface syntax.
+
 `quote_term_with_context` is general term-to-surface reconstruction.
 
 `quote_clause` is the clause codec paired with `lower_clause`.
@@ -96,8 +101,8 @@ The required contract is:
 Claim-with-args has one additional exact codec requirement:
 
 - if claim serialization emits a quoted clause together with type/value args, then
-  `Claim::new(lower_clause(quoted_clause), lower_claim_var_map(type_args, value_args))`
-  must reconstruct the canonical claim chosen by the serializer
+  `Claim::new(lower_clause(quoted_clause), lower_claim_var_map_for_type_params(type_params,
+  type_args, value_args))` must reconstruct the canonical claim chosen by the serializer
 - equivalently, canonical claim-with-args serialization must satisfy
   `deserialize_claim_with_args(serialize_claim_with_args(claim)) == claim`
 
