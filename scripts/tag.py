@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env python3
 
 # Script to tag the current version and push it upstream.
 #
@@ -13,9 +13,9 @@ import sys
 
 def get_version():
     # Find VERSION file
-    python_dir = os.path.dirname(os.path.abspath(__file__))
-    acorn_dir = os.path.dirname(python_dir)
-    version_file_path = os.path.join(acorn_dir, "VERSION")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    version_file_path = os.path.join(project_root, "VERSION")
 
     # Read current version
     with open(version_file_path) as f:

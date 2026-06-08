@@ -67,7 +67,7 @@ All commands are run from `~/acorn`.
 
    # Rebuild
    ./scripts/crossbuild.sh
-   ./python/tag.py
+   ./scripts/tag.py
    ./scripts/upload.sh
    ```
 

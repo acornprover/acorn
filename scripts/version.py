@@ -1,8 +1,8 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env python3
 
-# Run version.py to show the current version.
-# Run `version.py <new_version>` to change the version.
-# Run `version.py bump` to increment the last number in the version.
+# Run scripts/version.py to show the current version.
+# Run `scripts/version.py <new_version>` to change the version.
+# Run `scripts/version.py bump` to increment the last number in the version.
 
 import os
 import json
@@ -15,13 +15,13 @@ def looks_like_version_string(s):
 
 def main(args=None):
     # Find cargo.toml
-    python_dir = os.path.dirname(os.path.abspath(__file__))
-    acorn_dir = os.path.dirname(python_dir)
-    cargo_toml_path = os.path.join(acorn_dir, "Cargo.toml")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    cargo_toml_path = os.path.join(project_root, "Cargo.toml")
     cargo_toml = open(cargo_toml_path).read()
 
     # Find package.json
-    vscode_dir = os.path.join(acorn_dir, "vscode")
+    vscode_dir = os.path.join(project_root, "vscode")
     extension_dir = os.path.join(vscode_dir, "extension")
     package_json_path = os.path.join(extension_dir, "package.json")
     package_json = open(package_json_path).read()
@@ -30,7 +30,7 @@ def main(args=None):
         package_lock = json.load(f)
 
     # Find the version file
-    version_file_path = os.path.join(acorn_dir, "VERSION")
+    version_file_path = os.path.join(project_root, "VERSION")
 
     # Check what the current versions are
     cargo_version = cargo_toml.split('version = "')[1].split('"')[0]

@@ -20,10 +20,10 @@ set -ex
 if [ $# -eq 1 ]; then
     # Use provided version
     VERSION=$1
-    ./python/version.py "$VERSION"
+    ./scripts/version.py "$VERSION"
 else
     # Bump version and capture the new version
-    VERSION_OUTPUT=$(./python/version.py bump)
+    VERSION_OUTPUT=$(./scripts/version.py bump)
     VERSION=$(echo "$VERSION_OUTPUT" | grep "changed to:" | awk '{print $3}')
 fi
 
@@ -46,7 +46,7 @@ git push
 git push upstream master
 
 # Making the tag will kick off the Windows build.
-./python/tag.py
+./scripts/tag.py
 
 # This creates the release, and hopefully finishes before the Windows build.
 ./scripts/upload.sh --skip-build
