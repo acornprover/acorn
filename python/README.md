@@ -1,6 +1,8 @@
 # Acorn Scorer Training
 
 This uv project trains proof-step scoring models from `acorn eval --trace-out` JSONL exports.
+Trace feature names are written once in a sidecar `*.meta.json` file; training reads the numeric
+`feature_vector` values from the JSONL rows.
 
 The current training signal is one row per activated proof step:
 

@@ -821,7 +821,7 @@ impl Drop for Verifier {
 mod tests {
     use super::*;
     use crate::certificate::{Certificate, CertificateStore};
-    use crate::prover::trace::SearchTraceWriter;
+    use crate::prover::trace::{trace_metadata_path, SearchTraceWriter};
     use assert_fs::fixture::ChildPath;
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
@@ -2066,6 +2066,19 @@ mod tests {
         trace_writer.flush().expect("trace should flush");
         assert_eq!(output.status, BuildStatus::Good);
 
+        let metadata = std::fs::read_to_string(trace_metadata_path(trace_file.path()))
+            .expect("trace metadata file should exist");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("trace metadata should be valid JSON");
+        assert_eq!(metadata["schema"], "acorn-activated-step-trace-v2");
+        assert_eq!(
+            metadata["feature_vector"]
+                .as_array()
+                .expect("feature vector names should be an array")
+                .len(),
+            9
+        );
+
         let trace = std::fs::read_to_string(trace_file.path()).expect("trace file should exist");
         assert!(!trace.trim().is_empty(), "trace file should not be empty");
 
@@ -2073,7 +2086,7 @@ mod tests {
         for line in trace.lines() {
             let record: serde_json::Value =
                 serde_json::from_str(line).expect("trace line should be valid JSON");
-            assert_eq!(record["schema"], "acorn-activated-step-trace-v1");
+            assert_eq!(record["schema"], "acorn-activated-step-trace-v2");
             assert_eq!(record["module"], "foo");
             assert_eq!(record["goal"], "excluded_middle");
             assert_eq!(record["skip"], 0);
@@ -2084,7 +2097,7 @@ mod tests {
             assert!(record["feature_vector"]
                 .as_array()
                 .is_some_and(|values| !values.is_empty()));
-            assert!(record["features"]["atom_count"].as_i64().is_some());
+            assert!(record["features"].is_null());
             saw_positive |= record["used_in_final_proof"].as_bool() == Some(true);
         }
         assert!(

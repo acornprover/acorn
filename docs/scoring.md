@@ -179,9 +179,12 @@ decisive result. Regular verify/search behavior still treats unexpected inconsis
 
 The first trace exporter is intentionally eval-shaped:
 
-- `--trace-out PATH` writes one JSON object per activated step from successful eval searches
+- `--trace-out PATH` writes one schema-v2 JSON object per activated step from successful eval
+  searches
+- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl`,
+  records the feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
-  active id, queue score/order fields, current feature vectors, rule, truthiness, and a
+  active id, queue score/order fields, the current numeric feature vector, rule, truthiness, and a
   `used_in_final_proof` label derived from the final proof dependency closure
 - unactivated passive candidates are not labeled, because we do not know whether they would have
   been useful if selected later
@@ -543,16 +546,19 @@ partly like soft premise selection.
 
 5. Export eval-shaped training traces.
 
-The first version exists via `acorn eval --trace-out PATH`. It records enough information to start
+The current version exists via `acorn eval --trace-out PATH`. It records enough information to start
 training an activated-step classifier or ranker:
 
 - goal identity
 - search outcome
-- activated step features
+- activated step feature vector
 - score and final ordered key
 - activation order
 - rule and truthiness
 - whether the step appeared in the final proof
+
+Feature names are stored once in a sidecar metadata file rather than repeated in every activated
+step row.
 
 Remaining trace improvements:
 

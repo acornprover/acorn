@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -11,37 +11,23 @@ use crate::prover::features::Features;
 use crate::prover::score::Score;
 use crate::prover::Outcome;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct TraceFeatureValues {
-    pub is_contradiction: bool,
-    pub is_shallow: bool,
-    pub shallow_status: String,
-    pub atom_count: i32,
-    pub is_counterfactual: bool,
-    pub is_hypothetical: bool,
-    pub is_factual: bool,
-    pub is_assumption: bool,
-    pub is_negated_goal: bool,
-    pub proof_size: i32,
-    pub depth: i32,
-}
+pub const TRACE_SCHEMA: &str = "acorn-activated-step-trace-v2";
+pub const TRACE_FEATURE_VECTOR: [&str; 9] = [
+    "is_contradiction",
+    "atom_count",
+    "is_counterfactual",
+    "is_hypothetical",
+    "is_factual",
+    "is_assumption",
+    "is_negated_goal",
+    "proof_size",
+    "depth",
+];
 
-impl TraceFeatureValues {
-    fn from_features(features: &Features) -> Self {
-        Self {
-            is_contradiction: features.is_contradiction,
-            is_shallow: features.is_shallow,
-            shallow_status: shallow_status_name(features.shallow_status).to_string(),
-            atom_count: features.atom_count,
-            is_counterfactual: features.is_counterfactual,
-            is_hypothetical: features.is_hypothetical,
-            is_factual: features.is_factual,
-            is_assumption: features.is_assumption,
-            is_negated_goal: features.is_negated_goal,
-            proof_size: features.proof_size,
-            depth: features.depth,
-        }
-    }
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceMetadata {
+    pub schema: &'static str,
+    pub feature_vector: &'static [&'static str],
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +42,6 @@ struct TraceActivatedStep {
     rule: String,
     truthiness: String,
     feature_vector: Vec<f32>,
-    features: TraceFeatureValues,
 }
 
 impl TraceActivatedStep {
@@ -79,7 +64,6 @@ impl TraceActivatedStep {
             rule: step.rule.name().to_string(),
             truthiness: truthiness_name(step.truthiness).to_string(),
             feature_vector: features.to_floats().to_vec(),
-            features: TraceFeatureValues::from_features(&features),
         }
     }
 }
@@ -125,7 +109,7 @@ impl SearchTrace {
                     .is_some_and(|active_id| useful_active_ids.contains(&active_id))
                     || step.active_id.is_none();
                 TraceActivatedStepRecord {
-                    schema: "acorn-activated-step-trace-v1",
+                    schema: TRACE_SCHEMA,
                     search: meta.clone(),
                     outcome: outcome.clone(),
                     activation_index: step.activation_index,
@@ -139,7 +123,6 @@ impl SearchTrace {
                     rule: step.rule.clone(),
                     truthiness: step.truthiness.clone(),
                     feature_vector: step.feature_vector.clone(),
-                    features: step.features.clone(),
                 }
             })
             .collect()
@@ -173,7 +156,6 @@ pub struct TraceActivatedStepRecord {
     pub rule: String,
     pub truthiness: String,
     pub feature_vector: Vec<f32>,
-    pub features: TraceFeatureValues,
 }
 
 #[derive(Clone)]
@@ -188,6 +170,7 @@ impl SearchTraceWriter {
                 fs::create_dir_all(parent)?;
             }
         }
+        write_metadata_file(&trace_metadata_path(path))?;
         let file = File::create(path)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(BufWriter::new(file))),
@@ -212,6 +195,33 @@ impl SearchTraceWriter {
             .expect("search trace writer poisoned")
             .flush()
     }
+}
+
+fn write_metadata_file(path: &Path) -> io::Result<()> {
+    let file = File::create(path)?;
+    serde_json::to_writer_pretty(
+        file,
+        &TraceMetadata {
+            schema: TRACE_SCHEMA,
+            feature_vector: &TRACE_FEATURE_VECTOR,
+        },
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    Ok(())
+}
+
+pub fn trace_metadata_path(trace_path: &Path) -> PathBuf {
+    if trace_path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    {
+        if let Some(stem) = trace_path.file_stem() {
+            let mut file_name = stem.to_os_string();
+            file_name.push(".meta.json");
+            return trace_path.with_file_name(file_name);
+        }
+    }
+    trace_path.with_extension("meta.json")
 }
 
 pub fn shallow_status_name(status: ShallowStatus) -> &'static str {

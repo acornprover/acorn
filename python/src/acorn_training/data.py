@@ -10,7 +10,7 @@ from typing import Iterable
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-TRACE_SCHEMA = "acorn-activated-step-trace-v1"
+TRACE_SCHEMA = "acorn-activated-step-trace-v2"
 NUM_FEATURES = 9
 
 

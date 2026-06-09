@@ -48,7 +48,6 @@ def _record(goal: str, index: int, label: bool) -> dict:
             float(index + 2),
             float(index),
         ],
-        "features": {},
     }
 
 
