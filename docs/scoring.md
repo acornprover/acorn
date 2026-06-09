@@ -361,7 +361,9 @@ the first wave of alternate-policy bugs has been fixed.
 
 ## Recommended Next Work
 
-1. Rerun the traced four-policy eval after the bug fixes.
+1. Rerun the traced four-policy eval suite after the bug fixes.
+
+./scripts/eval-suite.sh
 
 The policy flag did its job: it found real failures outside the default proof paths. The reduced
 bugs from the first ablation pass are now fixed:
