@@ -4456,6 +4456,37 @@ mod tests {
     }
 
     #[test]
+    fn test_type_family_value_argument_can_start_with_numeral() {
+        let project = Project::new_mock();
+        let mut bindings = BindingMap::new(ModuleId(0));
+        let nat_type = add_nat_datatype(&mut bindings);
+        let AcornType::Data(nat_datatype, _) = &nat_type else {
+            panic!("Nat should be a datatype");
+        };
+        bindings.add_datatype_attribute(
+            nat_datatype,
+            "0",
+            vec![],
+            vec![],
+            nat_type.clone(),
+            None,
+            None,
+            vec![],
+            "0".to_string(),
+        );
+        bindings.set_numerals(nat_datatype.clone());
+        bindings.add_potential_type_with_family_params(
+            &TokenType::Identifier.new_token("Fin"),
+            vec![FamilyParamKind::Value(nat_type)],
+            vec![],
+            None,
+            None,
+        );
+
+        Evaluator::new(&project, &bindings, None).assert_type_ok("Fin[0.succ]");
+    }
+
+    #[test]
     fn test_dependent_visible_value_argument_updates_later_arg_type() {
         let project = Project::new_mock();
         let mut bindings = BindingMap::new(ModuleId(0));

@@ -18,6 +18,10 @@ use crate::syntax::token::{Token, TokenIter, TokenType};
 enum ExpressionType {
     Value,
     Type,
+
+    // Inside a type application, an argument may be either a type or a dependent value.
+    // The evaluator classifies each argument using the datatype family's parameter kinds.
+    TypeArg,
 }
 
 /// An Expression represents the basic structuring of tokens into a syntax tree.
@@ -821,7 +825,7 @@ impl Expression {
         let (mut partials, terminator) =
             parse_partial_expressions(tokens, expected_type, termination)?;
         group_type_parameters(&mut partials)?;
-        if expected_type == ExpressionType::Value {
+        if expected_type == ExpressionType::Value || expected_type == ExpressionType::TypeArg {
             check_unparenthesized_implies(&partials)?;
         }
         check_partial_expressions(&partials)?;
@@ -1170,7 +1174,7 @@ fn parse_partial_expressions(
             // If so, we need to parse the whole list as a single expression.
             let (subexpression, last_token) = Expression::parse(
                 tokens,
-                ExpressionType::Type,
+                ExpressionType::TypeArg,
                 Terminator::Is(TokenType::RightBracket),
             )?;
             partials.push_back(PartialExpression::Implicit(token.clone()));
@@ -1179,12 +1183,14 @@ fn parse_partial_expressions(
             continue;
         }
 
-        if token.token_type == TokenType::LessThan && expected_type == ExpressionType::Type {
+        if token.token_type == TokenType::LessThan
+            && (expected_type == ExpressionType::Type || expected_type == ExpressionType::TypeArg)
+        {
             // The start of a type parameter list.
             // If so, we need to parse the whole list as a single expression.
             let (subexpression, last_token) = Expression::parse(
                 tokens,
-                ExpressionType::Type,
+                ExpressionType::TypeArg,
                 Terminator::Is(TokenType::GreaterThan),
             )?;
             partials.push_back(PartialExpression::Implicit(token.clone()));
@@ -1195,10 +1201,10 @@ fn parse_partial_expressions(
 
         if token.token_type.is_binary() {
             match (expected_type, token.token_type) {
-                (ExpressionType::Value, TokenType::Colon) => {
-                    return Err(token.error("unexpected colon in value"));
+                (ExpressionType::Value | ExpressionType::TypeArg, TokenType::Colon) => {
+                    return Err(token.error("unexpected colon in expression"));
                 }
-                (ExpressionType::Value, _) => {
+                (ExpressionType::Value | ExpressionType::TypeArg, _) => {
                     // Anything else can be in a value
                 }
                 (ExpressionType::Type, TokenType::Comma)
@@ -1309,7 +1315,7 @@ fn parse_partial_expressions(
             }
 
             TokenType::ForAll | TokenType::Exists | TokenType::Function | TokenType::Choose => {
-                if expected_type != ExpressionType::Value {
+                if expected_type == ExpressionType::Type {
                     return Err(token.error("quantifiers cannot be used here"));
                 }
                 // Check for optional type parameters on function keyword
@@ -1344,7 +1350,7 @@ fn parse_partial_expressions(
             }
 
             TokenType::If => {
-                if expected_type != ExpressionType::Value {
+                if expected_type == ExpressionType::Type {
                     return Err(token.error("'if' expressions cannot be used here"));
                 }
                 let (condition, _) =
@@ -1382,7 +1388,7 @@ fn parse_partial_expressions(
                     continue;
                 }
 
-                if expected_type != ExpressionType::Value {
+                if expected_type == ExpressionType::Type {
                     return Err(token.error("'match' cannot be used here"));
                 }
                 let (scrutinee, _) =
@@ -2314,6 +2320,8 @@ mod tests {
         check_type("List[List[X] -> List[Y], List[Y] -> List[X]]");
         check_type("List[(foo.Foo, bar.Bar) -> baz.Baz[Qux]]");
         check_type("Pair[Bool, Bool]");
+        check_type("Fin[0.suc]");
+        check_type("Matrix[T, 0.suc, 0.suc]");
     }
 
     #[test]
