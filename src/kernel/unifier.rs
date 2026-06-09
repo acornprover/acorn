@@ -263,6 +263,83 @@ impl<'a> Unifier<'a> {
         }
     }
 
+    fn type_expr_satisfies_typeclass_constraint_rigid(
+        &self,
+        required_tc: crate::kernel::types::TypeclassId,
+        type_expr: TermRef,
+    ) -> bool {
+        if type_expr.is_type0() {
+            return false;
+        }
+        if matches!(
+            type_expr.decompose(),
+            Decomposition::Pi(_, _) | Decomposition::Lambda(_, _)
+        ) {
+            return false;
+        }
+        if matches!(
+            type_expr.decompose(),
+            Decomposition::Atom(Atom::Symbol(Symbol::Bool))
+        ) {
+            return false;
+        }
+        if self.kernel_context.type_store.type_term_is_instance_of(
+            type_expr,
+            &self.output_context,
+            required_tc,
+        ) {
+            return true;
+        }
+
+        let Some(out_var_id) = type_expr.atomic_variable() else {
+            return false;
+        };
+        let Some(var_type) = self.output_context.get_var_type(out_var_id as usize) else {
+            return false;
+        };
+        let TypeConstraintKind::Typeclass(actual_tc) =
+            resolve_type_constraint_kind(var_type.as_ref(), &self.output_context)
+        else {
+            return false;
+        };
+        actual_tc == required_tc
+            || self
+                .kernel_context
+                .type_store
+                .typeclass_extends(actual_tc, required_tc)
+    }
+
+    fn binding_type_matches_instance(
+        &mut self,
+        var_scope: Scope,
+        var_type: TermRef,
+        term: &Term,
+    ) -> bool {
+        if matches!(
+            var_type.decompose(),
+            Decomposition::Atom(Atom::Symbol(Symbol::Type0))
+        ) {
+            if term.as_ref().is_type0() {
+                return false;
+            }
+            return self.is_proper_type_expr(term.as_ref());
+        }
+
+        if let Some(typeclass_id) = var_type.as_typeclass() {
+            let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
+            let type_expr =
+                if term_type.as_ref().is_type0() || term_type.as_ref().as_typeclass().is_some() {
+                    term.as_ref()
+                } else {
+                    term_type.as_ref()
+                };
+            return self.type_expr_satisfies_typeclass_constraint_rigid(typeclass_id, type_expr);
+        }
+
+        let term_type = term.get_type_with_context(&self.output_context, self.kernel_context);
+        self.match_instance_internal(var_scope, var_type, Scope::OUTPUT, term_type.as_ref())
+    }
+
     /// Consumes the unifier and returns the output context.
     pub fn take_output_context(self) -> LocalContext {
         self.output_context
@@ -646,6 +723,179 @@ impl<'a> Unifier<'a> {
             panic!("Cannot call unify with output scope - the unifier manages output variables internally");
         }
         self.unify_internal(scope1, term1.as_ref(), scope2, term2.as_ref())
+    }
+
+    /// Directional instance matching.
+    ///
+    /// `unify` asks whether two terms can be made equal by instantiating variables
+    /// from either input scope. This method asks a stricter, directional question:
+    /// can `instance` be obtained by instantiating only free variables from
+    /// `pattern_scope` in `pattern`?
+    ///
+    /// Variables from `instance_scope` are rigid. They may appear in the image of a
+    /// pattern variable, but this method will not bind them later to satisfy another
+    /// constraint. For example, `List[T]` matches `List[Int]` with `T := Int`, while
+    /// a closed pattern type `Foo` does not match an instance-side variable `U`.
+    ///
+    /// This is useful for checking polymorphic pattern instances after a structural
+    /// match. It is intentionally different from symmetric unification because
+    /// pattern indexing must not make assumptions about query-local variables.
+    pub fn match_instance(
+        &mut self,
+        pattern_scope: Scope,
+        pattern: &Term,
+        instance_scope: Scope,
+        instance: &Term,
+    ) -> bool {
+        if pattern_scope == Scope::OUTPUT || instance_scope == Scope::OUTPUT {
+            panic!("Cannot call match_instance with output scope - the unifier manages output variables internally");
+        }
+        self.match_instance_internal(
+            pattern_scope,
+            pattern.as_ref(),
+            instance_scope,
+            instance.as_ref(),
+        )
+    }
+
+    fn match_instance_variable(
+        &mut self,
+        pattern_scope: Scope,
+        var_id: AtomId,
+        instance_scope: Scope,
+        instance: TermRef,
+    ) -> bool {
+        let instance_term = self.apply_internal(instance_scope, instance);
+        if let Some(existing) = self.get_mapping(pattern_scope, var_id) {
+            return existing == &instance_term;
+        }
+        if instance_term.has_escaping_bound_variable() {
+            return false;
+        }
+
+        let var_type = self
+            .get_local_context(pattern_scope)
+            .get_var_type(var_id as usize)
+            .cloned()
+            .expect("Variable should have type in LocalContext");
+        if !self.binding_type_matches_instance(pattern_scope, var_type.as_ref(), &instance_term) {
+            return false;
+        }
+
+        self.set_mapping(pattern_scope, var_id, instance_term);
+        true
+    }
+
+    fn match_instance_atoms(&mut self, pattern_atom: &Atom, instance_atom: &Atom) -> bool {
+        if pattern_atom == instance_atom {
+            return true;
+        }
+        matches!(
+            (pattern_atom, instance_atom),
+            (
+                Atom::Symbol(Symbol::Type0),
+                Atom::Symbol(Symbol::Typeclass(_))
+            )
+        )
+    }
+
+    fn match_instance_internal(
+        &mut self,
+        pattern_scope: Scope,
+        pattern: TermRef,
+        instance_scope: Scope,
+        instance: TermRef,
+    ) -> bool {
+        if let Some(var_id) = pattern.atomic_variable() {
+            return self.match_instance_variable(pattern_scope, var_id, instance_scope, instance);
+        }
+
+        match (pattern.decompose(), instance.decompose()) {
+            (Decomposition::Atom(pattern_atom), Decomposition::Atom(instance_atom)) => {
+                self.match_instance_atoms(pattern_atom, instance_atom)
+            }
+            (
+                Decomposition::Application(pattern_func, pattern_arg),
+                Decomposition::Application(instance_func, instance_arg),
+            ) => {
+                self.match_instance_internal(
+                    pattern_scope,
+                    pattern_func,
+                    instance_scope,
+                    instance_func,
+                ) && self.match_instance_internal(
+                    pattern_scope,
+                    pattern_arg,
+                    instance_scope,
+                    instance_arg,
+                )
+            }
+            (
+                Decomposition::Pi(pattern_input, pattern_output),
+                Decomposition::Pi(instance_input, instance_output),
+            ) => {
+                self.match_instance_internal(
+                    pattern_scope,
+                    pattern_input,
+                    instance_scope,
+                    instance_input,
+                ) && self.match_instance_internal(
+                    pattern_scope,
+                    pattern_output,
+                    instance_scope,
+                    instance_output,
+                )
+            }
+            (
+                Decomposition::Lambda(pattern_input, pattern_body),
+                Decomposition::Lambda(instance_input, instance_body),
+            ) => {
+                self.match_instance_internal(
+                    pattern_scope,
+                    pattern_input,
+                    instance_scope,
+                    instance_input,
+                ) && self.match_instance_internal(
+                    pattern_scope,
+                    pattern_body,
+                    instance_scope,
+                    instance_body,
+                )
+            }
+            (
+                Decomposition::ForAll(pattern_type, pattern_body),
+                Decomposition::ForAll(instance_type, instance_body),
+            ) => {
+                self.match_instance_internal(
+                    pattern_scope,
+                    pattern_type,
+                    instance_scope,
+                    instance_type,
+                ) && self.match_instance_internal(
+                    pattern_scope,
+                    pattern_body,
+                    instance_scope,
+                    instance_body,
+                )
+            }
+            (
+                Decomposition::Exists(pattern_type, pattern_body),
+                Decomposition::Exists(instance_type, instance_body),
+            ) => {
+                self.match_instance_internal(
+                    pattern_scope,
+                    pattern_type,
+                    instance_scope,
+                    instance_type,
+                ) && self.match_instance_internal(
+                    pattern_scope,
+                    pattern_body,
+                    instance_scope,
+                    instance_body,
+                )
+            }
+            _ => false,
+        }
     }
 
     // Internal unification implementation
@@ -2198,6 +2448,121 @@ mod tests {
             result_type, list_bool,
             "Result type should be List[Bool], not contain unresolved type variables"
         );
+    }
+
+    #[test]
+    fn test_match_instance_instantiates_pattern_type_variables() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_datatype("Int");
+        ctx.parse_type_constructor("List", 1);
+
+        let pattern_context = ctx.parse_local(&["Type"]);
+        let instance_context = LocalContext::empty();
+        let pattern = ctx.parse_type("List[x0]");
+        let instance = ctx.parse_type("List[Int]");
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, &pattern_context);
+        u.set_input_context(Scope::RIGHT, &instance_context);
+
+        assert!(
+            u.match_instance(Scope::LEFT, &pattern, Scope::RIGHT, &instance),
+            "List[Int] should be an instance of List[T]"
+        );
+        assert_eq!(
+            u.get_mapping(Scope::LEFT, 0),
+            Some(&ctx.parse_type("Int")),
+            "the pattern type variable should be instantiated to Int"
+        );
+    }
+
+    #[test]
+    fn test_match_instance_does_not_bind_instance_variables() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_datatype("Foo");
+
+        let pattern_context = LocalContext::empty();
+        let instance_context = ctx.parse_local(&["Type"]);
+        let pattern = ctx.parse_type("Foo");
+        let instance = Term::atom(Atom::FreeVariable(0));
+
+        let mut symmetric = Unifier::new(3, &ctx);
+        symmetric.set_input_context(Scope::LEFT, &pattern_context);
+        symmetric.set_input_context(Scope::RIGHT, &instance_context);
+        assert!(
+            symmetric.unify(Scope::LEFT, &pattern, Scope::RIGHT, &instance),
+            "symmetric unification can bind the instance-side variable"
+        );
+
+        let mut directional = Unifier::new(3, &ctx);
+        directional.set_input_context(Scope::LEFT, &pattern_context);
+        directional.set_input_context(Scope::RIGHT, &instance_context);
+        assert!(
+            !directional.match_instance(Scope::LEFT, &pattern, Scope::RIGHT, &instance),
+            "instance matching must treat instance-side variables as rigid"
+        );
+    }
+
+    #[test]
+    fn test_match_instance_keeps_repeated_instance_variables_rigid() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_datatype("Int");
+        ctx.parse_type_constructor("Pair", 2);
+
+        let pattern_context = ctx.parse_local(&["Type"]);
+        let instance_context = ctx.parse_local(&["Type"]);
+        let pattern = ctx.parse_type("Pair[x0, x0]");
+        let instance = ctx.parse_type("Pair[x0, Int]");
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, &pattern_context);
+        u.set_input_context(Scope::RIGHT, &instance_context);
+
+        assert!(
+            !u.match_instance(Scope::LEFT, &pattern, Scope::RIGHT, &instance),
+            "matching Pair[T, T] against Pair[U, Int] would require binding rigid U to Int"
+        );
+    }
+
+    #[test]
+    fn test_match_instance_instantiates_dependent_function_type() {
+        let mut ctx = KernelContext::new();
+        ctx.parse_datatype("Nat");
+        ctx.parse_type_constructor("Fin", 1);
+        ctx.parse_datatype("Value");
+        ctx.parse_constant("c0", "Nat");
+
+        let pattern_context = ctx.parse_local(&["Type", "Nat"]);
+        let instance_context = LocalContext::empty();
+        let fin_id = ctx.type_store.get_ground_id_by_name("Fin").unwrap();
+        let pattern = Term::pi(
+            Term::new(
+                Atom::Symbol(Symbol::Type(fin_id)),
+                vec![Term::atom(Atom::FreeVariable(1))],
+            ),
+            Term::atom(Atom::FreeVariable(0)),
+        );
+        let instance = Term::pi(
+            Term::new(
+                Atom::Symbol(Symbol::Type(fin_id)),
+                vec![ctx.parse_term("c0")],
+            ),
+            ctx.parse_type("Value"),
+        );
+
+        let mut u = Unifier::new(3, &ctx);
+        u.set_input_context(Scope::LEFT, &pattern_context);
+        u.set_input_context(Scope::RIGHT, &instance_context);
+
+        assert!(
+            u.match_instance(Scope::LEFT, &pattern, Scope::RIGHT, &instance),
+            "Fin[c0] -> Value should be an instance of Fin[n] -> T"
+        );
+        assert_eq!(
+            u.get_mapping(Scope::LEFT, 0),
+            Some(&ctx.parse_type("Value"))
+        );
+        assert_eq!(u.get_mapping(Scope::LEFT, 1), Some(&ctx.parse_term("c0")));
     }
 
     #[test]

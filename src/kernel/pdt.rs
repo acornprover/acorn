@@ -851,14 +851,13 @@ fn types_compatible(
         // Otherwise, try regular unification
     }
 
-    // Use Unifier to check if bound_type is an instance of pattern_var_type
+    // Use directional instance matching to check if bound_type is an instance of pattern_var_type
     // This handles cases like List[Int] matching List[T] where T is a type variable
     let mut unifier = Unifier::new(3, kernel_context);
     unifier.set_input_context(Scope::LEFT, pattern_context);
     unifier.set_input_context(Scope::RIGHT, query_context);
 
-    // Try to unify pattern_var_type (LEFT) with bound_type (RIGHT)
-    unifier.unify(Scope::LEFT, pattern_var_type, Scope::RIGHT, &bound_type)
+    unifier.match_instance(Scope::LEFT, pattern_var_type, Scope::RIGHT, &bound_type)
 }
 
 /// Matches a sequence of terms against patterns in the trie.
@@ -1980,6 +1979,47 @@ mod tests {
             literals.find_generalization_with_map(&query, &query_context, &kctx),
             None,
             "reversed equality matching must not bind a function-typed variable to a value"
+        );
+    }
+
+    #[test]
+    fn test_literal_set_rejects_fixed_ground_type_to_bool_match() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Foo")
+            .parse_constants(&["c0", "c1"], "Bool");
+
+        let pattern_context = kctx.parse_local(&["Foo", "Foo"]);
+        let pattern = Literal::equals(Term::parse("x0"), Term::parse("x1"));
+        let mut literals = LiteralSet::new();
+        literals.insert(&pattern, 0, &pattern_context);
+
+        let query_context = LocalContext::empty();
+        let query = Literal::equals(kctx.parse_term("c0"), kctx.parse_term("c1"));
+
+        assert_eq!(
+            literals.find_generalization_with_map(&query, &query_context, &kctx),
+            None,
+            "variables with a fixed ground type must not match Bool terms"
+        );
+    }
+
+    #[test]
+    fn test_literal_set_rejects_fixed_ground_type_to_polymorphic_output_type_match() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Foo");
+
+        let pattern_context = kctx.parse_local(&["Foo", "Foo"]);
+        let pattern = Literal::equals(Term::parse("x0"), Term::parse("x1"));
+        let mut literals = LiteralSet::new();
+        literals.insert(&pattern, 0, &pattern_context);
+
+        let query_context = kctx.parse_local(&["Type", "Bool -> x0"]);
+        let query = Literal::equals(kctx.parse_term("x1(true)"), kctx.parse_term("x1(false)"));
+
+        assert_eq!(
+            literals.find_generalization_with_map(&query, &query_context, &kctx),
+            None,
+            "variables with a fixed ground type must not match terms of an unconstrained output type"
         );
     }
 
