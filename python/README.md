@@ -2,7 +2,8 @@
 
 This uv project trains proof-step scoring models from `acorn eval --trace-out` JSONL exports.
 Trace feature names are written once in a sidecar `*.meta.json` file; training reads the numeric
-`feature_vector` values from the JSONL rows.
+`feature_vector` values from the JSONL rows. Both plain `.jsonl` and gzip-compressed `.jsonl.gz`
+traces are supported.
 
 The current training signal is one row per activated proof step:
 
@@ -21,12 +22,12 @@ Example:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl --out ../files/models/scorer.onnx
+uv run acorn-train-scorer ../traces/onnx.jsonl.gz --out ../files/models/scorer.onnx
 ```
 
 For quick inspection without training:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl --inspect-only
+uv run acorn-train-scorer ../traces/onnx.jsonl.gz --inspect-only
 ```

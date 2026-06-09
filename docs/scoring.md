@@ -169,7 +169,8 @@ performance; rerun the same policy ablation before drawing new conclusions.
 - disables module hash skipping
 - runs configured skip modes, defaulting to `0` and `1`
 - accepts `--policy` to select the activation queue policy
-- accepts `--trace-out` to write successful search traces as JSONL
+- accepts `--trace-out` to write successful search traces as JSONL, gzip-compressed when the
+  path ends in `.gz`
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
 
@@ -181,7 +182,7 @@ The first trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one schema-v2 JSON object per activated step from successful eval
   searches
-- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl`,
+- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.gz`,
   records the feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
   active id, queue score/order fields, the current numeric feature vector, rule, truthiness, and a

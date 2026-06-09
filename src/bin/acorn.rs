@@ -613,7 +613,7 @@ enum Command {
         /// Write successful eval search traces to this JSONL file
         #[clap(
             long = "trace-out",
-            help = "Write successful eval search traces to this JSONL file.",
+            help = "Write successful eval search traces to this JSONL file. Paths ending in .gz are gzip-compressed.",
             value_name = "PATH"
         )]
         trace_out: Option<PathBuf>,

@@ -18,6 +18,9 @@ usage() {
     cat <<EOF
 Usage: ./scripts/eval-suite.sh [options]
 
+Runs traced evals sequentially and writes gzip-compressed JSONL traces
+under OUT/traces/*.jsonl.gz.
+
 Options:
   --out DIR        Output directory. Default: tmp/acorn-eval-YYYYMMDD-HHMMSS
   --policy NAME    Policy to run. Can be repeated.
@@ -113,7 +116,7 @@ for policy in "${policies[@]}"; do
 
     log_file="$out_dir/logs/trace-$policy.log"
     status_file="$out_dir/status/trace-$policy.status"
-    trace_file="$out_dir/traces/$policy.jsonl"
+    trace_file="$out_dir/traces/$policy.jsonl.gz"
 
     echo "[$(date -Is)] Starting policy: $policy"
     start="$(date -Is)"
@@ -155,7 +158,7 @@ echo "Run directory:"
 du -sh "$out_dir"
 echo
 echo "Trace files:"
-du -h "$out_dir"/traces/*.jsonl 2>/dev/null || true
+du -h "$out_dir"/traces/*.jsonl "$out_dir"/traces/*.jsonl.gz 2>/dev/null || true
 echo
 echo "Status files:"
 for status_file in "$out_dir"/status/*.status; do

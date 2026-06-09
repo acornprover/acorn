@@ -4,6 +4,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::Serialize;
 
 use crate::kernel::proof_step::{ProofStep, ShallowStatus, Truthiness};
@@ -160,7 +162,7 @@ pub struct TraceActivatedStepRecord {
 
 #[derive(Clone)]
 pub struct SearchTraceWriter {
-    inner: Arc<Mutex<BufWriter<File>>>,
+    inner: Arc<Mutex<TraceOutput>>,
 }
 
 impl SearchTraceWriter {
@@ -173,7 +175,7 @@ impl SearchTraceWriter {
         write_metadata_file(&trace_metadata_path(path))?;
         let file = File::create(path)?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(BufWriter::new(file))),
+            inner: Arc::new(Mutex::new(TraceOutput::new(file, path))),
         })
     }
 
@@ -190,10 +192,50 @@ impl SearchTraceWriter {
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        self.inner
-            .lock()
-            .expect("search trace writer poisoned")
-            .flush()
+        let mut writer = self.inner.lock().expect("search trace writer poisoned");
+        writer.finish()
+    }
+}
+
+enum TraceOutput {
+    Plain(BufWriter<File>),
+    Gzip(GzEncoder<BufWriter<File>>),
+}
+
+impl TraceOutput {
+    fn new(file: File, path: &Path) -> Self {
+        let writer = BufWriter::new(file);
+        if path.extension().is_some_and(|extension| extension == "gz") {
+            Self::Gzip(GzEncoder::new(writer, Compression::fast()))
+        } else {
+            Self::Plain(writer)
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => {
+                writer.try_finish()?;
+                writer.get_mut().flush()
+            }
+        }
+    }
+}
+
+impl Write for TraceOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buf),
+            Self::Gzip(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => writer.flush(),
+        }
     }
 }
 
@@ -211,14 +253,12 @@ fn write_metadata_file(path: &Path) -> io::Result<()> {
 }
 
 pub fn trace_metadata_path(trace_path: &Path) -> PathBuf {
-    if trace_path
-        .extension()
-        .is_some_and(|extension| extension == "jsonl")
-    {
-        if let Some(stem) = trace_path.file_stem() {
-            let mut file_name = stem.to_os_string();
-            file_name.push(".meta.json");
-            return trace_path.with_file_name(file_name);
+    if let Some(file_name) = trace_path.file_name().and_then(|name| name.to_str()) {
+        if let Some(base) = file_name.strip_suffix(".jsonl.gz") {
+            return trace_path.with_file_name(format!("{}.meta.json", base));
+        }
+        if let Some(base) = file_name.strip_suffix(".jsonl") {
+            return trace_path.with_file_name(format!("{}.meta.json", base));
         }
     }
     trace_path.with_extension("meta.json")

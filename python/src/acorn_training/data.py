@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import random
 from collections import Counter
@@ -60,7 +61,8 @@ def _search_group(record: dict) -> str:
 
 
 def _iter_records(path: Path) -> Iterable[dict]:
-    with path.open() as f:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, "rt") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:

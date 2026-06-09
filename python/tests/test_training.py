@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import tempfile
 import unittest
@@ -54,14 +55,15 @@ def _record(goal: str, index: int, label: bool) -> dict:
 class TrainingDataTest(unittest.TestCase):
     def test_loads_trace_and_splits_by_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "trace.jsonl"
+            path = Path(tmp) / "trace.jsonl.gz"
             rows = [
                 _record("a", 0, True),
                 _record("a", 1, False),
                 _record("b", 0, True),
                 _record("b", 1, False),
             ]
-            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            with gzip.open(path, "wt") as f:
+                f.write("\n".join(json.dumps(row) for row in rows) + "\n")
 
             dataset = load_trace_dataset([path])
             self.assertEqual(dataset.num_examples, 4)
