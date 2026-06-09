@@ -180,16 +180,23 @@ decisive result. Regular verify/search behavior still treats unexpected inconsis
 
 The first trace exporter is intentionally eval-shaped:
 
-- `--trace-out PATH` writes one schema-v2 JSON object per activated step from successful eval
-  searches
+- `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
+  from successful eval searches
 - a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.gz`,
-  records the feature-vector names once
+  records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
-  active id, queue score/order fields, the current numeric feature vector, rule, truthiness, and a
-  `used_in_final_proof` label derived from the final proof dependency closure
+  active id, queue score/order fields, rule, truthiness, the current numeric `feature_vector`, and
+  a `used_in_final_proof` label derived from the final proof dependency closure
+- records do not currently include a named per-row `features` object; feature names live only in
+  the sidecar metadata file
 - unactivated passive candidates are not labeled, because we do not know whether they would have
   been useful if selected later
 - `Outcome::Inconsistent` traces are exported when eval counts them as successful prover outcomes
+
+This trace format is closer to an activated-step feature/label export than a stable raw event log.
+It preserves a few raw-ish categorical fields (`rule`, `truthiness`, queue/shallow status), but most
+model inputs are already flattened into the nine-number `feature_vector`. Future feature work should
+add stable raw fields to the trace before relying on them in a new training feature set.
 
 The skip modes give two related benchmark shapes:
 
@@ -552,21 +559,22 @@ training an activated-step classifier or ranker:
 
 - goal identity
 - search outcome
-- activated step feature vector
-- score and final ordered key
+- activated step numeric `feature_vector`
+- queue score and queue ordering fields
 - activation order
 - rule and truthiness
 - whether the step appeared in the final proof
 
 Feature names are stored once in a sidecar metadata file rather than repeated in every activated
-step row.
+step row. The current rows do not contain a named `features` object, and they do not yet preserve
+enough raw source/proof context to recompute arbitrary future feature sets.
 
 Remaining trace improvements:
 
 - include timeout and activation-limit metadata
 - include source/module metadata for assumptions
 - include generated-candidate counts caused by each activation
-- add richer goal-aware and source-aware features
+- add stable raw fields needed for richer goal-aware and source-aware features
 - optionally add sampled candidate snapshots for later pairwise/reranking experiments
 
 6. Evaluate by live prover behavior.
