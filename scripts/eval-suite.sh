@@ -13,6 +13,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/.." && pwd)"
 current_dir="$(pwd)"
 [[ $current_dir == $project_root ]] || { echo "Run this script from the repository root."; exit 1; }
+original_args=("$@")
 
 usage() {
     cat <<EOF
@@ -20,6 +21,9 @@ Usage: ./scripts/eval-suite.sh [options]
 
 Runs traced evals sequentially and writes gzip-compressed JSONL traces
 under OUT/traces/*.jsonl.gz.
+
+Each run also writes OUT/manifest.txt, git state files, and updates
+tmp/acorn-eval-latest to point at the newest run directory.
 
 Options:
   --out DIR        Output directory. Default: tmp/acorn-eval-YYYYMMDD-HHMMSS
@@ -36,7 +40,8 @@ EOF
 }
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
-out_dir="tmp/acorn-eval-$timestamp"
+default_out_dir="tmp/acorn-eval-$timestamp"
+out_dir=""
 min_free_gb=20
 skip_build=""
 policies=()
@@ -79,15 +84,96 @@ if [[ ${#policies[@]} -eq 0 ]]; then
     policies=(onnx depth-first handcrafted onnx-no-shallow)
 fi
 
-acorn_bin="${ACORN_BIN:-target/release/acorn}"
-
-if [[ -z "$skip_build" ]]; then
-    cargo build --profile release || exit 1
+if [[ -z "$out_dir" ]]; then
+    out_dir="$default_out_dir"
+    suffix=1
+    while [[ -e "$out_dir" ]]; do
+        out_dir="$default_out_dir-$suffix"
+        suffix=$((suffix + 1))
+    done
+elif [[ -e "$out_dir" ]] && [[ -n "$(find "$out_dir" -mindepth 1 -print -quit)" ]]; then
+    echo "Error: output directory already exists and is not empty: $out_dir"
+    exit 1
 fi
 
-[[ -x "$acorn_bin" ]] || { echo "Error: missing executable: $acorn_bin"; exit 1; }
+acorn_bin="${ACORN_BIN:-target/release/acorn}"
 
 mkdir -p "$out_dir/logs" "$out_dir/status" "$out_dir/traces"
+
+out_abs="$out_dir"
+if [[ "$out_abs" != /* ]]; then
+    out_abs="$project_root/$out_abs"
+fi
+
+latest_link="$project_root/tmp/acorn-eval-latest"
+mkdir -p "$project_root/tmp"
+if [[ -e "$latest_link" && ! -L "$latest_link" ]]; then
+    echo "Not updating latest link because it exists and is not a symlink: $latest_link"
+else
+    ln -sfn "$out_abs" "$latest_link"
+fi
+
+write_run_metadata() {
+    local phase="$1"
+    local manifest_file="$out_dir/manifest.txt"
+
+    {
+        printf "phase=%s\n" "$phase"
+        printf "created_at=%s\n" "$(date -Is)"
+        printf "project_root=%s\n" "$project_root"
+        printf "output_directory=%s\n" "$out_abs"
+        printf "latest_link=%s\n" "$latest_link"
+        printf "command="
+        printf "%q " "$0" "${original_args[@]}"
+        printf "\n"
+        printf "policies="
+        printf "%s " "${policies[@]}"
+        printf "\n"
+        printf "acorn_bin=%s\n" "$acorn_bin"
+        printf "skip_build=%s\n" "${skip_build:-0}"
+        printf "min_free_gb=%s\n" "$min_free_gb"
+        printf "hostname=%s\n" "$(hostname 2>/dev/null || true)"
+        printf "uname=%s\n" "$(uname -a 2>/dev/null || true)"
+        printf "cargo_version=%s\n" "$(cargo --version 2>/dev/null || true)"
+        printf "rustc_version=%s\n" "$(rustc --version 2>/dev/null || true)"
+        printf "ACORN_BIN_ENV=%s\n" "${ACORN_BIN-}"
+        printf "ACORNLIB_ENV=%s\n" "${ACORNLIB-}"
+        printf "ACORN_LIB_ENV=%s\n" "${ACORN_LIB-}"
+        printf "RUST_LOG_ENV=%s\n" "${RUST_LOG-}"
+        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            printf "git_branch=%s\n" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+            printf "git_commit=%s\n" "$(git rev-parse HEAD 2>/dev/null || true)"
+            if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+                printf "git_dirty=1\n"
+            else
+                printf "git_dirty=0\n"
+            fi
+        fi
+        if [[ -x "$acorn_bin" ]]; then
+            printf "acorn_binary_sha256=%s\n" "$(sha256sum "$acorn_bin" 2>/dev/null | awk '{ print $1 }')"
+        fi
+    } > "$manifest_file"
+
+    git status --short > "$out_dir/git-status.txt" 2>&1 || true
+    git diff > "$out_dir/git-diff.patch" 2>/dev/null || true
+    git diff --cached > "$out_dir/git-diff-staged.patch" 2>/dev/null || true
+    git submodule status > "$out_dir/git-submodule-status.txt" 2>&1 || true
+}
+
+write_run_metadata "starting"
+
+if [[ -z "$skip_build" ]]; then
+    build_log="$out_dir/logs/build.log"
+    echo "Building release binary..."
+    if ! cargo build --profile release > "$build_log" 2>&1; then
+        write_run_metadata "build-failed"
+        echo "Build failed. See $build_log"
+        exit 1
+    fi
+fi
+
+[[ -x "$acorn_bin" ]] || { write_run_metadata "missing-binary"; echo "Error: missing executable: $acorn_bin"; exit 1; }
+write_run_metadata "running"
 
 free_gb() {
     df -Pk "$out_dir" | awk 'NR == 2 { print int($4 / 1024 / 1024) }'
