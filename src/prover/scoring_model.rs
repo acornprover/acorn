@@ -52,7 +52,9 @@ impl Scorer for ScoringModel {
     // where the positive class is a step that was actually taken in a proof.
     // There's a lot of unwrapping - it would be nice to handle errors more gracefully.
     fn score(&self, features: &Features) -> Result<f32, Box<dyn Error>> {
-        let array = features.to_array().insert_axis(Axis(0));
+        let array = features
+            .to_array_for_names(Features::legacy_model_feature_names())
+            .insert_axis(Axis(0));
         let inputs = ort::inputs![array]?;
         let outputs = self.session.run(inputs)?;
         let extracted = outputs[0].try_extract_tensor::<f32>()?;
@@ -65,7 +67,7 @@ impl Scorer for ScoringModel {
     }
 
     fn score_batch(&self, features: &[Features]) -> Result<Vec<f32>, Box<dyn Error>> {
-        let array = Features::to_array2(features);
+        let array = Features::to_array2_for_names(features, Features::legacy_model_feature_names());
         let inputs = ort::inputs![array]?;
         let outputs = self.session.run(inputs)?;
         let extracted = outputs[0].try_extract_tensor::<f32>()?;

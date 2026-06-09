@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,8 +8,10 @@ import onnx
 import torch
 from torch import nn
 
-from .data import NUM_FEATURES, DatasetSplit, make_loader
+from .data import DatasetSplit, make_loader
 from .model import ProbabilityScorer, ScorerNet
+
+FEATURE_CONTRACT_SCHEMA = "acorn-scorer-feature-contract-v1"
 
 
 @dataclass(frozen=True)
@@ -158,10 +161,20 @@ def train_model(
     return model, metrics
 
 
-def export_onnx(model: ScorerNet, output_path: Path) -> None:
+def feature_contract_path(model_path: Path) -> Path:
+    if model_path.name.endswith(".onnx"):
+        return model_path.with_name(f"{model_path.name[:-len('.onnx')]}.features.json")
+    return model_path.with_suffix(".features.json")
+
+
+def export_onnx(model: ScorerNet, output_path: Path, feature_names: list[str]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_model = ProbabilityScorer(model).cpu().eval()
-    dummy_input = torch.zeros(1, NUM_FEATURES, dtype=torch.float32)
+    if not feature_names:
+        raise ValueError("feature_names must not be empty")
+    if len(feature_names) != int(model.feature_mean.numel()):
+        raise ValueError("feature_names length does not match model input width")
+    dummy_input = torch.zeros(1, len(feature_names), dtype=torch.float32)
     torch.onnx.export(
         export_model,
         dummy_input,
@@ -175,3 +188,14 @@ def export_onnx(model: ScorerNet, output_path: Path) -> None:
     )
     onnx_model = onnx.load(output_path)
     onnx.checker.check_model(onnx_model)
+    contract_path = feature_contract_path(output_path)
+    with contract_path.open("w") as f:
+        json.dump(
+            {
+                "schema": FEATURE_CONTRACT_SCHEMA,
+                "input_features": feature_names,
+            },
+            f,
+            indent=2,
+        )
+        f.write("\n")

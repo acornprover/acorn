@@ -9,13 +9,23 @@ from pathlib import Path
 import torch
 
 from acorn_training.data import (
+    LEGACY_FEATURE_NAMES,
     TRACE_SCHEMA,
     DatasetSplit,
     load_trace_dataset,
     split_by_search,
+    trace_metadata_path,
 )
 from acorn_training.model import ProbabilityScorer, ScorerNet
-from acorn_training.train import TrainConfig, export_onnx, train_model
+from acorn_training.train import (
+    FEATURE_CONTRACT_SCHEMA,
+    TrainConfig,
+    export_onnx,
+    feature_contract_path,
+    train_model,
+)
+
+TEST_FEATURE_NAMES = LEGACY_FEATURE_NAMES + ["literal_count", "rule_is_resolution"]
 
 
 def _record(goal: str, index: int, label: bool) -> dict:
@@ -48,6 +58,8 @@ def _record(goal: str, index: int, label: bool) -> dict:
             0.0,
             float(index + 2),
             float(index),
+            1.0,
+            0.0,
         ],
     }
 
@@ -62,23 +74,36 @@ class TrainingDataTest(unittest.TestCase):
                 _record("b", 0, True),
                 _record("b", 1, False),
             ]
+            trace_metadata_path(path).write_text(
+                json.dumps(
+                    {
+                        "schema": TRACE_SCHEMA,
+                        "feature_vector": TEST_FEATURE_NAMES,
+                    }
+                )
+            )
             with gzip.open(path, "wt") as f:
                 f.write("\n".join(json.dumps(row) for row in rows) + "\n")
 
             dataset = load_trace_dataset([path])
             self.assertEqual(dataset.num_examples, 4)
             self.assertEqual(dataset.num_positive, 2)
+            self.assertEqual(dataset.feature_names, TEST_FEATURE_NAMES)
 
             split = split_by_search(dataset, validation_fraction=0.5, seed=1)
-            self.assertEqual(split.train_features.shape[1], 9)
-            self.assertEqual(split.val_features.shape[1], 9)
+            self.assertEqual(split.train_features.shape[1], len(TEST_FEATURE_NAMES))
+            self.assertEqual(split.val_features.shape[1], len(TEST_FEATURE_NAMES))
             self.assertEqual(
                 split.train_labels.numel() + split.val_labels.numel(),
                 4,
             )
 
+            legacy_dataset = load_trace_dataset([path], feature_names=LEGACY_FEATURE_NAMES)
+            self.assertEqual(legacy_dataset.features.shape[1], len(LEGACY_FEATURE_NAMES))
+            self.assertEqual(legacy_dataset.feature_names, LEGACY_FEATURE_NAMES)
+
     def test_model_exports_probability_shape(self) -> None:
-        features = torch.randn(8, 9)
+        features = torch.randn(8, len(TEST_FEATURE_NAMES))
         model = ScorerNet.from_training_features(
             features,
             hidden_size=4,
@@ -93,22 +118,23 @@ class TrainingDataTest(unittest.TestCase):
         split = DatasetSplit(
             train_features=torch.tensor(
                 [
-                    [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0],
-                    [0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 0.0, 3.0, 1.0],
-                    [0.0, 3.0, 0.0, 0.0, 1.0, 1.0, 0.0, 4.0, 2.0],
-                    [0.0, 4.0, 0.0, 0.0, 1.0, 1.0, 0.0, 5.0, 3.0],
+                    [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 0.0, 3.0, 1.0, 1.0, 0.0],
+                    [0.0, 3.0, 0.0, 0.0, 1.0, 1.0, 0.0, 4.0, 2.0, 1.0, 0.0],
+                    [0.0, 4.0, 0.0, 0.0, 1.0, 1.0, 0.0, 5.0, 3.0, 1.0, 0.0],
                 ],
                 dtype=torch.float32,
             ),
             train_labels=torch.tensor([1.0, 0.0, 1.0, 0.0]),
             val_features=torch.tensor(
                 [
-                    [0.0, 5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 6.0, 4.0],
-                    [0.0, 6.0, 0.0, 0.0, 1.0, 1.0, 0.0, 7.0, 5.0],
+                    [0.0, 5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 6.0, 4.0, 1.0, 0.0],
+                    [0.0, 6.0, 0.0, 0.0, 1.0, 1.0, 0.0, 7.0, 5.0, 1.0, 0.0],
                 ],
                 dtype=torch.float32,
             ),
             val_labels=torch.tensor([1.0, 0.0]),
+            feature_names=TEST_FEATURE_NAMES,
         )
         config = TrainConfig(
             epochs=1,
@@ -125,8 +151,11 @@ class TrainingDataTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "scorer.onnx"
-            export_onnx(model, output_path)
+            export_onnx(model, output_path, TEST_FEATURE_NAMES)
             self.assertTrue(output_path.exists())
+            contract = json.loads(feature_contract_path(output_path).read_text())
+            self.assertEqual(contract["schema"], FEATURE_CONTRACT_SCHEMA)
+            self.assertEqual(contract["input_features"], TEST_FEATURE_NAMES)
 
 
 if __name__ == "__main__":

@@ -14,17 +14,6 @@ use crate::prover::score::Score;
 use crate::prover::Outcome;
 
 pub const TRACE_SCHEMA: &str = "acorn-activated-step-trace-v2";
-pub const TRACE_FEATURE_VECTOR: [&str; 9] = [
-    "is_contradiction",
-    "atom_count",
-    "is_counterfactual",
-    "is_hypothetical",
-    "is_factual",
-    "is_assumption",
-    "is_negated_goal",
-    "proof_size",
-    "depth",
-];
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceMetadata {
@@ -65,7 +54,7 @@ impl TraceActivatedStep {
             queue_is_shallow: score.is_shallow(),
             rule: step.rule.name().to_string(),
             truthiness: truthiness_name(step.truthiness).to_string(),
-            feature_vector: features.to_floats().to_vec(),
+            feature_vector: features.to_catalog_floats(),
         }
     }
 }
@@ -245,7 +234,7 @@ fn write_metadata_file(path: &Path) -> io::Result<()> {
         file,
         &TraceMetadata {
             schema: TRACE_SCHEMA,
-            feature_vector: &TRACE_FEATURE_VECTOR,
+            feature_vector: Features::catalog_feature_names(),
         },
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;

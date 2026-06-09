@@ -131,6 +131,7 @@ mod tests {
             is_negated_goal: false,
             proof_size: 1,
             depth: 0,
+            ..Features::default()
         }
     }
 

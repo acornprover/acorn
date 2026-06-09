@@ -3,8 +3,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .data import NUM_FEATURES
-
 
 class ScorerNet(nn.Module):
     def __init__(
@@ -16,16 +14,16 @@ class ScorerNet(nn.Module):
         hidden_layers: int,
     ) -> None:
         super().__init__()
-        if feature_mean.shape != (NUM_FEATURES,):
-            raise ValueError(f"feature_mean must have shape ({NUM_FEATURES},)")
-        if feature_scale.shape != (NUM_FEATURES,):
-            raise ValueError(f"feature_scale must have shape ({NUM_FEATURES},)")
+        if feature_mean.ndim != 1:
+            raise ValueError("feature_mean must be one-dimensional")
+        if feature_scale.shape != feature_mean.shape:
+            raise ValueError("feature_scale must have the same shape as feature_mean")
 
         self.register_buffer("feature_mean", feature_mean.float())
         self.register_buffer("feature_scale", feature_scale.float().clamp_min(1e-6))
 
         layers: list[nn.Module] = []
-        in_features = NUM_FEATURES
+        in_features = int(feature_mean.numel())
         for _ in range(hidden_layers):
             layers.append(nn.Linear(in_features, hidden_size))
             layers.append(nn.ReLU())

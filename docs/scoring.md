@@ -63,10 +63,9 @@ The first trace exporter is intentionally eval-shaped:
 - `Outcome::Inconsistent` traces are exported when eval counts them as successful prover outcomes
 
 This trace format is intentionally closer to an activated-step feature/label export than a stable
-raw event log. The pragmatic next direction is to make `feature_vector` a wide, versioned feature
-catalog: Rust computes many candidate features, traces store all of them with names in metadata,
-Python chooses model-specific feature subsets by name, and exported models record the exact feature
-names/order they expect.
+raw event log. `feature_vector` is a wide, versioned feature catalog: Rust computes many candidate
+features, traces store all of them with names in metadata, Python chooses model-specific feature
+subsets by name, and exported models record the exact feature names/order they expect.
 
 The skip modes give two related benchmark shapes:
 
@@ -162,21 +161,24 @@ Those are related but not the same policy decision.
 
 ## Current Features
 
-`Features` currently stores:
+`Features` now has two distinct vector views:
 
-- `is_contradiction`
-- `is_shallow`
-- `shallow_status`
-- `atom_count`
-- `is_counterfactual`
-- `is_hypothetical`
-- `is_factual`
-- `is_assumption`
-- `is_negated_goal`
-- `proof_size`
-- `depth`
+- the wide feature catalog, exported in eval traces via `Features::to_catalog_floats`
+- the legacy embedded-model input, selected by `Features::legacy_model_feature_names`
 
-But `Features::to_floats` sends only nine values to ONNX:
+The catalog is intended for serious training data. It includes the original nine model inputs plus
+refactor-resistant shape/count/category features:
+
+- shallow-status one-hots
+- literal counts by polarity and signed/equality shape
+- context variable, type-sort, and typeclass counts
+- free/bound variable atom counts and distinct free-variable count
+- scoped/global constant atom counts without preserving names
+- type, typeclass, boolean-value, and logical-symbol atom counts
+- generated-vs-assumption and rule-category one-hots
+- source-category one-hots, source importability, and source depth for direct assumptions
+
+The current embedded ONNX model still sees only the legacy nine inputs:
 
 - contradiction bit
 - atom count
@@ -188,20 +190,16 @@ But `Features::to_floats` sends only nine values to ONNX:
 - proof size
 - depth
 
-Notably, `is_shallow` and `shallow_status` are not model inputs. They are used outside the model
-by `Score`.
+`is_shallow` and `shallow_status` are still used outside the model by `Score` for policies that
+keep shallow-first ordering. They are now also present in the trace catalog so future models can
+learn from them directly.
 
-The model does not see:
+The catalog still does not include:
 
 - goal/fact symbol overlap
-- source module or import distance
+- dependency-distance or scope-distance features
 - source position or recency
 - whether a fact came from a direct dependency, transitive dependency, or local context
-- term structure beyond atom count
-- literal count by polarity
-- variable count, type information, or quantifier-like shape
-- rule type beyond assumption and negated goal bits
-- whether a step is an initial fact or generated during search
 - parent rule details
 - active/passive queue context
 - age or activation order
@@ -290,17 +288,17 @@ The current Python code under `python/` is a uv package named `acorn_training`. 
 `uv run acorn-train-scorer TRACE...`. It:
 
 - loads schema-v2 eval trace JSONL or JSONL.GZ files from `acorn eval --trace-out`
-- trains on each activated step's numeric `feature_vector`
+- trains on selected columns from each activated step's numeric `feature_vector`
 - uses `used_in_final_proof` as the binary label
 - groups train/validation splits by search key `(module, goal, skip, policy)`
 - trains a small configurable PyTorch MLP with feature normalization, positive-class weighting, and
   AdamW
-- exports an ONNX probability scorer with Rust's current scorer contract: input `input` with shape
-  `[batch_size, 9]`, output `output` with shape `[batch_size, 1]`
+- exports an ONNX probability scorer with input `input`, output `output`, and a sidecar
+  `*.features.json` file that records the exact input feature names/order
 
-This is a better starting point than the old notebook-era code, but it is still minimal. It
-hardcodes `NUM_FEATURES = 9`, reads feature columns by position rather than by name, and does not
-yet write a model-side feature-name contract. The embedded production model in
+The Python loader reads trace feature names from the sidecar `*.meta.json` file. By default it
+uses all catalog features; `--features legacy` selects the old nine-feature contract, and repeated
+`--feature NAME` arguments can choose an explicit subset. The embedded production model in
 `src/prover/scoring_model.rs` is still the checked-in `model-2024-09-25-15-33-10.onnx`; training a
 new ONNX file does not by itself replace the embedded scorer.
 
@@ -339,30 +337,31 @@ The default model is boxed in by policy. The default ordering is contradiction, 
 status, then model score. A better model cannot override shallow-first behavior unless we choose
 a policy that lets it do so.
 
-The model input is too sparse. Nine scalar features cannot express most of what a premise
-selector or activation policy needs to know, such as goal relevance, symbol overlap, module
+The embedded model input is too sparse. Nine scalar features cannot express most of what a premise
+selector or activation policy needs to know, such as goal relevance, symbol overlap, dependency
 distance, term shape, rule type, or search context.
 
 The scorer cannot express policy decisions beyond a float rank. It cannot say "do not activate
 this yet", "never activate this fact in this search", "spend only N factual activations", or
 "prefer this generated step because the current queue is saturated with assumptions."
 
-The training data is not eval-shaped. The old dataset labels whether activated steps appeared in
-the final proof. It does not directly encode decision-time ranking among candidates, counterfactual
-choices the prover did not activate, success under timeout, or activation counts.
+The legacy training data was not eval-shaped. The old dataset labels whether activated steps
+appeared in the final proof. The new trace path fixes the most important part of that by exporting
+successful eval searches, but it still does not directly encode decision-time ranking among
+candidates or counterfactual choices the prover did not activate.
 
 Eval policy selection now exists, but only for a small set of hardcoded choices. It is enough for
 basic ablations, not enough for richer search policies that defer, reject, threshold, or budget
 activations.
 
-For these reasons, the useful "scoring" work is really policy and measurement work: keep policies
-configurable, make shallow ordering optional or learnable, export better data, and evaluate with
-`acorn eval`. The immediate next step is to rerun the policy ablations now that the first wave of
-alternate-policy bugs has been fixed.
+For these reasons, the useful "scoring" work is really policy, training, and measurement work:
+keep policies configurable, make shallow ordering optional or learnable, train from eval traces,
+and evaluate with `acorn eval`. The immediate next step is to rerun the policy ablations now that
+the first wave of alternate-policy bugs has been fixed.
 
 ## Recommended Next Work
 
-1. Rerun the four-policy eval after the bug fixes.
+1. Rerun the traced four-policy eval after the bug fixes.
 
 The policy flag did its job: it found real failures outside the default proof paths. The reduced
 bugs from the first ablation pass are now fixed:
@@ -373,67 +372,44 @@ bugs from the first ablation pass are now fixed:
 - `handcrafted` certificate generation for the `fin_matrix_det.ac` line 225 proof path
 - claim context capture when a claim-map term refers to a surviving replacement-context type local
 
-The next useful data is a fresh run of the same four policies (`onnx`, `depth-first`,
-`handcrafted`, `onnx-no-shallow`) under the same timeout/skip settings. If the rerun exposes new
-crashes or certificate failures, reduce those next; otherwise, use the updated success and timing
-numbers as the new baseline for scorer work.
+The next useful data is a fresh traced run of the same four policies (`onnx`, `depth-first`,
+`handcrafted`, `onnx-no-shallow`) under the same timeout/skip settings. The eval suite already
+does the export when run with `--trace-out`, so there is no separate trace-export implementation
+step. If the rerun exposes new crashes or certificate failures, reduce those next; otherwise, use
+the updated success, timing, and trace data as the new baseline for scorer work.
 
-2. Separate shallow proof mode from shallow ordering.
+2. Inspect policy value and failure modes.
 
-`ProverMode::Shallow` still needs to stop at the shallow frontier. That does not require every
-normal search policy to rank all shallow clauses above all deep clauses. Make this distinction
-explicit in the code.
+The existing policies are useful both as baselines and as trace generators. After the rerun, compare
+which goals are solved uniquely by each policy and which policies are mostly subsumed by the others.
+This should tell us whether `onnx`, `depth-first`, `handcrafted`, and `onnx-no-shallow` are all worth
+keeping in the experiment suite while we train a replacement.
 
-`onnx-no-shallow` is the first attempt at this separation. The known stack-growth repro has been
-fixed, but the full-eval ablation needs to be rerun before trusting the result.
+3. Train the first catalog-feature scorer.
 
-3. Add richer features.
+The trace exporter and Python training path now exist. The default training path should use the full
+catalog feature set, train from successful traced eval runs, and export ONNX plus a `*.features.json`
+sidecar describing the model input order. This first model does not need to solve every policy
+question; it should establish whether the richer activated-step labels beat the old embedded model
+and the simple non-neural policies under live eval.
 
-Useful candidates include:
+4. Wire new model contracts into production scoring.
 
-- rule type one-hot
-- initial fact versus generated step
-- source kind: local, direct dependency, transitive dependency, generated
-- module distance from the goal
-- source position or recency
-- clause literal count by polarity
-- variable count
-- term-size features
-- type-parameter or higher-order shape features
-- goal symbol overlap
-- active/passive age
-- parent rule and parent truthiness
-- shallow status as an ordinary feature
+The current embedded ONNX scorer still intentionally uses the legacy nine-feature contract. Before
+replacing it with a catalog-feature model, Rust needs an explicit deployment path for the trained
+model's feature names and order, either by embedding the sidecar contract or by copying its feature
+list into the scorer code alongside the ONNX file. This keeps model replacement from silently
+depending on feature-vector order.
 
-Goal-aware and source-aware features are especially important if we want the scorer to behave
-partly like soft premise selection.
+5. Add the next feature batch only after looking at the new traces.
 
-4. Export eval-shaped training traces.
+The wide catalog already includes the obvious cheap shape/count/category features. The likely next
+feature work is goal-aware, source-aware, and cost-aware, but it should be guided by the traced eval
+data rather than added blindly. Refactor-resistant candidates include dependency distance, local
+versus imported scope category, source recency buckets, goal/candidate shape overlap, parent-rule
+summaries, activation age, and generated-candidate cost summaries.
 
-The current version exists via `acorn eval --trace-out PATH`. It records enough information to start
-training an activated-step classifier or ranker:
-
-- goal identity
-- search outcome
-- activated step numeric `feature_vector`
-- queue score and queue ordering fields
-- activation order
-- rule and truthiness
-- whether the step appeared in the final proof
-
-Feature names are stored once in a sidecar metadata file rather than repeated in every activated
-step row. The current rows do not contain a named `features` object. Future model training should
-select columns by feature name rather than assuming that the trace feature order is the model input
-order.
-
-Remaining trace improvements:
-
-- expand the versioned feature catalog with source-aware, goal-aware, and cost-aware features
-- record each exported model's expected feature names and order
-- record eval run settings once in metadata, especially timeout, skip modes, policy, and activation
-  cap
-
-5. Evaluate by live prover behavior.
+6. Evaluate by live prover behavior.
 
 Use `acorn eval` as the main metric. Track at least:
 
@@ -448,19 +424,19 @@ Use `acorn eval` as the main metric. Track at least:
 
 Offline loss can be a development signal, but it should not decide whether a policy is better.
 
-6. Use module-based train/test splits.
+7. Use module-based train/test splits.
 
 Avoid training and evaluating on nearly identical local proof contexts. Module-level or
 dependency-aware splits should give a better signal about whether the policy generalizes.
 
-7. Consider factual activation budgets.
+8. Consider factual activation budgets.
 
 The current activation cap counts non-factual activations. Since factual activations dominate,
 future policy experiments should consider a separate factual budget, a per-source budget, or a
 threshold that delays low-value factual assumptions. This is a natural bridge between scoring and
 retrieval.
 
-8. Return to retrieval after scoring baselines are understood.
+9. Return to retrieval after scoring baselines are understood.
 
 Retrieval is still important, especially as the library grows. But it should come after we know
 how much can be gained from better activation order with all facts still available. The scoring
@@ -485,6 +461,6 @@ useful under successful searches.
 - Should the scorer own only ranking, or should the abstraction become a broader search policy
   that can defer, reject, or budget activations?
 
-The next concrete milestone should be to rerun the same four-policy eval after the current fixes.
+The next concrete milestone should be to rerun the traced four-policy eval after the current fixes.
 Once the alternate policies complete cleanly, the ablations can tell us which policy constraints
-are costing searches before we invest in larger training and retrieval systems.
+are costing searches and provide the first serious trace corpus for training.

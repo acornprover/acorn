@@ -2073,12 +2073,12 @@ mod tests {
         let metadata: serde_json::Value =
             serde_json::from_str(&metadata).expect("trace metadata should be valid JSON");
         assert_eq!(metadata["schema"], "acorn-activated-step-trace-v2");
-        assert_eq!(
-            metadata["feature_vector"]
-                .as_array()
-                .expect("feature vector names should be an array")
-                .len(),
-            9
+        let feature_names = metadata["feature_vector"]
+            .as_array()
+            .expect("feature vector names should be an array");
+        assert!(
+            feature_names.len() > 9,
+            "trace should export the wide feature catalog"
         );
 
         let trace_file_reader =
@@ -2103,7 +2103,7 @@ mod tests {
             assert!(record["active_id"].is_u64() || record["active_id"].is_null());
             assert!(record["feature_vector"]
                 .as_array()
-                .is_some_and(|values| !values.is_empty()));
+                .is_some_and(|values| values.len() == feature_names.len()));
             assert!(record["features"].is_null());
             saw_positive |= record["used_in_final_proof"].as_bool() == Some(true);
         }

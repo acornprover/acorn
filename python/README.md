@@ -7,16 +7,21 @@ traces are supported.
 
 The current training signal is one row per activated proof step:
 
-- input: the trace row's `feature_vector`, matching `src/prover/features.rs`
+- input: selected columns from the trace row's `feature_vector`, using names from the sidecar
+  `*.meta.json`
 - label: `used_in_final_proof`
 
-The CLI trains a small PyTorch model and exports an ONNX model with the Rust scorer contract:
+By default the trainer uses all trace catalog features. Use `--features legacy` to train on the
+old nine-feature ONNX contract, or repeat `--feature NAME` to train on an explicit subset.
+
+The CLI trains a small PyTorch model and exports an ONNX model plus `*.features.json` sidecar:
 
 - input name: `input`
-- input shape: `[batch_size, 9]`
+- input shape: `[batch_size, selected_feature_count]`
 - output name: `output`
 - output shape: `[batch_size, 1]`
 - output value: probability that the activated step is used in the final proof
+- feature contract: exact input feature names and order
 
 Example:
 

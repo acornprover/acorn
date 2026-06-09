@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .data import load_trace_dataset, split_by_search
+from .data import LEGACY_FEATURE_NAMES, load_trace_dataset, split_by_search
 from .train import TrainConfig, export_onnx, train_model
 
 
@@ -32,6 +32,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--features",
+        choices=["all", "legacy"],
+        default="all",
+        help="Feature set to train on. Default: all trace catalog features.",
+    )
+    parser.add_argument(
+        "--feature",
+        action="append",
+        default=None,
+        help="Use this feature name. Can be repeated and overrides --features.",
+    )
+    parser.add_argument(
         "--device",
         default="auto",
         help="Torch device: auto, cpu, cuda, cuda:0, etc.",
@@ -57,11 +69,22 @@ def _print_dataset_summary(dataset) -> None:
     print(f"positive_rate: {dataset.positive_rate:.6f}")
     for key, count in sorted(dataset.metadata.items()):
         print(f"{key}: {count}")
+    print(f"features: {len(dataset.feature_names)}")
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    dataset = load_trace_dataset(args.trace, max_records=args.max_records)
+    feature_names = None
+    if args.feature is not None:
+        feature_names = args.feature
+    elif args.features == "legacy":
+        feature_names = LEGACY_FEATURE_NAMES
+
+    dataset = load_trace_dataset(
+        args.trace,
+        feature_names=feature_names,
+        max_records=args.max_records,
+    )
     _print_dataset_summary(dataset)
     if args.inspect_only:
         return
@@ -90,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
             f"val_accuracy={metric.val_accuracy:.4f} "
             f"val_predicted_positive_rate={metric.val_positive_rate:.4f}"
         )
-    export_onnx(model, args.out)
+    export_onnx(model, args.out, split.feature_names)
     print(f"wrote {args.out}")
 
 
