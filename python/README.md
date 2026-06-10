@@ -27,10 +27,11 @@ Example:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl.zst --out ../files/models/scorer.onnx
+uv run acorn-train-scorer ../tmp/acorn-eval-latest/shards \
+  --out ../tmp/models/scorer.onnx
 ```
 
-For quick inspection without training:
+For quick inspection without training from raw traces:
 
 ```bash
 cd python
@@ -45,9 +46,10 @@ from those shards. Direct trace training is mainly for smoke tests and early exp
 
 ```bash
 cd python
-uv run acorn-train-scorer ../tmp/acorn-eval-latest/traces/*.jsonl.zst \
+uv run acorn-build-scorer-shards ../tmp/acorn-eval-latest/traces/*.jsonl.zst \
   --sample-records 1000000 \
-  --out ../tmp/models/scorer.onnx
+  --shard-rows 250000 \
+  --out ../tmp/acorn-eval-latest/shards
 ```
 
 ## Training Shards
@@ -74,3 +76,24 @@ Shard boundaries should be based on row count, not module or policy. The convert
 group ids for train/validation splitting, but training wants to shuffle across modules and policies.
 For a full corpus conversion, use a bounded shuffle buffer or policy-balanced sampling before writing
 shards so early training batches are not dominated by trace-file order.
+
+The first converter supports reservoir sampling:
+
+```bash
+uv run acorn-build-scorer-shards TRACE... \
+  --sample-records 5000000 \
+  --shard-rows 1000000 \
+  --out ../tmp/shards
+```
+
+Without `--sample-records`, it writes all rows in input order. Use `--max-records` for smoke tests.
+
+Train from the resulting shard directory:
+
+```bash
+uv run acorn-train-scorer ../tmp/shards \
+  --out ../tmp/models/scorer.onnx
+```
+
+`acorn-train-scorer` still accepts raw trace files for smoke tests, but serious runs should train
+from shard directories.

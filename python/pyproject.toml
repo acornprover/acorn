@@ -11,6 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
+acorn-build-scorer-shards = "acorn_training.shard_cli:main"
 acorn-train-scorer = "acorn_training.cli:main"
 
 [build-system]

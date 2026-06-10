@@ -13,11 +13,13 @@ from acorn_training.data import (
     LEGACY_FEATURE_NAMES,
     TRACE_SCHEMA,
     DatasetSplit,
+    load_shard_dataset,
     load_trace_dataset,
     split_by_search,
     trace_metadata_path,
 )
 from acorn_training.model import ProbabilityScorer, ScorerNet
+from acorn_training.shards import SHARD_SCHEMA, ShardBuildConfig, build_shards
 from acorn_training.train import (
     FEATURE_CONTRACT_SCHEMA,
     TrainConfig,
@@ -129,6 +131,124 @@ class TrainingDataTest(unittest.TestCase):
             self.assertEqual(dataset.metadata["scanned_records"], 20)
             self.assertEqual(dataset.metadata["loaded_records"], 6)
             self.assertIn("foo\tb\t0\tonnx", dataset.groups)
+
+    def test_builds_training_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "trace.jsonl.zst"
+            out_dir = Path(tmp) / "shards"
+            self._write_trace(
+                trace,
+                [
+                    _record("a", 0, True),
+                    _record("a", 1, False),
+                    _record("b", 0, True),
+                    _record("b", 1, False),
+                    _record("c", 0, False),
+                ],
+            )
+
+            summary = build_shards(
+                ShardBuildConfig(
+                    trace_paths=[trace],
+                    out_dir=out_dir,
+                    shard_rows=2,
+                ),
+                progress=None,
+            )
+
+            self.assertEqual(summary.scanned_records, 5)
+            self.assertEqual(summary.written_records, 5)
+            self.assertEqual(summary.shard_count, 3)
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["schema"], SHARD_SCHEMA)
+            self.assertEqual(manifest["feature_names"], TEST_FEATURE_NAMES)
+            self.assertEqual(manifest["written_records"], 5)
+            self.assertEqual(len(manifest["shards"]), 3)
+
+            shard = torch.load(out_dir / "shard-000000.pt", weights_only=False)
+            self.assertEqual(shard["schema"], SHARD_SCHEMA)
+            self.assertEqual(tuple(shard["features"].shape), (2, len(TEST_FEATURE_NAMES)))
+            self.assertEqual(tuple(shard["labels"].shape), (2,))
+            self.assertEqual(tuple(shard["group_ids"].shape), (2,))
+
+            dataset = load_shard_dataset([out_dir])
+            self.assertEqual(dataset.num_examples, 5)
+            self.assertEqual(dataset.num_positive, 2)
+            self.assertEqual(dataset.feature_names, TEST_FEATURE_NAMES)
+            self.assertEqual(dataset.metadata["loaded_records"], 5)
+            self.assertEqual(dataset.metadata["policy:onnx"], 5)
+
+            limited = load_shard_dataset([out_dir], max_records=3)
+            self.assertEqual(limited.num_examples, 3)
+            self.assertEqual(limited.metadata["loaded_records"], 3)
+
+    def test_builds_sampled_training_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.jsonl.zst"
+            second = Path(tmp) / "second.jsonl.zst"
+            out_dir = Path(tmp) / "sampled"
+            self._write_trace(first, [_record("a", i, i == 0) for i in range(8)])
+            self._write_trace(second, [_record("b", i, i == 0) for i in range(8)])
+
+            summary = build_shards(
+                ShardBuildConfig(
+                    trace_paths=[first, second],
+                    out_dir=out_dir,
+                    shard_rows=3,
+                    sample_records=5,
+                    seed=7,
+                ),
+                progress=None,
+            )
+
+            self.assertEqual(summary.scanned_records, 16)
+            self.assertEqual(summary.written_records, 5)
+            self.assertEqual(summary.shard_count, 2)
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            self.assertTrue(manifest["sampled"])
+            self.assertEqual(manifest["source_trace_rows"], [8, 8])
+            self.assertEqual(sum(shard["rows"] for shard in manifest["shards"]), 5)
+
+    def test_trains_from_loaded_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "trace.jsonl.zst"
+            out_dir = Path(tmp) / "shards"
+            rows = [
+                _record("a", 0, True),
+                _record("a", 1, False),
+                _record("b", 0, True),
+                _record("b", 1, False),
+                _record("c", 0, True),
+                _record("c", 1, False),
+            ]
+            self._write_trace(trace, rows)
+            build_shards(
+                ShardBuildConfig(
+                    trace_paths=[trace],
+                    out_dir=out_dir,
+                    shard_rows=3,
+                ),
+                progress=None,
+            )
+
+            dataset = load_shard_dataset([out_dir])
+            split = split_by_search(dataset, validation_fraction=0.33, seed=2)
+            config = TrainConfig(
+                epochs=1,
+                batch_size=2,
+                learning_rate=1e-3,
+                weight_decay=0.0,
+                hidden_size=4,
+                hidden_layers=1,
+                seed=1,
+                device="cpu",
+            )
+            model, metrics = train_model(split, config)
+            self.assertEqual(len(metrics), 1)
+
+            output_path = Path(tmp) / "scorer.onnx"
+            export_onnx(model, output_path, dataset.feature_names)
+            self.assertTrue(output_path.exists())
 
     def test_model_exports_probability_shape(self) -> None:
         features = torch.randn(8, len(TEST_FEATURE_NAMES))

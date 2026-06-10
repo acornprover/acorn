@@ -13,6 +13,7 @@ import zstandard
 from torch.utils.data import DataLoader, TensorDataset
 
 TRACE_SCHEMA = "acorn-activated-step-trace-v2"
+SHARD_SCHEMA = "acorn-training-shards-v1"
 LEGACY_FEATURE_NAMES = [
     "is_contradiction",
     "atom_count",
@@ -31,7 +32,7 @@ class TraceDataset:
     features: torch.Tensor
     labels: torch.Tensor
     feature_names: list[str]
-    groups: list[str]
+    groups: list[str | int]
     metadata: Counter[str]
 
     @property
@@ -224,6 +225,108 @@ def load_trace_dataset(
         labels=torch.tensor([row.label for row in rows], dtype=torch.float32),
         feature_names=output_feature_names or [],
         groups=[row.group for row in rows],
+        metadata=metadata,
+    )
+
+
+def load_shard_dataset(
+    shard_dirs: list[Path],
+    *,
+    max_records: int | None = None,
+) -> TraceDataset:
+    if max_records is not None and max_records <= 0:
+        raise ValueError("max_records must be positive")
+
+    feature_names: list[str] | None = None
+    features: list[torch.Tensor] = []
+    labels: list[torch.Tensor] = []
+    group_ids: list[torch.Tensor] = []
+    metadata: Counter[str] = Counter()
+    loaded_records = 0
+    total_source_records = 0
+    group_offset = 0
+    policy_names: list[str] = []
+    outcome_names: list[str] = []
+
+    for shard_dir in shard_dirs:
+        manifest_path = shard_dir / "manifest.json"
+        with manifest_path.open("r") as f:
+            manifest = json.load(f)
+        if manifest.get("schema") != SHARD_SCHEMA:
+            raise ValueError(
+                f"{manifest_path}: expected schema {SHARD_SCHEMA!r}, "
+                f"got {manifest.get('schema')!r}"
+            )
+        manifest_features = manifest.get("feature_names")
+        if not isinstance(manifest_features, list) or not all(
+            isinstance(name, str) for name in manifest_features
+        ):
+            raise ValueError(f"{manifest_path}: expected string feature_names")
+        if feature_names is None:
+            feature_names = list(manifest_features)
+        elif feature_names != manifest_features:
+            raise ValueError("all shard directories must use the same feature names")
+
+        manifest_groups = manifest.get("group_names", [])
+        if not isinstance(manifest_groups, list):
+            raise ValueError(f"{manifest_path}: expected group_names list")
+        policy_names = [str(name) for name in manifest.get("policy_names", [])]
+        outcome_names = [str(name) for name in manifest.get("outcome_names", [])]
+
+        for shard in manifest.get("shards", []):
+            if not isinstance(shard, dict) or not isinstance(shard.get("path"), str):
+                raise ValueError(f"{manifest_path}: invalid shard entry")
+            data = torch.load(shard_dir / shard["path"], weights_only=False)
+            if data.get("schema") != SHARD_SCHEMA:
+                raise ValueError(f"{shard_dir / shard['path']}: invalid shard schema")
+            shard_features = data["features"].to(dtype=torch.float32)
+            shard_labels = data["labels"].to(dtype=torch.float32)
+            shard_groups = data["group_ids"].to(dtype=torch.long) + group_offset
+            row_count = int(shard_labels.numel())
+            if int(shard_features.shape[0]) != row_count:
+                raise ValueError(f"{shard_dir / shard['path']}: inconsistent row count")
+
+            if max_records is not None:
+                remaining = max_records - loaded_records
+                if remaining <= 0:
+                    break
+                if row_count > remaining:
+                    shard_features = shard_features[:remaining]
+                    shard_labels = shard_labels[:remaining]
+                    shard_groups = shard_groups[:remaining]
+                    row_count = remaining
+
+            features.append(shard_features)
+            labels.append(shard_labels)
+            group_ids.append(shard_groups)
+            loaded_records += row_count
+            if "policy_ids" in data:
+                policy_tensor = data["policy_ids"][:row_count]
+                for policy_id, count in zip(*torch.unique(policy_tensor, return_counts=True)):
+                    index = int(policy_id.item())
+                    name = policy_names[index] if index < len(policy_names) else str(index)
+                    metadata[f"policy:{name}"] += int(count.item())
+            if "outcome_ids" in data:
+                outcome_tensor = data["outcome_ids"][:row_count]
+                for outcome_id, count in zip(*torch.unique(outcome_tensor, return_counts=True)):
+                    index = int(outcome_id.item())
+                    name = outcome_names[index] if index < len(outcome_names) else str(index)
+                    metadata[f"outcome:{name}"] += int(count.item())
+        total_source_records += int(manifest.get("scanned_records", 0))
+        group_offset += len(manifest_groups)
+        if max_records is not None and loaded_records >= max_records:
+            break
+
+    if not labels:
+        raise ValueError("no shard records loaded")
+
+    metadata["loaded_records"] = loaded_records
+    metadata["source_records"] = total_source_records
+    return TraceDataset(
+        features=torch.cat(features, dim=0),
+        labels=torch.cat(labels, dim=0),
+        feature_names=feature_names or [],
+        groups=torch.cat(group_ids, dim=0).tolist(),
         metadata=metadata,
     )
 

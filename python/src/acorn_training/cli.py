@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .data import LEGACY_FEATURE_NAMES, load_trace_dataset, split_by_search
+from .data import LEGACY_FEATURE_NAMES, load_shard_dataset, load_trace_dataset, split_by_search
 from .train import TrainConfig, export_onnx, train_model
 
 
@@ -12,10 +12,10 @@ def _parser() -> argparse.ArgumentParser:
         description="Train an Acorn proof-step scorer from eval trace JSONL."
     )
     parser.add_argument(
-        "trace",
+        "input",
         nargs="+",
         type=Path,
-        help="Trace JSONL, JSONL.ZST, or JSONL.GZ file from `acorn eval --trace-out`.",
+        help="Shard directory, or trace JSONL/JSONL.ZST/JSONL.GZ file.",
     )
     parser.add_argument(
         "--out",
@@ -35,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
         "--features",
         choices=["all", "legacy"],
         default="all",
-        help="Feature set to train on. Default: all trace catalog features.",
+        help="Feature set to train on when reading raw traces. Default: all trace catalog features.",
     )
     parser.add_argument(
         "--feature",
@@ -58,7 +58,7 @@ def _parser() -> argparse.ArgumentParser:
         "--sample-records",
         type=int,
         default=None,
-        help="Reservoir-sample this many rows across all read trace rows.",
+        help="Reservoir-sample this many rows across all read trace rows. Not used for shards.",
     )
     parser.add_argument(
         "--inspect-only",
@@ -80,19 +80,34 @@ def _print_dataset_summary(dataset) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    feature_names = None
-    if args.feature is not None:
-        feature_names = args.feature
-    elif args.features == "legacy":
-        feature_names = LEGACY_FEATURE_NAMES
+    shard_dirs = [path for path in args.input if path.is_dir()]
+    trace_paths = [path for path in args.input if not path.is_dir()]
+    if shard_dirs and trace_paths:
+        raise ValueError("do not mix shard directories and raw trace files in one training run")
 
-    dataset = load_trace_dataset(
-        args.trace,
-        feature_names=feature_names,
-        max_records=args.max_records,
-        sample_records=args.sample_records,
-        seed=args.seed,
-    )
+    if shard_dirs:
+        if args.feature is not None or args.features != "all":
+            raise ValueError("feature selection is fixed by shard manifests")
+        if args.sample_records is not None:
+            raise ValueError("use acorn-build-scorer-shards --sample-records before training")
+        dataset = load_shard_dataset(
+            shard_dirs,
+            max_records=args.max_records,
+        )
+    else:
+        feature_names = None
+        if args.feature is not None:
+            feature_names = args.feature
+        elif args.features == "legacy":
+            feature_names = LEGACY_FEATURE_NAMES
+
+        dataset = load_trace_dataset(
+            trace_paths,
+            feature_names=feature_names,
+            max_records=args.max_records,
+            sample_records=args.sample_records,
+            seed=args.seed,
+        )
     _print_dataset_summary(dataset)
     if args.inspect_only:
         return
