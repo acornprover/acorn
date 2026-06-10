@@ -385,7 +385,8 @@ the updated success, timing, and trace data as the new baseline for scorer work.
 The existing policies are useful both as baselines and as trace generators. After the rerun, compare
 which goals are solved uniquely by each policy and which policies are mostly subsumed by the others.
 This should tell us whether `onnx`, `depth-first`, `handcrafted`, and `onnx-no-shallow` are all worth
-keeping in the experiment suite while we train a replacement.
+keeping in the experiment suite while we train a replacement. `scripts/eval-policy-wins.py` computes
+these unique-win counts from the eval-suite logs without reading the much larger trace files.
 
 3. Train the first catalog-feature scorer.
 
