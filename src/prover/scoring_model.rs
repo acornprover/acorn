@@ -1,9 +1,13 @@
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::sync::{Arc, OnceLock};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ndarray::{Axis, IxDyn};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use serde::Deserialize;
 
 use super::features::Features;
 use super::scorer::Scorer;
@@ -13,11 +17,22 @@ use crate::ort_utils::ensure_ort_initialized;
 pub struct ScoringModel {
     // The ONNX model.
     session: Arc<Session>,
+
+    // The feature names expected by the model input, in order.
+    feature_names: Vec<String>,
 }
 
 static SCORING_SESSION: OnceLock<Arc<Session>> = OnceLock::new();
+static EXTERNAL_SCORING_SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<Session>>>> = OnceLock::new();
 
 const MODEL_BYTES: &[u8] = include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx");
+const FEATURE_CONTRACT_SCHEMA: &str = "acorn-scorer-feature-contract-v1";
+
+#[derive(Deserialize)]
+struct FeatureContract {
+    schema: String,
+    input_features: Vec<String>,
+}
 
 fn make_session(bytes: &[u8]) -> Result<Arc<Session>, Box<dyn Error>> {
     ensure_ort_initialized()?;
@@ -30,20 +45,77 @@ fn make_session(bytes: &[u8]) -> Result<Arc<Session>, Box<dyn Error>> {
     Ok(Arc::new(session))
 }
 
+fn cached_external_session(path: &Path, bytes: &[u8]) -> Result<Arc<Session>, Box<dyn Error>> {
+    let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let sessions = EXTERNAL_SCORING_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(session) = sessions.lock().unwrap().get(&key) {
+        return Ok(Arc::clone(session));
+    }
+
+    let session = make_session(bytes)?;
+    let mut sessions = sessions.lock().unwrap();
+    let session = sessions.entry(key).or_insert(session);
+    Ok(Arc::clone(session))
+}
+
+fn load_feature_contract(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let json = fs::read_to_string(path)?;
+    let contract: FeatureContract = serde_json::from_str(&json)?;
+    if contract.schema != FEATURE_CONTRACT_SCHEMA {
+        return Err(format!(
+            "unsupported feature contract schema '{}' in {}",
+            contract.schema,
+            path.display()
+        )
+        .into());
+    }
+    if contract.input_features.is_empty() {
+        return Err(format!("feature contract is empty: {}", path.display()).into());
+    }
+
+    let mut seen = HashSet::new();
+    let probe = Features::default();
+    for name in &contract.input_features {
+        if !seen.insert(name.as_str()) {
+            return Err(format!("duplicate feature name '{}' in {}", name, path.display()).into());
+        }
+        if probe.feature_value(name).is_none() {
+            return Err(format!("unknown feature name '{}' in {}", name, path.display()).into());
+        }
+    }
+
+    Ok(contract.input_features)
+}
+
 impl ScoringModel {
-    // Loads a model from bytes.
-    // The bytes are typically preloaded into the binary with include_bytes!.
-    fn load_bytes(bytes: &[u8]) -> Result<Self, Box<dyn Error>> {
+    // Loads the hardcoded model.
+    pub fn load() -> Result<Self, Box<dyn Error>> {
         let session = SCORING_SESSION
-            .get_or_init(|| make_session(bytes).expect("Failed to initialize ORT session"));
+            .get_or_init(|| make_session(MODEL_BYTES).expect("Failed to initialize ORT session"));
         Ok(ScoringModel {
             session: Arc::clone(session),
+            feature_names: Features::legacy_model_feature_names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
         })
     }
 
-    // Loads the hardcoded model.
-    pub fn load() -> Result<Self, Box<dyn Error>> {
-        ScoringModel::load_bytes(MODEL_BYTES)
+    pub fn feature_contract_path(model_path: &Path) -> PathBuf {
+        model_path.with_extension("features.json")
+    }
+
+    // Loads an ONNX model from disk, using the adjacent *.features.json contract
+    // to decide which feature columns to feed the model.
+    pub fn load_from_path(path: &Path) -> Result<Self, Box<dyn Error>> {
+        let bytes = fs::read(path)?;
+        let feature_names = load_feature_contract(&Self::feature_contract_path(path))?;
+        let session = cached_external_session(path, &bytes)?;
+        Ok(ScoringModel {
+            session,
+            feature_names,
+        })
     }
 }
 
@@ -53,7 +125,7 @@ impl Scorer for ScoringModel {
     // There's a lot of unwrapping - it would be nice to handle errors more gracefully.
     fn score(&self, features: &Features) -> Result<f32, Box<dyn Error>> {
         let array = features
-            .to_array_for_names(Features::legacy_model_feature_names())
+            .to_array_for_names(&self.feature_names)
             .insert_axis(Axis(0));
         let inputs = ort::inputs![array]?;
         let outputs = self.session.run(inputs)?;
@@ -67,7 +139,7 @@ impl Scorer for ScoringModel {
     }
 
     fn score_batch(&self, features: &[Features]) -> Result<Vec<f32>, Box<dyn Error>> {
-        let array = Features::to_array2_for_names(features, Features::legacy_model_feature_names());
+        let array = Features::to_array2_for_names(features, &self.feature_names);
         let inputs = ort::inputs![array]?;
         let outputs = self.session.run(inputs)?;
         let extracted = outputs[0].try_extract_tensor::<f32>()?;
@@ -80,8 +152,42 @@ impl Scorer for ScoringModel {
 mod tests {
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::proof_step::ProofStep;
+    use std::fs;
 
     use super::*;
+
+    #[test]
+    fn test_feature_contract_path() {
+        let path = Path::new("tmp/models/scorer.onnx");
+        assert_eq!(
+            ScoringModel::feature_contract_path(path),
+            PathBuf::from("tmp/models/scorer.features.json")
+        );
+    }
+
+    #[test]
+    fn test_load_feature_contract_validates_names() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let good_path = temp.path().join("good.features.json");
+        fs::write(
+            &good_path,
+            r#"{"schema":"acorn-scorer-feature-contract-v1","input_features":["atom_count","depth"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_feature_contract(&good_path).unwrap(),
+            vec!["atom_count".to_string(), "depth".to_string()]
+        );
+
+        let bad_path = temp.path().join("bad.features.json");
+        fs::write(
+            &bad_path,
+            r#"{"schema":"acorn-scorer-feature-contract-v1","input_features":["not_a_feature"]}"#,
+        )
+        .unwrap();
+        let error = load_feature_contract(&bad_path).unwrap_err().to_string();
+        assert!(error.contains("unknown feature name"));
+    }
 
     #[test]
     fn test_ort_model_score() {

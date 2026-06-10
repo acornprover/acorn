@@ -1,7 +1,7 @@
 use super::active_set::ActiveSet;
 use super::features::Features;
 use super::score::Score;
-use super::scorer::{Scorer, ScoringPolicy};
+use super::scorer::{Scorer, ScoringConfig, ScoringPolicy};
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
 use crate::kernel::fingerprint::FingerprintSpecializer;
@@ -190,10 +190,15 @@ fn make_simplified(
 
 impl PassiveSet {
     pub fn new() -> PassiveSet {
-        Self::with_policy(ScoringPolicy::default())
+        Self::with_config(ScoringConfig::default())
     }
 
     pub fn with_policy(scoring_policy: ScoringPolicy) -> PassiveSet {
+        Self::with_config(ScoringConfig::new(scoring_policy))
+    }
+
+    pub fn with_config(scoring_config: ScoringConfig) -> PassiveSet {
+        let scoring_policy = scoring_config.policy();
         PassiveSet {
             clauses: vec![],
             queue: BTreeSet::new(),
@@ -201,7 +206,7 @@ impl PassiveSet {
             singles: HashMap::new(),
             contradiction: None,
             all_shallow: true,
-            scorer: scoring_policy.make_scorer().into(),
+            scorer: scoring_config.make_scorer().into(),
             scoring_policy,
         }
     }

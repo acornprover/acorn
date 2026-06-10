@@ -491,10 +491,11 @@ impl Features {
         })
     }
 
-    pub fn to_named_floats(&self, names: &[&str]) -> Vec<f32> {
+    pub fn to_named_floats<S: AsRef<str>>(&self, names: &[S]) -> Vec<f32> {
         names
             .iter()
             .map(|name| {
+                let name = name.as_ref();
                 self.feature_value(name)
                     .unwrap_or_else(|| panic!("unknown feature name '{}'", name))
             })
@@ -513,7 +514,7 @@ impl Features {
         Array1::from(self.to_floats())
     }
 
-    pub fn to_array_for_names(&self, names: &[&str]) -> Array1<f32> {
+    pub fn to_array_for_names<S: AsRef<str>>(&self, names: &[S]) -> Array1<f32> {
         Array1::from(self.to_named_floats(names))
     }
 
@@ -523,7 +524,10 @@ impl Features {
         Self::to_array2_for_names(features_slice, Self::legacy_model_feature_names())
     }
 
-    pub fn to_array2_for_names(features_slice: &[Features], names: &[&str]) -> Array2<f32> {
+    pub fn to_array2_for_names<S: AsRef<str>>(
+        features_slice: &[Features],
+        names: &[S],
+    ) -> Array2<f32> {
         let num_rows = features_slice.len();
         assert_ne!(num_rows, 0);
 

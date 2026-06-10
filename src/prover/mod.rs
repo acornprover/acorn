@@ -18,7 +18,7 @@ pub mod trace;
 
 // Re-export the main public types
 pub use prover::Prover;
-pub use scorer::ScoringPolicy;
+pub use scorer::{ScoringConfig, ScoringPolicy};
 
 /// Instrumentation collected during one prover search.
 #[derive(Clone, Debug, Default)]

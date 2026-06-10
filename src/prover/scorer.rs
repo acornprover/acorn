@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use super::features::Features;
@@ -23,6 +24,8 @@ pub enum ScoringPolicy {
     Handcrafted,
     DepthFirst,
     OnnxNoShallow,
+    Model,
+    ModelNoShallow,
 }
 
 impl Default for ScoringPolicy {
@@ -33,19 +36,19 @@ impl Default for ScoringPolicy {
 
 impl ScoringPolicy {
     pub fn make_scorer(self) -> Box<dyn Scorer + Send + Sync> {
-        match self {
-            Self::Onnx | Self::OnnxNoShallow => Box::new(ScoringModel::load().unwrap()),
-            Self::Handcrafted => Box::new(HandcraftedScorer),
-            Self::DepthFirst => Box::new(DepthFirstScorer),
-        }
+        ScoringConfig::new(self).make_scorer()
     }
 
     pub fn uses_shallow_ordering(self) -> bool {
-        !matches!(self, Self::OnnxNoShallow)
+        !matches!(self, Self::OnnxNoShallow | Self::ModelNoShallow)
+    }
+
+    pub fn requires_model(self) -> bool {
+        matches!(self, Self::Model | Self::ModelNoShallow)
     }
 
     pub fn options() -> &'static str {
-        "onnx, handcrafted, depth-first, onnx-no-shallow"
+        "onnx, handcrafted, depth-first, onnx-no-shallow, model, model-no-shallow"
     }
 }
 
@@ -56,6 +59,8 @@ impl fmt::Display for ScoringPolicy {
             Self::Handcrafted => "handcrafted",
             Self::DepthFirst => "depth-first",
             Self::OnnxNoShallow => "onnx-no-shallow",
+            Self::Model => "model",
+            Self::ModelNoShallow => "model-no-shallow",
         };
         f.write_str(name)
     }
@@ -70,12 +75,96 @@ impl FromStr for ScoringPolicy {
             "handcrafted" => Ok(Self::Handcrafted),
             "depth-first" => Ok(Self::DepthFirst),
             "onnx-no-shallow" => Ok(Self::OnnxNoShallow),
+            "model" => Ok(Self::Model),
+            "model-no-shallow" => Ok(Self::ModelNoShallow),
             _ => Err(format!(
                 "unknown policy '{}'. Expected one of: {}",
                 raw,
                 Self::options()
             )),
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoringConfig {
+    policy: ScoringPolicy,
+    model_path: Option<PathBuf>,
+    trace_label: Option<String>,
+}
+
+impl Default for ScoringConfig {
+    fn default() -> Self {
+        Self::new(ScoringPolicy::default())
+    }
+}
+
+impl ScoringConfig {
+    pub fn new(policy: ScoringPolicy) -> Self {
+        Self {
+            policy,
+            model_path: None,
+            trace_label: None,
+        }
+    }
+
+    pub fn with_model_path(mut self, model_path: PathBuf) -> Self {
+        self.model_path = Some(model_path);
+        self
+    }
+
+    pub fn with_trace_label(mut self, trace_label: String) -> Self {
+        self.trace_label = Some(trace_label);
+        self
+    }
+
+    pub fn policy(&self) -> ScoringPolicy {
+        self.policy
+    }
+
+    pub fn trace_label(&self) -> String {
+        self.trace_label
+            .clone()
+            .unwrap_or_else(|| self.policy.to_string())
+    }
+
+    pub fn load_scorer(&self) -> Result<Box<dyn Scorer + Send + Sync>, Box<dyn Error>> {
+        match self.policy {
+            ScoringPolicy::Onnx | ScoringPolicy::OnnxNoShallow => {
+                Ok(Box::new(ScoringModel::load().map_err(|e| {
+                    format!("failed to load embedded model: {}", e)
+                })?))
+            }
+            ScoringPolicy::Model | ScoringPolicy::ModelNoShallow => {
+                let path = self
+                    .model_path
+                    .as_deref()
+                    .ok_or_else(|| format!("policy '{}' requires --model PATH", self.policy))?;
+                Ok(Box::new(ScoringModel::load_from_path(path).map_err(
+                    |e| format!("failed to load scoring model {}: {}", path.display(), e),
+                )?))
+            }
+            ScoringPolicy::Handcrafted => Ok(Box::new(HandcraftedScorer)),
+            ScoringPolicy::DepthFirst => Ok(Box::new(DepthFirstScorer)),
+        }
+    }
+
+    pub fn make_scorer(&self) -> Box<dyn Scorer + Send + Sync> {
+        self.load_scorer().unwrap_or_else(|e| {
+            panic!(
+                "failed to initialize scoring config '{}': {}",
+                self.trace_label(),
+                e
+            )
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), Box<dyn Error>> {
+        self.load_scorer().map(|_| ())
+    }
+
+    pub fn model_path(&self) -> Option<&Path> {
+        self.model_path.as_deref()
     }
 }
 

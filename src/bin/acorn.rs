@@ -7,7 +7,7 @@ use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
 use acorn::project::{Project, ProjectConfig, ProjectError, SelectionInfo, UsageMode};
 use acorn::prover::trace::SearchTraceWriter;
-use acorn::prover::ScoringPolicy;
+use acorn::prover::{ScoringConfig, ScoringPolicy};
 use acorn::server::{run_server, ServerArgs};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
@@ -280,6 +280,35 @@ fn parse_eval_skip_modes(raw: Option<&str>) -> Result<Vec<usize>, String> {
 fn parse_eval_policy(raw: &str) -> Result<ScoringPolicy, String> {
     raw.parse::<ScoringPolicy>()
         .map_err(|e| format!("invalid --policy: {}", e))
+}
+
+fn build_eval_scoring_config(
+    policy: ScoringPolicy,
+    model: Option<PathBuf>,
+    policy_label: Option<String>,
+) -> Result<ScoringConfig, String> {
+    let mut config = ScoringConfig::new(policy);
+    if let Some(label) = policy_label {
+        if label.trim().is_empty() {
+            return Err("--policy-label must not be empty".to_string());
+        }
+        config = config.with_trace_label(label);
+    }
+
+    if policy.requires_model() {
+        let model = model.ok_or_else(|| format!("--policy {} requires --model PATH", policy))?;
+        config = config.with_model_path(model);
+        config
+            .validate()
+            .map_err(|e| format!("invalid --model for --policy {}: {}", policy, e))?;
+    } else if model.is_some() {
+        return Err(format!(
+            "--model can only be used with model policies, not {}",
+            policy
+        ));
+    }
+
+    Ok(config)
 }
 
 fn validate_force_search_flags(
@@ -605,10 +634,26 @@ enum Command {
         #[clap(
             long,
             default_value = "onnx",
-            help = "Activation queue policy. Options: onnx, handcrafted, depth-first, onnx-no-shallow.",
+            help = "Activation queue policy. Options: onnx, handcrafted, depth-first, onnx-no-shallow, model, model-no-shallow.",
             value_name = "POLICY"
         )]
         policy: String,
+
+        /// ONNX model path for --policy model or --policy model-no-shallow
+        #[clap(
+            long,
+            help = "ONNX model path for --policy model or --policy model-no-shallow. The adjacent .features.json contract is required.",
+            value_name = "PATH"
+        )]
+        model: Option<PathBuf>,
+
+        /// Label written into eval trace metadata for this policy/model case
+        #[clap(
+            long = "policy-label",
+            help = "Label written into eval trace metadata for this policy/model case.",
+            value_name = "LABEL"
+        )]
+        policy_label: Option<String>,
 
         /// Write successful eval search traces to this JSONL file
         #[clap(
@@ -1070,6 +1115,8 @@ async fn main() {
             jobs,
             skip,
             policy,
+            model,
+            policy_label,
             trace_out,
             timing,
         }) => {
@@ -1098,6 +1145,14 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            let scoring_config =
+                match build_eval_scoring_config(scoring_policy, model, policy_label) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        println!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
             let eval_jobs = jobs.unwrap_or_else(default_jobs);
             if eval_jobs == 0 {
                 println!("Error: --jobs must be at least 1");
@@ -1146,7 +1201,7 @@ async fn main() {
             verifier.builder.force_search = true;
             verifier.builder.eval_mode = true;
             verifier.builder.eval_skip_modes = skip_modes;
-            verifier.builder.scoring_policy = scoring_policy;
+            verifier.builder.scoring_config = scoring_config;
             verifier.builder.trace_writer = trace_writer;
             verifier.builder.shallow_search = shallow;
             verifier.builder.check_jobs = eval_jobs;
@@ -1978,6 +2033,8 @@ mod tests {
                 jobs,
                 skip,
                 policy,
+                model,
+                policy_label,
                 trace_out,
                 timing,
             }) => {
@@ -1989,6 +2046,8 @@ mod tests {
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
                 assert_eq!(policy, "onnx-no-shallow");
+                assert_eq!(model, None);
+                assert_eq!(policy_label, None);
                 assert_eq!(
                     trace_out.as_deref(),
                     Some(std::path::Path::new("/tmp/acorn-trace.jsonl"))
@@ -2031,6 +2090,11 @@ mod tests {
         assert_eq!(
             parse_eval_policy("onnx-no-shallow").unwrap(),
             ScoringPolicy::OnnxNoShallow
+        );
+        assert_eq!(parse_eval_policy("model").unwrap(), ScoringPolicy::Model);
+        assert_eq!(
+            parse_eval_policy("model-no-shallow").unwrap(),
+            ScoringPolicy::ModelNoShallow
         );
         assert!(parse_eval_policy("unknown").is_err());
     }

@@ -6,6 +6,7 @@
 #   ./scripts/eval-suite.sh
 #   ./scripts/eval-suite.sh --out tmp/my-eval --skip-build
 #   ./scripts/eval-suite.sh --policy depth-first --policy onnx
+#   ./scripts/eval-suite.sh --case trained=model:tmp/models/scorer.onnx
 
 set -uo pipefail
 
@@ -27,8 +28,10 @@ tmp/acorn-eval-latest to point at the newest run directory.
 
 Options:
   --out DIR        Output directory. Default: tmp/acorn-eval-YYYYMMDD-HHMMSS
-  --policy NAME    Policy to run. Can be repeated.
-                   Default: onnx depth-first handcrafted onnx-no-shallow
+  --case SPEC      Case to run. Can be repeated. SPEC is NAME=POLICY[:MODEL].
+                   Default: all standard cases.
+  --policy NAME    Built-in policy case to run. Can be repeated.
+                   Shorthand for --case NAME=NAME.
   --skip-build     Use the existing target/release/acorn binary.
   --min-free-gb N  Stop before the next run if less than N GiB is free.
                    Default: 20
@@ -44,7 +47,56 @@ default_out_dir="tmp/acorn-eval-$timestamp"
 out_dir=""
 min_free_gb=20
 skip_build=""
-policies=()
+case_names=()
+case_policies=()
+case_models=()
+case_specs=()
+standard_model="tmp/models/scorer-catalog-5m-h128-l3-e20-best.onnx"
+
+add_case() {
+    local name="$1"
+    local policy="$2"
+    local model="${3:-}"
+
+    [[ -n "$name" ]] || { echo "Error: case name must not be empty"; exit 1; }
+    [[ -n "$policy" ]] || { echo "Error: case policy must not be empty"; exit 1; }
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || {
+        echo "Error: invalid case name '$name'. Use letters, numbers, dot, underscore, or dash."
+        exit 1
+    }
+
+    case_names+=("$name")
+    case_policies+=("$policy")
+    case_models+=("$model")
+    if [[ -n "$model" ]]; then
+        case_specs+=("$name=$policy:$model")
+    else
+        case_specs+=("$name=$policy")
+    fi
+}
+
+add_case_spec() {
+    local spec="$1"
+    [[ "$spec" == *=* ]] || { echo "Error: --case requires NAME=POLICY[:MODEL]"; exit 1; }
+    local name="${spec%%=*}"
+    local rest="${spec#*=}"
+    local policy="$rest"
+    local model=""
+    if [[ "$rest" == *:* ]]; then
+        policy="${rest%%:*}"
+        model="${rest#*:}"
+    fi
+    add_case "$name" "$policy" "$model"
+}
+
+add_standard_cases() {
+    add_case "onnx" "onnx"
+    add_case "depth-first" "depth-first"
+    add_case "handcrafted" "handcrafted"
+    add_case "onnx-no-shallow" "onnx-no-shallow"
+    add_case "trained-5m" "model" "$standard_model"
+    add_case "trained-5m-no-shallow" "model-no-shallow" "$standard_model"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,9 +105,14 @@ while [[ $# -gt 0 ]]; do
             out_dir="$2"
             shift 2
             ;;
+        --case)
+            [[ $# -ge 2 ]] || { echo "Error: --case requires NAME=POLICY[:MODEL]"; exit 1; }
+            add_case_spec "$2"
+            shift 2
+            ;;
         --policy)
             [[ $# -ge 2 ]] || { echo "Error: --policy requires a policy name"; exit 1; }
-            policies+=("$2")
+            add_case "$2" "$2"
             shift 2
             ;;
         --skip-build)
@@ -80,9 +137,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ${#policies[@]} -eq 0 ]]; then
-    policies=(onnx depth-first handcrafted onnx-no-shallow)
+if [[ ${#case_names[@]} -eq 0 ]]; then
+    add_standard_cases
 fi
+
+for i in "${!case_names[@]}"; do
+    model="${case_models[$i]}"
+    if [[ -n "$model" && ! -f "$model" ]]; then
+        echo "Error: model for case '${case_names[$i]}' does not exist: $model"
+        exit 1
+    fi
+done
 
 if [[ -z "$out_dir" ]]; then
     out_dir="$default_out_dir"
@@ -126,9 +191,10 @@ write_run_metadata() {
         printf "command="
         printf "%q " "$0" "${original_args[@]}"
         printf "\n"
-        printf "policies="
-        printf "%s " "${policies[@]}"
+        printf "cases="
+        printf "%s " "${case_specs[@]}"
         printf "\n"
+        printf "standard_model=%s\n" "$standard_model"
         printf "acorn_bin=%s\n" "$acorn_bin"
         printf "skip_build=%s\n" "${skip_build:-0}"
         printf "min_free_gb=%s\n" "$min_free_gb"
@@ -152,6 +218,15 @@ write_run_metadata() {
         if [[ -x "$acorn_bin" ]]; then
             printf "acorn_binary_sha256=%s\n" "$(sha256sum "$acorn_bin" 2>/dev/null | awk '{ print $1 }')"
         fi
+        for i in "${!case_names[@]}"; do
+            case_name="${case_names[$i]}"
+            safe_case_name="$(printf "%s" "$case_name" | tr -c 'A-Za-z0-9_' '_')"
+            printf "case_%s_policy=%s\n" "$safe_case_name" "${case_policies[$i]}"
+            if [[ -n "${case_models[$i]}" ]]; then
+                printf "case_%s_model=%s\n" "$safe_case_name" "${case_models[$i]}"
+                printf "case_%s_model_sha256=%s\n" "$safe_case_name" "$(sha256sum "${case_models[$i]}" 2>/dev/null | awk '{ print $1 }')"
+            fi
+        done
     } > "$manifest_file"
 
     git status --short > "$out_dir/git-status.txt" 2>&1 || true
@@ -188,25 +263,32 @@ any_failed=0
 stopped_early=0
 
 echo "Output directory: $out_dir"
-echo "Policies: ${policies[*]}"
+echo "Cases: ${case_specs[*]}"
 echo "Minimum free space: ${min_free_gb}GiB"
 echo
 
-for policy in "${policies[@]}"; do
+for i in "${!case_names[@]}"; do
+    case_name="${case_names[$i]}"
+    policy="${case_policies[$i]}"
+    model="${case_models[$i]}"
     free_before="$(free_gb)"
     if [[ "$free_before" -lt "$min_free_gb" ]]; then
-        echo "Stopping before $policy: only ${free_before}GiB free."
+        echo "Stopping before $case_name: only ${free_before}GiB free."
         stopped_early=1
         break
     fi
 
-    log_file="$out_dir/logs/trace-$policy.log"
-    status_file="$out_dir/status/trace-$policy.status"
-    trace_file="$out_dir/traces/$policy.jsonl.zst"
+    log_file="$out_dir/logs/trace-$case_name.log"
+    status_file="$out_dir/status/trace-$case_name.status"
+    trace_file="$out_dir/traces/$case_name.jsonl.zst"
 
-    echo "[$(date -Is)] Starting policy: $policy"
+    echo "[$(date -Is)] Starting case: $case_name ($policy)"
     start="$(date -Is)"
-    "$acorn_bin" eval --policy "$policy" --trace-out "$trace_file" --timing > "$log_file" 2>&1
+    cmd=("$acorn_bin" eval --policy "$policy" --policy-label "$case_name" --trace-out "$trace_file" --timing)
+    if [[ -n "$model" ]]; then
+        cmd+=(--model "$model")
+    fi
+    "${cmd[@]}" > "$log_file" 2>&1
     status=$?
     end="$(date -Is)"
 
@@ -216,7 +298,9 @@ for policy in "${policies[@]}"; do
     fi
 
     {
+        printf "case=%s\n" "$case_name"
         printf "policy=%s\n" "$policy"
+        printf "model=%s\n" "$model"
         printf "start=%s\n" "$start"
         printf "end=%s\n" "$end"
         printf "exit_status=%s\n" "$status"
@@ -225,7 +309,7 @@ for policy in "${policies[@]}"; do
         printf "trace_bytes=%s\n" "$trace_bytes"
     } > "$status_file"
 
-    echo "[$end] Finished policy: $policy (exit $status, trace ${trace_bytes} bytes)"
+    echo "[$end] Finished case: $case_name (exit $status, trace ${trace_bytes} bytes)"
     print_run_summary "$log_file"
     df -h "$out_dir"
     echo
@@ -233,7 +317,7 @@ for policy in "${policies[@]}"; do
     if [[ "$status" -ne 0 ]]; then
         any_failed=1
         if grep -Eiq "No space left on device|ENOSPC|could not flush trace file|could not create trace file" "$log_file"; then
-            echo "Stopping after $policy because the log indicates a trace/disk write failure."
+            echo "Stopping after $case_name because the log indicates a trace/disk write failure."
             stopped_early=1
             break
         fi

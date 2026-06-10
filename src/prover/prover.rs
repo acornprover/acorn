@@ -8,7 +8,7 @@ use tracing::trace;
 use super::active_set::ActiveSet;
 use super::passive_set::{PassivePushStats, PassiveSet};
 use super::proof::Proof;
-use super::scorer::ScoringPolicy;
+use super::scorer::{ScoringConfig, ScoringPolicy};
 use super::synthetic::WitnessRegistry;
 use super::trace::{SearchTrace, TraceActivatedStepRecord, TraceSearchMeta};
 use crate::certificate::Certificate;
@@ -158,14 +158,19 @@ impl Prover {
     /// Creates a new Prover instance.
     /// The prover must stop when any of its cancellation tokens are canceled.
     pub fn new(tokens: Vec<CancellationToken>) -> Prover {
-        Self::with_policy(tokens, ScoringPolicy::default())
+        Self::with_config(tokens, ScoringConfig::default())
     }
 
     /// Creates a new Prover instance with a specific scoring policy.
     pub fn with_policy(tokens: Vec<CancellationToken>, scoring_policy: ScoringPolicy) -> Prover {
+        Self::with_config(tokens, ScoringConfig::new(scoring_policy))
+    }
+
+    /// Creates a new Prover instance with a specific scoring configuration.
+    pub fn with_config(tokens: Vec<CancellationToken>, scoring_config: ScoringConfig) -> Prover {
         Prover {
             active_set: ActiveSet::new(),
-            passive_set: PassiveSet::with_policy(scoring_policy),
+            passive_set: PassiveSet::with_config(scoring_config),
             final_step: None,
             cancellation_tokens: tokens,
             useful_passive: vec![],

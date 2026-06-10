@@ -1,6 +1,6 @@
 use crate::builder::BuildStatus;
 use crate::project::{ProjectConfig, UsageMode};
-use crate::prover::ScoringPolicy;
+use crate::prover::{ScoringConfig, ScoringPolicy};
 use crate::tests::support::verify_fails;
 use crate::verifier::{Verifier, VerifierOutput};
 use std::env;
@@ -179,7 +179,7 @@ fn verify_and_eval_succeeds(source: &str, policy: ScoringPolicy, skip_modes: Vec
     eval.builder.force_search = true;
     eval.builder.eval_mode = true;
     eval.builder.eval_skip_modes = skip_modes;
-    eval.builder.scoring_policy = policy;
+    eval.builder.scoring_config = ScoringConfig::new(policy);
     eval.builder.check_jobs = 1;
     eval.builder.operation_verb = "proved";
     let eval_output = eval.run().expect("eval should run");
