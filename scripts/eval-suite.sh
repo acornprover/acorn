@@ -254,11 +254,14 @@ for status_file in "$out_dir"/status/*.status; do
 done
 
 if [[ "$stopped_early" -ne 0 ]]; then
+    write_run_metadata "stopped-early"
     exit 2
 fi
 
 if [[ "$any_failed" -ne 0 ]]; then
+    write_run_metadata "completed-with-failures"
     exit 1
 fi
 
+write_run_metadata "completed"
 exit 0
