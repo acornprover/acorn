@@ -311,6 +311,14 @@ fn build_eval_scoring_config(
     Ok(config)
 }
 
+fn validate_trace_shard_rows(rows: Option<usize>) -> Result<(), String> {
+    if rows == Some(0) {
+        Err("--trace-shard-rows must be positive".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_force_search_flags(
     force_search: bool,
     read_only: bool,
@@ -655,13 +663,21 @@ enum Command {
         )]
         policy_label: Option<String>,
 
-        /// Write successful eval search traces to this JSONL file
+        /// Write successful eval search traces to this JSONL.ZST file
         #[clap(
             long = "trace-out",
-            help = "Write successful eval search traces to this JSONL file. Paths ending in .zst or .gz are compressed.",
+            help = "Write successful eval search traces to this .jsonl.zst file.",
             value_name = "PATH"
         )]
         trace_out: Option<PathBuf>,
+
+        /// Rotate trace output after this many JSONL rows
+        #[clap(
+            long = "trace-shard-rows",
+            help = "Rotate trace output after this many JSONL rows. Shards are named TRACE-000000.jsonl.zst, TRACE-000001.jsonl.zst, ...",
+            value_name = "ROWS"
+        )]
+        trace_shard_rows: Option<usize>,
 
         /// Print phase timing information
         #[clap(
@@ -1118,6 +1134,7 @@ async fn main() {
             model,
             policy_label,
             trace_out,
+            trace_shard_rows,
             timing,
         }) => {
             let (target, line_sel) = match parse_target_and_line(target, None, None) {
@@ -1128,6 +1145,10 @@ async fn main() {
                 }
             };
             if let Err(e) = validate_activations_flag(activations) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = validate_trace_shard_rows(trace_shard_rows) {
                 println!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -1159,17 +1180,19 @@ async fn main() {
                 std::process::exit(1);
             }
             let trace_writer = match trace_out.as_ref() {
-                Some(path) => match SearchTraceWriter::create(path) {
-                    Ok(writer) => Some(writer),
-                    Err(e) => {
-                        println!(
-                            "Error: could not create trace file {}: {}",
-                            path.display(),
-                            e
-                        );
-                        std::process::exit(1);
+                Some(path) => {
+                    match SearchTraceWriter::create_with_shard_rows(path, trace_shard_rows) {
+                        Ok(writer) => Some(writer),
+                        Err(e) => {
+                            println!(
+                                "Error: could not create trace file {}: {}",
+                                path.display(),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
                     }
-                },
+                }
                 None => None,
             };
             let line_selection = match line_sel {
@@ -2018,7 +2041,9 @@ mod tests {
             "--policy",
             "onnx-no-shallow",
             "--trace-out",
-            "/tmp/acorn-trace.jsonl",
+            "/tmp/acorn-trace.jsonl.zst",
+            "--trace-shard-rows",
+            "100",
             "--timing",
         ])
         .expect("eval command should parse");
@@ -2036,6 +2061,7 @@ mod tests {
                 model,
                 policy_label,
                 trace_out,
+                trace_shard_rows,
                 timing,
             }) => {
                 assert_eq!(target.as_deref(), Some("nat.nat_base"));
@@ -2050,8 +2076,9 @@ mod tests {
                 assert_eq!(policy_label, None);
                 assert_eq!(
                     trace_out.as_deref(),
-                    Some(std::path::Path::new("/tmp/acorn-trace.jsonl"))
+                    Some(std::path::Path::new("/tmp/acorn-trace.jsonl.zst"))
                 );
+                assert_eq!(trace_shard_rows, Some(100));
                 assert!(timing);
             }
             _ => panic!("unexpected command"),

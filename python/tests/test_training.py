@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import json
 import tempfile
 import unittest
@@ -77,13 +76,7 @@ class TrainingDataTest(unittest.TestCase):
                 }
             )
         )
-        if path.suffix == ".zst":
-            opener = zstandard.open
-        elif path.suffix == ".gz":
-            opener = gzip.open
-        else:
-            opener = Path.open
-        with opener(path, "wt") as f:
+        with zstandard.open(path, "wt") as f:
             f.write("\n".join(json.dumps(row) for row in rows) + "\n")
 
     def test_loads_trace_and_splits_by_search(self) -> None:
@@ -131,6 +124,12 @@ class TrainingDataTest(unittest.TestCase):
             self.assertEqual(dataset.metadata["scanned_records"], 20)
             self.assertEqual(dataset.metadata["loaded_records"], 6)
             self.assertIn("foo\tb\t0\tonnx", dataset.groups)
+
+    def test_rejects_non_zstd_trace_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            with self.assertRaisesRegex(ValueError, "must end in .jsonl.zst"):
+                load_trace_dataset([path])
 
     def test_builds_training_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

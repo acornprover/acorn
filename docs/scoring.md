@@ -41,8 +41,9 @@ with its exported `*.features.json` contract. That immediately exposed two impor
 - accepts `--policy` to select the activation queue policy
 - accepts `--model` for external ONNX scorer policies and `--policy-label` for stable trace case
   names
-- accepts `--trace-out` to write successful search traces as JSONL, zstd-compressed when the
-  path ends in `.zst` and gzip-compressed when the path ends in `.gz`
+- accepts `--trace-out` to write successful search traces as `.jsonl.zst`
+- accepts `--trace-shard-rows` to rotate trace output into independent `.jsonl.zst` shards for
+  later parallel conversion
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
 
@@ -53,7 +54,7 @@ decisive result. Regular verify/search behavior still treats unexpected inconsis
 The first trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
-  from successful eval searches
+  from successful eval searches; paths must end in `.jsonl.zst`
 - a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
@@ -307,8 +308,8 @@ exporter is the path we are using for eval-shaped training.
 The current Python code under `python/` is a uv package named `acorn_training`. Its CLIs build
 tensor shards from traces and train from either raw traces or shard directories. The trainer:
 
-- loads schema-v2 eval trace JSONL, JSONL.ZST, or JSONL.GZ files from `acorn eval --trace-out`,
-  or prebuilt shard directories
+- loads schema-v2 eval trace `.jsonl.zst` files from `acorn eval --trace-out`, or prebuilt shard
+  directories
 - trains on selected columns from each activated step's numeric `feature_vector`
 - uses `used_in_final_proof` as the binary label
 - groups train/validation splits by search key `(module, goal, skip, policy)`

@@ -15,7 +15,7 @@ def _parser() -> argparse.ArgumentParser:
         "trace",
         nargs="+",
         type=Path,
-        help="Trace JSONL, JSONL.ZST, or JSONL.GZ file from `acorn eval --trace-out`.",
+        help="Trace JSONL.ZST file from `acorn eval --trace-out`.",
     )
     parser.add_argument(
         "--out",

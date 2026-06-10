@@ -20,8 +20,8 @@ usage() {
     cat <<EOF
 Usage: ./scripts/eval-suite.sh [options]
 
-Runs traced evals sequentially and writes zstd-compressed JSONL traces
-under OUT/traces/*.jsonl.zst.
+Runs traced evals sequentially and writes sharded zstd-compressed JSONL
+traces under OUT/traces/*.jsonl.zst.
 
 Each run also writes OUT/manifest.txt, git state files, and updates
 tmp/acorn-eval-latest to point at the newest run directory.
@@ -33,6 +33,9 @@ Options:
   --policy NAME    Built-in policy case to run. Can be repeated.
                    Shorthand for --case NAME=NAME.
   --skip-build     Use the existing target/release/acorn binary.
+  --trace-shard-rows N
+                   Rotate trace files after N JSONL rows.
+                   Default: 1000000
   --min-free-gb N  Stop before the next run if less than N GiB is free.
                    Default: 20
   -h, --help       Show this help.
@@ -47,6 +50,7 @@ default_out_dir="tmp/acorn-eval-$timestamp"
 out_dir=""
 min_free_gb=20
 skip_build=""
+trace_shard_rows=1000000
 case_names=()
 case_policies=()
 case_models=()
@@ -118,6 +122,12 @@ while [[ $# -gt 0 ]]; do
         --skip-build)
             skip_build="1"
             shift
+            ;;
+        --trace-shard-rows)
+            [[ $# -ge 2 ]] || { echo "Error: --trace-shard-rows requires a number"; exit 1; }
+            [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "Error: --trace-shard-rows must be a positive integer"; exit 1; }
+            trace_shard_rows="$2"
+            shift 2
             ;;
         --min-free-gb)
             [[ $# -ge 2 ]] || { echo "Error: --min-free-gb requires a number"; exit 1; }
@@ -197,6 +207,7 @@ write_run_metadata() {
         printf "standard_model=%s\n" "$standard_model"
         printf "acorn_bin=%s\n" "$acorn_bin"
         printf "skip_build=%s\n" "${skip_build:-0}"
+        printf "trace_shard_rows=%s\n" "$trace_shard_rows"
         printf "min_free_gb=%s\n" "$min_free_gb"
         printf "hostname=%s\n" "$(hostname 2>/dev/null || true)"
         printf "uname=%s\n" "$(uname -a 2>/dev/null || true)"
@@ -259,6 +270,18 @@ print_run_summary() {
     grep -E "benchmark searches succeeded|search success rate|average search time|searches found inconsistent assumptions|Build failed|Evaluation completed|Evaluation succeeded" "$log_file" || true
 }
 
+trace_file_bytes() {
+    local pattern="$1"
+    local bytes=0
+    local file
+    shopt -s nullglob
+    for file in $pattern; do
+        bytes=$((bytes + $(stat -c '%s' "$file")))
+    done
+    shopt -u nullglob
+    printf "%s\n" "$bytes"
+}
+
 any_failed=0
 stopped_early=0
 
@@ -281,10 +304,11 @@ for i in "${!case_names[@]}"; do
     log_file="$out_dir/logs/trace-$case_name.log"
     status_file="$out_dir/status/trace-$case_name.status"
     trace_file="$out_dir/traces/$case_name.jsonl.zst"
+    trace_pattern="$out_dir/traces/$case_name-*.jsonl.zst"
 
     echo "[$(date -Is)] Starting case: $case_name ($policy)"
     start="$(date -Is)"
-    cmd=("$acorn_bin" eval --policy "$policy" --policy-label "$case_name" --trace-out "$trace_file" --timing)
+    cmd=("$acorn_bin" eval --policy "$policy" --policy-label "$case_name" --trace-out "$trace_file" --trace-shard-rows "$trace_shard_rows" --timing)
     if [[ -n "$model" ]]; then
         cmd+=(--model "$model")
     fi
@@ -292,10 +316,7 @@ for i in "${!case_names[@]}"; do
     status=$?
     end="$(date -Is)"
 
-    trace_bytes=0
-    if [[ -f "$trace_file" ]]; then
-        trace_bytes="$(stat -c '%s' "$trace_file")"
-    fi
+    trace_bytes="$(trace_file_bytes "$trace_pattern")"
 
     {
         printf "case=%s\n" "$case_name"
@@ -305,7 +326,7 @@ for i in "${!case_names[@]}"; do
         printf "end=%s\n" "$end"
         printf "exit_status=%s\n" "$status"
         printf "log=%s\n" "$log_file"
-        printf "trace=%s\n" "$trace_file"
+        printf "trace_pattern=%s\n" "$trace_pattern"
         printf "trace_bytes=%s\n" "$trace_bytes"
     } > "$status_file"
 
@@ -328,7 +349,7 @@ echo "Run directory:"
 du -sh "$out_dir"
 echo
 echo "Trace files:"
-du -h "$out_dir"/traces/*.jsonl "$out_dir"/traces/*.jsonl.gz "$out_dir"/traces/*.jsonl.zst 2>/dev/null || true
+du -h "$out_dir"/traces/*.jsonl.zst 2>/dev/null || true
 echo
 echo "Status files:"
 for status_file in "$out_dir"/status/*.status; do

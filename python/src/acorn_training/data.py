@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import json
 import random
 from collections import Counter
@@ -84,13 +83,9 @@ def _search_group(record: dict) -> str:
 
 
 def _iter_records(path: Path) -> Iterable[dict]:
-    if path.suffix == ".zst":
-        opener = zstandard.open
-    elif path.suffix == ".gz":
-        opener = gzip.open
-    else:
-        opener = Path.open
-    with opener(path, "rt") as f:
+    if not path.name.endswith(".jsonl.zst"):
+        raise ValueError(f"{path}: trace files must end in .jsonl.zst")
+    with zstandard.open(path, "rt") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
@@ -111,11 +106,7 @@ def trace_metadata_path(trace_path: Path) -> Path:
     name = trace_path.name
     if name.endswith(".jsonl.zst"):
         return trace_path.with_name(f"{name[:-len('.jsonl.zst')]}.meta.json")
-    if name.endswith(".jsonl.gz"):
-        return trace_path.with_name(f"{name[:-len('.jsonl.gz')]}.meta.json")
-    if name.endswith(".jsonl"):
-        return trace_path.with_name(f"{name[:-len('.jsonl')]}.meta.json")
-    return trace_path.with_suffix(".meta.json")
+    raise ValueError(f"{trace_path}: trace files must end in .jsonl.zst")
 
 
 def _load_feature_names(path: Path) -> list[str]:

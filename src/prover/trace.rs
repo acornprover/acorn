@@ -4,8 +4,6 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde::Serialize;
 
 use crate::kernel::proof_step::{ProofStep, ShallowStatus, Truthiness};
@@ -151,20 +149,24 @@ pub struct TraceActivatedStepRecord {
 
 #[derive(Clone)]
 pub struct SearchTraceWriter {
-    inner: Arc<Mutex<TraceOutput>>,
+    inner: Arc<Mutex<TraceWriterState>>,
 }
 
 impl SearchTraceWriter {
     pub fn create(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        Self::create_with_shard_rows(path, None)
+    }
+
+    pub fn create_with_shard_rows(path: &Path, shard_rows: Option<usize>) -> io::Result<Self> {
+        validate_trace_path(path)?;
+        if shard_rows == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trace shard rows must be positive",
+            ));
         }
-        write_metadata_file(&trace_metadata_path(path))?;
-        let file = File::create(path)?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(TraceOutput::new(file, path))),
+            inner: Arc::new(Mutex::new(TraceWriterState::new(path, shard_rows)?)),
         })
     }
 
@@ -174,8 +176,7 @@ impl SearchTraceWriter {
         }
         let mut writer = self.inner.lock().expect("search trace writer poisoned");
         for record in records {
-            serde_json::to_writer(&mut *writer, record)?;
-            writer.write_all(b"\n")?;
+            writer.write_record(record)?;
         }
         Ok(records.len())
     }
@@ -186,34 +187,72 @@ impl SearchTraceWriter {
     }
 }
 
+struct TraceWriterState {
+    base_path: PathBuf,
+    shard_rows: Option<usize>,
+    shard_index: usize,
+    records_in_shard: usize,
+    output: TraceOutput,
+}
+
+impl TraceWriterState {
+    fn new(path: &Path, shard_rows: Option<usize>) -> io::Result<Self> {
+        let output_path = if shard_rows.is_some() {
+            trace_shard_path(path, 0)
+        } else {
+            path.to_path_buf()
+        };
+        Ok(Self {
+            base_path: path.to_path_buf(),
+            shard_rows,
+            shard_index: 0,
+            records_in_shard: 0,
+            output: open_trace_output(&output_path)?,
+        })
+    }
+
+    fn write_record(&mut self, record: &TraceActivatedStepRecord) -> io::Result<()> {
+        self.rotate_if_needed()?;
+        serde_json::to_writer(&mut self.output, record)?;
+        self.output.write_all(b"\n")?;
+        self.records_in_shard += 1;
+        Ok(())
+    }
+
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        let Some(shard_rows) = self.shard_rows else {
+            return Ok(());
+        };
+        if self.records_in_shard < shard_rows {
+            return Ok(());
+        }
+        self.output.finish()?;
+        self.shard_index += 1;
+        self.records_in_shard = 0;
+        let output_path = trace_shard_path(&self.base_path, self.shard_index);
+        self.output = open_trace_output(&output_path)?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.output.finish()
+    }
+}
+
 enum TraceOutput {
-    Plain(BufWriter<File>),
-    Gzip(GzEncoder<BufWriter<File>>),
     Zstd(Option<zstd::stream::write::Encoder<'static, BufWriter<File>>>),
 }
 
 impl TraceOutput {
-    fn new(file: File, path: &Path) -> Self {
+    fn new(file: File) -> Self {
         let writer = BufWriter::new(file);
-        if path.extension().is_some_and(|extension| extension == "gz") {
-            Self::Gzip(GzEncoder::new(writer, Compression::fast()))
-        } else if path.extension().is_some_and(|extension| extension == "zst") {
-            Self::Zstd(Some(
-                zstd::stream::write::Encoder::new(writer, 3)
-                    .expect("zstd encoder should initialize"),
-            ))
-        } else {
-            Self::Plain(writer)
-        }
+        Self::Zstd(Some(
+            zstd::stream::write::Encoder::new(writer, 3).expect("zstd encoder should initialize"),
+        ))
     }
 
     fn finish(&mut self) -> io::Result<()> {
         match self {
-            Self::Plain(writer) => writer.flush(),
-            Self::Gzip(writer) => {
-                writer.try_finish()?;
-                writer.get_mut().flush()
-            }
             Self::Zstd(writer) => {
                 if let Some(writer) = writer.take() {
                     let mut inner = writer.finish()?;
@@ -229,8 +268,6 @@ impl TraceOutput {
 impl Write for TraceOutput {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::Plain(writer) => writer.write(buf),
-            Self::Gzip(writer) => writer.write(buf),
             Self::Zstd(writer) => writer
                 .as_mut()
                 .expect("cannot write after zstd trace output finished")
@@ -240,10 +277,43 @@ impl Write for TraceOutput {
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::Plain(writer) => writer.flush(),
-            Self::Gzip(writer) => writer.flush(),
             Self::Zstd(writer) => writer.as_mut().map_or(Ok(()), |writer| writer.flush()),
         }
+    }
+}
+
+fn open_trace_output(path: &Path) -> io::Result<TraceOutput> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    write_metadata_file(&trace_metadata_path(path))?;
+    let file = File::create(path)?;
+    Ok(TraceOutput::new(file))
+}
+
+pub fn trace_shard_path(trace_path: &Path, shard_index: usize) -> PathBuf {
+    if let Some(file_name) = trace_path.file_name().and_then(|name| name.to_str()) {
+        if let Some(base) = file_name.strip_suffix(".jsonl.zst") {
+            return trace_path.with_file_name(format!("{base}-{shard_index:06}.jsonl.zst"));
+        }
+    }
+    trace_path.with_file_name(format!("trace-{shard_index:06}.jsonl.zst"))
+}
+
+fn validate_trace_path(path: &Path) -> io::Result<()> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"))
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "trace path must end in .jsonl.zst",
+        ))
     }
 }
 
@@ -265,12 +335,6 @@ pub fn trace_metadata_path(trace_path: &Path) -> PathBuf {
         if let Some(base) = file_name.strip_suffix(".jsonl.zst") {
             return trace_path.with_file_name(format!("{}.meta.json", base));
         }
-        if let Some(base) = file_name.strip_suffix(".jsonl.gz") {
-            return trace_path.with_file_name(format!("{}.meta.json", base));
-        }
-        if let Some(base) = file_name.strip_suffix(".jsonl") {
-            return trace_path.with_file_name(format!("{}.meta.json", base));
-        }
     }
     trace_path.with_extension("meta.json")
 }
@@ -289,5 +353,84 @@ pub fn truthiness_name(truthiness: Truthiness) -> &'static str {
         Truthiness::Factual => "factual",
         Truthiness::Hypothetical => "hypothetical",
         Truthiness::Counterfactual => "counterfactual",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::io::Read;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn record(index: usize) -> TraceActivatedStepRecord {
+        TraceActivatedStepRecord {
+            schema: TRACE_SCHEMA,
+            search: TraceSearchMeta {
+                module: "m".to_string(),
+                goal: "g".to_string(),
+                goal_first_line: 1,
+                goal_last_line: 1,
+                skip: Some(0),
+                policy: "onnx".to_string(),
+            },
+            outcome: "success".to_string(),
+            activation_index: index,
+            passive_id: index,
+            active_id: Some(index),
+            used_in_final_proof: index == 0,
+            queue_score: 0.0,
+            queue_contradiction: false,
+            queue_shallow_status: "deep".to_string(),
+            queue_is_shallow: false,
+            rule: "assumption".to_string(),
+            truthiness: "factual".to_string(),
+            feature_vector: vec![1.0, 2.0],
+        }
+    }
+
+    fn read_zstd_lines(path: &Path) -> Vec<String> {
+        let file = File::open(path).unwrap();
+        let mut text = String::new();
+        zstd::stream::read::Decoder::new(file)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text.lines().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn trace_writer_rejects_non_zstd_paths() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("trace.jsonl");
+        let error = match SearchTraceWriter::create(&path) {
+            Ok(_) => panic!("non-zstd trace path should be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn trace_writer_rotates_zstd_shards() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("trace.jsonl.zst");
+        let writer = SearchTraceWriter::create_with_shard_rows(&path, Some(2)).unwrap();
+        writer
+            .write_records(&[record(0), record(1), record(2), record(3), record(4)])
+            .unwrap();
+        writer.flush().unwrap();
+
+        let first = temp.path().join("trace-000000.jsonl.zst");
+        let second = temp.path().join("trace-000001.jsonl.zst");
+        let third = temp.path().join("trace-000002.jsonl.zst");
+        assert_eq!(read_zstd_lines(&first).len(), 2);
+        assert_eq!(read_zstd_lines(&second).len(), 2);
+        assert_eq!(read_zstd_lines(&third).len(), 1);
+        assert!(trace_metadata_path(&first).exists());
+        assert!(trace_metadata_path(&second).exists());
+        assert!(trace_metadata_path(&third).exists());
+        assert!(!path.exists());
     }
 }
