@@ -38,8 +38,8 @@ policies without code edits. That immediately exposed two important facts:
 - disables module hash skipping
 - runs configured skip modes, defaulting to `0` and `1`
 - accepts `--policy` to select the activation queue policy
-- accepts `--trace-out` to write successful search traces as JSONL, gzip-compressed when the
-  path ends in `.gz`
+- accepts `--trace-out` to write successful search traces as JSONL, zstd-compressed when the
+  path ends in `.zst` and gzip-compressed when the path ends in `.gz`
 - compares current source goals against cached proof targets
 - records per-search `SearchStats`
 
@@ -51,7 +51,7 @@ The first trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
   from successful eval searches
-- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.gz`,
+- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
   active id, queue score/order fields, rule, truthiness, the current numeric `feature_vector`, and
@@ -287,7 +287,7 @@ exporter is the path we are using for eval-shaped training.
 The current Python code under `python/` is a uv package named `acorn_training`. Its CLI is
 `uv run acorn-train-scorer TRACE...`. It:
 
-- loads schema-v2 eval trace JSONL or JSONL.GZ files from `acorn eval --trace-out`
+- loads schema-v2 eval trace JSONL, JSONL.ZST, or JSONL.GZ files from `acorn eval --trace-out`
 - trains on selected columns from each activated step's numeric `feature_vector`
 - uses `used_in_final_proof` as the binary label
 - groups train/validation splits by search key `(module, goal, skip, policy)`

@@ -38,6 +38,7 @@ tower-lsp = "0.20.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.4.0"
+zstd = "0.13"
 
 [dev-dependencies]
 assert_fs = "1.1.2"

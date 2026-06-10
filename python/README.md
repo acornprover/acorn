@@ -2,8 +2,8 @@
 
 This uv project trains proof-step scoring models from `acorn eval --trace-out` JSONL exports.
 Trace feature names are written once in a sidecar `*.meta.json` file; training reads the numeric
-`feature_vector` values from the JSONL rows. Both plain `.jsonl` and gzip-compressed `.jsonl.gz`
-traces are supported.
+`feature_vector` values from the JSONL rows. Plain `.jsonl`, zstd-compressed `.jsonl.zst`, and
+gzip-compressed `.jsonl.gz` traces are supported.
 
 The current training signal is one row per activated proof step:
 
@@ -27,12 +27,50 @@ Example:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl.gz --out ../files/models/scorer.onnx
+uv run acorn-train-scorer ../traces/onnx.jsonl.zst --out ../files/models/scorer.onnx
 ```
 
 For quick inspection without training:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl.gz --inspect-only
+uv run acorn-train-scorer ../traces/onnx.jsonl.zst --inspect-only
 ```
+
+For large eval-suite trace corpora, use reservoir sampling to keep memory bounded while still
+sampling across all input traces:
+
+The normal training path should convert raw `.jsonl.zst` traces into binary shards first, then train
+from those shards. Direct trace training is mainly for smoke tests and early experiments.
+
+```bash
+cd python
+uv run acorn-train-scorer ../tmp/acorn-eval-latest/traces/*.jsonl.zst \
+  --sample-records 1000000 \
+  --out ../tmp/models/scorer.onnx
+```
+
+## Training Shards
+
+The intended training cache format is a directory of fixed-row-count binary shards plus a manifest.
+Raw `.jsonl.zst` traces should remain the inspectable archive format; repeated training should read
+the shards instead of reparsing JSON.
+
+Initial shard layout:
+
+- `manifest.json`: schema version, feature names, policy names, source trace paths, shard row
+  counts, and split/sampling settings
+- `shard-000000.pt`, `shard-000001.pt`, ...: PyTorch-saved dictionaries with tensor fields
+
+Each shard should store:
+
+- `features`: `float32` tensor with shape `[rows, features]`
+- `labels`: `bool` or `uint8` tensor for `used_in_final_proof`
+- `group_ids`: integer tensor for `(module, goal, skip, policy)` split groups
+- `policy_ids`: small integer tensor for policy source
+- optional cheap analysis fields such as `activation_index`
+
+Shard boundaries should be based on row count, not module or policy. The converter should preserve
+group ids for train/validation splitting, but training wants to shuffle across modules and policies.
+For a full corpus conversion, use a bounded shuffle buffer or policy-balanced sampling before writing
+shards so early training batches are not dominated by trace-file order.

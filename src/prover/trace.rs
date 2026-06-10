@@ -189,6 +189,7 @@ impl SearchTraceWriter {
 enum TraceOutput {
     Plain(BufWriter<File>),
     Gzip(GzEncoder<BufWriter<File>>),
+    Zstd(Option<zstd::stream::write::Encoder<'static, BufWriter<File>>>),
 }
 
 impl TraceOutput {
@@ -196,6 +197,11 @@ impl TraceOutput {
         let writer = BufWriter::new(file);
         if path.extension().is_some_and(|extension| extension == "gz") {
             Self::Gzip(GzEncoder::new(writer, Compression::fast()))
+        } else if path.extension().is_some_and(|extension| extension == "zst") {
+            Self::Zstd(Some(
+                zstd::stream::write::Encoder::new(writer, 3)
+                    .expect("zstd encoder should initialize"),
+            ))
         } else {
             Self::Plain(writer)
         }
@@ -208,6 +214,14 @@ impl TraceOutput {
                 writer.try_finish()?;
                 writer.get_mut().flush()
             }
+            Self::Zstd(writer) => {
+                if let Some(writer) = writer.take() {
+                    let mut inner = writer.finish()?;
+                    inner.flush()
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -217,6 +231,10 @@ impl Write for TraceOutput {
         match self {
             Self::Plain(writer) => writer.write(buf),
             Self::Gzip(writer) => writer.write(buf),
+            Self::Zstd(writer) => writer
+                .as_mut()
+                .expect("cannot write after zstd trace output finished")
+                .write(buf),
         }
     }
 
@@ -224,6 +242,7 @@ impl Write for TraceOutput {
         match self {
             Self::Plain(writer) => writer.flush(),
             Self::Gzip(writer) => writer.flush(),
+            Self::Zstd(writer) => writer.as_mut().map_or(Ok(()), |writer| writer.flush()),
         }
     }
 }
@@ -243,6 +262,9 @@ fn write_metadata_file(path: &Path) -> io::Result<()> {
 
 pub fn trace_metadata_path(trace_path: &Path) -> PathBuf {
     if let Some(file_name) = trace_path.file_name().and_then(|name| name.to_str()) {
+        if let Some(base) = file_name.strip_suffix(".jsonl.zst") {
+            return trace_path.with_file_name(format!("{}.meta.json", base));
+        }
         if let Some(base) = file_name.strip_suffix(".jsonl.gz") {
             return trace_path.with_file_name(format!("{}.meta.json", base));
         }

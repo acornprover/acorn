@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 import torch
+import zstandard
 from torch.utils.data import DataLoader, TensorDataset
 
 TRACE_SCHEMA = "acorn-activated-step-trace-v2"
@@ -61,6 +62,15 @@ class DatasetSplit:
     feature_names: list[str]
 
 
+@dataclass(frozen=True)
+class _LoadedRow:
+    features: list[float]
+    label: float
+    group: str
+    policy: str
+    outcome: str
+
+
 def _search_group(record: dict) -> str:
     return "\t".join(
         [
@@ -73,7 +83,12 @@ def _search_group(record: dict) -> str:
 
 
 def _iter_records(path: Path) -> Iterable[dict]:
-    opener = gzip.open if path.suffix == ".gz" else Path.open
+    if path.suffix == ".zst":
+        opener = zstandard.open
+    elif path.suffix == ".gz":
+        opener = gzip.open
+    else:
+        opener = Path.open
     with opener(path, "rt") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
@@ -93,6 +108,8 @@ def _iter_records(path: Path) -> Iterable[dict]:
 
 def trace_metadata_path(trace_path: Path) -> Path:
     name = trace_path.name
+    if name.endswith(".jsonl.zst"):
+        return trace_path.with_name(f"{name[:-len('.jsonl.zst')]}.meta.json")
     if name.endswith(".jsonl.gz"):
         return trace_path.with_name(f"{name[:-len('.jsonl.gz')]}.meta.json")
     if name.endswith(".jsonl"):
@@ -138,11 +155,17 @@ def load_trace_dataset(
     *,
     feature_names: list[str] | None = None,
     max_records: int | None = None,
+    sample_records: int | None = None,
+    seed: int = 42,
 ) -> TraceDataset:
-    feature_rows: list[list[float]] = []
-    labels: list[float] = []
-    groups: list[str] = []
-    metadata: Counter[str] = Counter()
+    if max_records is not None and max_records <= 0:
+        raise ValueError("max_records must be positive")
+    if sample_records is not None and sample_records <= 0:
+        raise ValueError("sample_records must be positive")
+
+    rows: list[_LoadedRow] = []
+    rng = random.Random(seed)
+    scanned_records = 0
     output_feature_names: list[str] | None = None
 
     for path in paths:
@@ -163,25 +186,44 @@ def load_trace_dataset(
             if not isinstance(label, bool):
                 raise ValueError(f"{path}: expected boolean used_in_final_proof")
 
-            feature_rows.append([float(vector[i]) for i in indices])
-            labels.append(float(label))
-            groups.append(_search_group(record))
-            metadata[f"policy:{record.get('policy', '')}"] += 1
-            metadata[f"outcome:{record.get('outcome', '')}"] += 1
+            row = _LoadedRow(
+                features=[float(vector[i]) for i in indices],
+                label=float(label),
+                group=_search_group(record),
+                policy=str(record.get("policy", "")),
+                outcome=str(record.get("outcome", "")),
+            )
+            scanned_records += 1
 
-            if max_records is not None and len(labels) >= max_records:
+            if sample_records is None:
+                rows.append(row)
+            elif len(rows) < sample_records:
+                rows.append(row)
+            else:
+                replacement_index = rng.randrange(scanned_records)
+                if replacement_index < sample_records:
+                    rows[replacement_index] = row
+
+            if max_records is not None and scanned_records >= max_records:
                 break
-        if max_records is not None and len(labels) >= max_records:
+        if max_records is not None and scanned_records >= max_records:
             break
 
-    if not labels:
+    if not rows:
         raise ValueError("no trace records loaded")
 
+    metadata: Counter[str] = Counter()
+    for row in rows:
+        metadata[f"policy:{row.policy}"] += 1
+        metadata[f"outcome:{row.outcome}"] += 1
+    metadata["loaded_records"] = len(rows)
+    metadata["scanned_records"] = scanned_records
+
     return TraceDataset(
-        features=torch.tensor(feature_rows, dtype=torch.float32),
-        labels=torch.tensor(labels, dtype=torch.float32),
+        features=torch.tensor([row.features for row in rows], dtype=torch.float32),
+        labels=torch.tensor([row.label for row in rows], dtype=torch.float32),
         feature_names=output_feature_names or [],
-        groups=groups,
+        groups=[row.group for row in rows],
         metadata=metadata,
     )
 

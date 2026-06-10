@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import torch
+import zstandard
 
 from acorn_training.data import (
     LEGACY_FEATURE_NAMES,
@@ -65,25 +66,34 @@ def _record(goal: str, index: int, label: bool) -> dict:
 
 
 class TrainingDataTest(unittest.TestCase):
+    def _write_trace(self, path: Path, rows: list[dict]) -> None:
+        trace_metadata_path(path).write_text(
+            json.dumps(
+                {
+                    "schema": TRACE_SCHEMA,
+                    "feature_vector": TEST_FEATURE_NAMES,
+                }
+            )
+        )
+        if path.suffix == ".zst":
+            opener = zstandard.open
+        elif path.suffix == ".gz":
+            opener = gzip.open
+        else:
+            opener = Path.open
+        with opener(path, "wt") as f:
+            f.write("\n".join(json.dumps(row) for row in rows) + "\n")
+
     def test_loads_trace_and_splits_by_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "trace.jsonl.gz"
+            path = Path(tmp) / "trace.jsonl.zst"
             rows = [
                 _record("a", 0, True),
                 _record("a", 1, False),
                 _record("b", 0, True),
                 _record("b", 1, False),
             ]
-            trace_metadata_path(path).write_text(
-                json.dumps(
-                    {
-                        "schema": TRACE_SCHEMA,
-                        "feature_vector": TEST_FEATURE_NAMES,
-                    }
-                )
-            )
-            with gzip.open(path, "wt") as f:
-                f.write("\n".join(json.dumps(row) for row in rows) + "\n")
+            self._write_trace(path, rows)
 
             dataset = load_trace_dataset([path])
             self.assertEqual(dataset.num_examples, 4)
@@ -101,6 +111,24 @@ class TrainingDataTest(unittest.TestCase):
             legacy_dataset = load_trace_dataset([path], feature_names=LEGACY_FEATURE_NAMES)
             self.assertEqual(legacy_dataset.features.shape[1], len(LEGACY_FEATURE_NAMES))
             self.assertEqual(legacy_dataset.feature_names, LEGACY_FEATURE_NAMES)
+
+    def test_reservoir_sample_scans_all_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.jsonl.zst"
+            second = Path(tmp) / "second.jsonl.zst"
+            self._write_trace(first, [_record("a", i, i == 0) for i in range(10)])
+            self._write_trace(second, [_record("b", i, i == 0) for i in range(10)])
+
+            dataset = load_trace_dataset(
+                [first, second],
+                sample_records=6,
+                seed=3,
+            )
+
+            self.assertEqual(dataset.num_examples, 6)
+            self.assertEqual(dataset.metadata["scanned_records"], 20)
+            self.assertEqual(dataset.metadata["loaded_records"], 6)
+            self.assertIn("foo\tb\t0\tonnx", dataset.groups)
 
     def test_model_exports_probability_shape(self) -> None:
         features = torch.randn(8, len(TEST_FEATURE_NAMES))

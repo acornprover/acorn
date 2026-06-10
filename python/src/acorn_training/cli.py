@@ -15,7 +15,7 @@ def _parser() -> argparse.ArgumentParser:
         "trace",
         nargs="+",
         type=Path,
-        help="Trace JSONL or JSONL.GZ file from `acorn eval --trace-out`.",
+        help="Trace JSONL, JSONL.ZST, or JSONL.GZ file from `acorn eval --trace-out`.",
     )
     parser.add_argument(
         "--out",
@@ -52,7 +52,13 @@ def _parser() -> argparse.ArgumentParser:
         "--max-records",
         type=int,
         default=None,
-        help="Limit loaded trace rows for smoke tests or quick iteration.",
+        help="Stop reading after this many trace rows, for smoke tests or quick iteration.",
+    )
+    parser.add_argument(
+        "--sample-records",
+        type=int,
+        default=None,
+        help="Reservoir-sample this many rows across all read trace rows.",
     )
     parser.add_argument(
         "--inspect-only",
@@ -84,6 +90,8 @@ def main(argv: list[str] | None = None) -> None:
         args.trace,
         feature_names=feature_names,
         max_records=args.max_records,
+        sample_records=args.sample_records,
+        seed=args.seed,
     )
     _print_dataset_summary(dataset)
     if args.inspect_only:

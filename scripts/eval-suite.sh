@@ -19,8 +19,8 @@ usage() {
     cat <<EOF
 Usage: ./scripts/eval-suite.sh [options]
 
-Runs traced evals sequentially and writes gzip-compressed JSONL traces
-under OUT/traces/*.jsonl.gz.
+Runs traced evals sequentially and writes zstd-compressed JSONL traces
+under OUT/traces/*.jsonl.zst.
 
 Each run also writes OUT/manifest.txt, git state files, and updates
 tmp/acorn-eval-latest to point at the newest run directory.
@@ -202,7 +202,7 @@ for policy in "${policies[@]}"; do
 
     log_file="$out_dir/logs/trace-$policy.log"
     status_file="$out_dir/status/trace-$policy.status"
-    trace_file="$out_dir/traces/$policy.jsonl.gz"
+    trace_file="$out_dir/traces/$policy.jsonl.zst"
 
     echo "[$(date -Is)] Starting policy: $policy"
     start="$(date -Is)"
@@ -244,7 +244,7 @@ echo "Run directory:"
 du -sh "$out_dir"
 echo
 echo "Trace files:"
-du -h "$out_dir"/traces/*.jsonl "$out_dir"/traces/*.jsonl.gz 2>/dev/null || true
+du -h "$out_dir"/traces/*.jsonl "$out_dir"/traces/*.jsonl.gz "$out_dir"/traces/*.jsonl.zst 2>/dev/null || true
 echo
 echo "Status files:"
 for status_file in "$out_dir"/status/*.status; do

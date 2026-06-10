@@ -825,7 +825,6 @@ mod tests {
     use assert_fs::fixture::ChildPath;
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
-    use flate2::read::GzDecoder;
     use std::io::Read;
 
     /// Creates a standard Acorn project layout with acorn.toml, src/, and build/ directories.
@@ -2041,7 +2040,7 @@ mod tests {
             },
         );
 
-        let trace_file = build.child("trace.jsonl.gz");
+        let trace_file = build.child("trace.jsonl.zst");
         let trace_writer =
             SearchTraceWriter::create(trace_file.path()).expect("trace writer should open");
 
@@ -2084,9 +2083,10 @@ mod tests {
         let trace_file_reader =
             std::fs::File::open(trace_file.path()).expect("trace file should exist");
         let mut trace = String::new();
-        GzDecoder::new(trace_file_reader)
+        zstd::stream::read::Decoder::new(trace_file_reader)
+            .expect("zstd trace decoder should initialize")
             .read_to_string(&mut trace)
-            .expect("trace file should decode as gzip JSONL");
+            .expect("trace file should decode as zstd JSONL");
         assert!(!trace.trim().is_empty(), "trace file should not be empty");
 
         let mut saw_positive = false;
