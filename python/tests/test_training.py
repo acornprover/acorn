@@ -245,6 +245,7 @@ class TrainingDataTest(unittest.TestCase):
             )
             model, metrics = train_model(split, config)
             self.assertEqual(len(metrics), 1)
+            self.assertTrue(metrics[0].is_best)
 
             output_path = Path(tmp) / "scorer.onnx"
             export_onnx(model, output_path, dataset.feature_names)
@@ -296,6 +297,7 @@ class TrainingDataTest(unittest.TestCase):
         )
         model, metrics = train_model(split, config)
         self.assertEqual(len(metrics), 1)
+        self.assertTrue(metrics[0].is_best)
 
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "scorer.onnx"

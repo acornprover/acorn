@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,7 @@ class EpochMetrics:
     val_loss: float
     val_accuracy: float
     val_positive_rate: float
+    is_best: bool = False
 
 
 def choose_device(raw: str) -> torch.device:
@@ -134,6 +136,8 @@ def train_model(
     )
 
     metrics: list[EpochMetrics] = []
+    best_val_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
     for epoch in range(1, config.epochs + 1):
         train_loss, _, _ = _run_epoch(
             model,
@@ -148,6 +152,10 @@ def train_model(
             criterion,
             device=device,
         )
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
         metrics.append(
             EpochMetrics(
                 epoch=epoch,
@@ -155,9 +163,11 @@ def train_model(
                 val_loss=val_loss,
                 val_accuracy=val_accuracy,
                 val_positive_rate=val_positive_rate,
+                is_best=is_best,
             )
         )
 
+    model.load_state_dict(best_state)
     return model, metrics
 
 

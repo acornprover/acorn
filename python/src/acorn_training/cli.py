@@ -129,14 +129,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     model, metrics = train_model(split, config)
     for metric in metrics:
+        best_marker = " *" if metric.is_best else ""
         print(
-            f"epoch {metric.epoch}: "
+            f"epoch {metric.epoch}{best_marker}: "
             f"train_loss={metric.train_loss:.6f} "
             f"val_loss={metric.val_loss:.6f} "
             f"val_accuracy={metric.val_accuracy:.4f} "
             f"val_predicted_positive_rate={metric.val_positive_rate:.4f}"
         )
+    best_metric = min(metrics, key=lambda metric: metric.val_loss)
     export_onnx(model, args.out, split.feature_names)
+    print(f"exported best epoch {best_metric.epoch} with val_loss={best_metric.val_loss:.6f}")
     print(f"wrote {args.out}")
 
 
