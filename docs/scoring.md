@@ -55,7 +55,8 @@ The first trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
   from successful eval searches; paths must end in `.jsonl.zst`
-- a sidecar metadata file next to the trace, for example `onnx.meta.json` for `onnx.jsonl.zst`,
+- a sidecar metadata file next to the trace, for example `legacy.meta.json` for
+  `legacy.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
   active id, queue score/order fields, rule, truthiness, the current numeric `feature_vector`, and
@@ -86,11 +87,11 @@ buckets above.
 
 The current policy options are:
 
-- `onnx`: the default embedded ONNX scorer, with shallow-first ordering
+- `legacy`: the default embedded legacy ONNX scorer, with shallow-first ordering
 - `handcrafted`: the old hand-written scorer, with shallow-first ordering
 - `depth-first`: constant scorer, so queue ties fall back to insertion/order structure, with
   shallow-first ordering
-- `onnx-no-shallow`: the embedded ONNX scorer with shallow status removed from the ordinary
+- `legacy-no-shallow`: the embedded legacy ONNX scorer with shallow status removed from the ordinary
   ordering key
 - `model`: an external ONNX scorer loaded from `--model`, with shallow-first ordering
 - `model-no-shallow`: an external ONNX scorer loaded from `--model`, with shallow status removed
@@ -100,15 +101,14 @@ The scoring config is threaded through `Builder`, `Processor`, `Prover`, and `Pa
 workers can carry both a policy and an optional external model path. `scripts/eval-suite.sh` runs
 the standard traced cases by default:
 
-- `onnx`
+- `legacy`
 - `depth-first`
 - `handcrafted`
-- `onnx-no-shallow`
-- `trained-5m`
-- `trained-5m-no-shallow`
+- `legacy-no-shallow`
+- `model-20260610a`
+- `model-20260610a-no-shallow`
 
-The trained cases currently point at
-`tmp/models/scorer-catalog-5m-h128-l3-e20-best.onnx`.
+The `model-20260610a` cases currently point at `tmp/models/model-20260610a.onnx`.
 
 ## Current Scoring Architecture
 
@@ -138,20 +138,21 @@ include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx")
 
 `ScoringPolicy` now exposes these choices:
 
-- `Onnx`
+- `Legacy`
 - `Handcrafted`
 - `DepthFirst`
-- `OnnxNoShallow`
+- `LegacyNoShallow`
 - `Model`
 - `ModelNoShallow`
 
-The eval CLI exposes them as `onnx`, `handcrafted`, `depth-first`, `onnx-no-shallow`, `model`, and
-`model-no-shallow`. `model` policies require `--model PATH`; Rust loads the adjacent
+The eval CLI exposes them as `legacy`, `handcrafted`, `depth-first`, `legacy-no-shallow`, `model`,
+and `model-no-shallow`. The old names `onnx` and `onnx-no-shallow` are accepted as aliases for the
+legacy embedded model. `model` policies require `--model PATH`; Rust loads the adjacent
 `PATH.with_extension("features.json")` contract and feeds the model exactly those feature columns.
 
 ## Policy Around The Model
 
-The model score is not the whole ordering. Under the default `onnx` policy, `Score` orders proof
+The model score is not the whole ordering. Under the default `legacy` policy, `Score` orders proof
 steps lexicographically by:
 
 1. whether the step is a contradiction
@@ -168,7 +169,7 @@ This matters because an ONNX replacement cannot learn to activate a useful deep 
 unhelpful shallow step. That choice is made outside the model. The shallow heuristic is useful for
 some proof-validation behavior, but it is also acting as a global search policy.
 
-`onnx-no-shallow` was added to ablate this ordering. It preserves whether a step is shallow for
+`legacy-no-shallow` was added to ablate this ordering. It preserves whether a step is shallow for
 shallow proof mode, but neutralizes shallow status in the ordinary queue ordering. The first full
 eval attempt hit a stack-growth bug that is now fixed in reduced form, so this ablation should be
 rerun.
@@ -391,7 +392,7 @@ that the first wave of alternate-policy bugs has been fixed and the first traine
 The policy flag did its job: it found real failures outside the default proof paths. The reduced
 bugs from the first ablation pass are now fixed:
 
-- `onnx-no-shallow` stack growth from cyclic named-witness placement
+- `legacy-no-shallow` stack growth from cyclic named-witness placement
 - `handcrafted` certificate generation for the `number_theory/arithmetic_functions.ac` line 154
   proof path
 - `handcrafted` certificate generation for the `fin_matrix_det.ac` line 225 proof path

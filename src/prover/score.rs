@@ -138,9 +138,13 @@ mod tests {
     #[test]
     fn shallow_status_orders_scores_by_default() {
         let scorer = ConstantScorer;
-        let deep = Score::new(ScoringPolicy::Onnx, &scorer, &features(ShallowStatus::Deep));
+        let deep = Score::new(
+            ScoringPolicy::Legacy,
+            &scorer,
+            &features(ShallowStatus::Deep),
+        );
         let shallow = Score::new(
-            ScoringPolicy::Onnx,
+            ScoringPolicy::Legacy,
             &scorer,
             &features(ShallowStatus::Unspent),
         );
@@ -151,15 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn onnx_no_shallow_keeps_shallow_status_out_of_ordering() {
+    fn legacy_no_shallow_keeps_shallow_status_out_of_ordering() {
         let scorer = ConstantScorer;
         let deep = Score::new(
-            ScoringPolicy::OnnxNoShallow,
+            ScoringPolicy::LegacyNoShallow,
             &scorer,
             &features(ShallowStatus::Deep),
         );
         let shallow = Score::new(
-            ScoringPolicy::OnnxNoShallow,
+            ScoringPolicy::LegacyNoShallow,
             &scorer,
             &features(ShallowStatus::Unspent),
         );

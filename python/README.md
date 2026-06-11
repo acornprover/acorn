@@ -35,7 +35,7 @@ For quick inspection without training from raw traces:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/onnx.jsonl.zst --inspect-only
+uv run acorn-train-scorer ../traces/legacy.jsonl.zst --inspect-only
 ```
 
 For large eval-suite trace corpora, use reservoir sampling to keep memory bounded while still

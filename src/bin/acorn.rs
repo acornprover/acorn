@@ -641,8 +641,8 @@ enum Command {
         /// Activation queue policy to use for proof search
         #[clap(
             long,
-            default_value = "onnx",
-            help = "Activation queue policy. Options: onnx, handcrafted, depth-first, onnx-no-shallow, model, model-no-shallow.",
+            default_value = "legacy",
+            help = "Activation queue policy. Options: legacy, handcrafted, depth-first, legacy-no-shallow, model, model-no-shallow. Legacy aliases: onnx, onnx-no-shallow.",
             value_name = "POLICY"
         )]
         policy: String,
@@ -2039,7 +2039,7 @@ mod tests {
             "--skip",
             "01",
             "--policy",
-            "onnx-no-shallow",
+            "legacy-no-shallow",
             "--trace-out",
             "/tmp/acorn-trace.jsonl.zst",
             "--trace-shard-rows",
@@ -2071,7 +2071,7 @@ mod tests {
                 assert!(shallow);
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
-                assert_eq!(policy, "onnx-no-shallow");
+                assert_eq!(policy, "legacy-no-shallow");
                 assert_eq!(model, None);
                 assert_eq!(policy_label, None);
                 assert_eq!(
@@ -2105,7 +2105,8 @@ mod tests {
 
     #[test]
     fn test_parse_eval_policy() {
-        assert_eq!(parse_eval_policy("onnx").unwrap(), ScoringPolicy::Onnx);
+        assert_eq!(parse_eval_policy("legacy").unwrap(), ScoringPolicy::Legacy);
+        assert_eq!(parse_eval_policy("onnx").unwrap(), ScoringPolicy::Legacy);
         assert_eq!(
             parse_eval_policy("handcrafted").unwrap(),
             ScoringPolicy::Handcrafted
@@ -2115,8 +2116,12 @@ mod tests {
             ScoringPolicy::DepthFirst
         );
         assert_eq!(
+            parse_eval_policy("legacy-no-shallow").unwrap(),
+            ScoringPolicy::LegacyNoShallow
+        );
+        assert_eq!(
             parse_eval_policy("onnx-no-shallow").unwrap(),
-            ScoringPolicy::OnnxNoShallow
+            ScoringPolicy::LegacyNoShallow
         );
         assert_eq!(parse_eval_policy("model").unwrap(), ScoringPolicy::Model);
         assert_eq!(

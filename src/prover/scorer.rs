@@ -20,17 +20,17 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScoringPolicy {
-    Onnx,
+    Legacy,
     Handcrafted,
     DepthFirst,
-    OnnxNoShallow,
+    LegacyNoShallow,
     Model,
     ModelNoShallow,
 }
 
 impl Default for ScoringPolicy {
     fn default() -> Self {
-        Self::Onnx
+        Self::Legacy
     }
 }
 
@@ -40,7 +40,7 @@ impl ScoringPolicy {
     }
 
     pub fn uses_shallow_ordering(self) -> bool {
-        !matches!(self, Self::OnnxNoShallow | Self::ModelNoShallow)
+        !matches!(self, Self::LegacyNoShallow | Self::ModelNoShallow)
     }
 
     pub fn requires_model(self) -> bool {
@@ -48,17 +48,17 @@ impl ScoringPolicy {
     }
 
     pub fn options() -> &'static str {
-        "onnx, handcrafted, depth-first, onnx-no-shallow, model, model-no-shallow"
+        "legacy, handcrafted, depth-first, legacy-no-shallow, model, model-no-shallow"
     }
 }
 
 impl fmt::Display for ScoringPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::Onnx => "onnx",
+            Self::Legacy => "legacy",
             Self::Handcrafted => "handcrafted",
             Self::DepthFirst => "depth-first",
-            Self::OnnxNoShallow => "onnx-no-shallow",
+            Self::LegacyNoShallow => "legacy-no-shallow",
             Self::Model => "model",
             Self::ModelNoShallow => "model-no-shallow",
         };
@@ -71,10 +71,10 @@ impl FromStr for ScoringPolicy {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
-            "onnx" => Ok(Self::Onnx),
+            "legacy" | "onnx" => Ok(Self::Legacy),
             "handcrafted" => Ok(Self::Handcrafted),
             "depth-first" => Ok(Self::DepthFirst),
-            "onnx-no-shallow" => Ok(Self::OnnxNoShallow),
+            "legacy-no-shallow" | "onnx-no-shallow" => Ok(Self::LegacyNoShallow),
             "model" => Ok(Self::Model),
             "model-no-shallow" => Ok(Self::ModelNoShallow),
             _ => Err(format!(
@@ -130,7 +130,7 @@ impl ScoringConfig {
 
     pub fn load_scorer(&self) -> Result<Box<dyn Scorer + Send + Sync>, Box<dyn Error>> {
         match self.policy {
-            ScoringPolicy::Onnx | ScoringPolicy::OnnxNoShallow => {
+            ScoringPolicy::Legacy | ScoringPolicy::LegacyNoShallow => {
                 Ok(Box::new(ScoringModel::load().map_err(|e| {
                     format!("failed to load embedded model: {}", e)
                 })?))

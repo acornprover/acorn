@@ -5,8 +5,8 @@
 # Examples:
 #   ./scripts/eval-suite.sh
 #   ./scripts/eval-suite.sh --out tmp/my-eval --skip-build
-#   ./scripts/eval-suite.sh --policy depth-first --policy onnx
-#   ./scripts/eval-suite.sh --case trained=model:tmp/models/scorer.onnx
+#   ./scripts/eval-suite.sh --policy depth-first --policy legacy
+#   ./scripts/eval-suite.sh --case candidate=model:tmp/models/scorer.onnx
 
 set -uo pipefail
 
@@ -55,7 +55,7 @@ case_names=()
 case_policies=()
 case_models=()
 case_specs=()
-standard_model="tmp/models/scorer-catalog-5m-h128-l3-e20-best.onnx"
+standard_model="tmp/models/model-20260610a.onnx"
 
 add_case() {
     local name="$1"
@@ -94,12 +94,12 @@ add_case_spec() {
 }
 
 add_standard_cases() {
-    add_case "onnx" "onnx"
+    add_case "legacy" "legacy"
     add_case "depth-first" "depth-first"
     add_case "handcrafted" "handcrafted"
-    add_case "onnx-no-shallow" "onnx-no-shallow"
-    add_case "trained-5m" "model" "$standard_model"
-    add_case "trained-5m-no-shallow" "model-no-shallow" "$standard_model"
+    add_case "legacy-no-shallow" "legacy-no-shallow"
+    add_case "model-20260610a" "model" "$standard_model"
+    add_case "model-20260610a-no-shallow" "model-no-shallow" "$standard_model"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -304,7 +304,7 @@ for i in "${!case_names[@]}"; do
     log_file="$out_dir/logs/trace-$case_name.log"
     status_file="$out_dir/status/trace-$case_name.status"
     trace_file="$out_dir/traces/$case_name.jsonl.zst"
-    trace_pattern="$out_dir/traces/$case_name-*.jsonl.zst"
+    trace_pattern="$out_dir/traces/$case_name-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst"
 
     echo "[$(date -Is)] Starting case: $case_name ($policy)"
     start="$(date -Is)"

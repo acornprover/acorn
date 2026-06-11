@@ -2097,7 +2097,7 @@ mod tests {
             assert_eq!(record["module"], "foo");
             assert_eq!(record["goal"], "excluded_middle");
             assert_eq!(record["skip"], 0);
-            assert_eq!(record["policy"], "onnx");
+            assert_eq!(record["policy"], "legacy");
             assert!(record["activation_index"].as_u64().is_some());
             assert!(record["passive_id"].as_u64().is_some());
             assert!(record["active_id"].is_u64() || record["active_id"].is_null());
