@@ -4,6 +4,7 @@ import json
 import copy
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import onnx
 import torch
@@ -25,6 +26,7 @@ class TrainConfig:
     hidden_layers: int
     seed: int
     device: str
+    threads: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,8 +104,13 @@ def _run_epoch(
 def train_model(
     split: DatasetSplit,
     config: TrainConfig,
+    progress: Callable[[EpochMetrics], None] | None = None,
 ) -> tuple[ScorerNet, list[EpochMetrics]]:
     torch.manual_seed(config.seed)
+    if config.threads is not None:
+        if config.threads <= 0:
+            raise ValueError("threads must be positive")
+        torch.set_num_threads(config.threads)
     device = choose_device(config.device)
 
     model = ScorerNet.from_training_features(
@@ -156,16 +163,17 @@ def train_model(
         if is_best:
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
-        metrics.append(
-            EpochMetrics(
-                epoch=epoch,
-                train_loss=train_loss,
-                val_loss=val_loss,
-                val_accuracy=val_accuracy,
-                val_positive_rate=val_positive_rate,
-                is_best=is_best,
-            )
+        metric = EpochMetrics(
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            val_accuracy=val_accuracy,
+            val_positive_rate=val_positive_rate,
+            is_best=is_best,
         )
+        metrics.append(metric)
+        if progress is not None:
+            progress(metric)
 
     model.load_state_dict(best_state)
     return model, metrics

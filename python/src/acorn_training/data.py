@@ -31,7 +31,7 @@ class TraceDataset:
     features: torch.Tensor
     labels: torch.Tensor
     feature_names: list[str]
-    groups: list[str | int]
+    groups: list[str | int] | torch.Tensor
     metadata: Counter[str]
 
     @property
@@ -317,7 +317,7 @@ def load_shard_dataset(
         features=torch.cat(features, dim=0),
         labels=torch.cat(labels, dim=0),
         feature_names=feature_names or [],
-        groups=torch.cat(group_ids, dim=0).tolist(),
+        groups=torch.cat(group_ids, dim=0),
         metadata=metadata,
     )
 
@@ -331,25 +331,39 @@ def split_by_search(
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("validation_fraction must be between 0 and 1")
 
-    unique_groups = sorted(set(dataset.groups))
     rng = random.Random(seed)
-    rng.shuffle(unique_groups)
-    val_group_count = max(1, int(round(len(unique_groups) * validation_fraction)))
-    if val_group_count >= len(unique_groups):
-        val_group_count = max(1, len(unique_groups) - 1)
-    val_groups = set(unique_groups[:val_group_count])
+    if isinstance(dataset.groups, torch.Tensor):
+        group_ids = dataset.groups.to(dtype=torch.long)
+        unique_groups = torch.unique(group_ids).tolist()
+        rng.shuffle(unique_groups)
+        val_group_count = max(1, int(round(len(unique_groups) * validation_fraction)))
+        if val_group_count >= len(unique_groups):
+            val_group_count = max(1, len(unique_groups) - 1)
+        val_groups = torch.tensor(unique_groups[:val_group_count], dtype=torch.long)
+        lookup = torch.zeros(int(group_ids.max().item()) + 1, dtype=torch.bool)
+        lookup[val_groups] = True
+        val_mask = lookup.index_select(0, group_ids)
+        val_tensor = val_mask.nonzero(as_tuple=False).flatten()
+        train_tensor = (~val_mask).nonzero(as_tuple=False).flatten()
+    else:
+        unique_groups = sorted(set(dataset.groups))
+        rng.shuffle(unique_groups)
+        val_group_count = max(1, int(round(len(unique_groups) * validation_fraction)))
+        if val_group_count >= len(unique_groups):
+            val_group_count = max(1, len(unique_groups) - 1)
+        val_groups = set(unique_groups[:val_group_count])
 
-    val_indices = [
-        i for i, group in enumerate(dataset.groups) if group in val_groups
-    ]
-    train_indices = [
-        i for i, group in enumerate(dataset.groups) if group not in val_groups
-    ]
-    if not train_indices or not val_indices:
+        val_indices = [
+            i for i, group in enumerate(dataset.groups) if group in val_groups
+        ]
+        train_indices = [
+            i for i, group in enumerate(dataset.groups) if group not in val_groups
+        ]
+        train_tensor = torch.tensor(train_indices, dtype=torch.long)
+        val_tensor = torch.tensor(val_indices, dtype=torch.long)
+
+    if train_tensor.numel() == 0 or val_tensor.numel() == 0:
         raise ValueError("split produced an empty train or validation set")
-
-    train_tensor = torch.tensor(train_indices, dtype=torch.long)
-    val_tensor = torch.tensor(val_indices, dtype=torch.long)
     return DatasetSplit(
         train_features=dataset.features.index_select(0, train_tensor),
         train_labels=dataset.labels.index_select(0, train_tensor),

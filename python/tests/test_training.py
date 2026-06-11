@@ -208,6 +208,83 @@ class TrainingDataTest(unittest.TestCase):
             self.assertEqual(manifest["source_trace_rows"], [8, 8])
             self.assertEqual(sum(shard["rows"] for shard in manifest["shards"]), 5)
 
+    def test_builds_positive_preserving_sampled_training_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "trace.jsonl.zst"
+            out_dir = Path(tmp) / "sampled"
+            rows = [
+                _record("a", 0, True),
+                _record("a", 1, False),
+                _record("b", 0, False),
+                _record("c", 0, True),
+                _record("d", 0, False),
+                _record("e", 0, True),
+                _record("f", 0, False),
+            ]
+            self._write_trace(trace, rows)
+
+            summary = build_shards(
+                ShardBuildConfig(
+                    trace_paths=[trace],
+                    out_dir=out_dir,
+                    shard_rows=3,
+                    max_negative_records=2,
+                    seed=7,
+                ),
+                progress=None,
+            )
+
+            self.assertEqual(summary.scanned_records, 7)
+            self.assertEqual(summary.written_records, 5)
+            self.assertEqual(summary.positive_records, 3)
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            self.assertTrue(manifest["sampled"])
+            self.assertEqual(manifest["sampling_mode"], "all_positives_max_negatives")
+            self.assertEqual(manifest["max_negative_records"], 2)
+            self.assertEqual(manifest["positive_records"], 3)
+            self.assertEqual(manifest["negative_records"], 2)
+
+            dataset = load_shard_dataset([out_dir])
+            self.assertEqual(dataset.num_examples, 5)
+            self.assertEqual(dataset.num_positive, 3)
+            self.assertEqual(dataset.num_negative, 2)
+
+    def test_builds_positive_preserving_sampled_training_shards_in_parallel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.jsonl.zst"
+            second = Path(tmp) / "second.jsonl.zst"
+            out_dir = Path(tmp) / "sampled"
+            self._write_trace(first, [_record("a", i, i == 0) for i in range(6)])
+            self._write_trace(second, [_record("b", i, i == 0) for i in range(6)])
+
+            summary = build_shards(
+                ShardBuildConfig(
+                    trace_paths=[first, second],
+                    out_dir=out_dir,
+                    shard_rows=3,
+                    max_negative_records=4,
+                    workers=2,
+                    seed=7,
+                ),
+                progress=None,
+            )
+
+            self.assertEqual(summary.scanned_records, 12)
+            self.assertEqual(summary.written_records, 6)
+            self.assertEqual(summary.positive_records, 2)
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            self.assertEqual(
+                manifest["sampling_mode"],
+                "all_positives_file_stratified_max_negatives",
+            )
+            self.assertEqual(manifest["workers"], 2)
+
+            dataset = load_shard_dataset([out_dir])
+            self.assertEqual(dataset.num_examples, 6)
+            self.assertEqual(dataset.num_positive, 2)
+            self.assertEqual(dataset.num_negative, 4)
+            self.assertEqual(dataset.metadata["policy:onnx"], 6)
+
     def test_trains_from_loaded_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / "trace.jsonl.zst"

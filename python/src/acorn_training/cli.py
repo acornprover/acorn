@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .data import LEGACY_FEATURE_NAMES, load_shard_dataset, load_trace_dataset, split_by_search
-from .train import TrainConfig, export_onnx, train_model
+from .train import EpochMetrics, TrainConfig, export_onnx, train_model
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,6 +28,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--hidden-size", type=int, default=32)
+    parser.add_argument(
+        "--hidden-size-sweep",
+        default=None,
+        help="Comma-separated hidden sizes to train after one data load, e.g. 128,256,512.",
+    )
     parser.add_argument("--hidden-layers", type=int, default=2)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -47,6 +52,12 @@ def _parser() -> argparse.ArgumentParser:
         "--device",
         default="auto",
         help="Torch device: auto, cpu, cuda, cuda:0, etc.",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="CPU threads for torch training. Default: torch default.",
     )
     parser.add_argument(
         "--max-records",
@@ -69,13 +80,58 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _print_dataset_summary(dataset) -> None:
-    print(f"examples: {dataset.num_examples}")
-    print(f"positive: {dataset.num_positive}")
-    print(f"negative: {dataset.num_negative}")
-    print(f"positive_rate: {dataset.positive_rate:.6f}")
+    print(f"examples: {dataset.num_examples}", flush=True)
+    print(f"positive: {dataset.num_positive}", flush=True)
+    print(f"negative: {dataset.num_negative}", flush=True)
+    print(f"positive_rate: {dataset.positive_rate:.6f}", flush=True)
     for key, count in sorted(dataset.metadata.items()):
-        print(f"{key}: {count}")
-    print(f"features: {len(dataset.feature_names)}")
+        print(f"{key}: {count}", flush=True)
+    print(f"features: {len(dataset.feature_names)}", flush=True)
+
+
+def _hidden_sizes(args) -> list[int]:
+    if args.hidden_size_sweep is None:
+        return [args.hidden_size]
+    sizes = []
+    for raw in args.hidden_size_sweep.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        size = int(raw)
+        if size <= 0:
+            raise ValueError("hidden sizes must be positive")
+        sizes.append(size)
+    if not sizes:
+        raise ValueError("hidden-size-sweep must include at least one size")
+    return sizes
+
+
+def _output_path(template: Path, *, hidden_size: int, hidden_layers: int, sweep: bool) -> Path:
+    raw = str(template)
+    if "{hidden_size}" in raw or "{hidden_layers}" in raw:
+        return Path(
+            raw.format(hidden_size=hidden_size, hidden_layers=hidden_layers)
+        )
+    if not sweep:
+        return template
+    suffix = "".join(template.suffixes)
+    if suffix:
+        stem = template.name[: -len(suffix)]
+    else:
+        stem = template.name
+    return template.with_name(f"{stem}-h{hidden_size}-l{hidden_layers}{suffix}")
+
+
+def _print_epoch(prefix: str, metric: EpochMetrics) -> None:
+    best_marker = " *" if metric.is_best else ""
+    print(
+        f"{prefix} epoch {metric.epoch}{best_marker}: "
+        f"train_loss={metric.train_loss:.6f} "
+        f"val_loss={metric.val_loss:.6f} "
+        f"val_accuracy={metric.val_accuracy:.4f} "
+        f"val_predicted_positive_rate={metric.val_positive_rate:.4f}",
+        flush=True,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -112,35 +168,62 @@ def main(argv: list[str] | None = None) -> None:
     if args.inspect_only:
         return
 
+    print("splitting train/validation groups", flush=True)
     split = split_by_search(
         dataset,
         validation_fraction=args.validation_fraction,
         seed=args.seed,
     )
-    config = TrainConfig(
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        hidden_size=args.hidden_size,
-        hidden_layers=args.hidden_layers,
-        seed=args.seed,
-        device=args.device,
-    )
-    model, metrics = train_model(split, config)
-    for metric in metrics:
-        best_marker = " *" if metric.is_best else ""
-        print(
-            f"epoch {metric.epoch}{best_marker}: "
-            f"train_loss={metric.train_loss:.6f} "
-            f"val_loss={metric.val_loss:.6f} "
-            f"val_accuracy={metric.val_accuracy:.4f} "
-            f"val_predicted_positive_rate={metric.val_positive_rate:.4f}"
+    del dataset
+
+    sizes = _hidden_sizes(args)
+    sweep = len(sizes) > 1
+    best_by_size: list[tuple[int, EpochMetrics, Path]] = []
+    for hidden_size in sizes:
+        prefix = f"h{hidden_size}/l{args.hidden_layers}"
+        print(f"training {prefix}", flush=True)
+        config = TrainConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            hidden_size=hidden_size,
+            hidden_layers=args.hidden_layers,
+            seed=args.seed,
+            device=args.device,
+            threads=args.threads,
         )
-    best_metric = min(metrics, key=lambda metric: metric.val_loss)
-    export_onnx(model, args.out, split.feature_names)
-    print(f"exported best epoch {best_metric.epoch} with val_loss={best_metric.val_loss:.6f}")
-    print(f"wrote {args.out}")
+        model, metrics = train_model(
+            split,
+            config,
+            progress=lambda metric, prefix=prefix: _print_epoch(prefix, metric),
+        )
+        best_metric = min(metrics, key=lambda metric: metric.val_loss)
+        output_path = _output_path(
+            args.out,
+            hidden_size=hidden_size,
+            hidden_layers=args.hidden_layers,
+            sweep=sweep,
+        )
+        export_onnx(model, output_path, split.feature_names)
+        best_by_size.append((hidden_size, best_metric, output_path))
+        print(
+            f"{prefix} exported best epoch {best_metric.epoch} "
+            f"with val_loss={best_metric.val_loss:.6f}",
+            flush=True,
+        )
+        print(f"{prefix} wrote {output_path}", flush=True)
+
+    if sweep:
+        print("validation summary:", flush=True)
+        for hidden_size, best_metric, output_path in best_by_size:
+            print(
+                f"h{hidden_size}/l{args.hidden_layers}: "
+                f"best_epoch={best_metric.epoch} "
+                f"val_loss={best_metric.val_loss:.6f} "
+                f"path={output_path}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

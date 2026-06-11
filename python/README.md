@@ -79,7 +79,22 @@ group ids for train/validation splitting, but training wants to shuffle across m
 For a full corpus conversion, use a bounded shuffle buffer or policy-balanced sampling before writing
 shards so early training batches are not dominated by trace-file order.
 
-The first converter supports reservoir sampling:
+The converter supports either uniform reservoir sampling or positive-preserving negative sampling.
+The positive-preserving mode keeps every `used_in_final_proof=true` row and reservoir-samples only
+negative rows, which is the normal choice for serious scorer training:
+
+```bash
+uv run acorn-build-scorer-shards TRACE... \
+  --max-negatives 20000000 \
+  --shard-rows 1000000 \
+  --workers 0 \
+  --out ../tmp/shards
+```
+
+`--workers 0` uses one worker per trace file up to the local CPU count. Parallel negative sampling is
+file-stratified by trace size, then merged into a normal shard manifest.
+
+Uniform reservoir sampling is still useful for small smoke-test datasets:
 
 ```bash
 uv run acorn-build-scorer-shards TRACE... \

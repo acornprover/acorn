@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .data import LEGACY_FEATURE_NAMES
@@ -36,12 +37,24 @@ def _parser() -> argparse.ArgumentParser:
         help="Reservoir-sample this many rows before writing shards.",
     )
     parser.add_argument(
+        "--max-negatives",
+        type=int,
+        default=None,
+        help="Keep all positive rows and reservoir-sample at most this many negative rows.",
+    )
+    parser.add_argument(
         "--max-records",
         type=int,
         default=None,
         help="Stop reading after this many trace rows, for smoke tests.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Parallel workers for positive-preserving sharding. Use 0 for auto. Default: 0.",
+    )
     parser.add_argument(
         "--features",
         choices=["all", "legacy"],
@@ -75,6 +88,9 @@ def main(argv: list[str] | None = None) -> None:
         feature_names = args.feature
     elif args.features == "legacy":
         feature_names = LEGACY_FEATURE_NAMES
+    workers = args.workers
+    if workers == 0:
+        workers = min(os.cpu_count() or 1, len(args.trace))
 
     summary = build_shards(
         ShardBuildConfig(
@@ -83,10 +99,12 @@ def main(argv: list[str] | None = None) -> None:
             feature_names=feature_names,
             shard_rows=args.shard_rows,
             sample_records=args.sample_records,
+            max_negative_records=args.max_negatives,
             max_records=args.max_records,
             seed=args.seed,
             overwrite=args.overwrite,
             progress_interval=args.progress_interval,
+            workers=workers,
         )
     )
     print(f"wrote {summary.written_records} rows to {summary.shard_count} shards")
