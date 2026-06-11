@@ -106,8 +106,14 @@ the standard traced cases by default:
 - `legacy-no-shallow`
 - `model-20260610a`
 - `model-20260610a-no-shallow`
+- `model-20260611-e20-h256-l3`
+- `model-20260611-e50-h512-l3`
 
-The `model-20260610a` cases currently point at `tmp/models/model-20260610a.onnx`.
+The current external model cases point at:
+
+- `model-20260610a`: `tmp/models/model-20260610a.onnx`
+- `model-20260611-e20-h256-l3`: `tmp/models/model-20260611-e20-h256-l3.onnx`
+- `model-20260611-e50-h512-l3`: `tmp/models/model-20260611-e50-h512-l3.onnx`
 
 ## Current Scoring Architecture
 

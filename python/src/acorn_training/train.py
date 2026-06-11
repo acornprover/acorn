@@ -10,7 +10,7 @@ import onnx
 import torch
 from torch import nn
 
-from .data import DatasetSplit, make_loader
+from .data import DatasetSplit
 from .model import ProbabilityScorer, ScorerNet
 
 FEATURE_CONTRACT_SCHEMA = "acorn-scorer-feature-contract-v1"
@@ -60,10 +60,13 @@ def _positive_weight(labels: torch.Tensor) -> torch.Tensor:
 
 def _run_epoch(
     model: ScorerNet,
-    loader,
+    features: torch.Tensor,
+    labels: torch.Tensor,
     criterion: nn.Module,
     *,
-    device: torch.device,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[float, float, float]:
     training = optimizer is not None
@@ -75,22 +78,41 @@ def _run_epoch(
     predicted_positive = 0
 
     with torch.set_grad_enabled(training):
-        for features, labels in loader:
-            features = features.to(device)
-            labels = labels.to(device).unsqueeze(1)
-            logits = model(features)
-            loss = criterion(logits, labels)
+        if shuffle:
+            generator = torch.Generator(device=features.device)
+            generator.manual_seed(seed)
+            order = torch.randperm(
+                labels.numel(),
+                generator=generator,
+                device=features.device,
+            )
+        else:
+            order = None
+
+        for start in range(0, labels.numel(), batch_size):
+            end = min(start + batch_size, labels.numel())
+            if order is None:
+                batch_features = features[start:end]
+                batch_labels = labels[start:end]
+            else:
+                indices = order[start:end]
+                batch_features = features.index_select(0, indices)
+                batch_labels = labels.index_select(0, indices)
+
+            batch_labels = batch_labels.unsqueeze(1)
+            logits = model(batch_features)
+            loss = criterion(logits, batch_labels)
 
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
-            batch_size = int(labels.shape[0])
-            total_loss += float(loss.item()) * batch_size
-            total_examples += batch_size
+            actual_batch_size = int(batch_labels.shape[0])
+            total_loss += float(loss.item()) * actual_batch_size
+            total_examples += actual_batch_size
             predictions = torch.sigmoid(logits) >= 0.5
-            expected = labels >= 0.5
+            expected = batch_labels >= 0.5
             correct += int((predictions == expected).sum().item())
             predicted_positive += int(predictions.sum().item())
 
@@ -118,28 +140,17 @@ def train_model(
         hidden_size=config.hidden_size,
         hidden_layers=config.hidden_layers,
     ).to(device)
+    train_features = split.train_features.to(device)
+    train_labels = split.train_labels.to(device)
+    val_features = split.val_features.to(device)
+    val_labels = split.val_labels.to(device)
     criterion = nn.BCEWithLogitsLoss(
-        pos_weight=_positive_weight(split.train_labels).to(device)
+        pos_weight=_positive_weight(train_labels).to(device)
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
-    )
-
-    train_loader = make_loader(
-        split.train_features,
-        split.train_labels,
-        batch_size=config.batch_size,
-        shuffle=True,
-        seed=config.seed,
-    )
-    val_loader = make_loader(
-        split.val_features,
-        split.val_labels,
-        batch_size=config.batch_size,
-        shuffle=False,
-        seed=config.seed,
     )
 
     metrics: list[EpochMetrics] = []
@@ -148,16 +159,22 @@ def train_model(
     for epoch in range(1, config.epochs + 1):
         train_loss, _, _ = _run_epoch(
             model,
-            train_loader,
+            train_features,
+            train_labels,
             criterion,
-            device=device,
+            batch_size=config.batch_size,
+            shuffle=True,
+            seed=config.seed + epoch,
             optimizer=optimizer,
         )
         val_loss, val_accuracy, val_positive_rate = _run_epoch(
             model,
-            val_loader,
+            val_features,
+            val_labels,
             criterion,
-            device=device,
+            batch_size=config.batch_size,
+            shuffle=False,
+            seed=config.seed,
         )
         is_best = val_loss < best_val_loss
         if is_best:
