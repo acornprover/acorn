@@ -25,7 +25,7 @@ The CLI trains a small PyTorch model and exports an ONNX model plus `*.features.
 - output value: probability that the activated step is used in the final proof
 - feature contract: exact input feature names and order
 
-Example:
+Minimal example:
 
 ```bash
 cd python
@@ -40,19 +40,72 @@ cd python
 uv run acorn-train-scorer ../traces/legacy.jsonl.zst --inspect-only
 ```
 
-For large eval-suite trace corpora, use reservoir sampling to keep memory bounded while still
-sampling across all input traces:
+## Normal Training Workflow
 
-The normal training path should convert raw `.jsonl.zst` traces into binary shards first, then train
-from those shards. Direct trace training is mainly for smoke tests and early experiments.
+Use exactly one eval-suite output directory as one training generation. Do not mix traces from
+different eval-suite runs unless you are doing that deliberately; one run is simpler to reason about
+and already contains comparable traces for each policy.
+
+The normal training path is:
+
+1. Run the eval suite with tracing.
+2. Convert that run's raw `.jsonl.zst` traces into binary shards.
+3. Train from the shard directory, not from raw JSON.
+
+Direct trace training is mainly for smoke tests and early experiments.
+
+For the current suite layout, `handcrafted` is intentionally not part of the standard training
+corpus. Build shards from the latest non-handcrafted traces like this:
 
 ```bash
 cd python
-uv run acorn-build-scorer-shards ../tmp/acorn-eval-latest/traces/*.jsonl.zst \
-  --sample-records 1000000 \
-  --shard-rows 250000 \
-  --out ../tmp/acorn-eval-latest/shards
+uv run acorn-build-scorer-shards \
+  ../tmp/acorn-eval-latest/traces/depth-first-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst \
+  ../tmp/acorn-eval-latest/traces/onnx-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst \
+  ../tmp/acorn-eval-latest/traces/onnx-no-shallow-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst \
+  ../tmp/acorn-eval-latest/traces/trained-5m-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst \
+  ../tmp/acorn-eval-latest/traces/trained-5m-no-shallow-[0-9][0-9][0-9][0-9][0-9][0-9].jsonl.zst \
+  --out ../tmp/shards/model-YYYYMMDD-latest-allpos-neg20m \
+  --max-negatives 20000000 \
+  --shard-rows 1000000 \
+  --workers 0 \
+  --overwrite
 ```
+
+Then train a size sweep from those shards:
+
+```bash
+uv run acorn-train-scorer ../tmp/shards/model-YYYYMMDD-latest-allpos-neg20m \
+  --out '../tmp/models/model-YYYYMMDD-h{hidden_size}-l3.onnx' \
+  --hidden-size-sweep 128,256,512 \
+  --hidden-layers 3 \
+  --epochs 5 \
+  --batch-size 65536 \
+  --device cuda \
+  --seed 42
+```
+
+With a sweep, the trainer loads and splits the shard dataset once, then trains each requested
+architecture on the same train/validation split. The `--out` path can use `{hidden_size}` and
+`{hidden_layers}` placeholders.
+
+For CPU-only fallback, use `--device cpu --threads 20` or another appropriate thread count.
+
+## CUDA Notes
+
+The project uses a CUDA-enabled PyTorch wheel. A quick sanity check is:
+
+```bash
+cd python
+uv run python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
+```
+
+On the current workstation this should report `torch 2.4.1+cu121`, `True`, and
+`NVIDIA GeForce RTX 3080 Ti`.
+
+In Codex/tool-driven runs, prefer `uv run ...` for GPU training. Direct `.venv/bin/python ...`
+commands can run inside a sandbox that hides `/dev/nvidia*`; in that case PyTorch is built with
+CUDA but reports `torch.cuda.is_available() == False` and may warn that it cannot initialize NVML.
 
 ## Training Shards
 
@@ -76,8 +129,8 @@ Each shard should store:
 
 Shard boundaries should be based on row count, not module or policy. The converter should preserve
 group ids for train/validation splitting, but training wants to shuffle across modules and policies.
-For a full corpus conversion, use a bounded shuffle buffer or policy-balanced sampling before writing
-shards so early training batches are not dominated by trace-file order.
+For a full corpus conversion, use positive-preserving negative sampling before writing shards. This
+keeps all known-good proof steps while bounding the much larger negative class.
 
 The converter supports either uniform reservoir sampling or positive-preserving negative sampling.
 The positive-preserving mode keeps every `used_in_final_proof=true` row and reservoir-samples only
@@ -93,6 +146,10 @@ uv run acorn-build-scorer-shards TRACE... \
 
 `--workers 0` uses one worker per trace file up to the local CPU count. Parallel negative sampling is
 file-stratified by trace size, then merged into a normal shard manifest.
+
+The latest non-handcrafted eval-suite run on 2026-06-11 produced this shard build with
+`--max-negatives 20000000`: 127,437,913 scanned trace rows, 1,011,106 positive rows, 20,000,000
+negative rows, 21,011,106 written shard rows, and about 5.1 GiB on disk.
 
 Uniform reservoir sampling is still useful for small smoke-test datasets:
 
