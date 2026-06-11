@@ -47,7 +47,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            target
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ steps.cargo-cache-key.outputs.lock_hash }}
