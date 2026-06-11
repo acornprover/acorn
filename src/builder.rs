@@ -1926,7 +1926,7 @@ impl<'a> Builder<'a> {
         let Some(writer) = &self.trace_writer else {
             return Ok(());
         };
-        if !self.eval_mode || !matches!(outcome, Outcome::Success | Outcome::Inconsistent) {
+        if !self.eval_mode {
             return Ok(());
         }
         let module = self

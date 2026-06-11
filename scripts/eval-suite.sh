@@ -96,7 +96,6 @@ add_case_spec() {
 add_standard_cases() {
     add_case "legacy" "legacy"
     add_case "depth-first" "depth-first"
-    add_case "handcrafted" "handcrafted"
     add_case "legacy-no-shallow" "legacy-no-shallow"
     add_case "model-20260610a" "model" "$standard_model"
     add_case "model-20260610a-no-shallow" "model-no-shallow" "$standard_model"

@@ -663,10 +663,10 @@ enum Command {
         )]
         policy_label: Option<String>,
 
-        /// Write successful eval search traces to this JSONL.ZST file
+        /// Write eval search traces to this JSONL.ZST file
         #[clap(
             long = "trace-out",
-            help = "Write successful eval search traces to this .jsonl.zst file.",
+            help = "Write eval search traces to this .jsonl.zst file.",
             value_name = "PATH"
         )]
         trace_out: Option<PathBuf>,

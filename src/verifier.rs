@@ -2114,6 +2114,89 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_writes_failed_search_trace() {
+        let (acornlib, src, build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                let p: Bool = axiom
+                let q: Bool = axiom
+
+                theorem wrapper {
+                    p or q
+                } by {
+                    p
+                    p or q
+                }
+                "#,
+            )
+            .unwrap();
+
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "p or q".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
+
+        let trace_file = build.child("trace-failed.jsonl.zst");
+        let trace_writer =
+            SearchTraceWriter::create(trace_file.path()).expect("trace writer should open");
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0, 1];
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+        verifier.builder.trace_writer = Some(trace_writer.clone());
+
+        let output = verifier.run().expect("eval should run");
+        trace_writer.flush().expect("trace should flush");
+        assert_eq!(output.status, BuildStatus::Warning);
+        assert_eq!(output.metrics.searches_total, 2);
+        assert_eq!(output.metrics.searches_success, 1);
+
+        let trace_file_reader =
+            std::fs::File::open(trace_file.path()).expect("trace file should exist");
+        let mut trace = String::new();
+        zstd::stream::read::Decoder::new(trace_file_reader)
+            .expect("zstd trace decoder should initialize")
+            .read_to_string(&mut trace)
+            .expect("trace file should decode as zstd JSONL");
+
+        let mut failed_rows = 0;
+        for line in trace.lines() {
+            let record: serde_json::Value =
+                serde_json::from_str(line).expect("trace line should be valid JSON");
+            if record["skip"].as_u64() == Some(1) {
+                failed_rows += 1;
+                assert_ne!(record["outcome"].as_str(), Some("Success"));
+                assert_eq!(record["used_in_final_proof"].as_bool(), Some(false));
+            }
+        }
+        assert!(
+            failed_rows > 0,
+            "failed eval search should write trace rows"
+        );
+    }
+
+    #[test]
     fn test_eval_line_selection_searches_only_selected_benchmark_goal() {
         let (acornlib, src, _build) = setup();
 

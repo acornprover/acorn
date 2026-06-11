@@ -87,16 +87,17 @@ impl SearchTrace {
         &self,
         meta: TraceSearchMeta,
         outcome: Outcome,
-        useful_active_ids: &HashSet<usize>,
+        useful_active_ids: Option<&HashSet<usize>>,
     ) -> Vec<TraceActivatedStepRecord> {
         let outcome = outcome.to_string();
         self.activated_steps
             .iter()
             .map(|step| {
-                let used_in_final_proof = step
-                    .active_id
-                    .is_some_and(|active_id| useful_active_ids.contains(&active_id))
-                    || step.active_id.is_none();
+                let used_in_final_proof = useful_active_ids.is_some_and(|ids| {
+                    step.active_id
+                        .is_some_and(|active_id| ids.contains(&active_id))
+                        || step.active_id.is_none()
+                });
                 TraceActivatedStepRecord {
                     schema: TRACE_SCHEMA,
                     search: meta.clone(),

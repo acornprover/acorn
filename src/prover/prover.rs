@@ -199,16 +199,18 @@ impl Prover {
         meta: TraceSearchMeta,
         outcome: Outcome,
     ) -> Option<Vec<TraceActivatedStepRecord>> {
-        let final_step = self.final_step.as_ref()?;
         let trace = self.last_search_trace.as_ref()?;
-        let mut useful_active = HashSet::new();
-        self.active_set
-            .find_upstream(final_step, false, &mut useful_active);
-        for step in &self.useful_passive {
+        let useful_active = self.final_step.as_ref().map(|final_step| {
+            let mut useful_active = HashSet::new();
             self.active_set
-                .find_upstream(step, false, &mut useful_active);
-        }
-        Some(trace.records(meta, outcome, &useful_active))
+                .find_upstream(final_step, false, &mut useful_active);
+            for step in &self.useful_passive {
+                self.active_set
+                    .find_upstream(step, false, &mut useful_active);
+            }
+            useful_active
+        });
+        Some(trace.records(meta, outcome, useful_active.as_ref()))
     }
 
     fn record_passive_push_stats(&mut self, stats: PassivePushStats) {

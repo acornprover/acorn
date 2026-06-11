@@ -41,7 +41,7 @@ with its exported `*.features.json` contract. That immediately exposed two impor
 - accepts `--policy` to select the activation queue policy
 - accepts `--model` for external ONNX scorer policies and `--policy-label` for stable trace case
   names
-- accepts `--trace-out` to write successful search traces as `.jsonl.zst`
+- accepts `--trace-out` to write search traces as `.jsonl.zst`
 - accepts `--trace-shard-rows` to rotate trace output into independent `.jsonl.zst` shards for
   later parallel conversion
 - compares current source goals against cached proof targets
@@ -51,22 +51,22 @@ Eval success counts successful prover outcomes. That includes `Outcome::Success`
 `Outcome::Inconsistent`; finding an inconsistency is useful evidence that the prover reached a
 decisive result. Regular verify/search behavior still treats unexpected inconsistencies as warnings.
 
-The first trace exporter is intentionally eval-shaped:
+The trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
-  from successful eval searches; paths must end in `.jsonl.zst`
+  from eval searches; paths must end in `.jsonl.zst`
 - a sidecar metadata file next to the trace, for example `legacy.meta.json` for
   `legacy.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
   active id, queue score/order fields, rule, truthiness, the current numeric `feature_vector`, and
   a `used_in_final_proof` label derived from the final proof dependency closure
+- failed-search rows have their real `outcome` and `used_in_final_proof=false`, because there is no
+  final proof dependency closure
 - records do not currently include a named per-row `features` object; feature names live only in
   the sidecar metadata file
 - unactivated passive candidates are not labeled, because we do not know whether they would have
   been useful if selected later
-- `Outcome::Inconsistent` traces are exported when eval counts them as successful prover outcomes
-
 This trace format is intentionally closer to an activated-step feature/label export than a stable
 raw event log. `feature_vector` is a wide, versioned feature catalog: Rust computes many candidate
 features, traces store all of them with names in metadata, Python chooses model-specific feature
@@ -103,7 +103,6 @@ the standard traced cases by default:
 
 - `legacy`
 - `depth-first`
-- `handcrafted`
 - `legacy-no-shallow`
 - `model-20260610a`
 - `model-20260610a-no-shallow`
@@ -371,8 +370,8 @@ this yet", "never activate this fact in this search", "spend only N factual acti
 
 The legacy training data was not eval-shaped. The old dataset labels whether activated steps
 appeared in the final proof. The new trace path fixes the most important part of that by exporting
-successful eval searches, but it still does not directly encode decision-time ranking among
-candidates or counterfactual choices the prover did not activate.
+eval searches directly, including failures, but it still does not directly encode decision-time
+ranking among candidates or counterfactual choices the prover did not activate.
 
 Eval policy selection now supports both built-in scorers and external model contracts. It is enough
 for ranking ablations, but not enough for richer search policies that defer, reject, threshold, or
@@ -399,10 +398,10 @@ bugs from the first ablation pass are now fixed:
 - claim context capture when a claim-map term refers to a surviving replacement-context type local
 
 The next useful data is a fresh traced run of all standard cases under the same timeout/skip
-settings. The eval suite now exports traces for every case by default, so there is no separate
-trace-export implementation step. If the rerun exposes new crashes or certificate failures, reduce
-those next; otherwise, use the updated success, timing, and trace data as the new baseline for
-scorer work.
+settings. The eval suite now exports traces, including failed searches, for every standard case by
+default, so there is no separate trace-export implementation step. If the rerun exposes new crashes
+or certificate failures, reduce those next; otherwise, use the updated success, timing, and trace
+data as the new baseline for scorer work.
 
 2. Inspect policy value and failure modes.
 
@@ -465,8 +464,6 @@ useful under successful searches.
 ## Open Questions
 
 - Does `depth-first` still outperform the default ONNX policy after the next full eval rerun?
-- Will the fixed `handcrafted` run now complete the full corpus, and how does it compare to
-  `depth-first`?
 - Does the first catalog-feature trained model beat the embedded ONNX model, and does removing
   shallow-first ordering help or hurt it?
 - Can normal search drop shallow-first ordering and let the model rank shallow and deep candidates

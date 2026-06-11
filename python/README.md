@@ -11,6 +11,8 @@ The current training signal is one row per activated proof step:
   `*.meta.json`
 - label: `used_in_final_proof`
 
+Rows from failed searches are kept with their real `outcome` and `used_in_final_proof=false`.
+
 By default the trainer uses all trace catalog features. Use `--features legacy` to train on the
 old nine-feature ONNX contract, or repeat `--feature NAME` to train on an explicit subset.
 
