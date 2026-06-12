@@ -30,8 +30,8 @@ from acorn_training.train import (
 TEST_FEATURE_NAMES = LEGACY_FEATURE_NAMES + ["literal_count", "rule_is_resolution"]
 
 
-def _record(goal: str, index: int, label: bool) -> dict:
-    return {
+def _record(goal: str, index: int, label: bool, goal_bucket: int | None = None) -> dict:
+    record = {
         "schema": TRACE_SCHEMA,
         "module": "foo",
         "goal": goal,
@@ -64,6 +64,9 @@ def _record(goal: str, index: int, label: bool) -> dict:
             0.0,
         ],
     }
+    if goal_bucket is not None:
+        record["goal_bucket"] = goal_bucket
+    return record
 
 
 class TrainingDataTest(unittest.TestCase):
@@ -147,6 +150,27 @@ class TrainingDataTest(unittest.TestCase):
                 [1, 3],
             )
 
+    def test_goal_buckets_define_validation_split_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl.zst"
+            rows = [
+                _record("train", 0, True, goal_bucket=12),
+                _record("train", 1, False, goal_bucket=12),
+                _record("val", 0, True, goal_bucket=90),
+                _record("val", 1, False, goal_bucket=90),
+            ]
+            self._write_trace(path, rows)
+
+            dataset = load_trace_dataset([path])
+            self.assertEqual(dataset.metadata["rows_with_goal_bucket"], 4)
+            self.assertEqual(dataset.goal_buckets.tolist(), [12, 12, 90, 90])
+
+            split = split_by_search(dataset, validation_fraction=0.1, seed=1)
+            self.assertEqual(split.train_labels.numel(), 2)
+            self.assertEqual(split.val_labels.numel(), 2)
+            self.assertEqual(split.train_labels.tolist(), [1.0, 0.0])
+            self.assertEqual(split.val_labels.tolist(), [1.0, 0.0])
+
     def test_rejects_non_zstd_trace_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "trace.jsonl"
@@ -199,10 +223,39 @@ class TrainingDataTest(unittest.TestCase):
             self.assertEqual(dataset.feature_names, TEST_FEATURE_NAMES)
             self.assertEqual(dataset.metadata["loaded_records"], 5)
             self.assertEqual(dataset.metadata["policy:onnx"], 5)
+            self.assertIsNone(dataset.goal_buckets)
 
             limited = load_shard_dataset([out_dir], max_records=3)
             self.assertEqual(limited.num_examples, 3)
             self.assertEqual(limited.metadata["loaded_records"], 3)
+
+    def test_shards_preserve_goal_buckets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "trace.jsonl.zst"
+            out_dir = Path(tmp) / "shards"
+            self._write_trace(
+                trace,
+                [
+                    _record("a", 0, True, goal_bucket=0),
+                    _record("b", 0, False, goal_bucket=90),
+                    _record("c", 0, False, goal_bucket=99),
+                ],
+            )
+
+            build_shards(
+                ShardBuildConfig(
+                    trace_paths=[trace],
+                    out_dir=out_dir,
+                    shard_rows=2,
+                ),
+                progress=None,
+            )
+
+            dataset = load_shard_dataset([out_dir])
+            self.assertEqual(dataset.goal_buckets.tolist(), [0, 90, 99])
+            split = split_by_search(dataset, validation_fraction=0.1, seed=1)
+            self.assertEqual(split.train_labels.numel(), 1)
+            self.assertEqual(split.val_labels.numel(), 2)
 
     def test_builds_sampled_training_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,6 +5,7 @@
 # Examples:
 #   ./scripts/eval-suite.sh
 #   ./scripts/eval-suite.sh --out tmp/my-eval --skip-build
+#   ./scripts/eval-suite.sh --fast --skip-build
 #   ./scripts/eval-suite.sh --policy depth-first --policy legacy
 #   ./scripts/eval-suite.sh --case candidate=model:tmp/models/scorer.onnx
 
@@ -32,6 +33,9 @@ Options:
                    Default: all standard cases.
   --policy NAME    Built-in policy case to run. Can be repeated.
                    Shorthand for --case NAME=NAME.
+  --fast           Run the standard fast eval sample: buckets 0-4,90-94.
+  --eval-sample BUCKETS
+                   Restrict eval to stable goal buckets, e.g. 0-4,90-94.
   --skip-build     Use the existing target/release/acorn binary.
   --trace-shard-rows N
                    Rotate trace files after N JSONL rows.
@@ -51,6 +55,8 @@ out_dir=""
 min_free_gb=20
 skip_build=""
 trace_shard_rows=1000000
+fast_eval=""
+eval_sample=""
 case_names=()
 case_policies=()
 case_models=()
@@ -120,6 +126,18 @@ while [[ $# -gt 0 ]]; do
         --policy)
             [[ $# -ge 2 ]] || { echo "Error: --policy requires a policy name"; exit 1; }
             add_case "$2" "$2"
+            shift 2
+            ;;
+        --fast)
+            fast_eval="1"
+            if [[ -z "$eval_sample" ]]; then
+                eval_sample="0-4,90-94"
+            fi
+            shift
+            ;;
+        --eval-sample)
+            [[ $# -ge 2 ]] || { echo "Error: --eval-sample requires a bucket range"; exit 1; }
+            eval_sample="$2"
             shift 2
             ;;
         --skip-build)
@@ -213,6 +231,8 @@ write_run_metadata() {
         printf "acorn_bin=%s\n" "$acorn_bin"
         printf "skip_build=%s\n" "${skip_build:-0}"
         printf "trace_shard_rows=%s\n" "$trace_shard_rows"
+        printf "fast_eval=%s\n" "${fast_eval:-0}"
+        printf "eval_sample=%s\n" "$eval_sample"
         printf "min_free_gb=%s\n" "$min_free_gb"
         printf "hostname=%s\n" "$(hostname 2>/dev/null || true)"
         printf "uname=%s\n" "$(uname -a 2>/dev/null || true)"
@@ -292,6 +312,9 @@ stopped_early=0
 
 echo "Output directory: $out_dir"
 echo "Cases: ${case_specs[*]}"
+if [[ -n "$eval_sample" ]]; then
+    echo "Eval sample: $eval_sample"
+fi
 echo "Minimum free space: ${min_free_gb}GiB"
 echo
 
@@ -314,6 +337,9 @@ for i in "${!case_names[@]}"; do
     echo "[$(date -Is)] Starting case: $case_name ($policy)"
     start="$(date -Is)"
     cmd=("$acorn_bin" eval --policy "$policy" --policy-label "$case_name" --trace-out "$trace_file" --trace-shard-rows "$trace_shard_rows" --timing)
+    if [[ -n "$eval_sample" ]]; then
+        cmd+=(--eval-sample "$eval_sample")
+    fi
     if [[ -n "$model" ]]; then
         cmd+=(--model "$model")
     fi

@@ -33,6 +33,7 @@ class TraceDataset:
     feature_names: list[str]
     groups: list[str | int] | torch.Tensor
     metadata: Counter[str]
+    goal_buckets: torch.Tensor | None = None
 
     @property
     def num_examples(self) -> int:
@@ -67,6 +68,7 @@ class _LoadedRow:
     features: list[float]
     label: float
     group: str
+    goal_bucket: int | None
     policy: str
     outcome: str
 
@@ -80,6 +82,13 @@ def _search_group(record: dict) -> str:
             str(record.get("goal", "")),
         ]
     )
+
+
+def _goal_bucket(record: dict) -> int | None:
+    bucket = record.get("goal_bucket")
+    if isinstance(bucket, int) and 0 <= bucket < 100:
+        return bucket
+    return None
 
 
 def _iter_records(path: Path) -> Iterable[dict]:
@@ -182,6 +191,7 @@ def load_trace_dataset(
                 features=[float(vector[i]) for i in indices],
                 label=float(label),
                 group=_search_group(record),
+                goal_bucket=_goal_bucket(record),
                 policy=str(record.get("policy", "")),
                 outcome=str(record.get("outcome", "")),
             )
@@ -208,8 +218,13 @@ def load_trace_dataset(
     for row in rows:
         metadata[f"policy:{row.policy}"] += 1
         metadata[f"outcome:{row.outcome}"] += 1
+    rows_with_goal_bucket = sum(row.goal_bucket is not None for row in rows)
+    metadata["rows_with_goal_bucket"] = rows_with_goal_bucket
     metadata["loaded_records"] = len(rows)
     metadata["scanned_records"] = scanned_records
+    goal_buckets = None
+    if rows_with_goal_bucket == len(rows):
+        goal_buckets = torch.tensor([row.goal_bucket for row in rows], dtype=torch.long)
 
     return TraceDataset(
         features=torch.tensor([row.features for row in rows], dtype=torch.float32),
@@ -217,6 +232,7 @@ def load_trace_dataset(
         feature_names=output_feature_names or [],
         groups=[row.group for row in rows],
         metadata=metadata,
+        goal_buckets=goal_buckets,
     )
 
 
@@ -232,10 +248,12 @@ def load_shard_dataset(
     features: list[torch.Tensor] = []
     labels: list[torch.Tensor] = []
     group_ids: list[torch.Tensor] = []
+    goal_bucket_tensors: list[torch.Tensor] = []
     metadata: Counter[str] = Counter()
     loaded_records = 0
     total_source_records = 0
     group_offset = 0
+    missing_goal_buckets = False
     policy_names: list[str] = []
     outcome_names: list[str] = []
 
@@ -273,6 +291,11 @@ def load_shard_dataset(
             shard_features = data["features"].to(dtype=torch.float32)
             shard_labels = data["labels"].to(dtype=torch.float32)
             shard_groups = data["group_ids"].to(dtype=torch.long) + group_offset
+            shard_goal_buckets = data.get("goal_buckets")
+            if shard_goal_buckets is not None:
+                shard_goal_buckets = shard_goal_buckets.to(dtype=torch.long)
+            else:
+                missing_goal_buckets = True
             row_count = int(shard_labels.numel())
             if int(shard_features.shape[0]) != row_count:
                 raise ValueError(f"{shard_dir / shard['path']}: inconsistent row count")
@@ -285,11 +308,15 @@ def load_shard_dataset(
                     shard_features = shard_features[:remaining]
                     shard_labels = shard_labels[:remaining]
                     shard_groups = shard_groups[:remaining]
+                    if shard_goal_buckets is not None:
+                        shard_goal_buckets = shard_goal_buckets[:remaining]
                     row_count = remaining
 
             features.append(shard_features)
             labels.append(shard_labels)
             group_ids.append(shard_groups)
+            if shard_goal_buckets is not None:
+                goal_bucket_tensors.append(shard_goal_buckets)
             loaded_records += row_count
             if "policy_ids" in data:
                 policy_tensor = data["policy_ids"][:row_count]
@@ -313,12 +340,19 @@ def load_shard_dataset(
 
     metadata["loaded_records"] = loaded_records
     metadata["source_records"] = total_source_records
+    goal_buckets = None
+    if not missing_goal_buckets and goal_bucket_tensors:
+        candidate_goal_buckets = torch.cat(goal_bucket_tensors, dim=0)
+        if bool(torch.all((0 <= candidate_goal_buckets) & (candidate_goal_buckets < 100))):
+            goal_buckets = candidate_goal_buckets
+            metadata["rows_with_goal_bucket"] = loaded_records
     return TraceDataset(
         features=torch.cat(features, dim=0),
         labels=torch.cat(labels, dim=0),
         feature_names=feature_names or [],
         groups=torch.cat(group_ids, dim=0),
         metadata=metadata,
+        goal_buckets=goal_buckets,
     )
 
 
@@ -332,7 +366,14 @@ def split_by_search(
         raise ValueError("validation_fraction must be between 0 and 1")
 
     rng = random.Random(seed)
-    if isinstance(dataset.groups, torch.Tensor):
+    if dataset.goal_buckets is not None:
+        goal_buckets = dataset.goal_buckets.to(dtype=torch.long)
+        first_validation_bucket = int(round((1.0 - validation_fraction) * 100.0))
+        first_validation_bucket = max(1, min(99, first_validation_bucket))
+        val_mask = goal_buckets >= first_validation_bucket
+        val_tensor = val_mask.nonzero(as_tuple=False).flatten()
+        train_tensor = (~val_mask).nonzero(as_tuple=False).flatten()
+    elif isinstance(dataset.groups, torch.Tensor):
         group_ids = dataset.groups.to(dtype=torch.long)
         unique_groups = torch.unique(group_ids).tolist()
         rng.shuffle(unique_groups)

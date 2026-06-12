@@ -9,6 +9,7 @@ pub mod common;
 pub mod doc_generator;
 pub mod elaborator;
 pub mod exporter;
+pub mod goal_partition;
 pub mod interfaces;
 pub mod kernel;
 pub mod lint;

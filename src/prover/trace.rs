@@ -123,6 +123,7 @@ impl SearchTrace {
 pub struct TraceSearchMeta {
     pub module: String,
     pub goal: String,
+    pub goal_bucket: u8,
     pub goal_first_line: u32,
     pub goal_last_line: u32,
     pub skip: Option<usize>,
@@ -372,6 +373,7 @@ mod tests {
             search: TraceSearchMeta {
                 module: "m".to_string(),
                 goal: "g".to_string(),
+                goal_bucket: 0,
                 goal_first_line: 1,
                 goal_last_line: 1,
                 skip: Some(0),

@@ -18,6 +18,7 @@ use crate::elaborator::lowered_module::{LoweredItem, LoweredModule};
 use crate::elaborator::lowering::LoweredGoal;
 use crate::elaborator::node::NodeCursor;
 use crate::elaborator::source::SourceType;
+use crate::goal_partition::{goal_bucket, GoalBucketFilter};
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::processor::Processor;
 use crate::project::{PackageRole, Project, ProjectLookup, ProjectView, ProjectViewModule};
@@ -255,6 +256,9 @@ pub struct Builder<'a> {
     /// Eval skip modes to run for each benchmark goal.
     pub eval_skip_modes: Vec<usize>,
 
+    /// Optional stable goal-bucket filter for sampled eval runs.
+    pub eval_bucket_filter: Option<GoalBucketFilter>,
+
     /// Activation queue scoring configuration for prover search.
     pub scoring_config: ScoringConfig,
 
@@ -407,6 +411,7 @@ struct ModuleWorkerConfig {
     force_search: bool,
     eval_mode: bool,
     eval_skip_modes: Vec<usize>,
+    eval_bucket_filter: Option<GoalBucketFilter>,
     scoring_config: ScoringConfig,
     trace_writer: Option<SearchTraceWriter>,
     operation_verb: &'static str,
@@ -425,6 +430,7 @@ impl ModuleWorkerConfig {
             force_search: builder.force_search,
             eval_mode: builder.eval_mode,
             eval_skip_modes: builder.eval_skip_modes.clone(),
+            eval_bucket_filter: builder.eval_bucket_filter.clone(),
             scoring_config: builder.scoring_config.clone(),
             trace_writer: builder.trace_writer.clone(),
             operation_verb: builder.operation_verb,
@@ -442,6 +448,7 @@ impl ModuleWorkerConfig {
         builder.force_search = self.force_search;
         builder.eval_mode = self.eval_mode;
         builder.eval_skip_modes = self.eval_skip_modes.clone();
+        builder.eval_bucket_filter = self.eval_bucket_filter.clone();
         builder.scoring_config = self.scoring_config.clone();
         builder.trace_writer = self.trace_writer.clone();
         builder.operation_verb = self.operation_verb;
@@ -540,6 +547,9 @@ pub struct BuildMetrics {
 
     /// Number of current source goals skipped because they are not in the benchmark corpus.
     pub eval_goals_skipped_uncertified: i32,
+
+    /// Number of current source goals skipped by the eval bucket sample.
+    pub eval_goals_skipped_sample: i32,
 
     /// Per-skip proof search metrics for eval runs.
     pub eval_skip_metrics: Vec<EvalSkipMetrics>,
@@ -904,6 +914,7 @@ impl BuildMetrics {
         self.eval_corpus_matched += result.eval_corpus_matched;
         self.eval_corpus_unmatched += result.eval_corpus_unmatched;
         self.eval_goals_skipped_uncertified += result.eval_goals_skipped_uncertified;
+        self.eval_goals_skipped_sample += result.eval_goals_skipped_sample;
         for skip_metrics in &result.eval_skip_metrics {
             self.eval_skip_metrics_mut(skip_metrics.skip)
                 .add(skip_metrics);
@@ -940,6 +951,12 @@ impl BuildMetrics {
                 lines.push(format!(
                     "{} current goals skipped without eligible cached proofs",
                     self.eval_goals_skipped_uncertified
+                ));
+            }
+            if self.eval_goals_skipped_sample > 0 {
+                lines.push(format!(
+                    "{} current goals skipped by eval sample",
+                    self.eval_goals_skipped_sample
                 ));
             }
         }
@@ -1225,6 +1242,7 @@ impl<'a> Builder<'a> {
             force_search: false,
             eval_mode: false,
             eval_skip_modes: vec![0, 1],
+            eval_bucket_filter: None,
             scoring_config: ScoringConfig::default(),
             trace_writer: None,
             module_work: None,
@@ -1673,8 +1691,17 @@ impl<'a> Builder<'a> {
 
         let include_empty = self.eval_skip_modes.iter().any(|&skip| skip > 0);
         let mut counts: HashMap<String, EvalGoalCounts> = HashMap::new();
+        let module = target.to_string();
         if let Some(store) = self.project().build_cache().get_certificates(target) {
             for cert in &store.certs {
+                let bucket = goal_bucket(&module, &cert.goal);
+                if self
+                    .eval_bucket_filter
+                    .as_ref()
+                    .is_some_and(|filter| !filter.contains(bucket))
+                {
+                    continue;
+                }
                 if let Some(proof) = &cert.proof {
                     if proof.is_empty() {
                         if include_empty {
@@ -1687,6 +1714,18 @@ impl<'a> Builder<'a> {
             }
         }
         Some(counts)
+    }
+
+    fn eval_goal_in_sample(&self, goal: &Goal) -> bool {
+        let Some(filter) = &self.eval_bucket_filter else {
+            return true;
+        };
+        let module = self
+            .current_module
+            .as_ref()
+            .map(|module| module.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        filter.contains(goal_bucket(&module, &goal.name))
     }
 
     fn default_event(&self) -> BuildEvent {
@@ -1934,9 +1973,11 @@ impl<'a> Builder<'a> {
             .as_ref()
             .map(|module| module.to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        let goal_bucket = goal_bucket(&module, &goal.name);
         let meta = TraceSearchMeta {
             module,
             goal: goal.name.clone(),
+            goal_bucket,
             goal_first_line: goal.first_line + 1,
             goal_last_line: goal.last_line + 1,
             skip: eval_skip,
@@ -2588,6 +2629,10 @@ impl<'a> Builder<'a> {
                 return Ok(());
             }
         }
+        if self.eval_mode && !self.eval_goal_in_sample(goal) {
+            self.metrics.eval_goals_skipped_sample += 1;
+            return Ok(());
+        }
         let eval_proof_kind = if let Some(counts) = eval_goal_counts.as_mut() {
             let Some(counts) = counts.get_mut(&goal.name) else {
                 self.metrics.eval_goals_skipped_uncertified += 1;
@@ -2875,9 +2920,17 @@ impl<'a> Builder<'a> {
         let Some(store) = self.project().build_cache().get_certificates(target) else {
             return 0;
         };
+        let module = target.to_string();
         store
             .certs
             .iter()
+            .filter(|cert| {
+                let bucket = goal_bucket(&module, &cert.goal);
+                match &self.eval_bucket_filter {
+                    Some(filter) => filter.contains(bucket),
+                    None => true,
+                }
+            })
             .map(|cert| match &cert.proof {
                 Some(proof) if proof.is_empty() => nonzero_skip_count,
                 Some(_) => nonzero_skip_count + usize::from(has_skip_zero),

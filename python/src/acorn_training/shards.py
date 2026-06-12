@@ -15,6 +15,7 @@ import torch
 from .data import (
     TRACE_SCHEMA,
     _iter_records,
+    _goal_bucket,
     _load_feature_names,
     _search_group,
     _selected_indices,
@@ -76,6 +77,7 @@ class _Row:
     features: list[float]
     label: int
     group_id: int
+    goal_bucket: int
     policy_id: int
     outcome_id: int
     activation_index: int
@@ -111,6 +113,7 @@ class _ShardWriter:
         self.feature_rows: list[list[float]] = []
         self.labels: list[int] = []
         self.group_ids: list[int] = []
+        self.goal_buckets: list[int] = []
         self.policy_ids: list[int] = []
         self.outcome_ids: list[int] = []
         self.activation_indices: list[int] = []
@@ -120,6 +123,7 @@ class _ShardWriter:
         self.feature_rows.append(row.features)
         self.labels.append(row.label)
         self.group_ids.append(row.group_id)
+        self.goal_buckets.append(row.goal_bucket)
         self.policy_ids.append(row.policy_id)
         self.outcome_ids.append(row.outcome_id)
         self.activation_indices.append(row.activation_index)
@@ -140,6 +144,7 @@ class _ShardWriter:
                 "features": torch.tensor(self.feature_rows, dtype=torch.float32),
                 "labels": torch.tensor(self.labels, dtype=torch.uint8),
                 "group_ids": torch.tensor(self.group_ids, dtype=torch.int64),
+                "goal_buckets": torch.tensor(self.goal_buckets, dtype=torch.int16),
                 "policy_ids": torch.tensor(self.policy_ids, dtype=torch.int16),
                 "outcome_ids": torch.tensor(self.outcome_ids, dtype=torch.int16),
                 "activation_index": torch.tensor(self.activation_indices, dtype=torch.int32),
@@ -151,6 +156,7 @@ class _ShardWriter:
         self.feature_rows = []
         self.labels = []
         self.group_ids = []
+        self.goal_buckets = []
         self.policy_ids = []
         self.outcome_ids = []
         self.activation_indices = []
@@ -165,6 +171,7 @@ class _Reservoir:
         self.features = torch.empty((capacity, feature_count), dtype=torch.float32)
         self.labels = torch.empty(capacity, dtype=torch.uint8)
         self.group_ids = torch.empty(capacity, dtype=torch.int64)
+        self.goal_buckets = torch.empty(capacity, dtype=torch.int16)
         self.policy_ids = torch.empty(capacity, dtype=torch.int16)
         self.outcome_ids = torch.empty(capacity, dtype=torch.int16)
         self.activation_indices = torch.empty(capacity, dtype=torch.int32)
@@ -187,6 +194,7 @@ class _Reservoir:
         self.features[slot] = torch.tensor(row.features, dtype=torch.float32)
         self.labels[slot] = row.label
         self.group_ids[slot] = row.group_id
+        self.goal_buckets[slot] = row.goal_bucket
         self.policy_ids[slot] = row.policy_id
         self.outcome_ids[slot] = row.outcome_id
         self.activation_indices[slot] = row.activation_index
@@ -220,6 +228,7 @@ class _Reservoir:
                     "features": self.features.index_select(0, indices),
                     "labels": self.labels.index_select(0, indices),
                     "group_ids": self.group_ids.index_select(0, indices),
+                    "goal_buckets": self.goal_buckets.index_select(0, indices),
                     "policy_ids": self.policy_ids.index_select(0, indices),
                     "outcome_ids": self.outcome_ids.index_select(0, indices),
                     "activation_index": self.activation_indices.index_select(0, indices),
@@ -341,10 +350,12 @@ def _row_from_record(
         activation_index = -1
     policy = str(record.get("policy", ""))
     outcome = str(record.get("outcome", ""))
+    goal_bucket = _goal_bucket(record)
     return _Row(
         features=[float(vector[i]) for i in selection.indices],
         label=int(label),
         group_id=groups.id_for(_search_group(record)),
+        goal_bucket=goal_bucket if goal_bucket is not None else -1,
         policy_id=policies.id_for(policy),
         outcome_id=outcomes.id_for(outcome),
         activation_index=activation_index,

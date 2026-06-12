@@ -821,6 +821,7 @@ impl Drop for Verifier {
 mod tests {
     use super::*;
     use crate::certificate::{Certificate, CertificateStore};
+    use crate::goal_partition::{goal_bucket, GoalBucketFilter};
     use crate::prover::trace::{trace_metadata_path, SearchTraceWriter};
     use assert_fs::fixture::ChildPath;
     use assert_fs::prelude::*;
@@ -2096,6 +2097,10 @@ mod tests {
             assert_eq!(record["schema"], "acorn-activated-step-trace-v2");
             assert_eq!(record["module"], "foo");
             assert_eq!(record["goal"], "excluded_middle");
+            assert_eq!(
+                record["goal_bucket"].as_u64(),
+                Some(u64::from(goal_bucket("foo", "excluded_middle")))
+            );
             assert_eq!(record["skip"], 0);
             assert_eq!(record["policy"], "legacy");
             assert!(record["activation_index"].as_u64().is_some());
@@ -2194,6 +2199,59 @@ mod tests {
             failed_rows > 0,
             "failed eval search should write trace rows"
         );
+    }
+
+    #[test]
+    fn test_eval_sample_skips_goals_outside_bucket_filter() {
+        let (acornlib, src, _build) = setup();
+
+        src.child("foo.ac")
+            .write_str(
+                r#"
+                theorem first {
+                    true
+                }
+                "#,
+            )
+            .unwrap();
+
+        save_cert_store(
+            &cert_for_source(&src, "foo.ac"),
+            CertificateStore {
+                certs: vec![Certificate::new(
+                    "first".to_string(),
+                    vec!["dummy proof step".to_string()],
+                )],
+            },
+        );
+
+        let excluded_bucket = goal_bucket("foo", "first");
+        let included_bucket = (excluded_bucket + 1) % 100;
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: true,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("foo".to_string()),
+        )
+        .expect("eval verifier should construct");
+        verifier.builder.eval_mode = true;
+        verifier.builder.eval_skip_modes = vec![0];
+        verifier.builder.eval_bucket_filter = Some(GoalBucketFilter::single(included_bucket));
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.builder.operation_verb = "proved";
+
+        let output = verifier.run().expect("eval should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert_eq!(output.metrics.eval_corpus_total, 0);
+        assert_eq!(output.metrics.eval_goals_skipped_sample, 1);
+        assert_eq!(output.metrics.eval_goals_skipped_uncertified, 0);
+        assert_eq!(output.metrics.searches_total, 0);
     }
 
     #[test]

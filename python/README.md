@@ -124,11 +124,15 @@ Each shard should store:
 - `features`: `float32` tensor with shape `[rows, features]`
 - `labels`: `bool` or `uint8` tensor for `used_in_final_proof`
 - `group_ids`: integer tensor for `(module, goal)` split groups
+- `goal_buckets`: `int16` tensor for the stable eval/training partition, or `-1` for legacy rows
 - `policy_ids`: small integer tensor for policy source
 - optional cheap analysis fields such as `activation_index`
 
 Shard boundaries should be based on row count, not module or policy. The converter should preserve
 group ids for train/validation splitting, but training wants to shuffle across modules and policies.
+For new traces that include `goal_bucket`, training uses buckets `90-99` as validation and `0-89`
+as trainable rows. Legacy traces or shards without usable buckets fall back to a randomized
+`(module, goal)` grouped split.
 For a full corpus conversion, use positive-preserving negative sampling before writing shards. This
 keeps all known-good proof steps while bounding the much larger negative class.
 

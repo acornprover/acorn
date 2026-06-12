@@ -58,9 +58,10 @@ The trace exporter is intentionally eval-shaped:
 - a sidecar metadata file next to the trace, for example `legacy.meta.json` for
   `legacy.jsonl.zst`,
   records the numeric feature-vector names once
-- each record includes module/goal/skip/policy/outcome metadata, activation index, passive id,
-  active id, queue score/order fields, rule, truthiness, the current numeric `feature_vector`, and
-  a `used_in_final_proof` label derived from the final proof dependency closure
+- each record includes module/goal/skip/policy/outcome metadata, stable `goal_bucket`, activation
+  index, passive id, active id, queue score/order fields, rule, truthiness, the current numeric
+  `feature_vector`, and a `used_in_final_proof` label derived from the final proof dependency
+  closure
 - failed-search rows have their real `outcome` and `used_in_final_proof=false`, because there is no
   final proof dependency closure
 - records do not currently include a named per-row `features` object; feature names live only in
@@ -114,6 +115,11 @@ The current external model cases point at:
 - `model-20260610a`: `tmp/models/model-20260610a.onnx`
 - `model-20260611-e20-h256-l3`: `tmp/models/model-20260611-e20-h256-l3.onnx`
 - `model-20260611-e50-h512-l3`: `tmp/models/model-20260611-e50-h512-l3.onnx`
+
+For quick iteration, `./scripts/eval-suite.sh --fast` passes
+`acorn eval --eval-sample 0-4,90-94` to every case. The sample uses the same stable goal buckets as
+training validation: buckets `0-4` are trainable-bucket goals, while buckets `90-94` are
+validation-bucket goals.
 
 ## Current Scoring Architecture
 
@@ -320,6 +326,8 @@ tensor shards from traces and train from either raw traces or shard directories.
 - uses `used_in_final_proof` as the binary label
 - groups train/validation splits by search key `(module, goal)`, so alternate policies and skip
   modes for the same goal cannot leak across the split
+- for new traces with stamped `goal_bucket`, uses buckets `90-99` as validation and `0-89` as
+  trainable data
 - trains a small configurable PyTorch MLP with feature normalization, positive-class weighting, and
   AdamW
 - exports an ONNX probability scorer with input `input`, output `output`, and a sidecar
@@ -449,10 +457,12 @@ Use `acorn eval` as the main metric. Track at least:
 
 Offline loss can be a development signal, but it should not decide whether a policy is better.
 
-6. Use module-based train/test splits.
+6. Use stable goal-bucket train/test splits.
 
-Avoid training and evaluating on nearly identical local proof contexts. Module-level or
-dependency-aware splits should give a better signal about whether the policy generalizes.
+Avoid training and evaluating on nearly identical local proof contexts. New traces stamp
+`goal_bucket = first_8_bytes_be(SHA-256("{module}\t{goal}")) % 100`; Python uses buckets `90-99`
+for validation and `0-89` for trainable data. Rows should not differ only by policy or skip mode
+across the split.
 
 7. Consider factual activation budgets.
 

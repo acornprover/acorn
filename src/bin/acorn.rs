@@ -2,6 +2,7 @@
 // You can run a language server, verify a file, or check the whole project.
 
 use acorn::doc_generator::DocGenerator;
+use acorn::goal_partition::GoalBucketFilter;
 use acorn::interfaces::GoalInfo;
 use acorn::lint::lint_project_targets;
 use acorn::module::{LoadState, ModuleDescriptor};
@@ -638,6 +639,14 @@ enum Command {
         )]
         skip: String,
 
+        /// Restrict eval to stable goal buckets, e.g. 0-4,90-94
+        #[clap(
+            long = "eval-sample",
+            help = "Restrict eval to stable goal buckets, e.g. 0-4,90-94.",
+            value_name = "BUCKETS"
+        )]
+        eval_sample: Option<GoalBucketFilter>,
+
         /// Activation queue policy to use for proof search
         #[clap(
             long,
@@ -1130,6 +1139,7 @@ async fn main() {
             shallow,
             jobs,
             skip,
+            eval_sample,
             policy,
             model,
             policy_label,
@@ -1224,6 +1234,7 @@ async fn main() {
             verifier.builder.force_search = true;
             verifier.builder.eval_mode = true;
             verifier.builder.eval_skip_modes = skip_modes;
+            verifier.builder.eval_bucket_filter = eval_sample;
             verifier.builder.scoring_config = scoring_config;
             verifier.builder.trace_writer = trace_writer;
             verifier.builder.shallow_search = shallow;
@@ -2038,6 +2049,8 @@ mod tests {
             "3",
             "--skip",
             "01",
+            "--eval-sample",
+            "0-4,90-94",
             "--policy",
             "legacy-no-shallow",
             "--trace-out",
@@ -2057,6 +2070,7 @@ mod tests {
                 shallow,
                 jobs,
                 skip,
+                eval_sample,
                 policy,
                 model,
                 policy_label,
@@ -2071,6 +2085,10 @@ mod tests {
                 assert!(shallow);
                 assert_eq!(jobs, Some(3));
                 assert_eq!(skip, "01");
+                assert_eq!(
+                    eval_sample,
+                    Some("0-4,90-94".parse::<GoalBucketFilter>().unwrap())
+                );
                 assert_eq!(policy, "legacy-no-shallow");
                 assert_eq!(model, None);
                 assert_eq!(policy_label, None);
