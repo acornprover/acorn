@@ -102,13 +102,20 @@ The scoring config is threaded through `Builder`, `Processor`, `Prover`, and `Pa
 workers can carry both a policy and an optional external model path. `scripts/eval-suite.sh` runs
 the standard traced cases by default:
 
-- `legacy`
 - `depth-first`
+- `legacy`
 - `legacy-no-shallow`
 - `model-20260610a`
 - `model-20260610a-no-shallow`
 - `model-20260611-e20-h256-l3`
 - `model-20260611-e50-h512-l3`
+- `depth-first-repeat`
+
+The strongest baseline (currently `depth-first`) runs both first and last. The two runs are
+identical cases, so their per-goal disagreement measures the run's noise floor: any
+policy-vs-policy difference smaller than that disagreement is indistinguishable from timing noise.
+Placing the pair at the two ends of the run also catches drift in machine conditions over the
+suite's duration.
 
 The current external model cases point at:
 
