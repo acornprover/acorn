@@ -123,7 +123,7 @@ Each shard should store:
 
 - `features`: `float32` tensor with shape `[rows, features]`
 - `labels`: `bool` or `uint8` tensor for `used_in_final_proof`
-- `group_ids`: integer tensor for `(module, goal, skip, policy)` split groups
+- `group_ids`: integer tensor for `(module, goal)` split groups
 - `policy_ids`: small integer tensor for policy source
 - optional cheap analysis fields such as `activation_index`
 

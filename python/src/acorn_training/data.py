@@ -72,12 +72,12 @@ class _LoadedRow:
 
 
 def _search_group(record: dict) -> str:
+    # Keep every policy/skip variant of the same goal in the same split.
+    # Otherwise validation can measure memorization across near-duplicate runs.
     return "\t".join(
         [
             str(record.get("module", "")),
             str(record.get("goal", "")),
-            str(record.get("skip", "")),
-            str(record.get("policy", "")),
         ]
     )
 

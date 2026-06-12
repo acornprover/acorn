@@ -123,7 +123,29 @@ class TrainingDataTest(unittest.TestCase):
             self.assertEqual(dataset.num_examples, 6)
             self.assertEqual(dataset.metadata["scanned_records"], 20)
             self.assertEqual(dataset.metadata["loaded_records"], 6)
-            self.assertIn("foo\tb\t0\tonnx", dataset.groups)
+            self.assertIn("foo\tb", dataset.groups)
+
+    def test_search_groups_ignore_policy_and_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl.zst"
+            rows = [
+                _record("same", 0, True),
+                {**_record("same", 1, False), "policy": "depth-first"},
+                {**_record("same", 2, False), "skip": 1},
+                _record("other", 0, True),
+            ]
+            self._write_trace(path, rows)
+
+            dataset = load_trace_dataset([path])
+            self.assertEqual(dataset.groups[0], dataset.groups[1])
+            self.assertEqual(dataset.groups[0], dataset.groups[2])
+            self.assertNotEqual(dataset.groups[0], dataset.groups[3])
+
+            split = split_by_search(dataset, validation_fraction=0.5, seed=1)
+            self.assertEqual(
+                sorted([split.train_labels.numel(), split.val_labels.numel()]),
+                [1, 3],
+            )
 
     def test_rejects_non_zstd_trace_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +183,7 @@ class TrainingDataTest(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
             self.assertEqual(manifest["schema"], SHARD_SCHEMA)
             self.assertEqual(manifest["feature_names"], TEST_FEATURE_NAMES)
+            self.assertEqual(manifest["group_names"], ["foo\ta", "foo\tb", "foo\tc"])
             self.assertEqual(manifest["written_records"], 5)
             self.assertEqual(len(manifest["shards"]), 3)
 

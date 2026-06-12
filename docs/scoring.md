@@ -318,7 +318,8 @@ tensor shards from traces and train from either raw traces or shard directories.
   directories
 - trains on selected columns from each activated step's numeric `feature_vector`
 - uses `used_in_final_proof` as the binary label
-- groups train/validation splits by search key `(module, goal, skip, policy)`
+- groups train/validation splits by search key `(module, goal)`, so alternate policies and skip
+  modes for the same goal cannot leak across the split
 - trains a small configurable PyTorch MLP with feature normalization, positive-class weighting, and
   AdamW
 - exports an ONNX probability scorer with input `input`, output `output`, and a sidecar
