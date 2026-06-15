@@ -1211,6 +1211,46 @@ impl BuildStatus {
     }
 }
 
+fn format_thread_suffix(thread_count: usize) -> String {
+    let thread_count = thread_count.max(1);
+    let thread_word = if thread_count == 1 {
+        "thread"
+    } else {
+        "threads"
+    };
+    format!(" with {} {}...", thread_count, thread_word)
+}
+
+fn format_verification_start_count_message(target_count: usize, thread_count: usize) -> String {
+    let module_word = if target_count == 1 {
+        "module"
+    } else {
+        "modules"
+    };
+    format!(
+        "verifying {} {}{}",
+        target_count,
+        module_word,
+        format_thread_suffix(thread_count)
+    )
+}
+
+fn format_verification_start_message(targets: &[ModuleDescriptor], thread_count: usize) -> String {
+    if targets.len() > 5 {
+        format_verification_start_count_message(targets.len(), thread_count)
+    } else {
+        format!(
+            "verifying modules: {}{}",
+            targets
+                .iter()
+                .map(|target| target.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_thread_suffix(thread_count)
+        )
+    }
+}
+
 impl<'a> Builder<'a> {
     pub fn new(
         project: &'a Project,
@@ -1283,7 +1323,10 @@ impl<'a> Builder<'a> {
             self.project().src_dir().clone(),
             self.project().build_dir().clone(),
         ));
-        self.log_global(format!("verifying {} modules...", target_count));
+        self.log_global(format_verification_start_count_message(
+            target_count,
+            self.check_jobs,
+        ));
     }
 
     pub fn prepare_loaded_module_work(
@@ -3470,19 +3513,7 @@ impl<'a> Builder<'a> {
         let mut targets = self.project().targets().iter().cloned().collect::<Vec<_>>();
         targets.sort();
 
-        let verification_message = if targets.len() > 5 {
-            format!("verifying {} modules...", targets.len())
-        } else {
-            format!(
-                "verifying modules: {}",
-                targets
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-        self.log_global(verification_message);
+        self.log_global(format_verification_start_message(&targets, self.check_jobs));
 
         if let Some(module_work) = self.module_work.take() {
             self.build_owned_module_work(targets, module_work);
@@ -3754,9 +3785,11 @@ impl<'a> Builder<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_check_cert_error, format_goal_panic_message, panic_payload_to_string, BuildMetrics,
-        EvalSkipTail,
+        compact_check_cert_error, format_goal_panic_message,
+        format_verification_start_count_message, format_verification_start_message,
+        panic_payload_to_string, BuildMetrics, EvalSkipTail,
     };
+    use crate::module::ModuleDescriptor;
 
     #[test]
     fn test_info_lines_hide_pending_elaboration_summary() {
@@ -3779,6 +3812,34 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("pending goals elaborated")),
             "pending elaboration summary should not be printed: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_verification_start_count_message_includes_threads() {
+        assert_eq!(
+            format_verification_start_count_message(605, 4),
+            "verifying 605 modules with 4 threads..."
+        );
+        assert_eq!(
+            format_verification_start_count_message(1, 1),
+            "verifying 1 module with 1 thread..."
+        );
+        assert_eq!(
+            format_verification_start_count_message(2, 0),
+            "verifying 2 modules with 1 thread..."
+        );
+    }
+
+    #[test]
+    fn test_verification_start_list_message_includes_threads() {
+        let targets = vec![
+            ModuleDescriptor::name("alpha"),
+            ModuleDescriptor::name("beta"),
+        ];
+        assert_eq!(
+            format_verification_start_message(&targets, 3),
+            "verifying modules: alpha, beta with 3 threads..."
         );
     }
 
