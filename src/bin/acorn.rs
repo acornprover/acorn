@@ -10,6 +10,7 @@ use acorn::project::{Project, ProjectConfig, ProjectError, SelectionInfo, UsageM
 use acorn::prover::trace::SearchTraceWriter;
 use acorn::prover::{ScoringConfig, ScoringPolicy};
 use acorn::server::{run_server, ServerArgs};
+use acorn::simplifier::{simplify_file, SimplifyOptions};
 use acorn::verifier::{LineSelection as VerifierLineSelection, Verifier};
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
@@ -529,6 +530,40 @@ enum Command {
         timing: bool,
     },
 
+    /// Remove proof-local propositions that weak search can rediscover
+    Simplify {
+        /// Target file or module to simplify
+        #[clap(
+            value_name = "TARGET",
+            help = "File or module to simplify. The command edits source files, so stdin is not supported."
+        )]
+        target: String,
+
+        /// Report removable propositions without writing the source file
+        #[clap(
+            long = "dry-run",
+            help = "Report simplifications without writing the source file."
+        )]
+        dry_run: bool,
+
+        /// Timeout in seconds for weak reproving
+        #[clap(
+            long,
+            default_value_t = 0.1,
+            help = "Timeout in seconds for weak reproving.",
+            value_name = "SECONDS"
+        )]
+        timeout: f32,
+
+        /// Maximum number of non-factual activations for weak reproving
+        #[clap(
+            long,
+            help = "Maximum number of non-factual activations for weak reproving.",
+            value_name = "COUNT"
+        )]
+        activations: Option<u32>,
+    },
+
     /// Check all goals, erroring if any goal requires a search
     #[clap(alias = "reverify")]
     Check {
@@ -1033,6 +1068,43 @@ async fn main() {
                     if !output.is_success() {
                         std::process::exit(1);
                     }
+                }
+            }
+        }
+
+        Some(Command::Simplify {
+            target,
+            dry_run,
+            timeout,
+            activations,
+        }) => {
+            if let Err(e) = validate_activations_flag(activations) {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            }
+            let activation_limit = activations.unwrap_or(2000) as i32;
+            let options = SimplifyOptions {
+                timeout_secs: timeout,
+                activation_limit,
+                dry_run,
+            };
+            match simplify_file(&current_dir, &target, options) {
+                Ok(report) => {
+                    let action = if report.dry_run {
+                        "would remove"
+                    } else {
+                        "removed"
+                    };
+                    println!(
+                        "{} {} proof-local proposition(s) from {}",
+                        action,
+                        report.removed_count(),
+                        report.target_path.display()
+                    );
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
@@ -1794,6 +1866,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    use acorn::goal_partition::GoalBucketFilter;
     use acorn::interfaces::GoalInfo;
     use acorn::prover::ScoringPolicy;
     use assert_fs::prelude::*;
@@ -2029,6 +2102,36 @@ mod tests {
 
         match args.command {
             Some(Command::Verify { jobs, .. }) => assert_eq!(jobs, Some(3)),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_simplify_command_parses() {
+        let args = Args::try_parse_from([
+            "acorn",
+            "simplify",
+            "src/main.ac",
+            "--dry-run",
+            "--timeout",
+            "0.2",
+            "--activations",
+            "50",
+        ])
+        .expect("simplify command should parse");
+
+        match args.command {
+            Some(Command::Simplify {
+                target,
+                dry_run,
+                timeout,
+                activations,
+            }) => {
+                assert_eq!(target, "src/main.ac");
+                assert!(dry_run);
+                assert_eq!(timeout, 0.2);
+                assert_eq!(activations, Some(50));
+            }
             _ => panic!("unexpected command"),
         }
     }

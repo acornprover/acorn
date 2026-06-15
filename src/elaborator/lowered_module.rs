@@ -18,6 +18,18 @@ pub struct LoweredFactId(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LoweredGoalId(usize);
 
+impl LoweredFactId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl LoweredGoalId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct LoweredGoalEntry {
     pub lowered_goal: LoweredGoal,
@@ -230,6 +242,11 @@ impl LoweredModule {
         let mut visible = Vec::new();
         let fact_ids = self.visible_fact_ids_for_goal(goal, &self.items, &mut visible)?;
         Some(fact_ids.into_iter().map(|id| self.fact(id)).collect())
+    }
+
+    pub fn visible_fact_ids_for(&self, goal: LoweredGoalId) -> Option<Vec<LoweredFactId>> {
+        let mut visible = Vec::new();
+        self.visible_fact_ids_for_goal(goal, &self.items, &mut visible)
     }
 
     pub fn fact_for_source_range(&self, range: Range) -> Option<&LoweredFact> {

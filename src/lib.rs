@@ -23,6 +23,7 @@ pub mod project;
 pub mod proof_display;
 pub mod prover;
 pub mod server;
+pub mod simplifier;
 pub mod syntax;
 pub mod verifier;
 
