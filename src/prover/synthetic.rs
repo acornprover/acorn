@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::names::ConstantName;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::clause::{Clause, NormalizedClauseTrace, PositiveExistsReduction};
@@ -278,6 +279,12 @@ pub fn witness_signature(
             }
         })
         .collect();
+    // Source-level witness functions do not take leading type-parameter locals as value
+    // arguments. Drop those slots so dependent value references use source argument indices.
+    let type_param_placeholders = vec![AcornValue::Bool(true); num_type_params];
+    let remove_type_param_locals = |acorn_type: AcornType| {
+        acorn_type.bind_values(0, ambient_context.len() as AtomId, &type_param_placeholders)
+    };
 
     let arguments: Vec<(String, AcornType)> = (num_type_params..ambient_context.len())
         .map(|var_id| {
@@ -287,12 +294,19 @@ pub fn witness_signature(
                 .clone();
             (
                 format!("x{}", var_id - num_type_params),
-                kernel_context.quote_type_with_context(arg_type, ambient_context, false),
+                remove_type_param_locals(kernel_context.quote_type_with_context(
+                    arg_type,
+                    ambient_context,
+                    false,
+                )),
             )
         })
         .collect();
-    let result_type =
-        kernel_context.quote_type_with_context(return_type.clone(), ambient_context, false);
+    let result_type = remove_type_param_locals(kernel_context.quote_type_with_context(
+        return_type.clone(),
+        ambient_context,
+        false,
+    ));
     let generic_type = if arguments.is_empty() {
         result_type.clone()
     } else {
@@ -305,4 +319,105 @@ pub fn witness_signature(
         )
     };
     (type_params, arguments, generic_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elaborator::acorn_type::{Datatype, DependentTypeArg, Typeclass};
+
+    #[test]
+    fn witness_signature_removes_type_param_slots_from_dependent_argument_types() {
+        let mut kernel_context = KernelContext::new();
+        let typeclass = Typeclass {
+            module_id: ModuleId(0),
+            name: "TopologicalSpace".to_string(),
+        };
+        let typeclass_id = kernel_context.type_store.add_typeclass(&typeclass);
+
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        kernel_context
+            .type_store
+            .add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        kernel_context
+            .type_store
+            .set_datatype_arity(&set_datatype, 1);
+
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: Some(typeclass.clone()),
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+        kernel_context.type_store.add_type(&AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(AcornValue::Variable(0, set_t.clone())),
+            ],
+        ));
+
+        let set_id = kernel_context
+            .type_store
+            .get_ground_id_by_name("Set")
+            .expect("Set should be registered");
+        let subspace_id = kernel_context
+            .type_store
+            .get_ground_id_by_name("Subspace")
+            .expect("Subspace should be registered");
+        let t_var = Term::new_variable(0);
+        let a_var = Term::new_variable(1);
+        let set_head = Term::ground_type(set_id);
+        let subspace_head = Term::ground_type(subspace_id);
+        let set_t_term = Term::type_application(set_head.clone(), vec![t_var.clone()]);
+        let subspace_t_a_term = Term::type_application(subspace_head, vec![t_var.clone(), a_var]);
+        let set_subspace_t_a_term =
+            Term::type_application(set_head.clone(), vec![subspace_t_a_term]);
+
+        let mut ambient_context = LocalContext::empty();
+        ambient_context.push_type(Term::typeclass(typeclass_id));
+        ambient_context.push_type(set_t_term.clone());
+        ambient_context.push_type(set_subspace_t_a_term);
+
+        let (type_params, arguments, generic_type) =
+            witness_signature(&kernel_context, &ambient_context, &set_t_term);
+
+        assert_eq!(
+            type_params,
+            vec![TypeParam {
+                name: "T0".to_string(),
+                typeclass: Some(typeclass),
+            }]
+        );
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(arguments[0].0, "x0");
+        assert_eq!(arguments[1].0, "x1");
+
+        let AcornType::Data(datatype, params) = &arguments[1].1 else {
+            panic!("second argument should be a Set");
+        };
+        assert_eq!(datatype.name, "Set");
+        let [AcornType::Family(datatype, subspace_args)] = params.as_slice() else {
+            panic!("second argument should contain Subspace[T, x0]");
+        };
+        assert_eq!(datatype.name, "Subspace");
+        let [DependentTypeArg::Type(AcornType::Variable(param)), DependentTypeArg::Value(AcornValue::Variable(var_id, _))] =
+            subspace_args.as_slice()
+        else {
+            panic!("Subspace arguments should be the type parameter and the first source value argument");
+        };
+        assert_eq!(param.name, "T0");
+        assert_eq!(var_id, &0);
+        assert_eq!(
+            generic_type.to_string(),
+            "(Set[TopologicalSpace], Set[Subspace[TopologicalSpace, x0]]) -> Set[TopologicalSpace]"
+        );
+    }
 }

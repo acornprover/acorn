@@ -257,19 +257,40 @@ fn passive_contradiction_var_map<R: ProofResolver>(
             used_vars.insert(*var_id);
         }
     }
+    let mut pending_vars: Vec<AtomId> = used_vars.iter().copied().collect();
+    while let Some(var_id) = pending_vars.pop() {
+        let Some(var_type) = local_context.get_var_type(var_id as usize) else {
+            continue;
+        };
+        for atom in var_type.iter_atoms() {
+            if let crate::kernel::atom::Atom::FreeVariable(dep_id) = atom {
+                if used_vars.insert(*dep_id) {
+                    pending_vars.push(*dep_id);
+                }
+            }
+        }
+    }
+    let mut used_vars: Vec<AtomId> = used_vars.into_iter().collect();
+    used_vars.sort_unstable();
 
     let mut var_map = VariableMap::new();
     for var_id in used_vars {
         let Some(var_type) = local_context.get_var_type(var_id as usize) else {
             continue;
         };
+        let concrete_type = apply_to_term(var_type.as_ref(), &var_map);
+        let inhabitant_context = if concrete_type.as_ref().as_typeclass().is_some() {
+            None
+        } else {
+            Some(&local_context)
+        };
         let witness = resolver
             .kernel_context()
-            .find_inhabitant(var_type, Some(&local_context))
+            .find_inhabitant(&concrete_type, inhabitant_context)
             .ok_or_else(|| {
                 Error::internal(format!(
                     "missing inhabitant while reconstructing passive contradiction for {} at x{}: {}",
-                    clause, var_id, var_type
+                    clause, var_id, concrete_type
                 ))
             })?;
         var_map.set(var_id, witness);
@@ -676,13 +697,16 @@ pub fn reconstruct_step<R: ProofResolver>(
 mod tests {
     use crate::certificate::Certificate;
     use crate::elaborator::binding_map::BindingMap;
+    use crate::kernel::atom::Atom;
     use crate::kernel::clause::{BooleanReductionKind, Clause};
     use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
     use crate::kernel::proof_step::{
         BooleanReductionInfo, PremiseMap, ProofStep, Rule, Truthiness,
     };
+    use crate::kernel::symbol::Symbol;
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::apply_to_term;
     use crate::kernel::variable_map::VariableMap;
@@ -707,6 +731,40 @@ mod tests {
             synthetic_witnesses,
             ModuleId::default(),
         )
+    }
+
+    #[test]
+    fn passive_contradiction_var_map_instantiates_dependent_typeclass_values() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_typeclass("Neg").parse_instance("Nat", "Neg");
+        let predicate_type = kctx.parse_pi("T: Neg", "T -> Bool");
+        kctx.symbol_table.add_global_constant(predicate_type);
+        kctx.symbol_table
+            .add_global_constant(kctx.parse_type("Nat"));
+
+        let local_context = kctx.parse_local(&["Neg", "x0"]);
+        let predicate = Term::atom(Atom::Symbol(Symbol::GlobalConstant(ModuleId(0), 0)))
+            .apply(&[Term::new_variable(0), Term::new_variable(1)]);
+        let clause = Clause::new(vec![Literal::negative(predicate)], &local_context);
+        clause.validate(&kctx);
+
+        let proof = Proof::new(&kctx);
+        let (var_map, _) = super::passive_contradiction_var_map(&proof, &clause)
+            .expect("passive contradiction should choose concrete type and value witnesses");
+
+        assert_eq!(
+            var_map.get_mapping(0),
+            Some(&kctx.parse_type("Nat")),
+            "the typeclass local should instantiate to the concrete Neg instance"
+        );
+        assert_eq!(
+            var_map.get_mapping(1),
+            Some(&Term::atom(Atom::Symbol(Symbol::GlobalConstant(
+                ModuleId(0),
+                1
+            )))),
+            "the dependent value local should use the inhabitant of the chosen concrete type"
+        );
     }
 
     /// Test that resolution followed by simplification produces correct results.

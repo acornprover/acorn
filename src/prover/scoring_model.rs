@@ -25,7 +25,10 @@ pub struct ScoringModel {
 static SCORING_SESSION: OnceLock<Arc<Session>> = OnceLock::new();
 static EXTERNAL_SCORING_SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<Session>>>> = OnceLock::new();
 
-const MODEL_BYTES: &[u8] = include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx");
+pub const EMBEDDED_MODEL_POLICY: &str = "model-20260611-e50-h512-l3";
+const MODEL_BYTES: &[u8] = include_bytes!("../../files/models/model-20260611-e50-h512-l3.onnx");
+const MODEL_FEATURE_CONTRACT_JSON: &str =
+    include_str!("../../files/models/model-20260611-e50-h512-l3.features.json");
 const FEATURE_CONTRACT_SCHEMA: &str = "acorn-scorer-feature-contract-v1";
 
 #[derive(Deserialize)]
@@ -59,33 +62,36 @@ fn cached_external_session(path: &Path, bytes: &[u8]) -> Result<Arc<Session>, Bo
     Ok(Arc::clone(session))
 }
 
-fn load_feature_contract(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
-    let json = fs::read_to_string(path)?;
+fn parse_feature_contract(source: &str, json: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let contract: FeatureContract = serde_json::from_str(&json)?;
     if contract.schema != FEATURE_CONTRACT_SCHEMA {
         return Err(format!(
             "unsupported feature contract schema '{}' in {}",
-            contract.schema,
-            path.display()
+            contract.schema, source
         )
         .into());
     }
     if contract.input_features.is_empty() {
-        return Err(format!("feature contract is empty: {}", path.display()).into());
+        return Err(format!("feature contract is empty: {}", source).into());
     }
 
     let mut seen = HashSet::new();
     let probe = Features::default();
     for name in &contract.input_features {
         if !seen.insert(name.as_str()) {
-            return Err(format!("duplicate feature name '{}' in {}", name, path.display()).into());
+            return Err(format!("duplicate feature name '{}' in {}", name, source).into());
         }
         if probe.feature_value(name).is_none() {
-            return Err(format!("unknown feature name '{}' in {}", name, path.display()).into());
+            return Err(format!("unknown feature name '{}' in {}", name, source).into());
         }
     }
 
     Ok(contract.input_features)
+}
+
+fn load_feature_contract(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let json = fs::read_to_string(path)?;
+    parse_feature_contract(&path.display().to_string(), &json)
 }
 
 impl ScoringModel {
@@ -93,12 +99,11 @@ impl ScoringModel {
     pub fn load() -> Result<Self, Box<dyn Error>> {
         let session = SCORING_SESSION
             .get_or_init(|| make_session(MODEL_BYTES).expect("Failed to initialize ORT session"));
+        let feature_names =
+            parse_feature_contract(EMBEDDED_MODEL_POLICY, MODEL_FEATURE_CONTRACT_JSON)?;
         Ok(ScoringModel {
             session: Arc::clone(session),
-            feature_names: Features::legacy_model_feature_names()
-                .iter()
-                .map(|name| name.to_string())
-                .collect(),
+            feature_names,
         })
     }
 
@@ -187,6 +192,13 @@ mod tests {
         .unwrap();
         let error = load_feature_contract(&bad_path).unwrap_err().to_string();
         assert!(error.contains("unknown feature name"));
+    }
+
+    #[test]
+    fn test_embedded_feature_contract_uses_catalog_features() {
+        let feature_names =
+            parse_feature_contract(EMBEDDED_MODEL_POLICY, MODEL_FEATURE_CONTRACT_JSON).unwrap();
+        assert_eq!(feature_names, Features::catalog_feature_names());
     }
 
     #[test]

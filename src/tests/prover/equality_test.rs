@@ -42,7 +42,6 @@ fn test_proving_with_injectivity() {
     assert_eq!(
         c.proof.unwrap(),
         vec![
-            "g(Foo.baz) = g(Foo.foo) or g(Foo.foo) = g(Foo.bar)",
             "g(Foo.foo) != g(Foo.bar)",
             "g(Foo.baz) != g(Foo.foo)",
             "g(Foo.baz) = g(Foo.foo)"
@@ -165,7 +164,6 @@ fn test_proving_multiple_simplifying() {
         &[
             "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { f(x0) }(Foo.bar)",
-            "not f(Foo.foo) or not f(Foo.bar)",
         ],
     );
 }
@@ -267,7 +265,10 @@ fn test_proving_with_existential_witness() {
     let proof = c.proof.unwrap();
     assert_eq!(
         proof,
-        vec!["function(x0: Foo) { not f(x0) or exists(k0: Foo) { g(x0, k0) } }(x)"]
+        vec![
+            "function(x0: Foo) { not f(x0) or exists(k0: Foo) { g(x0, k0) } }(x)",
+            "not f(x)",
+        ]
     );
 }
 
@@ -304,9 +305,8 @@ fn test_proving_with_free_variable() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo) { f(x0) }(Foo.bar)",
             "function(x0: Foo) { not f(x0) or g }(Foo.bar)",
-            "function(x0: Foo) { not f(x0) }(Foo.bar)",
+            "function(x0: Foo) { f(x0) }(Foo.bar)",
         ],
     );
 }
@@ -390,8 +390,9 @@ fn test_proving_with_theorem_arg() {
     assert_proof_lines(
         proof,
         &[
+            "function[T0: Thing](x0: T0, x1: T0) { x0 + x1 = x1 + x0 }[T](a, b + c)",
             "function[T0: Thing](x0: T0, x1: T0, x2: T0) { x0 + x1 + x2 = x0 + (x1 + x2) }[T](a, b, c)",
-            "function[T0: Thing](x0: T0, x1: T0) { x0 + x1 = x1 + x0 }[T](b + c, a)",
+            "a + (b + c) != a + b + c",
         ],
     );
 }

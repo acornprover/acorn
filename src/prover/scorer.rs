@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use super::features::Features;
-use super::scoring_model::ScoringModel;
+use super::scoring_model::{ScoringModel, EMBEDDED_MODEL_POLICY};
 
 pub trait Scorer {
     fn score(&self, features: &Features) -> Result<f32, Box<dyn Error>>;
@@ -20,17 +20,16 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScoringPolicy {
-    Legacy,
+    Model20260611E50H512L3,
     Handcrafted,
     DepthFirst,
-    LegacyNoShallow,
     Model,
     ModelNoShallow,
 }
 
 impl Default for ScoringPolicy {
     fn default() -> Self {
-        Self::Legacy
+        Self::Model20260611E50H512L3
     }
 }
 
@@ -40,7 +39,7 @@ impl ScoringPolicy {
     }
 
     pub fn uses_shallow_ordering(self) -> bool {
-        !matches!(self, Self::LegacyNoShallow | Self::ModelNoShallow)
+        !matches!(self, Self::ModelNoShallow)
     }
 
     pub fn requires_model(self) -> bool {
@@ -48,17 +47,16 @@ impl ScoringPolicy {
     }
 
     pub fn options() -> &'static str {
-        "legacy, handcrafted, depth-first, legacy-no-shallow, model, model-no-shallow"
+        "model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow"
     }
 }
 
 impl fmt::Display for ScoringPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::Legacy => "legacy",
+            Self::Model20260611E50H512L3 => EMBEDDED_MODEL_POLICY,
             Self::Handcrafted => "handcrafted",
             Self::DepthFirst => "depth-first",
-            Self::LegacyNoShallow => "legacy-no-shallow",
             Self::Model => "model",
             Self::ModelNoShallow => "model-no-shallow",
         };
@@ -71,10 +69,9 @@ impl FromStr for ScoringPolicy {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
-            "legacy" | "onnx" => Ok(Self::Legacy),
+            "model-20260611-e50-h512-l3" => Ok(Self::Model20260611E50H512L3),
             "handcrafted" => Ok(Self::Handcrafted),
             "depth-first" => Ok(Self::DepthFirst),
-            "legacy-no-shallow" | "onnx-no-shallow" => Ok(Self::LegacyNoShallow),
             "model" => Ok(Self::Model),
             "model-no-shallow" => Ok(Self::ModelNoShallow),
             _ => Err(format!(
@@ -130,7 +127,7 @@ impl ScoringConfig {
 
     pub fn load_scorer(&self) -> Result<Box<dyn Scorer + Send + Sync>, Box<dyn Error>> {
         match self.policy {
-            ScoringPolicy::Legacy | ScoringPolicy::LegacyNoShallow => {
+            ScoringPolicy::Model20260611E50H512L3 => {
                 Ok(Box::new(ScoringModel::load().map_err(|e| {
                     format!("failed to load embedded model: {}", e)
                 })?))

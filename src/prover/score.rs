@@ -139,12 +139,12 @@ mod tests {
     fn shallow_status_orders_scores_by_default() {
         let scorer = ConstantScorer;
         let deep = Score::new(
-            ScoringPolicy::Legacy,
+            ScoringPolicy::Model20260611E50H512L3,
             &scorer,
             &features(ShallowStatus::Deep),
         );
         let shallow = Score::new(
-            ScoringPolicy::Legacy,
+            ScoringPolicy::Model20260611E50H512L3,
             &scorer,
             &features(ShallowStatus::Unspent),
         );
@@ -155,15 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_no_shallow_keeps_shallow_status_out_of_ordering() {
+    fn model_no_shallow_keeps_shallow_status_out_of_ordering() {
         let scorer = ConstantScorer;
         let deep = Score::new(
-            ScoringPolicy::LegacyNoShallow,
+            ScoringPolicy::ModelNoShallow,
             &scorer,
             &features(ShallowStatus::Deep),
         );
         let shallow = Score::new(
-            ScoringPolicy::LegacyNoShallow,
+            ScoringPolicy::ModelNoShallow,
             &scorer,
             &features(ShallowStatus::Unspent),
         );

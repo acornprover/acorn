@@ -2102,7 +2102,7 @@ mod tests {
                 Some(u64::from(goal_bucket("foo", "excluded_middle")))
             );
             assert_eq!(record["skip"], 0);
-            assert_eq!(record["policy"], "legacy");
+            assert_eq!(record["policy"], "model-20260611-e50-h512-l3");
             assert!(record["activation_index"].as_u64().is_some());
             assert!(record["passive_id"].as_u64().is_some());
             assert!(record["active_id"].is_u64() || record["active_id"].is_null());

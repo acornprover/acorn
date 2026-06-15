@@ -17,19 +17,19 @@ facts into the passive set. A better activation policy can find proofs with fewe
 especially fewer irrelevant factual assumption activations. That directly attacks the dominant
 runtime bucket while keeping the proof search more complete than an early retrieval filter.
 
-This should not be interpreted as "replace the ONNX file and call it done." The current ONNX
-model is only one small part of the activation policy. The policy also has hardcoded ordering in
-the default configuration, very limited features, no ability to reject or budget facts, and old
-training infrastructure that is not eval-driven.
+This should not be interpreted as "the ONNX file is the whole policy." The current ONNX model is
+only one part of the activation policy. The policy also has hardcoded ordering in the default
+configuration, no ability to reject or budget facts, and training infrastructure that is only
+indirectly connected to the live eval metric.
 
 The first configurability step has now landed: `acorn eval --policy` can run several activation
 policies without code edits, and `--policy model --model PATH` can evaluate a trained ONNX scorer
 with its exported `*.features.json` contract. That immediately exposed two important facts:
 
-- `depth-first` currently beats the default ONNX policy by a large margin on the full eval.
+- the trained `model-20260611-e50-h512-l3` checkpoint narrowly beats `depth-first` on the full
+  eval, and is now the embedded default policy.
 - alternate policies exercised proof and certificate paths the default policy rarely reached.
-  The initially reduced certificate and stack-growth bugs have now been fixed, but the full
-  standard eval suite has not yet been rerun after those fixes and the first trained model.
+  The initially reduced certificate and stack-growth bugs have now been fixed.
 
 ## Current Eval Harness
 
@@ -55,8 +55,9 @@ The trace exporter is intentionally eval-shaped:
 
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
   from eval searches; paths must end in `.jsonl.zst`
-- a sidecar metadata file next to the trace, for example `legacy.meta.json` for
-  `legacy.jsonl.zst`,
+- a sidecar metadata file next to the trace, for example
+  `model-20260611-e50-h512-l3.meta.json` for
+  `model-20260611-e50-h512-l3.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, stable `goal_bucket`, activation
   index, passive id, active id, queue score/order fields, rule, truthiness, the current numeric
@@ -88,12 +89,10 @@ buckets above.
 
 The current policy options are:
 
-- `legacy`: the default embedded legacy ONNX scorer, with shallow-first ordering
+- `model-20260611-e50-h512-l3`: the default embedded ONNX scorer, with shallow-first ordering
 - `handcrafted`: the old hand-written scorer, with shallow-first ordering
 - `depth-first`: constant scorer, so queue ties fall back to insertion/order structure, with
   shallow-first ordering
-- `legacy-no-shallow`: the embedded legacy ONNX scorer with shallow status removed from the ordinary
-  ordering key
 - `model`: an external ONNX scorer loaded from `--model`, with shallow-first ordering
 - `model-no-shallow`: an external ONNX scorer loaded from `--model`, with shallow status removed
   from the ordinary ordering key
@@ -102,26 +101,16 @@ The scoring config is threaded through `Builder`, `Processor`, `Prover`, and `Pa
 workers can carry both a policy and an optional external model path. `scripts/eval-suite.sh` runs
 the standard traced cases by default:
 
+- `model-20260611-e50-h512-l3`
 - `depth-first`
-- `legacy`
-- `legacy-no-shallow`
 - `model-20260610a`
 - `model-20260610a-no-shallow`
 - `model-20260611-e20-h256-l3`
-- `model-20260611-e50-h512-l3`
-- `depth-first-repeat`
 
-The strongest baseline (currently `depth-first`) runs both first and last. The two runs are
-identical cases, so their per-goal disagreement measures the run's noise floor: any
-policy-vs-policy difference smaller than that disagreement is indistinguishable from timing noise.
-Placing the pair at the two ends of the run also catches drift in machine conditions over the
-suite's duration.
-
-The current external model cases point at:
+The current external comparison model cases point at:
 
 - `model-20260610a`: `tmp/models/model-20260610a.onnx`
 - `model-20260611-e20-h256-l3`: `tmp/models/model-20260611-e20-h256-l3.onnx`
-- `model-20260611-e50-h512-l3`: `tmp/models/model-20260611-e50-h512-l3.onnx`
 
 For quick iteration, `./scripts/eval-suite.sh --fast` passes
 `acorn eval --eval-sample 0-4,90-94` to every case. The sample uses the same stable goal buckets as
@@ -140,7 +129,7 @@ The activation queue lives in `PassiveSet`. New proof steps are scored in batche
 5. `PassiveSet::pop_shallow` is used by shallow proof mode to find shallow work even when the
    ordinary policy does not prioritize it.
 
-The default scorer is still the embedded ONNX model:
+The default scorer is the embedded ONNX model:
 
 ```rust
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
@@ -148,30 +137,29 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 }
 ```
 
-`ScoringModel::load()` embeds one ONNX model:
+`ScoringModel::load()` embeds one ONNX model and its feature contract:
 
 ```rust
-include_bytes!("../../files/models/model-2024-09-25-15-33-10.onnx")
+include_bytes!("../../files/models/model-20260611-e50-h512-l3.onnx")
+include_str!("../../files/models/model-20260611-e50-h512-l3.features.json")
 ```
 
 `ScoringPolicy` now exposes these choices:
 
-- `Legacy`
+- `Model20260611E50H512L3`
 - `Handcrafted`
 - `DepthFirst`
-- `LegacyNoShallow`
 - `Model`
 - `ModelNoShallow`
 
-The eval CLI exposes them as `legacy`, `handcrafted`, `depth-first`, `legacy-no-shallow`, `model`,
-and `model-no-shallow`. The old names `onnx` and `onnx-no-shallow` are accepted as aliases for the
-legacy embedded model. `model` policies require `--model PATH`; Rust loads the adjacent
+The eval CLI exposes them as `model-20260611-e50-h512-l3`, `handcrafted`, `depth-first`, `model`,
+and `model-no-shallow`. The `model` policies require `--model PATH`; Rust loads the adjacent
 `PATH.with_extension("features.json")` contract and feeds the model exactly those feature columns.
 
 ## Policy Around The Model
 
-The model score is not the whole ordering. Under the default `legacy` policy, `Score` orders proof
-steps lexicographically by:
+The model score is not the whole ordering. Under the default `model-20260611-e50-h512-l3` policy,
+`Score` orders proof steps lexicographically by:
 
 1. whether the step is a contradiction
 2. `ShallowStatus`
@@ -187,10 +175,9 @@ This matters because an ONNX replacement cannot learn to activate a useful deep 
 unhelpful shallow step. That choice is made outside the model. The shallow heuristic is useful for
 some proof-validation behavior, but it is also acting as a global search policy.
 
-`legacy-no-shallow` was added to ablate this ordering. It preserves whether a step is shallow for
-shallow proof mode, but neutralizes shallow status in the ordinary queue ordering. The first full
-eval attempt hit a stack-growth bug that is now fixed in reduced form, so this ablation should be
-rerun.
+`model-no-shallow` can be used with an external checkpoint to ablate this ordering. It preserves
+whether a step is shallow for shallow proof mode, but neutralizes shallow status in the ordinary
+queue ordering.
 
 Future work should separate:
 
@@ -204,7 +191,8 @@ Those are related but not the same policy decision.
 `Features` now has two distinct vector views:
 
 - the wide feature catalog, exported in eval traces via `Features::to_catalog_floats`
-- the legacy embedded-model input, selected by `Features::legacy_model_feature_names`
+- the old nine-feature input, still available through `Features::legacy_model_feature_names` for
+  historical training compatibility
 
 The catalog is intended for serious training data. It includes the original nine model inputs plus
 refactor-resistant shape/count/category features:
@@ -218,17 +206,8 @@ refactor-resistant shape/count/category features:
 - generated-vs-assumption and rule-category one-hots
 - source-category one-hots, source importability, and source depth for direct assumptions
 
-The current embedded ONNX model still sees only the legacy nine inputs:
-
-- contradiction bit
-- atom count
-- counterfactual bit
-- hypothetical bit
-- factual bit
-- assumption bit
-- negated-goal bit
-- proof size
-- depth
+The current embedded ONNX model records its exact 60-feature input order in
+`files/models/model-20260611-e50-h512-l3.features.json`.
 
 `is_shallow` and `shallow_status` are still used outside the model by `Score` for policies that
 keep shallow-first ordering. They are now also present in the trace catalog so future models can
@@ -284,8 +263,8 @@ immediately for inference, but they are all candidates for later activation unde
 queue ordering.
 
 The activation cap currently counts non-factual activations. Factual activations can therefore
-be very large in a timeout search. The default ONNX eval run had about 108 factual activations
-for every non-factual activation.
+be very large in a timeout search. An earlier default ONNX eval run had about 108 factual
+activations for every non-factual activation.
 
 ## Current Activation Cost
 
@@ -343,9 +322,8 @@ tensor shards from traces and train from either raw traces or shard directories.
 The Python loader reads trace feature names from the sidecar `*.meta.json` file. By default it
 uses all catalog features; `--features legacy` selects the old nine-feature contract, and repeated
 `--feature NAME` arguments can choose an explicit subset. The embedded production model in
-`src/prover/scoring_model.rs` is still the checked-in `model-2024-09-25-15-33-10.onnx`, but a
-new ONNX file can now be evaluated without embedding it by running
-`acorn eval --policy model --model PATH`.
+`src/prover/scoring_model.rs` is `model-20260611-e50-h512-l3`; new ONNX files can still be
+evaluated without embedding them by running `acorn eval --policy model --model PATH`.
 
 This setup is useful historical context, but it should not drive the next iteration by itself.
 The training objective is weakly connected to the actual metric we care about: proving more eval
@@ -374,26 +352,24 @@ and richer instrumentation before making larger premise-selection changes.
 The policy ablation made this more concrete: changing activation order alone, without changing
 retrieval, was enough to move both success rate and runtime substantially.
 
-## Why Not Just Swap The ONNX Model
+## Why The Model Is Not The Whole Policy
 
-Swapping the ONNX file alone is unlikely to be enough.
+Updating the embedded ONNX model is useful, but it is not the whole search policy.
 
 The default model is boxed in by policy. The default ordering is contradiction, then shallow
 status, then model score. A better model cannot override shallow-first behavior unless we choose
 a policy that lets it do so.
 
-The embedded model input is too sparse. Nine scalar features cannot express most of what a premise
-selector or activation policy needs to know, such as goal relevance, symbol overlap, dependency
-distance, term shape, rule type, or search context.
+The current catalog is still missing features that a premise selector or activation policy likely
+needs, such as goal relevance, symbol overlap, dependency distance, and richer search context.
 
 The scorer cannot express policy decisions beyond a float rank. It cannot say "do not activate
 this yet", "never activate this fact in this search", "spend only N factual activations", or
 "prefer this generated step because the current queue is saturated with assumptions."
 
-The legacy training data was not eval-shaped. The old dataset labels whether activated steps
-appeared in the final proof. The new trace path fixes the most important part of that by exporting
-eval searches directly, including failures, but it still does not directly encode decision-time
-ranking among candidates or counterfactual choices the prover did not activate.
+The current training data is closer to eval-shaped than the old dataset, but it still does not
+directly encode decision-time ranking among candidates or counterfactual choices the prover did not
+activate.
 
 Eval policy selection now supports both built-in scorers and external model contracts. It is enough
 for ranking ablations, but not enough for richer search policies that defer, reject, threshold, or
@@ -401,8 +377,8 @@ budget activations.
 
 For these reasons, the useful "scoring" work is really policy, training, and measurement work:
 keep policies configurable, make shallow ordering optional or learnable, train from eval traces,
-and evaluate with `acorn eval`. The immediate next step is to rerun the standard eval suite now
-that the first wave of alternate-policy bugs has been fixed and the first trained model is wired in.
+and evaluate with `acorn eval`. The immediate next step is to rerun the standard eval suite with
+the embedded `model-20260611-e50-h512-l3` checkpoint as the default baseline.
 
 ## Recommended Next Work
 
@@ -413,7 +389,7 @@ that the first wave of alternate-policy bugs has been fixed and the first traine
 The policy flag did its job: it found real failures outside the default proof paths. The reduced
 bugs from the first ablation pass are now fixed:
 
-- `legacy-no-shallow` stack growth from cyclic named-witness placement
+- no-shallow stack growth from cyclic named-witness placement
 - `handcrafted` certificate generation for the `number_theory/arithmetic_functions.ac` line 154
   proof path
 - `handcrafted` certificate generation for the `fin_matrix_det.ac` line 225 proof path
@@ -427,19 +403,19 @@ data as the new baseline for scorer work.
 
 2. Inspect policy value and failure modes.
 
-The existing policies and the first trained model are useful both as baselines and as trace
-generators. After the rerun, compare which goals are solved uniquely by each case and which cases
-are mostly subsumed by the others. This should tell us whether the built-ins and the first trained
-model variants are all worth keeping in the experiment suite while we train replacements.
+The existing policies and trained models are useful both as baselines and as trace generators.
+After the rerun, compare which goals are solved uniquely by each case and which cases are mostly
+subsumed by the others. This should tell us which built-ins and model variants are worth keeping in
+the experiment suite while we train replacements.
 `scripts/eval-policy-wins.py` computes these unique-win counts from the eval-suite logs without
 reading the much larger trace files.
 
 3. Iterate on the trained scorer.
 
 The trace exporter, shard converter, Python training path, ONNX export, and Rust external-model
-loader now exist. The first catalog-feature model should be treated as an eval candidate, not as a
-final replacement. If it beats useful baselines, the next iteration is larger or cleaner training.
-If it underperforms, inspect activation traces and offline errors before changing architecture.
+loader now exist. The current embedded catalog-feature model is a useful baseline, not a final
+answer. The next iteration should be guided by activation traces and live eval behavior, not just
+offline loss.
 
 4. Add the next feature batch only after looking at the new traces.
 
@@ -487,9 +463,10 @@ useful under successful searches.
 
 ## Open Questions
 
-- Does `depth-first` still outperform the default ONNX policy after the next full eval rerun?
-- Does the first catalog-feature trained model beat the embedded ONNX model, and does removing
-  shallow-first ordering help or hurt it?
+- Does the embedded `model-20260611-e50-h512-l3` checkpoint keep beating `depth-first` after the
+  next full eval rerun?
+- Does removing shallow-first ordering help or hurt the embedded checkpoint if we add a built-in
+  no-shallow variant?
 - Can normal search drop shallow-first ordering and let the model rank shallow and deep candidates
   together, while keeping `ProverMode::Shallow` as a separate bounded mode?
 - Should all initial facts continue to enter the passive set, or should a learned/source-aware
@@ -505,5 +482,5 @@ useful under successful searches.
 
 The next concrete milestone should be to rerun the traced standard eval suite after the current
 fixes and model-loader changes. Once the standard cases complete cleanly, the ablations can tell us
-which policy constraints are costing searches and whether the first catalog-feature model is already
-useful under live prover behavior.
+which policy constraints are costing searches and whether the embedded catalog-feature model keeps
+helping under live prover behavior.

@@ -6,7 +6,7 @@
 #   ./scripts/eval-suite.sh
 #   ./scripts/eval-suite.sh --out tmp/my-eval --skip-build
 #   ./scripts/eval-suite.sh --fast --skip-build
-#   ./scripts/eval-suite.sh --policy depth-first --policy legacy
+#   ./scripts/eval-suite.sh --policy model-20260611-e50-h512-l3 --policy depth-first
 #   ./scripts/eval-suite.sh --case candidate=model:tmp/models/scorer.onnx
 
 set -uo pipefail
@@ -63,7 +63,6 @@ case_models=()
 case_specs=()
 model_20260610a="tmp/models/model-20260610a.onnx"
 model_20260611_e20_h256_l3="tmp/models/model-20260611-e20-h256-l3.onnx"
-model_20260611_e50_h512_l3="tmp/models/model-20260611-e50-h512-l3.onnx"
 
 add_case() {
     local name="$1"
@@ -101,19 +100,12 @@ add_case_spec() {
     add_case "$name" "$policy" "$model"
 }
 
-# The strongest baseline runs first and last; disagreement between the two
-# identical cases is the run's noise floor, measured across its full duration.
-noise_floor_policy="depth-first"
-
 add_standard_cases() {
-    add_case "$noise_floor_policy" "$noise_floor_policy"
-    add_case "legacy" "legacy"
-    add_case "legacy-no-shallow" "legacy-no-shallow"
+    add_case "model-20260611-e50-h512-l3" "model-20260611-e50-h512-l3"
+    add_case "depth-first" "depth-first"
     add_case "model-20260610a" "model" "$model_20260610a"
     add_case "model-20260610a-no-shallow" "model-no-shallow" "$model_20260610a"
     add_case "model-20260611-e20-h256-l3" "model" "$model_20260611_e20_h256_l3"
-    add_case "model-20260611-e50-h512-l3" "model" "$model_20260611_e50_h512_l3"
-    add_case "$noise_floor_policy-repeat" "$noise_floor_policy"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -232,7 +224,6 @@ write_run_metadata() {
         printf "\n"
         printf "model_20260610a=%s\n" "$model_20260610a"
         printf "model_20260611_e20_h256_l3=%s\n" "$model_20260611_e20_h256_l3"
-        printf "model_20260611_e50_h512_l3=%s\n" "$model_20260611_e50_h512_l3"
         printf "acorn_bin=%s\n" "$acorn_bin"
         printf "skip_build=%s\n" "${skip_build:-0}"
         printf "trace_shard_rows=%s\n" "$trace_shard_rows"

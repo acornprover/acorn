@@ -292,6 +292,9 @@ impl Block {
         let mut theorem_alias = None;
         let goal_prop = match params {
             BlockParams::Conditional(ref premise) => {
+                if premise.value == AcornValue::Bool(false) {
+                    subenv.will_include_explicit_false = true;
+                }
                 Self::add_structural_premise(
                     project,
                     &mut subenv,

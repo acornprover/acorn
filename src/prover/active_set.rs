@@ -657,66 +657,6 @@ impl ActiveSet {
             literals.push(new_literal);
         }
 
-        // Check inhabitedness for eliminated variables from BOTH premises.
-        // A variable is "eliminated" if, after unification, it contributes no
-        // output variables to the resulting clause. Resolution is only sound
-        // when such eliminated variables have inhabited types.
-        let mut output_vars: HashSet<AtomId> = HashSet::new();
-        for literal in &literals {
-            for atom in literal.iter_atoms() {
-                if let Atom::FreeVariable(id) = atom {
-                    output_vars.insert(*id);
-                }
-            }
-        }
-
-        let mut check_eliminated_vars = |scope: Scope, context: &LocalContext| -> bool {
-            for var_id in 0..context.len() {
-                // Apply the unifier to a variable term to get its mapped value.
-                let var_term = Term::new_variable(var_id as AtomId);
-                let mapped_term = unifier.apply(scope, &var_term);
-
-                // If mapped to concrete term (no variables), the variable was instantiated.
-                if !mapped_term.has_any_variable() {
-                    continue;
-                }
-
-                // Check if any output variables in mapped_term appear in output literals.
-                let appears_in_output = mapped_term.iter_atoms().any(|atom| {
-                    if let Atom::FreeVariable(out_var) = atom {
-                        output_vars.contains(out_var)
-                    } else {
-                        false
-                    }
-                });
-
-                // If no output variables appear in output, this variable is eliminated.
-                if !appears_in_output {
-                    if let Some(var_type) = context.get_var_type(var_id) {
-                        // Translate the type to output scope for inhabitedness check.
-                        let translated_type = unifier.apply(scope, var_type);
-                        if !Self::provably_inhabited_for_elimination(
-                            kernel_context,
-                            &translated_type,
-                            Some(unifier.output_context()),
-                        ) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        };
-
-        let short_context = short_clause.get_local_context();
-        if !check_eliminated_vars(Scope::LEFT, short_context) {
-            return None;
-        }
-        let long_context = long_clause.get_local_context();
-        if !check_eliminated_vars(Scope::RIGHT, long_context) {
-            return None;
-        }
-
         // Gather the output data including variable maps for reconstruction
         let (all_maps, context) = unifier.into_maps_with_context();
         let mut short_var_map = VariableMap::new();
@@ -735,8 +675,7 @@ impl ActiveSet {
             &normalized.pre_norm_context,
             &normalized.var_ids,
             kernel_context,
-        )
-        .unwrap_or_else(VariableMap::new);
+        )?;
 
         let premise_map = PremiseMap::new_with_witnesses(
             vec![short_var_map.clone(), long_var_map.clone()],
@@ -1485,7 +1424,19 @@ impl ActiveSet {
         let mut simplifying_var_maps: Vec<VariableMap> = vec![];
         for literal in std::mem::take(&mut step.clause.literals) {
             match self.evaluate_literal(&literal, &local_context, kernel_context) {
-                Some((true, _)) => {
+                Some((true, elimination)) => {
+                    if initial_num_literals == 1 && step.truthiness != Truthiness::Factual {
+                        if let LiteralElimination::Eliminated { step: simp_id, .. } = &elimination {
+                            let simp_step = self.get_step(*simp_id);
+                            if simp_step.truthiness == Truthiness::Factual {
+                                // Keep the proof-local duplicate: factual-factual inference is
+                                // deliberately suppressed, so replacing a counterfactual literal
+                                // with a factual one can erase the only proof bridge.
+                                output_literals.push(literal);
+                                continue;
+                            }
+                        }
+                    }
                     // This literal is already known to be true.
                     // Thus, the whole clause is a tautology.
                     return None;
@@ -2053,6 +2004,29 @@ mod tests {
                 .map(|ps| ps.clause.to_string())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_simplify_keeps_counterfactual_duplicate_of_factual_single_literal() {
+        let mut kctx = KernelContext::new();
+        let mut synthetic_witnesses = WitnessRegistry::new();
+        kctx.parse_datatype("Nat")
+            .parse_constant("c0", "Nat")
+            .parse_constant("c1", "Nat");
+
+        let mut set = ActiveSet::new();
+        let factual_clause = kctx.parse_clause("c1 != c0", &[]);
+        let factual_step = ProofStep::mock_from_clause(factual_clause.clone());
+        activate_test(&mut set, factual_step, &mut kctx, &mut synthetic_witnesses);
+
+        let mut counterfactual_step = ProofStep::mock_from_clause(factual_clause.clone());
+        counterfactual_step.truthiness = Truthiness::Counterfactual;
+
+        let simplified = set
+            .simplify(counterfactual_step, &kctx)
+            .expect("proof-local duplicate should be kept");
+        assert_eq!(simplified.clause, factual_clause);
+        assert_eq!(simplified.truthiness, Truthiness::Counterfactual);
     }
 
     #[test]
