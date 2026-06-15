@@ -16,6 +16,7 @@ pub mod literal;
 pub mod local_context;
 pub mod pdt;
 pub mod proof_step;
+pub mod structured_proof;
 pub mod symbol;
 pub mod symbol_table;
 pub mod term;
