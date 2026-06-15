@@ -45,6 +45,12 @@ To test candidate claim `A`:
 The default weak prover timeout is `0.1` seconds. It uses the normal prover search with a small time
 budget, so simplification should remove only facts that are easy to rediscover.
 
+Passing weak reproving is not enough to edit the source. Before writing, the command reloads the
+edited source in memory and runs normal verification on the edited target. Existing certificates may
+be reused when they still check, but the edited target must verify successfully. If weak reproving
+accepts a candidate and the edited target does not load or verify, the command treats that as a
+`simplify bug` and leaves the file unchanged.
+
 ## Editing Loop
 
 The command tests one candidate at a time:
@@ -52,7 +58,7 @@ The command tests one candidate at a time:
 1. Load and lower the target file.
 2. Find the next removable candidate at or after the current source line.
 3. Test the candidate by masking it in memory.
-4. If accepted, verify that the edited text still lowers, then delete the source range.
+4. If accepted, verify the edited target in memory, then delete the source range.
 5. Reload the edited file and continue from the deletion point.
 6. If rejected, continue after the candidate range.
 

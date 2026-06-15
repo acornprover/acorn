@@ -1,14 +1,16 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::builder::Builder;
 use crate::elaborator::lowered_module::{LoweredFactId, LoweredGoalId, LoweredItem, LoweredModule};
 use crate::elaborator::lowering::LoweredFact;
 use crate::elaborator::source::SourceType;
 use crate::kernel::proof_step::Rule;
-use crate::module::LoadState;
+use crate::module::{LoadState, ModuleDescriptor};
 use crate::processor::Processor;
 use crate::project::{Project, ProjectConfig, UsageMode};
 use crate::prover::{Outcome, ProverMode, ScoringConfig};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SIMPLIFY_TIMEOUT_SECS: f32 = 0.1;
 const DEFAULT_SIMPLIFY_ACTIVATION_LIMIT: i32 = 2000;
@@ -53,6 +55,7 @@ impl SimplifyReport {
 
 struct LoadedTarget {
     project: Project,
+    descriptor: ModuleDescriptor,
     target_path: PathBuf,
     source: String,
     lowered: LoweredModule,
@@ -90,7 +93,7 @@ pub fn simplify_file(
     let mut working_source: Option<String> = None;
 
     let target_path = loop {
-        let loaded = load_target(start_path, target, working_source.as_deref())?;
+        let loaded = load_target(start_path, target, working_source.as_deref(), false)?;
         let current_target_path = loaded.target_path.clone();
         let candidates = collect_candidates(&loaded.lowered, cursor_line);
         let Some(candidate) = candidates.first().copied() else {
@@ -111,8 +114,21 @@ pub fn simplify_file(
                         )
                     })?;
 
-            // Validate the exact source text before touching the file on disk.
-            load_target(start_path, target, Some(&edited))?;
+            let edited_loaded =
+                load_target(start_path, target, Some(&edited), true).map_err(|e| {
+                    simplify_bug_message(
+                        candidate,
+                        "candidate passed masked reproving but edited source does not load",
+                        &e,
+                    )
+                })?;
+            verify_edited_target(&edited_loaded).map_err(|e| {
+                simplify_bug_message(
+                    candidate,
+                    "candidate passed masked reproving but edited source does not verify",
+                    &e,
+                )
+            })?;
 
             if options.dry_run {
                 working_source = Some(edited);
@@ -145,11 +161,12 @@ fn load_target(
     start_path: &Path,
     target: &str,
     source_override: Option<&str>,
+    read_cache: bool,
 ) -> Result<LoadedTarget, String> {
     let config = ProjectConfig {
         usage_mode: UsageMode::Verify,
         use_filesystem: true,
-        read_cache: false,
+        read_cache,
         write_cache: false,
         update_version: false,
     };
@@ -192,10 +209,56 @@ fn load_target(
 
     Ok(LoadedTarget {
         project,
+        descriptor,
         target_path,
         source,
         lowered,
     })
+}
+
+fn simplify_bug_message(candidate: Candidate, reason: &str, detail: &str) -> String {
+    format!(
+        "simplify bug: {} at lines {}-{}\n{}",
+        reason,
+        candidate.first_line + 1,
+        candidate.last_line + 1,
+        detail
+    )
+}
+
+fn verify_edited_target(loaded: &LoadedTarget) -> Result<(), String> {
+    let mut events = Vec::new();
+    let (status, result) = {
+        let mut builder = Builder::new(&loaded.project, CancellationToken::new(), |event| {
+            if let Some(message) = event.log_message {
+                events.push(message);
+            }
+        });
+        builder.check_hashes = false;
+        builder.exit_on_warning = true;
+        builder.operation_verb = "simplified";
+        builder.begin_module_work_build(1);
+        let result = builder
+            .verify_lowered_module(&loaded.descriptor, &loaded.lowered)
+            .map_err(|e| e.message);
+        builder.finish_module_work_build();
+        (builder.status, result)
+    };
+
+    if let Err(error) = result {
+        events.push(error);
+        return Err(events.join("\n"));
+    }
+    if status.is_good() {
+        return Ok(());
+    }
+
+    let details = if events.is_empty() {
+        format!("verification status: {}", status.verb())
+    } else {
+        events.join("\n")
+    };
+    Err(details)
 }
 
 fn resolve_target_path(
