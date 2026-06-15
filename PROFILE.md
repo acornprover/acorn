@@ -68,6 +68,89 @@ Slowest rebuilt modules by total processing time:
 
 ## profile_check
 
+### 2026-06-15 Current Full Check Profile
+
+- Date: 2026-06-15
+- Git hash: `62961b97`
+- Command: `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_check --profile=fastdev`, then `perf record -g --call-graph fp -o perf.data target/fastdev/profile_check`. For user-facing timing, also ran `/usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing`.
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
+- Timing: release `acorn check --timing` completed successfully in `47.79s` wall with `559.68s` user time, `25.49s` system time, `1224%` CPU, and `5,072,960 KB` max RSS (`4.84 GiB`). It checked `93,314/93,314` cached certificates, performed `0` searches, printed `604` modules, and rebuilt `583` modules. The measured timing was `47.319s`: `41.352s` target/module load, `46.804s` certificate checking, and `368.748s` summed cached cert checks. The `fastdev` profiling binary checked the same `93,314` certificates in `441.37s` wall with `99%` CPU and `3,909,752 KB` max RSS (`3.73 GiB`); the perf capture sampled `452.684s`, wrote a `512 MB` `perf.data`, collected about `1M` samples, and reported `0` lost samples.
+- Summary: The current check corpus is much larger than the May baseline (`93,314` cached certs vs `64,140`, and `604` printed modules vs `361`). The release command is also less efficient per certificate than the May run: throughput is now `1,994 certs/s` vs the older `5,668 certs/s`. The run averages about `12.2` logical CPUs, so it still does not saturate the 20 logical CPUs. Wall time is dominated by two overlapped phases: target/module loading is `87.4%` of wall time, and certificate checking is `98.9%` of wall time. The perf shape is still checker-heavy: clause insertion recursively triggers boolean reductions, normalization, hashing, persistent-map mutation, and allocator traffic.
+- Breakdown:
+
+```text
+Current Full Check Timing (2026-06-15)
+======================================
+
+release command: /usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing
+result: 604 modules printed, 583 rebuilt, 93,314/93,314 certificates OK, 0 searches
+max RSS: 5,072,960 KB = 4.84 GiB
+wall clock: 47.79s
+user time: 559.68s
+system time: 25.49s
+CPU: 1224%
+project setup: 33.7ms
+cache load: 30.3ms
+target/module load: 41.352s
+build loading phase: 0.0ms
+certificate checking: 46.804s
+cached cert checks: 368.748s summed worker time
+certificate throughput: 1994 certs/s
+
+Slowest rebuilt modules by total processing time:
+├── set_lattice: 29.804s total, 28.628s cert time
+├── topological_space: 18.253s total, 17.560s cert time
+├── set: 17.829s total, 17.172s cert time
+├── submodule: 15.058s total, 14.110s cert time
+├── function_product_units: 13.073s total, 11.542s cert time
+├── int.lattice: 11.153s total, 347.4ms cert time
+├── function_product_algebra: 9.907s total, 2.784s cert time
+├── subring: 9.309s total, 8.919s cert time
+├── top100.theorem_071_order_of_a_subgroup: 8.401s total, 3.696s cert time
+├── measurable_space: 8.054s total, 7.642s cert time
+├── simple_graph: 7.594s total, 7.011s cert time
+└── ideal: 7.321s total, 6.901s cert time
+
+Fastdev perf command: perf record -g --call-graph fp -o perf.data target/fastdev/profile_check
+fastdev timing: 441.37s wall, 423.80s user, 17.54s system, 99% CPU, 3.73 GiB max RSS
+perf sample: 1M samples over 452.684s, 512 MB perf.data, 0 lost samples
+
+Top-down perf shape:
+├── 84-85%  Builder::verify_lowered_module
+│   ├── 48%  Builder::verify_lowered_items
+│   │   └── 25%  Builder::verify_goal
+│   │       └── 23%  Certificate::check_with_usage
+│   │           └── 21%  Checker::check_cert_steps
+│   └── 20-38%  Processor::add_imports_from_bindings
+├── 77%  Checker::insert_clause_internal
+│   └── 68%  Checker::insert_boolean_reductions_with_reason
+├── 35-55%  Checker::check_cert_steps, mostly under insert_clause / boolean reductions
+├── 2-3%  Project::module_path_exists / statx / AppArmor path checks
+└── hot self-time: allocator traffic, normalize_clause_term_with_polarity,
+    Clause::find_boolean_reductions_with_kinds_with_options, Clause::split_symbol_application,
+    TermRef::split_application_multi, normalize_checker_trace, hashing, and im HAMT updates
+
+Follow-up timing after the duplicate-normalization patch:
+├── release command: /usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing
+├── result: 47.965s measured, 48.45s wall, 365.937s summed cached cert checks
+├── comparison: previous sample was 47.319s measured, 47.79s wall, 368.748s summed cached cert checks
+└── interpretation: cached cert replay moved slightly in the expected direction, but total wall time
+    was within run-to-run noise.
+
+Remaining possible improvement areas:
+├── Avoid broader import replay cost. Check-mode module exports already store normalized
+│   CheckExportFact clauses, but each module still constructs a fresh checker and replays the
+│   transitive import facts. An exact import-set cache and a small direct-dependency cache were
+│   both tried after this profile and did not produce a clear wall-time win.
+├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
+│   insert_boolean_reductions_with_reason dominates the profile; caching normalized reduction
+│   results per clause/kernel-context generation or trimming redundant reduction reprocessing is
+│   likely higher leverage than filesystem caching.
+└── Improve scheduling granularity for large modules. The release run averages 12.2 CPUs, while
+    modules like set_lattice, topological_space, set, and submodule dominate the tail. Per-module
+    work stealing cannot fully use 20 logical CPUs when a few large modules sit on the critical path.
+```
+
 ### 2026-05-14 SatisfyStep Checker Validation
 
 - Date: 2026-05-14
