@@ -27,6 +27,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::structured_proof::{StructuredProofStep, StructuredRule};
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
@@ -59,6 +60,90 @@ pub struct CertificateLine {
 pub struct CheckedCertificate {
     pub lines: Vec<CertificateLine>,
     pub consumed_proof_steps: usize,
+}
+
+/// Future compact structured certificate premise references.
+///
+/// JSON accepts either a single step id (`"from": 3`) or a list (`"from": [1, 2]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum StructuredCertificatePremises {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl StructuredCertificatePremises {
+    fn to_vec(&self) -> Vec<usize> {
+        match self {
+            StructuredCertificatePremises::One(id) => vec![*id],
+            StructuredCertificatePremises::Many(ids) => ids.clone(),
+        }
+    }
+}
+
+/// Certificate-layer representation of a future structured proof step.
+///
+/// This is intentionally not wired into `Certificate::proof` yet. It gives us a JSON adapter that
+/// can parse compact objects like `{"r":"pos_and_left","from":0,"s":"p"}` and lower them to the
+/// kernel-level `StructuredProofStep`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateStep {
+    #[serde(rename = "r")]
+    pub rule: StructuredRule,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<StructuredCertificatePremises>,
+
+    #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+impl StructuredCertificateStep {
+    pub fn to_kernel_step(
+        &self,
+        project: &dyn ProjectLookup,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) -> Result<StructuredProofStep, CodeGenError> {
+        let expected = match &self.step {
+            Some(step) => Some(Self::parse_expected_clause(
+                step,
+                project,
+                bindings,
+                kernel_context,
+            )?),
+            None => None,
+        };
+        Ok(StructuredProofStep {
+            rule: self.rule,
+            premises: self
+                .from
+                .as_ref()
+                .map_or_else(Vec::new, |from| from.to_vec()),
+            expected,
+        })
+    }
+
+    fn parse_expected_clause(
+        step: &str,
+        project: &dyn ProjectLookup,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+    ) -> Result<Clause, CodeGenError> {
+        let mut bindings = Cow::Owned(bindings.clone());
+        let mut kernel_context = Cow::Owned(kernel_context.clone());
+        let parsed =
+            Certificate::parse_code_line(step, project, &mut bindings, &mut kernel_context)?;
+        match parsed {
+            CertificateStep::Claim(claim) => claim
+                .normalized_specialized_clause(&kernel_context)
+                .map_err(CodeGenError::GeneratedBadCode),
+            CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(
+                "structured proof step `s` must parse as a claim, not a witness declaration"
+                    .to_string(),
+            )),
+        }
+    }
 }
 
 fn value_to_code(

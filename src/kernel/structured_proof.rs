@@ -86,6 +86,42 @@ impl StructuredRule {
         }
     }
 
+    pub fn from_boolean_reduction_kind(kind: BooleanReductionKind) -> Self {
+        match kind {
+            BooleanReductionKind::FalseLiteralElimination => StructuredRule::FalseLit,
+            BooleanReductionKind::IteSimplifyLeft => StructuredRule::IteSimpLeft,
+            BooleanReductionKind::IteSimplifyRight => StructuredRule::IteSimpRight,
+            BooleanReductionKind::IteSplitLeftThenBranch => StructuredRule::IteLeftThen,
+            BooleanReductionKind::IteSplitLeftElseBranch => StructuredRule::IteLeftElse,
+            BooleanReductionKind::IteSplitRightThenBranch => StructuredRule::IteRightThen,
+            BooleanReductionKind::IteSplitRightElseBranch => StructuredRule::IteRightElse,
+            BooleanReductionKind::FunctionInequalityToExists => StructuredRule::FunNeqToExists,
+            BooleanReductionKind::SignedNot => StructuredRule::SignedNot,
+            BooleanReductionKind::BooleanEqToEquality => StructuredRule::BoolEqToEq,
+            BooleanReductionKind::PositiveForallOpen => StructuredRule::PosForallOpen,
+            BooleanReductionKind::PositiveExistsObviousWitness => StructuredRule::PosExistsWitness,
+            BooleanReductionKind::PositiveExistsOpen => StructuredRule::PosExistsOpen,
+            BooleanReductionKind::NegatedForallToExists => StructuredRule::NegForallExists,
+            BooleanReductionKind::NegatedExistsOpen => StructuredRule::NegExistsOpen,
+            BooleanReductionKind::PositiveAndLeft => StructuredRule::PosAndLeft,
+            BooleanReductionKind::PositiveAndRight => StructuredRule::PosAndRight,
+            BooleanReductionKind::NegativeAnd => StructuredRule::NegAnd,
+            BooleanReductionKind::PositiveOr => StructuredRule::PosOr,
+            BooleanReductionKind::NegativeOrLeft => StructuredRule::NegOrLeft,
+            BooleanReductionKind::NegativeOrRight => StructuredRule::NegOrRight,
+            BooleanReductionKind::BooleanEqualityLeftOrNotRight => {
+                StructuredRule::BoolEqLeftNotRight
+            }
+            BooleanReductionKind::BooleanEqualityNotLeftOrRight => {
+                StructuredRule::BoolEqNotLeftRight
+            }
+            BooleanReductionKind::BooleanInequalityNotLeftOrNotRight => {
+                StructuredRule::BoolNeqNotLeftNotRight
+            }
+            BooleanReductionKind::BooleanInequalityLeftOrRight => StructuredRule::BoolNeqLeftRight,
+        }
+    }
+
     fn boolean_reduction_kind(self) -> Option<BooleanReductionKind> {
         Some(match self {
             StructuredRule::FalseLit => BooleanReductionKind::FalseLiteralElimination,

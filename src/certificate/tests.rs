@@ -421,6 +421,54 @@ fn test_parse_code_line_accepts_claim_with_args_shape() {
 }
 
 #[test]
+fn test_structured_certificate_step_lowers_to_kernel_step() {
+    let code = r#"
+        let foo: Bool = axiom
+
+        theorem goal {
+            foo
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let cert_step: StructuredCertificateStep =
+        serde_json::from_str(r#"{"r":"pos_and_left","from":0,"s":"foo"}"#)
+            .expect("structured certificate step should parse");
+    let kernel_step = cert_step
+        .to_kernel_step(&project, &bindings, &kernel_context)
+        .expect("structured certificate step should lower");
+
+    assert_eq!(kernel_step.rule, StructuredRule::PosAndLeft);
+    assert_eq!(kernel_step.premises, vec![0]);
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let expected = expect_claim(
+        Certificate::parse_code_line("foo", &project, &mut bindings_cow, &mut kernel_context_cow)
+            .expect("expected claim should parse"),
+    )
+    .normalized_specialized_clause(&kernel_context_cow)
+    .expect("expected claim should normalize");
+    assert_eq!(kernel_step.expected, Some(expected));
+}
+
+#[test]
+fn test_structured_certificate_step_accepts_array_premises_without_expected_clause() {
+    let cert_step: StructuredCertificateStep =
+        serde_json::from_str(r#"{"r":"eqgraph","from":[1,2]}"#)
+            .expect("structured certificate step should parse");
+    assert_eq!(cert_step.rule, StructuredRule::EqGraph);
+    assert_eq!(
+        cert_step
+            .from
+            .as_ref()
+            .expect("from should be present")
+            .to_vec(),
+        vec![1, 2]
+    );
+    assert!(cert_step.step.is_none());
+}
+
+#[test]
 fn test_parse_code_line_rejects_local_proof_let_claim() {
     let code = r#"
         type Empty: axiom

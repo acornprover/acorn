@@ -9,6 +9,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
+use crate::kernel::structured_proof::{StructuredProofStep, StructuredRule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::prover::synthetic::WitnessRegistry;
@@ -115,6 +116,16 @@ pub struct ConcreteStep {
     // Each var_map is paired with the context that its replacement terms reference while
     // specializing.
     pub var_maps: Vec<(VariableMap, LocalContext)>,
+}
+
+/// A structured proof trace generated in memory from prover proof steps.
+///
+/// This is not a cache format yet. It is the shadow-generation target that can be checked by
+/// `StructuredChecker` before we migrate JSONL certificates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredProofTrace {
+    pub known_clauses: Vec<Clause>,
+    pub steps: Vec<StructuredProofStep>,
 }
 
 impl ConcreteStep {
@@ -432,6 +443,104 @@ impl<'a> Proof<'a> {
         Ok(steps_in_order)
     }
 
+    /// Build a structured proof trace from the prover proof graph.
+    ///
+    /// The first shadow version is intentionally conservative: every structured step carries its
+    /// expected clause, and unsupported prover rules return a clear error instead of degrading to
+    /// legacy claim checking.
+    pub fn make_structured_trace(&self) -> Result<StructuredProofTrace, Error> {
+        let mut id_map: HashMap<ProofStepId, usize> = HashMap::new();
+        let mut known_seen = HashSet::new();
+        let mut known_clauses = Vec::new();
+        let mut steps = Vec::new();
+
+        for (proof_id, proof_step) in &self.steps {
+            let rule = self.structured_rule_for_step(proof_step)?;
+            let premises = self.structured_premises_for_step(proof_step, &id_map)?;
+            let expected = proof_step.clause.clone();
+
+            if matches!(proof_step.rule, Rule::Assumption(_)) && known_seen.insert(expected.clone())
+            {
+                known_clauses.push(expected.clone());
+            }
+
+            let structured_step = StructuredProofStep::with_expected(rule, premises, expected);
+            let structured_id = steps.len();
+            steps.push(structured_step);
+            id_map.insert(*proof_id, structured_id);
+        }
+
+        Ok(StructuredProofTrace {
+            known_clauses,
+            steps,
+        })
+    }
+
+    fn structured_rule_for_step(&self, step: &ProofStep) -> Result<StructuredRule, Error> {
+        Ok(match &step.rule {
+            Rule::Assumption(_) => StructuredRule::Known,
+            Rule::EqualityFactoring(_) => StructuredRule::EqFact,
+            Rule::EqualityResolution(_) => StructuredRule::EqRes,
+            Rule::Injectivity(_) => StructuredRule::Inject,
+            Rule::Extensionality(_) => StructuredRule::Ext,
+            Rule::BooleanReduction(info) => StructuredRule::from_boolean_reduction_kind(info.kind),
+            Rule::Resolution(_)
+            | Rule::Rewrite(_)
+            | Rule::Specialization(_)
+            | Rule::MultipleRewrite(_)
+            | Rule::PassiveContradiction(_)
+            | Rule::Simplification(_) => {
+                return Err(Error::internal(format!(
+                    "structured proof builder does not yet support prover rule {}",
+                    step.rule.name()
+                )));
+            }
+        })
+    }
+
+    fn structured_premises_for_step(
+        &self,
+        step: &ProofStep,
+        id_map: &HashMap<ProofStepId, usize>,
+    ) -> Result<Vec<usize>, Error> {
+        let active_premise = |id: usize| -> Result<usize, Error> {
+            id_map
+                .get(&ProofStepId::Active(id))
+                .copied()
+                .ok_or_else(|| {
+                    Error::internal(format!(
+                        "structured proof step references unavailable active premise {}",
+                        id
+                    ))
+                })
+        };
+
+        Ok(match &step.rule {
+            Rule::Assumption(_) => vec![],
+            Rule::EqualityFactoring(info)
+            | Rule::EqualityResolution(info)
+            | Rule::Injectivity(info)
+            | Rule::Extensionality(info) => vec![active_premise(info.id)?],
+            Rule::BooleanReduction(info) => {
+                for extra_id in &info.inhabitance_source_ids {
+                    active_premise(*extra_id)?;
+                }
+                vec![active_premise(info.id)?]
+            }
+            Rule::Resolution(_)
+            | Rule::Rewrite(_)
+            | Rule::Specialization(_)
+            | Rule::MultipleRewrite(_)
+            | Rule::PassiveContradiction(_)
+            | Rule::Simplification(_) => {
+                return Err(Error::internal(format!(
+                    "structured proof builder does not yet support prover rule {}",
+                    step.rule.name()
+                )));
+            }
+        })
+    }
+
     /// Create a concrete proof from this proof.
     /// This is an intermediate representation between Proof and Certificate.
     pub fn make_concrete_proof(&self, goal: String) -> Result<ConcreteProof, Error> {
@@ -706,6 +815,7 @@ mod tests {
     use crate::kernel::proof_step::{
         BooleanReductionInfo, PremiseMap, ProofStep, Rule, Truthiness,
     };
+    use crate::kernel::structured_proof::{StructuredChecker, StructuredRule};
     use crate::kernel::symbol::Symbol;
     use crate::kernel::term::Term;
     use crate::kernel::variable_map::apply_to_term;
@@ -1049,6 +1159,57 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+
+    #[test]
+    fn test_make_structured_trace_replays_boolean_reduction() {
+        use crate::kernel::literal::Literal;
+
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let source_clause = Clause::new(
+            vec![Literal::positive(Term::and(
+                kctx.parse_term("c0"),
+                kctx.parse_term("c1"),
+            ))],
+            &LocalContext::empty(),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+        let reduced_clause = kctx.parse_clause("c0", &[]);
+        let reduction_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 0,
+                kind: BooleanReductionKind::PositiveAndLeft,
+                inhabitance_source_ids: vec![],
+            }),
+            reduced_clause.clone(),
+            PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &source_step);
+        proof.add_step(ProofStepId::Final, &reduction_step);
+
+        let trace = proof
+            .make_structured_trace()
+            .expect("supported proof should produce a structured trace");
+        assert_eq!(trace.known_clauses, vec![source_clause]);
+        assert_eq!(trace.steps.len(), 2);
+        assert_eq!(trace.steps[0].rule, StructuredRule::Known);
+        assert_eq!(trace.steps[1].rule, StructuredRule::PosAndLeft);
+        assert_eq!(trace.steps[1].premises, vec![0]);
+        assert_eq!(trace.steps[1].expected, Some(reduced_clause.clone()));
+
+        let mut checker = StructuredChecker::new();
+        for clause in &trace.known_clauses {
+            checker.add_known_clause(clause, &kctx);
+        }
+        checker
+            .check_steps(&trace.steps, &kctx)
+            .expect("structured trace should replay");
+        assert_eq!(checker.clauses().last(), Some(&reduced_clause));
     }
 
     #[test]
