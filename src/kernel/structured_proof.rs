@@ -5,6 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::kernel::atom::AtomId;
+use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::{BooleanReductionKind, Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
@@ -22,6 +23,12 @@ pub enum StructuredRule {
     EqFact,
     Inject,
     Ext,
+    Resolve,
+    Rewrite,
+    Specialize,
+    MultiRewrite,
+    PassiveContra,
+    Simplify,
     FalseLit,
     IteSimpLeft,
     IteSimpRight,
@@ -58,6 +65,12 @@ impl StructuredRule {
             StructuredRule::EqFact => "eq_fact",
             StructuredRule::Inject => "inject",
             StructuredRule::Ext => "ext",
+            StructuredRule::Resolve => "resolve",
+            StructuredRule::Rewrite => "rewrite",
+            StructuredRule::Specialize => "specialize",
+            StructuredRule::MultiRewrite => "multi_rewrite",
+            StructuredRule::PassiveContra => "passive_contra",
+            StructuredRule::Simplify => "simplify",
             StructuredRule::FalseLit => "false_lit",
             StructuredRule::IteSimpLeft => "ite_simp_left",
             StructuredRule::IteSimpRight => "ite_simp_right",
@@ -160,8 +173,26 @@ impl StructuredRule {
             | StructuredRule::EqRes
             | StructuredRule::EqFact
             | StructuredRule::Inject
-            | StructuredRule::Ext => return None,
+            | StructuredRule::Ext
+            | StructuredRule::Resolve
+            | StructuredRule::Rewrite
+            | StructuredRule::Specialize
+            | StructuredRule::MultiRewrite
+            | StructuredRule::PassiveContra
+            | StructuredRule::Simplify => return None,
         })
+    }
+
+    fn uses_local_checker(self) -> bool {
+        matches!(
+            self,
+            StructuredRule::Resolve
+                | StructuredRule::Rewrite
+                | StructuredRule::Specialize
+                | StructuredRule::MultiRewrite
+                | StructuredRule::PassiveContra
+                | StructuredRule::Simplify
+        )
     }
 }
 
@@ -182,6 +213,12 @@ impl FromStr for StructuredRule {
             "eq_fact" => Ok(StructuredRule::EqFact),
             "inject" => Ok(StructuredRule::Inject),
             "ext" => Ok(StructuredRule::Ext),
+            "resolve" => Ok(StructuredRule::Resolve),
+            "rewrite" => Ok(StructuredRule::Rewrite),
+            "specialize" => Ok(StructuredRule::Specialize),
+            "multi_rewrite" => Ok(StructuredRule::MultiRewrite),
+            "passive_contra" => Ok(StructuredRule::PassiveContra),
+            "simplify" => Ok(StructuredRule::Simplify),
             "false_lit" => Ok(StructuredRule::FalseLit),
             "ite_simp_left" => Ok(StructuredRule::IteSimpLeft),
             "ite_simp_right" => Ok(StructuredRule::IteSimpRight),
@@ -350,6 +387,9 @@ impl StructuredChecker {
         if step.rule == StructuredRule::EqGraph {
             return self.derive_eqgraph(step, kernel_context);
         }
+        if step.rule.uses_local_checker() {
+            return self.derive_with_local_checker(step, kernel_context);
+        }
 
         let candidates = self.derive_candidate_clauses(step, kernel_context)?;
         self.select_candidate(step, candidates)
@@ -418,15 +458,53 @@ impl StructuredChecker {
         }
     }
 
+    fn derive_with_local_checker(
+        &self,
+        step: &StructuredProofStep,
+        kernel_context: &KernelContext,
+    ) -> Result<Clause, StructuredCheckError> {
+        let Some(expected) = &step.expected else {
+            return Err(StructuredCheckError::new(format!(
+                "rule {} requires an expected clause",
+                step.rule
+            )));
+        };
+        let expected = Self::normalize_input_clause(expected);
+        if step.premises.is_empty() {
+            return Err(StructuredCheckError::new(format!(
+                "rule {} requires premises",
+                step.rule
+            )));
+        }
+
+        let mut checker = Checker::new();
+        for premise_id in step.premises.iter().copied() {
+            let premise = self.premise_clause(premise_id)?;
+            checker.insert_clause(premise, StepReason::Testing, kernel_context);
+        }
+
+        if checker.check_clause(&expected, kernel_context).is_some() {
+            Ok(expected)
+        } else {
+            Err(StructuredCheckError::new(format!(
+                "rule {} from {:?} did not prove expected clause {}",
+                step.rule, step.premises, expected
+            )))
+        }
+    }
+
     fn derive_candidate_clauses(
         &self,
         step: &StructuredProofStep,
         kernel_context: &KernelContext,
     ) -> Result<Vec<Clause>, StructuredCheckError> {
-        let premise = self.only_premise(step)?;
         let mut candidates = Vec::new();
 
         if let Some(kind) = step.rule.boolean_reduction_kind() {
+            let premise = self.first_premise(step)?;
+            for premise_id in step.premises.iter().copied().skip(1) {
+                self.premise_clause(premise_id)?;
+            }
             for (candidate_kind, trace) in
                 premise.find_boolean_reduction_kinds_with_options(kernel_context, true)
             {
@@ -439,6 +517,7 @@ impl StructuredChecker {
             return Ok(candidates);
         }
 
+        let premise = self.only_premise(step)?;
         match step.rule {
             StructuredRule::EqRes => {
                 for (literals, context, _) in
@@ -480,6 +559,12 @@ impl StructuredChecker {
                 }
             }
             StructuredRule::Known | StructuredRule::EqGraph => unreachable!(),
+            StructuredRule::Resolve
+            | StructuredRule::Rewrite
+            | StructuredRule::Specialize
+            | StructuredRule::MultiRewrite
+            | StructuredRule::PassiveContra
+            | StructuredRule::Simplify => unreachable!(),
             _ => {
                 return Err(StructuredCheckError::new(format!(
                     "rule {} is not implemented by the structured checker",
@@ -528,6 +613,16 @@ impl StructuredChecker {
                 step.rule, step.premises, n
             ))),
         }
+    }
+
+    fn first_premise(&self, step: &StructuredProofStep) -> Result<&Clause, StructuredCheckError> {
+        let Some(id) = step.premises.first().copied() else {
+            return Err(StructuredCheckError::new(format!(
+                "rule {} expects at least one premise",
+                step.rule
+            )));
+        };
+        self.premise_clause(id)
     }
 
     fn only_premise(&self, step: &StructuredProofStep) -> Result<&Clause, StructuredCheckError> {
@@ -660,6 +755,12 @@ mod tests {
             StructuredRule::EqFact,
             StructuredRule::Inject,
             StructuredRule::Ext,
+            StructuredRule::Resolve,
+            StructuredRule::Rewrite,
+            StructuredRule::Specialize,
+            StructuredRule::MultiRewrite,
+            StructuredRule::PassiveContra,
+            StructuredRule::Simplify,
             StructuredRule::FalseLit,
             StructuredRule::IteSimpLeft,
             StructuredRule::IteSimpRight,

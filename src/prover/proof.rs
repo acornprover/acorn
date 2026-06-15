@@ -445,9 +445,9 @@ impl<'a> Proof<'a> {
 
     /// Build a structured proof trace from the prover proof graph.
     ///
-    /// The first shadow version is intentionally conservative: every structured step carries its
-    /// expected clause, and unsupported prover rules return a clear error instead of degrading to
-    /// legacy claim checking.
+    /// The shadow version is intentionally conservative: every structured step carries its
+    /// expected clause. Simplification originals are emitted inline as their own structured steps,
+    /// because the prover stores them inline rather than by proof-step id.
     pub fn make_structured_trace(&self) -> Result<StructuredProofTrace, Error> {
         let mut id_map: HashMap<ProofStepId, usize> = HashMap::new();
         let mut known_seen = HashSet::new();
@@ -455,19 +455,14 @@ impl<'a> Proof<'a> {
         let mut steps = Vec::new();
 
         for (proof_id, proof_step) in &self.steps {
-            let rule = self.structured_rule_for_step(proof_step)?;
-            let premises = self.structured_premises_for_step(proof_step, &id_map)?;
-            let expected = proof_step.clause.clone();
-
-            if matches!(proof_step.rule, Rule::Assumption(_)) && known_seen.insert(expected.clone())
-            {
-                known_clauses.push(expected.clone());
-            }
-
-            let structured_step = StructuredProofStep::with_expected(rule, premises, expected);
-            let structured_id = steps.len();
-            steps.push(structured_step);
-            id_map.insert(*proof_id, structured_id);
+            self.emit_structured_step(
+                Some(*proof_id),
+                proof_step,
+                &mut id_map,
+                &mut known_seen,
+                &mut known_clauses,
+                &mut steps,
+            )?;
         }
 
         Ok(StructuredProofTrace {
@@ -484,61 +479,77 @@ impl<'a> Proof<'a> {
             Rule::Injectivity(_) => StructuredRule::Inject,
             Rule::Extensionality(_) => StructuredRule::Ext,
             Rule::BooleanReduction(info) => StructuredRule::from_boolean_reduction_kind(info.kind),
-            Rule::Resolution(_)
-            | Rule::Rewrite(_)
-            | Rule::Specialization(_)
-            | Rule::MultipleRewrite(_)
-            | Rule::PassiveContradiction(_)
-            | Rule::Simplification(_) => {
-                return Err(Error::internal(format!(
-                    "structured proof builder does not yet support prover rule {}",
-                    step.rule.name()
-                )));
-            }
+            Rule::Resolution(_) => StructuredRule::Resolve,
+            Rule::Rewrite(_) => StructuredRule::Rewrite,
+            Rule::Specialization(_) => StructuredRule::Specialize,
+            Rule::MultipleRewrite(_) => StructuredRule::MultiRewrite,
+            Rule::PassiveContradiction(_) => StructuredRule::PassiveContra,
+            Rule::Simplification(_) => StructuredRule::Simplify,
         })
     }
 
-    fn structured_premises_for_step(
+    fn emit_structured_step(
         &self,
+        proof_id: Option<ProofStepId>,
         step: &ProofStep,
+        id_map: &mut HashMap<ProofStepId, usize>,
+        known_seen: &mut HashSet<Clause>,
+        known_clauses: &mut Vec<Clause>,
+        steps: &mut Vec<StructuredProofStep>,
+    ) -> Result<usize, Error> {
+        if let Some(proof_id) = proof_id {
+            if let Some(structured_id) = id_map.get(&proof_id).copied() {
+                return Ok(structured_id);
+            }
+        }
+
+        let rule = self.structured_rule_for_step(step)?;
+        let premises = if let Rule::Simplification(info) = &step.rule {
+            let original_id = self.emit_structured_step(
+                None,
+                &info.original,
+                id_map,
+                known_seen,
+                known_clauses,
+                steps,
+            )?;
+            let mut premises = vec![original_id];
+            premises.extend(self.structured_premises_for_ids(step.rule.premises(), id_map)?);
+            premises
+        } else {
+            self.structured_premises_for_ids(step.rule.premises(), id_map)?
+        };
+        let expected = step.clause.clone();
+
+        if matches!(step.rule, Rule::Assumption(_)) && known_seen.insert(expected.clone()) {
+            known_clauses.push(expected.clone());
+        }
+
+        let structured_step = StructuredProofStep::with_expected(rule, premises, expected);
+        let structured_id = steps.len();
+        steps.push(structured_step);
+        if let Some(proof_id) = proof_id {
+            id_map.insert(proof_id, structured_id);
+        }
+        Ok(structured_id)
+    }
+
+    fn structured_premises_for_ids(
+        &self,
+        premise_ids: Vec<ProofStepId>,
         id_map: &HashMap<ProofStepId, usize>,
     ) -> Result<Vec<usize>, Error> {
-        let active_premise = |id: usize| -> Result<usize, Error> {
-            id_map
-                .get(&ProofStepId::Active(id))
-                .copied()
-                .ok_or_else(|| {
+        premise_ids
+            .into_iter()
+            .map(|premise_id| {
+                id_map.get(&premise_id).copied().ok_or_else(|| {
                     Error::internal(format!(
-                        "structured proof step references unavailable active premise {}",
-                        id
+                        "structured proof step references unavailable premise {:?}",
+                        premise_id
                     ))
                 })
-        };
-
-        Ok(match &step.rule {
-            Rule::Assumption(_) => vec![],
-            Rule::EqualityFactoring(info)
-            | Rule::EqualityResolution(info)
-            | Rule::Injectivity(info)
-            | Rule::Extensionality(info) => vec![active_premise(info.id)?],
-            Rule::BooleanReduction(info) => {
-                for extra_id in &info.inhabitance_source_ids {
-                    active_premise(*extra_id)?;
-                }
-                vec![active_premise(info.id)?]
-            }
-            Rule::Resolution(_)
-            | Rule::Rewrite(_)
-            | Rule::Specialization(_)
-            | Rule::MultipleRewrite(_)
-            | Rule::PassiveContradiction(_)
-            | Rule::Simplification(_) => {
-                return Err(Error::internal(format!(
-                    "structured proof builder does not yet support prover rule {}",
-                    step.rule.name()
-                )));
-            }
-        })
+            })
+            .collect()
     }
 
     /// Create a concrete proof from this proof.
@@ -813,7 +824,7 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
     use crate::kernel::proof_step::{
-        BooleanReductionInfo, PremiseMap, ProofStep, Rule, Truthiness,
+        BooleanReductionInfo, PremiseMap, ProofStep, RewriteInfo, Rule, ShallowStatus, Truthiness,
     };
     use crate::kernel::structured_proof::{StructuredChecker, StructuredRule};
     use crate::kernel::symbol::Symbol;
@@ -841,6 +852,20 @@ mod tests {
             synthetic_witnesses,
             ModuleId::default(),
         )
+    }
+
+    fn check_structured_trace(
+        trace: &super::StructuredProofTrace,
+        kctx: &KernelContext,
+    ) -> Vec<Clause> {
+        let mut checker = StructuredChecker::new();
+        for clause in &trace.known_clauses {
+            checker.add_known_clause(clause, kctx);
+        }
+        checker
+            .check_steps(&trace.steps, kctx)
+            .expect("structured trace should replay");
+        checker.clauses().to_vec()
     }
 
     #[test]
@@ -1210,6 +1235,184 @@ mod tests {
             .check_steps(&trace.steps, &kctx)
             .expect("structured trace should replay");
         assert_eq!(checker.clauses().last(), Some(&reduced_clause));
+    }
+
+    #[test]
+    fn test_make_structured_trace_replays_resolution() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let long_clause = kctx.parse_clause("not c0 or c1", &[]);
+        let long_step = ProofStep::mock_from_clause(long_clause);
+        let short_clause = kctx.parse_clause("c0", &[]);
+        let short_step = ProofStep::mock_from_clause(short_clause);
+        let resolved_clause = kctx.parse_clause("c1", &[]);
+        let resolution_step = ProofStep::resolution(
+            0,
+            &long_step,
+            1,
+            &short_step,
+            false,
+            resolved_clause.clone(),
+            PremiseMap::empty(),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &long_step);
+        proof.add_step(ProofStepId::Active(1), &short_step);
+        proof.add_step(ProofStepId::Final, &resolution_step);
+
+        let trace = proof
+            .make_structured_trace()
+            .expect("resolution proof should produce a structured trace");
+        assert_eq!(trace.steps[2].rule, StructuredRule::Resolve);
+        assert_eq!(trace.steps[2].premises, vec![1, 0]);
+
+        let checked = check_structured_trace(&trace, &kctx);
+        assert_eq!(checked.last(), Some(&resolved_clause));
+    }
+
+    #[test]
+    fn test_make_structured_trace_replays_rewrite_and_specialization_rules() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let eq_step = ProofStep::mock_from_clause(kctx.parse_clause("c0 = c1", &[]));
+        let target_step = ProofStep::mock_from_clause(kctx.parse_clause("c0", &[]));
+        let rewritten_clause = kctx.parse_clause("c1", &[]);
+        let rewrite_step = ProofStep::direct(
+            &target_step,
+            Rule::Rewrite(RewriteInfo {
+                pattern_id: 0,
+                target_id: 1,
+            }),
+            rewritten_clause.clone(),
+            PremiseMap::empty(),
+        );
+
+        let mut rewrite_proof = Proof::new(&kctx);
+        rewrite_proof.add_step(ProofStepId::Active(0), &eq_step);
+        rewrite_proof.add_step(ProofStepId::Active(1), &target_step);
+        rewrite_proof.add_step(ProofStepId::Final, &rewrite_step);
+
+        let rewrite_trace = rewrite_proof
+            .make_structured_trace()
+            .expect("rewrite proof should produce a structured trace");
+        assert_eq!(rewrite_trace.steps[2].rule, StructuredRule::Rewrite);
+        assert_eq!(rewrite_trace.steps[2].premises, vec![0, 1]);
+        let checked = check_structured_trace(&rewrite_trace, &kctx);
+        assert_eq!(checked.last(), Some(&rewritten_clause));
+
+        let pattern_step = ProofStep::mock_from_clause(kctx.parse_clause("c0", &[]));
+        let specialized_clause = kctx.parse_clause("c0", &[]);
+        let specialization_step = ProofStep::specialization(
+            0,
+            0,
+            &pattern_step,
+            specialized_clause.clone(),
+            PremiseMap::empty(),
+        );
+
+        let mut specialization_proof = Proof::new(&kctx);
+        specialization_proof.add_step(ProofStepId::Active(0), &pattern_step);
+        specialization_proof.add_step(ProofStepId::Final, &specialization_step);
+
+        let specialization_trace = specialization_proof
+            .make_structured_trace()
+            .expect("specialization proof should produce a structured trace");
+        assert_eq!(
+            specialization_trace.steps[1].rule,
+            StructuredRule::Specialize
+        );
+        assert_eq!(specialization_trace.steps[1].premises, vec![0]);
+        let checked = check_structured_trace(&specialization_trace, &kctx);
+        assert_eq!(checked.last(), Some(&specialized_clause));
+    }
+
+    #[test]
+    fn test_make_structured_trace_replays_contradiction_rules() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constant("c0", "Bool");
+
+        let passive_steps = vec![
+            ProofStep::mock_from_clause(kctx.parse_clause("c0", &[])),
+            ProofStep::mock_from_clause(kctx.parse_clause("not c0", &[])),
+        ];
+        let passive_contradiction = ProofStep::passive_contradiction(&passive_steps);
+
+        let mut passive_proof = Proof::new(&kctx);
+        passive_proof.add_step(ProofStepId::Passive(0), &passive_steps[0]);
+        passive_proof.add_step(ProofStepId::Passive(1), &passive_steps[1]);
+        passive_proof.add_step(ProofStepId::Final, &passive_contradiction);
+
+        let passive_trace = passive_proof
+            .make_structured_trace()
+            .expect("passive contradiction should produce a structured trace");
+        assert_eq!(passive_trace.steps[2].rule, StructuredRule::PassiveContra);
+        assert_eq!(passive_trace.steps[2].premises, vec![0, 1]);
+        let checked = check_structured_trace(&passive_trace, &kctx);
+        assert_eq!(checked.last(), Some(&Clause::impossible()));
+
+        let inequality_step = ProofStep::mock_from_clause(kctx.parse_clause("c0 != c0", &[]));
+        let multiple_rewrite = ProofStep::multiple_rewrite(
+            0,
+            vec![],
+            vec![],
+            Truthiness::Factual,
+            0,
+            ShallowStatus::Contradiction,
+        );
+
+        let mut multiple_rewrite_proof = Proof::new(&kctx);
+        multiple_rewrite_proof.add_step(ProofStepId::Active(0), &inequality_step);
+        multiple_rewrite_proof.add_step(ProofStepId::Final, &multiple_rewrite);
+
+        let multiple_rewrite_trace = multiple_rewrite_proof
+            .make_structured_trace()
+            .expect("multiple rewrite should produce a structured trace");
+        assert_eq!(
+            multiple_rewrite_trace.steps[1].rule,
+            StructuredRule::MultiRewrite
+        );
+        assert_eq!(multiple_rewrite_trace.steps[1].premises, vec![0]);
+        let checked = check_structured_trace(&multiple_rewrite_trace, &kctx);
+        assert_eq!(checked.last(), Some(&Clause::impossible()));
+    }
+
+    #[test]
+    fn test_make_structured_trace_emits_inline_simplification_original() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let simplifying_step = ProofStep::mock_from_clause(kctx.parse_clause("not c1", &[]));
+        let original_step = ProofStep::mock_from_clause(kctx.parse_clause("c0 or c1", &[]));
+        let simplified_clause = kctx.parse_clause("c0", &[]);
+        let simplification_step = ProofStep::simplification(
+            original_step,
+            vec![0],
+            &[&simplifying_step],
+            simplified_clause.clone(),
+            Truthiness::Factual,
+            1,
+            0,
+            PremiseMap::empty(),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &simplifying_step);
+        proof.add_step(ProofStepId::Final, &simplification_step);
+
+        let trace = proof
+            .make_structured_trace()
+            .expect("simplification proof should produce a structured trace");
+        assert_eq!(trace.steps.len(), 3);
+        assert_eq!(trace.steps[0].rule, StructuredRule::Known);
+        assert_eq!(trace.steps[1].rule, StructuredRule::Known);
+        assert_eq!(trace.steps[2].rule, StructuredRule::Simplify);
+        assert_eq!(trace.steps[2].premises, vec![1, 0]);
+
+        let checked = check_structured_trace(&trace, &kctx);
+        assert_eq!(checked.last(), Some(&simplified_clause));
     }
 
     #[test]
