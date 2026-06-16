@@ -124,6 +124,20 @@ fn setup_selected_goal_env(code: &str, line: u32) -> (Project, BindingMap, Kerne
     (project, bindings, kernel_context)
 }
 
+fn check_structured_trace(
+    trace: &StructuredProofTrace,
+    kernel_context: &KernelContext,
+) -> Vec<Clause> {
+    let mut checker = StructuredChecker::new();
+    for clause in &trace.known_clauses {
+        checker.add_known_clause(clause, kernel_context);
+    }
+    checker
+        .check_steps(&trace.steps, kernel_context)
+        .expect("structured trace should replay");
+    checker.clauses().to_vec()
+}
+
 fn witness_body_equating_ambient_bool() -> crate::kernel::term::Term {
     use crate::kernel::atom::Atom;
     use crate::kernel::term::Term;
@@ -636,6 +650,103 @@ fn test_structured_certificate_step_serializes_explicit_details() {
     let parsed: StructuredCertificateStep =
         serde_json::from_value(value).expect("serialized step should parse");
     assert_eq!(parsed, cert_step);
+}
+
+#[test]
+fn test_legacy_structured_compiler_reconstructs_boolean_reduction_details() {
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+
+    let mut kernel_context = KernelContext::new();
+    kernel_context.parse_constants(&["c0", "c1"], "Bool");
+    let source = Clause::new(
+        vec![Literal::positive(Term::and(
+            kernel_context.parse_term("c0"),
+            kernel_context.parse_term("c1"),
+        ))],
+        &LocalContext::empty(),
+    );
+
+    let mut legacy_checker = Checker::new();
+    legacy_checker.insert_clause(&source, StepReason::Testing, &kernel_context);
+    assert!(
+        legacy_checker.inserted_len() > 1,
+        "source clause should produce legacy boolean-reduction insertions"
+    );
+
+    let mut compiler = LegacyStructuredCompiler::new(&kernel_context);
+    compiler
+        .compile_insertions_from(&legacy_checker, 0)
+        .expect("legacy insertions should compile");
+    let trace = compiler.finish();
+    let clauses = check_structured_trace(&trace, &kernel_context);
+    let p = kernel_context.parse_clause("c0", &[]);
+    let q = kernel_context.parse_clause("c1", &[]);
+
+    assert!(clauses.contains(&p));
+    assert!(clauses.contains(&q));
+    assert!(trace.steps.iter().any(|step| {
+        matches!(
+            step.rule,
+            StructuredRule::PosAndLeft | StructuredRule::PosAndRight
+        ) && step.details.boolean.is_some()
+    }));
+}
+
+#[test]
+fn test_compile_legacy_certificate_to_structured_trace_replays_generated_cert() {
+    use crate::prover::{Outcome, ProverMode};
+
+    let code = r#"
+        type Foo: axiom
+        let a: Foo = axiom
+        let pred: Foo -> Bool = axiom
+
+        axiom all_pred(x: Foo) {
+            pred(x)
+        }
+
+        theorem goal {
+            pred(a)
+        }
+    "#;
+
+    let (mut processor, bindings, normalized_goal) = Processor::test_goal(code);
+    let mut project = Project::new_mock();
+    project.mock("/mock/main.ac", code);
+    project
+        .load_module_by_name("main")
+        .expect("module should load");
+
+    let outcome = processor.search(ProverMode::Test, &normalized_goal.kernel_context);
+    assert_eq!(outcome, Outcome::Success);
+    let cert = processor
+        .make_cert(&bindings, &normalized_goal.kernel_context, false)
+        .expect("certificate generation should succeed");
+    assert!(
+        cert.proof.as_ref().is_some_and(|proof| !proof.is_empty()),
+        "test should exercise a non-empty legacy certificate"
+    );
+
+    let trace = processor
+        .compile_legacy_cert_to_structured_trace(
+            &cert,
+            Some(&normalized_goal),
+            &normalized_goal.kernel_context,
+            &project,
+            &bindings,
+        )
+        .expect("legacy certificate should compile to a structured trace");
+    let clauses = check_structured_trace(&trace, &normalized_goal.kernel_context);
+
+    assert!(
+        clauses.last().is_some_and(|clause| clause.is_impossible()),
+        "compiled trace should end in a contradiction"
+    );
+    assert!(trace
+        .steps
+        .iter()
+        .any(|step| step.rule == StructuredRule::Specialize));
 }
 
 #[test]

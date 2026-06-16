@@ -15,6 +15,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::proof_step::Rule;
 use crate::module::ModuleId;
 use crate::project::ProjectView;
+use crate::prover::proof::StructuredProofTrace;
 use crate::prover::trace::{TraceActivatedStepRecord, TraceSearchMeta};
 use crate::prover::{Outcome, Prover, ProverMode, ScoringConfig, ScoringPolicy, SearchStats};
 use tokio_util::sync::CancellationToken;
@@ -372,6 +373,45 @@ impl Processor {
             project,
             bindings,
             false,
+        )
+    }
+
+    /// Compile an old string certificate into a structured proof trace, using the same checker
+    /// setup as normal certificate verification.
+    pub fn compile_legacy_cert_to_structured_trace(
+        &self,
+        cert: &Certificate,
+        normalized_goal: Option<&LoweredGoal>,
+        kernel_context: &KernelContext,
+        project: impl Into<ProjectView>,
+        bindings: &BindingMap,
+    ) -> Result<StructuredProofTrace, Error> {
+        let project = project.into();
+        let mut checker = self.checker.clone();
+        let mut cert_bindings = Cow::Borrowed(bindings);
+        let effective_kernel_context: &KernelContext;
+
+        if let Some(normalized_goal) = normalized_goal {
+            checker.insert_lowered_goal(normalized_goal)?;
+            cert_bindings =
+                Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
+            effective_kernel_context = &normalized_goal.kernel_context;
+        } else if let Some(type_params) = self
+            .prover
+            .as_ref()
+            .and_then(|prover| prover.goal_type_params())
+        {
+            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
+            effective_kernel_context = kernel_context;
+        } else {
+            effective_kernel_context = kernel_context;
+        }
+
+        cert.compile_legacy_structured_trace(
+            checker,
+            &project,
+            cert_bindings,
+            Cow::Owned(effective_kernel_context.clone()),
         )
     }
 

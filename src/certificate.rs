@@ -28,7 +28,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::structured_proof::{
-    StructuredBooleanHint, StructuredProofStep, StructuredProofStepDetails,
+    StructuredBooleanHint, StructuredChecker, StructuredProofStep, StructuredProofStepDetails,
     StructuredResolutionHint, StructuredRewriteHint, StructuredRule, StructuredSimplificationHint,
     StructuredSimplificationRemoval, StructuredSimplificationResolution,
 };
@@ -39,7 +39,7 @@ use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::ProjectLookup;
-use crate::prover::proof::ConcreteStep;
+use crate::prover::proof::{ConcreteStep, StructuredProofTrace};
 use crate::prover::synthetic::{
     witness_application, witness_signature, WitnessEntry, WitnessRegistry,
 };
@@ -442,6 +442,295 @@ impl StructuredCertificateStep {
                     .to_string(),
             )),
         }
+    }
+}
+
+struct LegacyStructuredCompiler<'a> {
+    kernel_context: &'a KernelContext,
+    trace: StructuredProofTrace,
+    checker: StructuredChecker,
+    checker_to_structured: Vec<Option<usize>>,
+    known_seen: HashSet<Clause>,
+}
+
+impl<'a> LegacyStructuredCompiler<'a> {
+    fn new(kernel_context: &'a KernelContext) -> Self {
+        Self {
+            kernel_context,
+            trace: StructuredProofTrace {
+                known_clauses: Vec::new(),
+                steps: Vec::new(),
+            },
+            checker: StructuredChecker::new(),
+            checker_to_structured: Vec::new(),
+            known_seen: HashSet::new(),
+        }
+    }
+
+    fn finish(self) -> StructuredProofTrace {
+        self.trace
+    }
+
+    fn ensure_checker_slot(&mut self, checker_id: usize) {
+        if self.checker_to_structured.len() <= checker_id {
+            self.checker_to_structured.resize(checker_id + 1, None);
+        }
+    }
+
+    fn record_checker_id(&mut self, checker_id: usize, structured_id: usize) {
+        self.ensure_checker_slot(checker_id);
+        self.checker_to_structured[checker_id] = Some(structured_id);
+    }
+
+    fn checker_mapping(&self, checker_id: usize) -> Option<usize> {
+        self.checker_to_structured
+            .get(checker_id)
+            .and_then(|id| *id)
+    }
+
+    fn push_step(&mut self, step: StructuredProofStep) -> Result<usize, CodeGenError> {
+        let expected_id = self.trace.steps.len();
+        let actual_id = self
+            .checker
+            .check_step(&step, self.kernel_context)
+            .map_err(|e| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "legacy structured compiler emitted invalid {} step from {:?}: {}",
+                    step.rule, step.premises, e
+                ))
+            })?;
+        if actual_id != expected_id {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "structured checker returned step id {}, expected {}",
+                actual_id, expected_id
+            )));
+        }
+        self.trace.steps.push(step);
+        Ok(expected_id)
+    }
+
+    fn emit_known(&mut self, clause: Clause) -> Result<usize, CodeGenError> {
+        if self.known_seen.insert(clause.clone()) {
+            self.checker.add_known_clause(&clause, self.kernel_context);
+            self.trace.known_clauses.push(clause.clone());
+        }
+        self.push_step(StructuredProofStep::with_expected(
+            StructuredRule::Known,
+            vec![],
+            clause,
+        ))
+    }
+
+    fn emit_eqgraph(&mut self, clause: Clause) -> Result<usize, CodeGenError> {
+        let premises: Vec<usize> = (0..self.trace.steps.len()).collect();
+        if premises.is_empty() {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "legacy structured compiler cannot prove {} by eqgraph with no premises",
+                clause
+            )));
+        }
+        self.push_step(StructuredProofStep::with_expected(
+            StructuredRule::EqGraph,
+            premises,
+            clause,
+        ))
+    }
+
+    fn emit_unary(
+        &mut self,
+        legacy_checker: &Checker,
+        rule: StructuredRule,
+        source_id: usize,
+        clause: Clause,
+    ) -> Result<usize, CodeGenError> {
+        let source = self.ensure_checker_id_compiled(legacy_checker, source_id)?;
+        self.push_step(StructuredProofStep::with_expected(
+            rule,
+            vec![source],
+            clause,
+        ))
+    }
+
+    fn emit_boolean_reduction(
+        &mut self,
+        legacy_checker: &Checker,
+        source_id: usize,
+        clause: Clause,
+    ) -> Result<usize, CodeGenError> {
+        let source = self.ensure_checker_id_compiled(legacy_checker, source_id)?;
+        let source_clause = legacy_checker
+            .inserted_clause(source_id)
+            .ok_or_else(|| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "legacy boolean reduction references missing checker step {}",
+                    source_id
+                ))
+            })?
+            .clause;
+
+        let mut seen_for_literal = Vec::<(usize, usize, StructuredRule)>::new();
+        for (kind, literal_index, _) in source_clause
+            .find_boolean_reduction_kinds_with_locations_with_options(self.kernel_context, true)
+        {
+            let rule = StructuredRule::from_boolean_reduction_kind(kind);
+            let candidate_index =
+                match seen_for_literal
+                    .iter_mut()
+                    .find(|(seen_literal_index, _, seen_rule)| {
+                        *seen_literal_index == literal_index && *seen_rule == rule
+                    }) {
+                    Some((_, count, _)) => {
+                        let current = *count;
+                        *count += 1;
+                        current
+                    }
+                    None => {
+                        seen_for_literal.push((literal_index, 1, rule));
+                        0
+                    }
+                };
+            let step = StructuredProofStep::with_expected(rule, vec![source], clause.clone())
+                .with_details(StructuredProofStepDetails {
+                    boolean: Some(StructuredBooleanHint {
+                        literal_index,
+                        candidate_index,
+                    }),
+                    ..Default::default()
+                });
+            if self
+                .checker
+                .clone()
+                .check_step(&step, self.kernel_context)
+                .is_ok()
+            {
+                return self.push_step(step);
+            }
+        }
+
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "legacy structured compiler could not find boolean-reduction details for {} from checker step {}",
+            clause, source_id
+        )))
+    }
+
+    fn emit_specialization(
+        &mut self,
+        source: usize,
+        clause: Clause,
+    ) -> Result<usize, CodeGenError> {
+        self.push_step(StructuredProofStep::with_expected(
+            StructuredRule::Specialize,
+            vec![source],
+            clause,
+        ))
+    }
+
+    fn emit_from_reason(
+        &mut self,
+        legacy_checker: &Checker,
+        reason: StepReason,
+        clause: Clause,
+    ) -> Result<usize, CodeGenError> {
+        let exact_checker_id = legacy_checker.exact_clause_id(&clause);
+        if let Some(checker_id) = exact_checker_id {
+            if let Some(structured_id) = self.checker_mapping(checker_id) {
+                return Ok(structured_id);
+            }
+        }
+
+        match reason {
+            StepReason::EqualityGraph => self.emit_eqgraph(clause),
+            StepReason::Assumption(_)
+            | StepReason::Skolemization(_)
+            | StepReason::Testing
+            | StepReason::WitnessDeclaration => {
+                if exact_checker_id.is_some() {
+                    self.emit_known(clause)
+                } else {
+                    self.emit_eqgraph(clause)
+                }
+            }
+            StepReason::PreviousClaim => Err(CodeGenError::GeneratedBadCode(format!(
+                "legacy structured compiler found unmapped previous claim {}",
+                clause
+            ))),
+            StepReason::Contradiction => self.emit_eqgraph(clause),
+            StepReason::EqualityResolution(source_id) => {
+                self.emit_unary(legacy_checker, StructuredRule::EqRes, source_id, clause)
+            }
+            StepReason::Extensionality(source_id) => {
+                self.emit_unary(legacy_checker, StructuredRule::Ext, source_id, clause)
+            }
+            StepReason::EqualityFactoring(source_id) => {
+                self.emit_unary(legacy_checker, StructuredRule::EqFact, source_id, clause)
+            }
+            StepReason::Injectivity(source_id) => {
+                self.emit_unary(legacy_checker, StructuredRule::Inject, source_id, clause)
+            }
+            StepReason::BooleanReduction(source_id) => {
+                self.emit_boolean_reduction(legacy_checker, source_id, clause)
+            }
+        }
+    }
+
+    fn compile_inserted_clause(
+        &mut self,
+        legacy_checker: &Checker,
+        checker_id: usize,
+    ) -> Result<usize, CodeGenError> {
+        if let Some(structured_id) = self.checker_mapping(checker_id) {
+            return Ok(structured_id);
+        }
+        let inserted = legacy_checker.inserted_clause(checker_id).ok_or_else(|| {
+            CodeGenError::GeneratedBadCode(format!(
+                "legacy structured compiler missing checker insertion {}",
+                checker_id
+            ))
+        })?;
+        let structured_id =
+            self.emit_from_reason(legacy_checker, inserted.reason, inserted.clause)?;
+        self.record_checker_id(checker_id, structured_id);
+        Ok(structured_id)
+    }
+
+    fn ensure_checker_id_compiled(
+        &mut self,
+        legacy_checker: &Checker,
+        checker_id: usize,
+    ) -> Result<usize, CodeGenError> {
+        self.compile_inserted_clause(legacy_checker, checker_id)
+    }
+
+    fn compile_insertions_from(
+        &mut self,
+        legacy_checker: &Checker,
+        start: usize,
+    ) -> Result<(), CodeGenError> {
+        for checker_id in start..legacy_checker.inserted_len() {
+            self.compile_inserted_clause(legacy_checker, checker_id)?;
+        }
+        Ok(())
+    }
+
+    fn emit_final_contradiction(&mut self) -> Result<(), CodeGenError> {
+        if self
+            .checker
+            .clauses()
+            .last()
+            .is_some_and(|clause| clause.is_impossible())
+        {
+            return Ok(());
+        }
+        let premises: Vec<usize> = (0..self.trace.steps.len()).collect();
+        if premises.is_empty() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "legacy structured compiler cannot emit a contradiction with no structured premises"
+                    .to_string(),
+            ));
+        }
+        let step = StructuredProofStep::new(StructuredRule::EqGraph, premises);
+        self.push_step(step)?;
+        Ok(())
     }
 }
 
@@ -1979,6 +2268,290 @@ impl Certificate {
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
+    }
+
+    fn legacy_cert_line_context(proof: &[String], step_index: usize) -> String {
+        proof
+            .get(step_index)
+            .map(|line| format!("; certificate line {}: {:?}", step_index + 1, line))
+            .unwrap_or_default()
+    }
+
+    fn compile_legacy_obvious_clause(
+        checker: &mut Checker,
+        compiler: &mut LegacyStructuredCompiler<'_>,
+        kernel_context: &KernelContext,
+        generic_clause: &Clause,
+        clause: &Clause,
+        proof: &[String],
+        step_index: usize,
+        label: &str,
+    ) -> Result<(usize, usize), CodeGenError> {
+        if let Some(reason) = checker.check_clause(generic_clause, kernel_context) {
+            let generic_id = compiler.emit_from_reason(checker, reason, generic_clause.clone())?;
+            let clause_id = if clause == generic_clause {
+                generic_id
+            } else {
+                compiler.emit_specialization(generic_id, clause.clone())?
+            };
+            return Ok((generic_id, clause_id));
+        }
+
+        if let Some(reason) = checker.check_clause(clause, kernel_context) {
+            if generic_clause != clause {
+                let cert_line_context = Self::legacy_cert_line_context(proof, step_index);
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "legacy structured compiler proved specialized {label} at step {} but not its generic clause{}; specialized debug: {:?}; generic debug: {:?}",
+                    step_index + 1,
+                    cert_line_context,
+                    clause,
+                    generic_clause,
+                )));
+            }
+            let clause_id = compiler.emit_from_reason(checker, reason, clause.clone())?;
+            return Ok((clause_id, clause_id));
+        }
+
+        let cert_line_context = Self::legacy_cert_line_context(proof, step_index);
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "{label} at step {} is not obviously true{} (generic debug: {:?}; specialized debug: {:?})",
+            step_index + 1,
+            cert_line_context,
+            generic_clause,
+            clause,
+        )))
+    }
+
+    fn record_legacy_insertions(
+        compiler: &mut LegacyStructuredCompiler<'_>,
+        checker: &Checker,
+        start: usize,
+        mappings: &[(Clause, usize)],
+        reason_matches: impl Fn(&StepReason) -> bool,
+        emit_unmapped_witness_declarations: bool,
+    ) -> Result<(), CodeGenError> {
+        for checker_id in start..checker.inserted_len() {
+            if compiler.checker_mapping(checker_id).is_some() {
+                continue;
+            }
+            let inserted = checker.inserted_clause(checker_id).ok_or_else(|| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "legacy structured compiler missing checker insertion {}",
+                    checker_id
+                ))
+            })?;
+
+            if reason_matches(&inserted.reason) {
+                if let Some((_, structured_id)) = mappings
+                    .iter()
+                    .find(|(clause, _)| clause == &inserted.clause)
+                {
+                    compiler.record_checker_id(checker_id, *structured_id);
+                    continue;
+                }
+            }
+
+            if emit_unmapped_witness_declarations
+                && matches!(inserted.reason, StepReason::WitnessDeclaration)
+            {
+                let structured_id = compiler.emit_known(inserted.clause.clone())?;
+                compiler.record_checker_id(checker_id, structured_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_legacy_claim_insertions(
+        checker: &mut Checker,
+        compiler: &mut LegacyStructuredCompiler<'_>,
+        kernel_context: &KernelContext,
+        generic_clause: &Clause,
+        generic_id: usize,
+        clause: &Clause,
+        clause_id: usize,
+    ) -> Result<(), CodeGenError> {
+        let insertion_start = checker.inserted_len();
+        checker.insert_clause(generic_clause, StepReason::PreviousClaim, kernel_context);
+        checker.insert_clause(clause, StepReason::PreviousClaim, kernel_context);
+        let mappings = vec![
+            (generic_clause.clone(), generic_id),
+            (clause.clone(), clause_id),
+        ];
+        Self::record_legacy_insertions(
+            compiler,
+            checker,
+            insertion_start,
+            &mappings,
+            |reason| matches!(reason, StepReason::PreviousClaim),
+            false,
+        )?;
+        compiler.compile_insertions_from(checker, insertion_start)
+    }
+
+    fn compile_legacy_witness_insertions(
+        checker: &mut Checker,
+        compiler: &mut LegacyStructuredCompiler<'_>,
+        kernel_context: &KernelContext,
+        step: &SatisfyStep,
+        generic_clause: &Clause,
+        generic_id: usize,
+        justification_clause: &Clause,
+        justification_id: usize,
+    ) -> Result<(), CodeGenError> {
+        let insertion_start = checker.inserted_len();
+        checker.insert_clause(
+            generic_clause,
+            StepReason::WitnessDeclaration,
+            kernel_context,
+        );
+        checker.insert_clause(
+            justification_clause,
+            StepReason::WitnessDeclaration,
+            kernel_context,
+        );
+        if let Some(specialized_clause) = &step.specialized_clause {
+            checker.insert_clause(
+                specialized_clause,
+                StepReason::WitnessDeclaration,
+                kernel_context,
+            );
+        }
+        for clause in &step.witness_clauses {
+            checker.insert_clause(clause, StepReason::WitnessDeclaration, kernel_context);
+        }
+
+        let mappings = vec![
+            (generic_clause.clone(), generic_id),
+            (justification_clause.clone(), justification_id),
+        ];
+        Self::record_legacy_insertions(
+            compiler,
+            checker,
+            insertion_start,
+            &mappings,
+            |reason| matches!(reason, StepReason::WitnessDeclaration),
+            true,
+        )?;
+        compiler.compile_insertions_from(checker, insertion_start)
+    }
+
+    /// Compile an old string certificate into a structured proof trace by replaying the legacy
+    /// checker. This does not search for a proof: every structured step is derived from a
+    /// successful legacy checker reason, and unsupported legacy ambiguities are reported as
+    /// certificate compiler bugs.
+    pub fn compile_legacy_structured_trace(
+        &self,
+        mut checker: Checker,
+        project: &dyn ProjectLookup,
+        mut bindings: Cow<BindingMap>,
+        mut kernel_context: Cow<KernelContext>,
+    ) -> Result<StructuredProofTrace, CodeGenError> {
+        let Some(proof) = &self.proof else {
+            if checker.has_contradiction() {
+                let mut compiler = LegacyStructuredCompiler::new(&kernel_context);
+                compiler.compile_insertions_from(&checker, 0)?;
+                compiler.emit_final_contradiction()?;
+                return Ok(compiler.finish());
+            }
+            return Err(CodeGenError::NoProof);
+        };
+
+        let cert_steps = Self::parse_cert_steps_internal(
+            proof,
+            project,
+            &mut bindings,
+            &mut kernel_context,
+            false,
+        )?;
+        let kernel_context = kernel_context.as_ref();
+        let mut compiler = LegacyStructuredCompiler::new(kernel_context);
+        compiler.compile_insertions_from(&checker, 0)?;
+        let mut seen_claims = HashSet::new();
+        let mut witness_validation_context = kernel_context.clone();
+
+        for (step_index, step) in cert_steps.iter().enumerate() {
+            if checker.has_contradiction() {
+                compiler.emit_final_contradiction()?;
+                return Ok(compiler.finish());
+            }
+
+            match step {
+                CertificateStep::Claim(claim) => {
+                    claim
+                        .validate_checker_payload(kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+
+                    let generic_clause = claim.normalized_generic_clause();
+                    let clause = claim
+                        .normalized_specialized_clause(kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+                    if !seen_claims.insert(clause.clone()) {
+                        continue;
+                    }
+
+                    let (generic_id, clause_id) = Self::compile_legacy_obvious_clause(
+                        &mut checker,
+                        &mut compiler,
+                        kernel_context,
+                        &generic_clause,
+                        &clause,
+                        proof,
+                        step_index,
+                        "claim",
+                    )?;
+
+                    Self::compile_legacy_claim_insertions(
+                        &mut checker,
+                        &mut compiler,
+                        kernel_context,
+                        &generic_clause,
+                        generic_id,
+                        &clause,
+                        clause_id,
+                    )?;
+                }
+                CertificateStep::Satisfy(step) => {
+                    step.validate_checker_payload(&mut witness_validation_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+
+                    let generic_clause = step.justification.normalized_generic_clause();
+                    let justification_clause = step
+                        .justification
+                        .normalized_specialized_clause(kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+                    let (generic_id, justification_id) = Self::compile_legacy_obvious_clause(
+                        &mut checker,
+                        &mut compiler,
+                        kernel_context,
+                        &generic_clause,
+                        &justification_clause,
+                        proof,
+                        step_index,
+                        "witness declaration",
+                    )?;
+
+                    Self::compile_legacy_witness_insertions(
+                        &mut checker,
+                        &mut compiler,
+                        kernel_context,
+                        step,
+                        &generic_clause,
+                        generic_id,
+                        &justification_clause,
+                        justification_id,
+                    )?;
+                }
+            }
+        }
+
+        if checker.has_contradiction() {
+            compiler.emit_final_contradiction()?;
+            Ok(compiler.finish())
+        } else {
+            Err(CodeGenError::GeneratedBadCode(
+                "proof does not result in a contradiction".to_string(),
+            ))
+        }
     }
 
     fn check_with_usage_internal(

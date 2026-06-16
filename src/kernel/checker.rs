@@ -107,6 +107,13 @@ pub struct CheckedStep {
     pub prefer_code_line: bool,
 }
 
+/// A clause inserted into the legacy checker, together with the reason used for dependency IDs.
+#[derive(Debug, Clone)]
+pub struct InsertedClause {
+    pub clause: Clause,
+    pub reason: StepReason,
+}
+
 /// The checker quickly checks if a clause can be proven in a single step from known clauses.
 ///
 /// The types of single-step we support are:
@@ -142,6 +149,9 @@ pub struct Checker {
 
     /// The reason for each step. The step_id is the index in this vector.
     reasons: ImVector<StepReason>,
+
+    /// Clauses inserted into the checker, indexed in parallel with `reasons`.
+    inserted_clauses: ImVector<Clause>,
 }
 
 impl Checker {
@@ -155,6 +165,7 @@ impl Checker {
             past_boolean_reductions: ImHashSet::new(),
             proven_inhabited: HashSet::new(),
             reasons: ImVector::new(),
+            inserted_clauses: ImVector::new(),
         }
     }
 
@@ -429,6 +440,7 @@ impl Checker {
 
         let step_id = self.reasons.len();
         self.reasons.push_back(reason.clone());
+        self.inserted_clauses.push_back(clause.clone());
 
         self.exact_clauses.entry(clause.clone()).or_insert(step_id);
 
@@ -650,6 +662,21 @@ impl Checker {
         let clause = normalize_clause_subterms(clause).normalized();
         self.check_clause_direct(&clause, kernel_context)
             .or_else(|| self.check_clause_via_boolean_reductions(&clause, kernel_context))
+    }
+
+    pub fn inserted_len(&self) -> usize {
+        self.inserted_clauses.len()
+    }
+
+    pub fn inserted_clause(&self, id: usize) -> Option<InsertedClause> {
+        Some(InsertedClause {
+            clause: self.inserted_clauses.get(id)?.clone(),
+            reason: self.reasons.get(id)?.clone(),
+        })
+    }
+
+    pub fn exact_clause_id(&self, clause: &Clause) -> Option<usize> {
+        self.exact_clauses.get(clause).copied()
     }
 
     fn simplify_variable_clause_with_concrete_facts(
