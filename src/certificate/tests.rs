@@ -469,6 +469,201 @@ fn test_structured_certificate_step_accepts_array_premises_without_expected_clau
 }
 
 #[test]
+fn test_structured_certificate_step_lowers_explicit_details() {
+    use crate::kernel::structured_proof::{
+        StructuredBooleanHint, StructuredResolutionHint, StructuredRewriteHint,
+        StructuredSimplificationHint, StructuredSimplificationRemoval,
+        StructuredSimplificationResolution,
+    };
+    use crate::kernel::term::PathStep;
+
+    let code = r#"
+        let foo: Bool = axiom
+
+        theorem goal {
+            foo
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let cert_step: StructuredCertificateStep = serde_json::from_str(
+        r#"{
+            "r": "rewrite",
+            "from": [1, 2],
+            "s": "foo",
+            "bool": {"lit": 3, "cand": 4},
+            "rw": {"fwd": false, "left": true, "path": "fa", "inst": true},
+            "res": {"l": 5, "r": 6, "flip": true},
+            "simp": {
+                "rm": [{"orig": 7, "prem": 8, "lit": 9, "flip": false, "inst": true}],
+                "res": {
+                    "orig": 10,
+                    "prem": 11,
+                    "lit": 12,
+                    "flip": true,
+                    "first": false,
+                    "inst": true
+                }
+            }
+        }"#,
+    )
+    .expect("structured certificate step should parse");
+    let kernel_step = cert_step
+        .to_kernel_step(&project, &bindings, &kernel_context)
+        .expect("structured certificate step should lower");
+
+    assert_eq!(
+        kernel_step.details.boolean,
+        Some(StructuredBooleanHint {
+            literal_index: 3,
+            candidate_index: 4,
+        })
+    );
+    assert_eq!(
+        kernel_step.details.rewrite,
+        Some(StructuredRewriteHint {
+            forwards: false,
+            target_left: true,
+            path: vec![PathStep::Function, PathStep::Argument],
+            use_instantiated_premises: true,
+        })
+    );
+    assert_eq!(
+        kernel_step.details.resolution,
+        Some(StructuredResolutionHint {
+            left_literal: 5,
+            right_literal: 6,
+            flipped: true,
+        })
+    );
+    assert_eq!(
+        kernel_step.details.simplification,
+        Some(StructuredSimplificationHint {
+            removals: vec![StructuredSimplificationRemoval {
+                original_literal: 7,
+                simplifier_premise: 8,
+                simplifier_literal: 9,
+                flipped: false,
+                use_instantiated_simplifier: true,
+            }],
+            resolution: Some(StructuredSimplificationResolution {
+                original_literal: 10,
+                simplifier_premise: 11,
+                simplifier_literal: 12,
+                flipped: true,
+                simplifier_first: false,
+                use_instantiated_simplifier: true,
+            }),
+        })
+    );
+}
+
+#[test]
+fn test_structured_certificate_step_serializes_explicit_details() {
+    use crate::kernel::structured_proof::{
+        StructuredBooleanHint, StructuredProofStep, StructuredProofStepDetails,
+        StructuredResolutionHint, StructuredRewriteHint, StructuredSimplificationHint,
+        StructuredSimplificationRemoval, StructuredSimplificationResolution,
+    };
+    use crate::kernel::term::PathStep;
+
+    let kernel_step = StructuredProofStep::new(StructuredRule::Rewrite, vec![1, 2]).with_details(
+        StructuredProofStepDetails {
+            boolean: Some(StructuredBooleanHint {
+                literal_index: 3,
+                candidate_index: 4,
+            }),
+            rewrite: Some(StructuredRewriteHint {
+                forwards: false,
+                target_left: true,
+                path: vec![PathStep::Function, PathStep::Argument],
+                use_instantiated_premises: true,
+            }),
+            simplification: Some(StructuredSimplificationHint {
+                removals: vec![StructuredSimplificationRemoval {
+                    original_literal: 7,
+                    simplifier_premise: 8,
+                    simplifier_literal: 9,
+                    flipped: false,
+                    use_instantiated_simplifier: true,
+                }],
+                resolution: Some(StructuredSimplificationResolution {
+                    original_literal: 10,
+                    simplifier_premise: 11,
+                    simplifier_literal: 12,
+                    flipped: true,
+                    simplifier_first: false,
+                    use_instantiated_simplifier: true,
+                }),
+            }),
+            resolution: Some(StructuredResolutionHint {
+                left_literal: 5,
+                right_literal: 6,
+                flipped: true,
+            }),
+        },
+    );
+    let cert_step = StructuredCertificateStep::from_kernel_step(&kernel_step, Some("foo".into()));
+    let value = serde_json::to_value(&cert_step).expect("step should serialize");
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "r": "rewrite",
+            "from": [1, 2],
+            "s": "foo",
+            "bool": {"lit": 3, "cand": 4},
+            "rw": {"fwd": false, "left": true, "path": "fa", "inst": true},
+            "res": {"l": 5, "r": 6, "flip": true},
+            "simp": {
+                "rm": [{"orig": 7, "prem": 8, "lit": 9, "flip": false, "inst": true}],
+                "res": {
+                    "orig": 10,
+                    "prem": 11,
+                    "lit": 12,
+                    "flip": true,
+                    "first": false,
+                    "inst": true
+                }
+            }
+        })
+    );
+
+    let parsed: StructuredCertificateStep =
+        serde_json::from_value(value).expect("serialized step should parse");
+    assert_eq!(parsed, cert_step);
+}
+
+#[test]
+fn test_structured_certificate_step_rejects_invalid_rewrite_path() {
+    let code = r#"
+        let foo: Bool = axiom
+
+        theorem goal {
+            foo
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+
+    let cert_step: StructuredCertificateStep = serde_json::from_str(
+        r#"{
+            "r": "rewrite",
+            "from": [1, 2],
+            "rw": {"fwd": true, "left": true, "path": "fx", "inst": false}
+        }"#,
+    )
+    .expect("structured certificate step should parse before lowering");
+    let err = cert_step
+        .to_kernel_step(&project, &bindings, &kernel_context)
+        .expect_err("invalid path should be rejected while lowering");
+    assert!(
+        err.to_string().contains("invalid character `x`"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
 fn test_parse_code_line_rejects_local_proof_let_claim() {
     let code = r#"
         type Empty: axiom

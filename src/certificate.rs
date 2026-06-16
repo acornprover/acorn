@@ -27,10 +27,14 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::structured_proof::{StructuredProofStep, StructuredRule};
+use crate::kernel::structured_proof::{
+    StructuredBooleanHint, StructuredProofStep, StructuredProofStepDetails,
+    StructuredResolutionHint, StructuredRewriteHint, StructuredRule, StructuredSimplificationHint,
+    StructuredSimplificationRemoval, StructuredSimplificationResolution,
+};
 use crate::kernel::symbol::Symbol;
 use crate::kernel::symbol_table::NewConstantType;
-use crate::kernel::term::{Decomposition, Term};
+use crate::kernel::term::{Decomposition, PathStep, Term};
 use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::{ModuleDescriptor, ModuleId};
@@ -81,6 +85,253 @@ impl StructuredCertificatePremises {
     }
 }
 
+/// Certificate-layer data for a boolean-reduction rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateBooleanHint {
+    #[serde(rename = "lit")]
+    pub literal_index: usize,
+
+    #[serde(rename = "cand")]
+    pub candidate_index: usize,
+}
+
+impl From<StructuredBooleanHint> for StructuredCertificateBooleanHint {
+    fn from(hint: StructuredBooleanHint) -> Self {
+        Self {
+            literal_index: hint.literal_index,
+            candidate_index: hint.candidate_index,
+        }
+    }
+}
+
+impl From<StructuredCertificateBooleanHint> for StructuredBooleanHint {
+    fn from(hint: StructuredCertificateBooleanHint) -> Self {
+        Self {
+            literal_index: hint.literal_index,
+            candidate_index: hint.candidate_index,
+        }
+    }
+}
+
+/// Certificate-layer data for a rewrite rule.
+///
+/// `path` is a compact path through the target term. `f` means "function side of an
+/// application" and `a` means "argument side".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateRewriteHint {
+    #[serde(rename = "fwd")]
+    pub forwards: bool,
+
+    #[serde(rename = "left")]
+    pub target_left: bool,
+
+    pub path: String,
+
+    #[serde(rename = "inst")]
+    pub use_instantiated_premises: bool,
+}
+
+impl StructuredCertificateRewriteHint {
+    fn to_kernel_hint(&self) -> Result<StructuredRewriteHint, CodeGenError> {
+        Ok(StructuredRewriteHint {
+            forwards: self.forwards,
+            target_left: self.target_left,
+            path: parse_structured_path(&self.path)?,
+            use_instantiated_premises: self.use_instantiated_premises,
+        })
+    }
+}
+
+impl From<&StructuredRewriteHint> for StructuredCertificateRewriteHint {
+    fn from(hint: &StructuredRewriteHint) -> Self {
+        Self {
+            forwards: hint.forwards,
+            target_left: hint.target_left,
+            path: structured_path_to_string(&hint.path),
+            use_instantiated_premises: hint.use_instantiated_premises,
+        }
+    }
+}
+
+/// Certificate-layer data for a resolution rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateResolutionHint {
+    #[serde(rename = "l")]
+    pub left_literal: usize,
+
+    #[serde(rename = "r")]
+    pub right_literal: usize,
+
+    #[serde(rename = "flip")]
+    pub flipped: bool,
+}
+
+impl From<StructuredResolutionHint> for StructuredCertificateResolutionHint {
+    fn from(hint: StructuredResolutionHint) -> Self {
+        Self {
+            left_literal: hint.left_literal,
+            right_literal: hint.right_literal,
+            flipped: hint.flipped,
+        }
+    }
+}
+
+impl From<StructuredCertificateResolutionHint> for StructuredResolutionHint {
+    fn from(hint: StructuredCertificateResolutionHint) -> Self {
+        Self {
+            left_literal: hint.left_literal,
+            right_literal: hint.right_literal,
+            flipped: hint.flipped,
+        }
+    }
+}
+
+/// Certificate-layer data for one simplification literal removal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateSimplificationRemoval {
+    #[serde(rename = "orig")]
+    pub original_literal: usize,
+
+    #[serde(rename = "prem")]
+    pub simplifier_premise: usize,
+
+    #[serde(rename = "lit")]
+    pub simplifier_literal: usize,
+
+    #[serde(rename = "flip")]
+    pub flipped: bool,
+
+    #[serde(rename = "inst")]
+    pub use_instantiated_simplifier: bool,
+}
+
+impl From<StructuredSimplificationRemoval> for StructuredCertificateSimplificationRemoval {
+    fn from(removal: StructuredSimplificationRemoval) -> Self {
+        Self {
+            original_literal: removal.original_literal,
+            simplifier_premise: removal.simplifier_premise,
+            simplifier_literal: removal.simplifier_literal,
+            flipped: removal.flipped,
+            use_instantiated_simplifier: removal.use_instantiated_simplifier,
+        }
+    }
+}
+
+impl From<StructuredCertificateSimplificationRemoval> for StructuredSimplificationRemoval {
+    fn from(removal: StructuredCertificateSimplificationRemoval) -> Self {
+        Self {
+            original_literal: removal.original_literal,
+            simplifier_premise: removal.simplifier_premise,
+            simplifier_literal: removal.simplifier_literal,
+            flipped: removal.flipped,
+            use_instantiated_simplifier: removal.use_instantiated_simplifier,
+        }
+    }
+}
+
+/// Certificate-layer data for a simplification step that finishes by resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateSimplificationResolution {
+    #[serde(rename = "orig")]
+    pub original_literal: usize,
+
+    #[serde(rename = "prem")]
+    pub simplifier_premise: usize,
+
+    #[serde(rename = "lit")]
+    pub simplifier_literal: usize,
+
+    #[serde(rename = "flip")]
+    pub flipped: bool,
+
+    #[serde(rename = "first")]
+    pub simplifier_first: bool,
+
+    #[serde(rename = "inst")]
+    pub use_instantiated_simplifier: bool,
+}
+
+impl From<StructuredSimplificationResolution> for StructuredCertificateSimplificationResolution {
+    fn from(resolution: StructuredSimplificationResolution) -> Self {
+        Self {
+            original_literal: resolution.original_literal,
+            simplifier_premise: resolution.simplifier_premise,
+            simplifier_literal: resolution.simplifier_literal,
+            flipped: resolution.flipped,
+            simplifier_first: resolution.simplifier_first,
+            use_instantiated_simplifier: resolution.use_instantiated_simplifier,
+        }
+    }
+}
+
+impl From<StructuredCertificateSimplificationResolution> for StructuredSimplificationResolution {
+    fn from(resolution: StructuredCertificateSimplificationResolution) -> Self {
+        Self {
+            original_literal: resolution.original_literal,
+            simplifier_premise: resolution.simplifier_premise,
+            simplifier_literal: resolution.simplifier_literal,
+            flipped: resolution.flipped,
+            simplifier_first: resolution.simplifier_first,
+            use_instantiated_simplifier: resolution.use_instantiated_simplifier,
+        }
+    }
+}
+
+/// Certificate-layer data for a simplification rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredCertificateSimplificationHint {
+    #[serde(rename = "rm", default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<StructuredCertificateSimplificationRemoval>,
+
+    #[serde(rename = "res", default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<StructuredCertificateSimplificationResolution>,
+}
+
+impl From<StructuredSimplificationHint> for StructuredCertificateSimplificationHint {
+    fn from(hint: StructuredSimplificationHint) -> Self {
+        Self {
+            removals: hint.removals.into_iter().map(Into::into).collect(),
+            resolution: hint.resolution.map(Into::into),
+        }
+    }
+}
+
+impl From<StructuredCertificateSimplificationHint> for StructuredSimplificationHint {
+    fn from(hint: StructuredCertificateSimplificationHint) -> Self {
+        Self {
+            removals: hint.removals.into_iter().map(Into::into).collect(),
+            resolution: hint.resolution.map(Into::into),
+        }
+    }
+}
+
+fn structured_path_to_string(path: &[PathStep]) -> String {
+    path.iter()
+        .map(|step| match step {
+            PathStep::Function => 'f',
+            PathStep::Argument => 'a',
+        })
+        .collect()
+}
+
+fn parse_structured_path(path: &str) -> Result<Vec<PathStep>, CodeGenError> {
+    let mut steps = Vec::with_capacity(path.len());
+    for (i, ch) in path.chars().enumerate() {
+        let step = match ch {
+            'f' => PathStep::Function,
+            'a' => PathStep::Argument,
+            _ => {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "structured proof rewrite path contains invalid character `{}` at offset {}; expected `f` or `a`",
+                    ch, i
+                )));
+            }
+        };
+        steps.push(step);
+    }
+    Ok(steps)
+}
+
 /// Certificate-layer representation of a future structured proof step.
 ///
 /// This is intentionally not wired into `Certificate::proof` yet. It gives us a JSON adapter that
@@ -96,6 +347,18 @@ pub struct StructuredCertificateStep {
 
     #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+
+    #[serde(rename = "bool", default, skip_serializing_if = "Option::is_none")]
+    pub boolean: Option<StructuredCertificateBooleanHint>,
+
+    #[serde(rename = "rw", default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<StructuredCertificateRewriteHint>,
+
+    #[serde(rename = "res", default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<StructuredCertificateResolutionHint>,
+
+    #[serde(rename = "simp", default, skip_serializing_if = "Option::is_none")]
+    pub simplification: Option<StructuredCertificateSimplificationHint>,
 }
 
 impl StructuredCertificateStep {
@@ -122,7 +385,36 @@ impl StructuredCertificateStep {
                 .map_or_else(Vec::new, |from| from.to_vec()),
             expected,
             premise_instantiations: vec![],
-            details: Default::default(),
+            details: self.to_kernel_details()?,
+        })
+    }
+
+    pub fn from_kernel_step(step: &StructuredProofStep, source_step: Option<String>) -> Self {
+        Self {
+            rule: step.rule,
+            from: match step.premises.as_slice() {
+                [] => None,
+                [id] => Some(StructuredCertificatePremises::One(*id)),
+                ids => Some(StructuredCertificatePremises::Many(ids.to_vec())),
+            },
+            step: source_step,
+            boolean: step.details.boolean.map(Into::into),
+            rewrite: step.details.rewrite.as_ref().map(Into::into),
+            resolution: step.details.resolution.map(Into::into),
+            simplification: step.details.simplification.clone().map(Into::into),
+        }
+    }
+
+    fn to_kernel_details(&self) -> Result<StructuredProofStepDetails, CodeGenError> {
+        Ok(StructuredProofStepDetails {
+            boolean: self.boolean.clone().map(Into::into),
+            rewrite: self
+                .rewrite
+                .as_ref()
+                .map(StructuredCertificateRewriteHint::to_kernel_hint)
+                .transpose()?,
+            simplification: self.simplification.clone().map(Into::into),
+            resolution: self.resolution.clone().map(Into::into),
         })
     }
 
