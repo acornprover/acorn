@@ -1605,9 +1605,15 @@ impl AcornValue {
                     .into_iter()
                     .map(|t| t.insert_stack(index, increment))
                     .collect(),
-                instance_type: c.instance_type.insert_stack(index, increment),
+                instance_type: if c.bound_value_args.is_empty() {
+                    c.instance_type
+                        .insert_stack(index + c.value_param_types.len() as AtomId, increment)
+                } else {
+                    c.instance_type.insert_stack(index, increment)
+                },
                 generic_type: if c.bound_value_args.is_empty() {
-                    c.generic_type.insert_stack(index, increment)
+                    c.generic_type
+                        .insert_stack(index + c.value_param_types.len() as AtomId, increment)
                 } else {
                     c.generic_type
                 },
@@ -1615,7 +1621,8 @@ impl AcornValue {
                 value_param_types: if c.bound_value_args.is_empty() {
                     c.value_param_types
                         .into_iter()
-                        .map(|t| t.insert_stack(index, increment))
+                        .enumerate()
+                        .map(|(i, t)| t.insert_stack(index + i as AtomId, increment))
                         .collect()
                 } else {
                     c.value_param_types
@@ -4025,6 +4032,53 @@ mod tests {
             panic!("expected function type");
         };
         assert_eq!(function_type.arg_types[0], set_subspace_t_a);
+    }
+
+    #[test]
+    fn test_insert_stack_preserves_unbound_hidden_value_param_placeholders() {
+        let nat_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let fin_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Fin".to_string(),
+        };
+        let nat_type = AcornType::Data(nat_datatype, vec![]);
+        let hidden_n = AcornValue::Variable(0, nat_type.clone());
+        let fin_n = AcornType::Family(
+            fin_datatype.clone(),
+            vec![DependentTypeArg::Value(hidden_n)],
+        );
+        let value_constant = ConstantInstance {
+            name: ConstantName::datatype_attr(ModuleId(0), fin_datatype.clone(), "value"),
+            params: vec![],
+            instance_type: AcornType::functional(vec![fin_n.clone()], nat_type.clone()),
+            generic_type: AcornType::functional(vec![fin_n], nat_type.clone()),
+            type_param_names: vec![],
+            value_param_types: vec![nat_type.clone()],
+            bound_value_args: vec![],
+        };
+        let n = AcornValue::Variable(0, nat_type.clone());
+        let x = AcornValue::Variable(
+            1,
+            AcornType::Family(fin_datatype, vec![DependentTypeArg::Value(n.clone())]),
+        );
+        let application = AcornValue::apply(AcornValue::Constant(value_constant), vec![n, x]);
+
+        let shifted = application.insert_stack(0, 1);
+        let shifted_n = AcornValue::Variable(1, nat_type.clone());
+        let shifted_fin_n = AcornType::Family(
+            Datatype {
+                module_id: ModuleId(0),
+                name: "Fin".to_string(),
+            },
+            vec![DependentTypeArg::Value(shifted_n)],
+        );
+        let lambda = AcornValue::lambda(vec![AcornType::Bool, nat_type, shifted_fin_n], shifted);
+        lambda
+            .validate()
+            .expect("inserted binder should not capture hidden family placeholders");
     }
 
     #[test]

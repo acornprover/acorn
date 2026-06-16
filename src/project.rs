@@ -977,31 +977,31 @@ mod tests {
     #[test]
     fn project_error_formats_manifest_version_for_callers() {
         let too_new = ProjectError::from(ManifestError::VersionTooNew {
-            found: 25,
-            supported: 24,
+            found: 26,
+            supported: 25,
         });
 
         assert_eq!(
             too_new.cli_message(),
-            "This version of acornlib uses project format 25, but this version of the acorn binary only supports up to project format 24. Please run `acorn --update`."
+            "This version of acornlib uses project format 26, but this version of the acorn binary only supports up to project format 25. Please run `acorn --update`."
         );
         assert_eq!(
             too_new.vscode_message(),
-            "This version of acornlib uses project format 25, but this version of the Acorn VS Code extension only supports up to project format 24. Please update the Acorn VS Code extension."
+            "This version of acornlib uses project format 26, but this version of the Acorn VS Code extension only supports up to project format 25. Please update the Acorn VS Code extension."
         );
 
         let too_old = ProjectError::from(ManifestError::VersionTooOld {
             found: 22,
-            supported: 24,
+            supported: 25,
         });
 
         assert_eq!(
             too_old.cli_message(),
-            "This version of acornlib uses project format 22, but this version of the acorn binary writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format."
+            "This version of acornlib uses project format 22, but this version of the acorn binary writes project format 25. Please run `acorn verify --update-version` to update acornlib's project format."
         );
         assert_eq!(
             too_old.vscode_message(),
-            "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format."
+            "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 25. Please run `acorn verify --update-version` to update acornlib's project format."
         );
     }
 

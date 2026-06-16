@@ -15,11 +15,31 @@ use crate::module::ModuleId;
 /// Bridge for quoting kernel terms/clauses back into Acorn surface values/types.
 pub struct TermBridge<'a> {
     kernel_context: &'a KernelContext,
+    reconstruct_instance_attributes: bool,
+}
+
+struct TermBridgeErrorContext;
+
+impl crate::elaborator::error::ErrorContext for TermBridgeErrorContext {
+    fn error(&self, msg: &str) -> crate::elaborator::error::Error {
+        let token = crate::syntax::token::Token::empty();
+        crate::elaborator::error::Error::new(&token, &token, msg)
+    }
 }
 
 impl<'a> TermBridge<'a> {
     pub fn new(kernel_context: &'a KernelContext) -> Self {
-        Self { kernel_context }
+        Self {
+            kernel_context,
+            reconstruct_instance_attributes: true,
+        }
+    }
+
+    pub fn new_for_clause_codec(kernel_context: &'a KernelContext) -> Self {
+        Self {
+            kernel_context,
+            reconstruct_instance_attributes: false,
+        }
     }
 
     fn quote_dependent_type_application_with_context(
@@ -699,6 +719,53 @@ impl<'a> TermBridge<'a> {
         Some(AcornValue::apply(public_attr, visible_args.to_vec()))
     }
 
+    fn maybe_bind_datatype_attribute_family_args(
+        &self,
+        head: AcornValue,
+        value_args: Vec<AcornValue>,
+    ) -> (AcornValue, Vec<AcornValue>) {
+        let AcornValue::Constant(constant) = &head else {
+            return (head, value_args);
+        };
+        if constant.bound_value_args.len() == constant.value_param_types.len()
+            || constant.value_param_types.is_empty()
+        {
+            return (head, value_args);
+        }
+
+        let datatype = match &constant.name {
+            ConstantName::DatatypeAttribute(_, datatype, _)
+            | ConstantName::SpecificDatatypeAttribute(_, datatype, _, _) => datatype,
+            _ => return (head, value_args),
+        };
+
+        let Some(receiver) = value_args.first() else {
+            return (head, value_args);
+        };
+        let AcornType::Family(receiver_datatype, family_args) = receiver.get_type() else {
+            return (head, value_args);
+        };
+        if &receiver_datatype != datatype {
+            return (head, value_args);
+        }
+
+        let hidden_value_args: Vec<_> = family_args
+            .into_iter()
+            .filter_map(|arg| match arg {
+                DependentTypeArg::Type(_) => None,
+                DependentTypeArg::Value(value) => Some(value),
+            })
+            .collect();
+        if hidden_value_args.len() != constant.value_param_types.len() {
+            return (head, value_args);
+        }
+
+        let bound_head = AcornValue::Constant(constant.clone())
+            .bind_value_params(&hidden_value_args, &TermBridgeErrorContext)
+            .expect("receiver family args should bind to datatype attribute");
+        (bound_head, value_args)
+    }
+
     fn quote_term(
         &self,
         term: &Term,
@@ -1201,17 +1268,18 @@ impl<'a> TermBridge<'a> {
             AcornValue::Constant(c) => Self::apply_type_args_to_constant(&c, &type_args),
             other => other,
         };
+        let (head, value_args) = self.maybe_bind_datatype_attribute_family_args(head, value_args);
 
-        if let Some(value) = self.maybe_reconstruct_instance_attribute(&head, &value_args) {
-            return value;
+        if self.reconstruct_instance_attributes {
+            if let Some(value) = self.maybe_reconstruct_instance_attribute(&head, &value_args) {
+                return value;
+            }
         }
 
         if let AcornValue::Constant(constant) = &head {
+            let hidden_value_arg_count = constant.value_param_types.len();
             let missing_hidden_value_args = if constant.bound_value_args.is_empty() {
-                constant
-                    .value_param_types
-                    .len()
-                    .saturating_sub(value_args.len())
+                hidden_value_arg_count.saturating_sub(value_args.len())
             } else {
                 0
             };
@@ -1222,17 +1290,36 @@ impl<'a> TermBridge<'a> {
                     first_arg_index,
                     missing_hidden_value_args,
                 );
-                let lambda_args: Vec<_> = constant
-                    .value_param_types
-                    .iter()
-                    .take(missing_hidden_value_args)
-                    .cloned()
-                    .collect();
-                let hidden_args = lambda_args.iter().enumerate().map(|(i, arg_type)| {
-                    AcornValue::Variable(first_arg_index + i as AtomId, arg_type.clone())
-                });
-                let all_args = hidden_args.chain(shifted_value_args).collect();
-                return AcornValue::lambda(lambda_args, AcornValue::apply(head, all_args));
+                let mut lambda_args = vec![];
+                let mut all_args = shifted_value_args;
+                for hidden_index in all_args.len()..hidden_value_arg_count {
+                    let arg_type =
+                        constant.value_param_types[hidden_index].bind_value_params(&all_args);
+                    let arg_index = first_arg_index + lambda_args.len() as AtomId;
+                    lambda_args.push(arg_type.clone());
+                    all_args.push(AcornValue::Variable(arg_index, arg_type));
+                }
+
+                let mut body = AcornValue::apply(head, all_args);
+                let scoped_body_type = body
+                    .get_type()
+                    .function_to_scoped_context(first_arg_index + lambda_args.len() as AtomId);
+                if let AcornType::Function(function_type) = scoped_body_type {
+                    let visible_args: Vec<_> = function_type
+                        .arg_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, arg_type)| {
+                            AcornValue::Variable(
+                                first_arg_index + lambda_args.len() as AtomId + i as AtomId,
+                                arg_type.clone(),
+                            )
+                        })
+                        .collect();
+                    lambda_args.extend(function_type.arg_types);
+                    body = AcornValue::apply(body, visible_args);
+                }
+                return AcornValue::lambda(lambda_args, body);
             }
         }
 
@@ -1585,6 +1672,7 @@ mod tests {
         AcornType, Datatype, DependentTypeArg, TypeParam, Typeclass,
     };
     use crate::elaborator::names::ConstantName;
+    use crate::kernel::clause::Clause;
     use crate::kernel::kernel_context::KernelContext;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -1829,6 +1917,199 @@ mod tests {
 
         let expected = AcornType::functional_from_flat_context(vec![u_type], subspace_t_a);
         assert_eq!(quoted, expected);
+    }
+
+    #[test]
+    fn test_quote_dependent_datatype_attribute_recovers_hidden_family_arg_from_receiver() {
+        let mut kernel_context = KernelContext::new();
+        let set_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Set".to_string(),
+        };
+        kernel_context
+            .type_store
+            .add_type(&AcornType::Data(set_datatype.clone(), vec![]));
+        kernel_context
+            .type_store
+            .set_datatype_arity(&set_datatype, 1);
+        let subspace_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Subspace".to_string(),
+        };
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let t_type = AcornType::Variable(t_param);
+        let set_t = AcornType::Data(set_datatype, vec![t_type.clone()]);
+        let hidden_a = AcornValue::Variable(0, set_t.clone());
+        let subspace_t_a = AcornType::Family(
+            subspace_datatype.clone(),
+            vec![
+                DependentTypeArg::Type(t_type.clone()),
+                DependentTypeArg::Value(hidden_a),
+            ],
+        );
+        kernel_context.type_store.add_type(&subspace_t_a);
+        let field_type = AcornType::functional(vec![subspace_t_a.clone()], t_type.clone());
+        let field_name =
+            ConstantName::datatype_attr(ModuleId(0), subspace_datatype.clone(), "value");
+        let set_ground_id = kernel_context
+            .type_store
+            .get_ground_id_by_name("Set")
+            .expect("Set should be registered");
+        let subspace_ground_id = kernel_context
+            .type_store
+            .get_ground_id_by_name("Subspace")
+            .expect("Subspace should be registered");
+        let set_t_binder = Term::new(
+            Atom::Symbol(Symbol::Type(set_ground_id)),
+            vec![Term::atom(Atom::BoundVariable(0))],
+        );
+        let subspace_t_a_binders = Term::new(
+            Atom::Symbol(Symbol::Type(subspace_ground_id)),
+            vec![
+                Term::atom(Atom::BoundVariable(1)),
+                Term::atom(Atom::BoundVariable(0)),
+            ],
+        );
+        let field_symbol_type = Term::pi(
+            Term::type_sort(),
+            Term::pi(
+                set_t_binder,
+                Term::pi(subspace_t_a_binders, Term::atom(Atom::BoundVariable(2))),
+            ),
+        );
+        kernel_context.symbol_table.add_constant(
+            field_name.clone(),
+            NewConstantType::Global,
+            field_symbol_type,
+        );
+        kernel_context.symbol_table.set_polymorphic_info(
+            field_name.clone(),
+            field_type.clone(),
+            vec!["T".to_string()],
+            vec![set_t],
+        );
+
+        let local_context = LocalContext::from_types(vec![
+            Term::type_sort(),
+            kernel_context.parse_type("Set[x0]"),
+            kernel_context.parse_type("Subspace[x0, x1]"),
+        ]);
+        let field_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&field_name)
+            .expect("field symbol should be registered");
+        let term = Term::atom(Atom::Symbol(field_symbol))
+            .apply(&[Term::new_variable(0), Term::new_variable(2)]);
+
+        let quoted =
+            TermBridge::new(&kernel_context).quote_term_with_context(&term, &local_context, true);
+        let AcornValue::Application(app) = quoted else {
+            panic!("field projection should quote as an application");
+        };
+        let AcornValue::Constant(bound_field) = app.function.as_ref() else {
+            panic!("field projection should keep the datatype field as its head");
+        };
+        assert_eq!(
+            bound_field.bound_value_args,
+            vec![AcornValue::Variable(
+                1,
+                bound_field.bound_value_args[0].get_type()
+            )],
+            "the hidden family arg should be bound onto the field constant"
+        );
+        assert_eq!(
+            app.args.len(),
+            1,
+            "only the visible receiver should remain as an application arg"
+        );
+        assert_eq!(app.args[0], AcornValue::Variable(2, app.args[0].get_type()));
+    }
+
+    #[test]
+    fn test_quote_clause_roundtrips_bare_dependent_datatype_attribute_function() {
+        let mut kernel_context = KernelContext::new();
+        let nat_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Nat".to_string(),
+        };
+        let nat_type = AcornType::Data(nat_datatype.clone(), vec![]);
+        kernel_context.type_store.add_type(&nat_type);
+
+        let fin_datatype = Datatype {
+            module_id: ModuleId(0),
+            name: "Fin".to_string(),
+        };
+        let generic_n = AcornValue::Variable(0, nat_type.clone());
+        let fin_n = AcornType::Family(
+            fin_datatype.clone(),
+            vec![DependentTypeArg::Value(generic_n)],
+        );
+        kernel_context.type_store.add_type(&fin_n);
+        kernel_context
+            .type_store
+            .set_datatype_arity(&fin_datatype, 1);
+
+        let constraint_name =
+            ConstantName::datatype_attr(ModuleId(0), fin_datatype.clone(), "constraint");
+        let constraint_type = AcornType::functional(vec![nat_type.clone()], AcornType::Bool);
+        kernel_context.symbol_table.add_constant(
+            constraint_name.clone(),
+            NewConstantType::Global,
+            kernel_context.parse_type("(Nat, Nat) -> Bool"),
+        );
+        kernel_context.symbol_table.set_polymorphic_info(
+            constraint_name.clone(),
+            constraint_type.clone(),
+            vec![],
+            vec![nat_type.clone()],
+        );
+
+        let t_param = TypeParam {
+            name: "T".to_string(),
+            typeclass: None,
+        };
+        let t_type = AcornType::Variable(t_param);
+        let identity_name = ConstantName::unqualified(ModuleId(0), "identity_fn");
+        let identity_type = AcornType::functional(vec![t_type.clone()], t_type);
+        kernel_context.symbol_table.add_constant(
+            identity_name.clone(),
+            NewConstantType::Global,
+            kernel_context.parse_pi("T: Type", "T -> T"),
+        );
+        kernel_context.symbol_table.set_polymorphic_info(
+            identity_name.clone(),
+            identity_type,
+            vec!["T".to_string()],
+            vec![],
+        );
+
+        let identity_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&identity_name)
+            .expect("identity_fn should be registered");
+        let constraint_symbol = kernel_context
+            .symbol_table
+            .get_symbol(&constraint_name)
+            .expect("Fin.constraint should be registered");
+        let predicate_type = kernel_context.parse_type("(Nat, Nat) -> Bool");
+        let local_context = LocalContext::from_types(vec![
+            kernel_context.parse_type("Nat"),
+            kernel_context.parse_type("Nat"),
+        ]);
+        let term = Term::atom(Atom::Symbol(identity_symbol)).apply(&[
+            predicate_type,
+            Term::atom(Atom::Symbol(constraint_symbol)),
+            Term::new_variable(0),
+            Term::new_variable(1),
+        ]);
+        let clause = Clause::new(vec![Literal::negative(term)], &local_context);
+
+        kernel_context
+            .validate_clause_roundtrip(&clause)
+            .expect("bare dependent datatype attribute function should roundtrip");
     }
 
     #[test]

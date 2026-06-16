@@ -610,7 +610,7 @@ impl KernelContext {
         type_param_names: Option<&[String]>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
-        TermBridge::new(self).quote_clause(
+        TermBridge::new_for_clause_codec(self).quote_clause(
             clause,
             arbitrary_names,
             type_param_names,

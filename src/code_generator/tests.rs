@@ -257,6 +257,82 @@ fn test_code_generation() {
 }
 
 #[test]
+fn test_bound_dependent_datatype_attribute_does_not_treat_receiver_as_family_arg() {
+    use crate::elaborator::acorn_type::{AcornType, Datatype, DependentTypeArg, TypeParam};
+    use crate::elaborator::acorn_value::{AcornValue, ConstantInstance};
+    use crate::elaborator::names::ConstantName;
+
+    let mut p = Project::new_mock_ide();
+    p.mock(
+        "/mock/main.ac",
+        r#"
+            type Set[T]: axiom
+
+            structure Subspace[T, a: Set[T]] {
+                value: T
+            }
+        "#,
+    );
+    let module_id = p.load_module_by_name("main").expect("load failed");
+    let env = match p.get_module_by_id(module_id) {
+        LoadState::Ok(module) => module.env().expect("expected retained environment"),
+        LoadState::Error(e) => panic!("error: {}", e),
+        _ => panic!("no module"),
+    };
+
+    let set_datatype = Datatype {
+        module_id,
+        name: "Set".to_string(),
+    };
+    let subspace_datatype = Datatype {
+        module_id,
+        name: "Subspace".to_string(),
+    };
+    let t_param = TypeParam {
+        name: "T".to_string(),
+        typeclass: None,
+    };
+    let t_type = AcornType::Variable(t_param);
+    let generic_set_t = AcornType::Data(set_datatype.clone(), vec![t_type.clone()]);
+    let generic_a = AcornValue::Variable(0, generic_set_t.clone());
+    let generic_subspace_t_a = AcornType::Family(
+        subspace_datatype.clone(),
+        vec![
+            DependentTypeArg::Type(t_type.clone()),
+            DependentTypeArg::Value(generic_a),
+        ],
+    );
+    let generic_field_type = AcornType::functional(vec![generic_subspace_t_a], t_type.clone());
+
+    let set_bool = AcornType::Data(set_datatype, vec![AcornType::Bool]);
+    let a = AcornValue::Variable(0, set_bool.clone());
+    let subspace_bool_a = AcornType::Family(
+        subspace_datatype.clone(),
+        vec![
+            DependentTypeArg::Type(AcornType::Bool),
+            DependentTypeArg::Value(a.clone()),
+        ],
+    );
+    let p_value = AcornValue::Variable(1, subspace_bool_a.clone());
+    let field = AcornValue::Constant(ConstantInstance {
+        name: ConstantName::datatype_attr(module_id, subspace_datatype, "value"),
+        params: vec![AcornType::Bool],
+        instance_type: AcornType::functional(vec![subspace_bool_a], AcornType::Bool),
+        generic_type: generic_field_type,
+        type_param_names: vec!["T".to_string()],
+        value_param_types: vec![generic_set_t],
+        bound_value_args: vec![a],
+    });
+    let projection = AcornValue::apply(field, vec![p_value]);
+
+    let mut generator = CodeGenerator::new_for_certificate(&env.bindings);
+    let generated = generator
+        .value_to_code_with_initial_vars(&projection, &["a".to_string(), "p".to_string()])
+        .expect("projection should generate code");
+    assert_eq!(generated, "Subspace[Bool, a].value(p)");
+}
+
+#[test]
 fn test_code_for_imported_things() {
     let mut p = Project::new_mock();
     p.mock(

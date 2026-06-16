@@ -1,9 +1,8 @@
 use crate::certificate::Certificate;
-use crate::elaborator::acorn_type::{AcornType, TypeParam};
+use crate::elaborator::acorn_type::{AcornType, Datatype, TypeParam};
 use crate::elaborator::acorn_value::AcornValue;
 use crate::elaborator::binding_map::BindingMap;
-use crate::elaborator::names::ConstantName;
-use crate::elaborator::names::DefinedName;
+use crate::elaborator::names::{ConstantName, DefinedName, InstanceName};
 use crate::kernel::atom::Atom;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -719,6 +718,154 @@ fn build_clause_with_instance_specialized_method(kernel_context: &mut KernelCont
     .normalized_preserving_locals()
 }
 
+/// Builds a clause containing an internal instance-attribute implementation for a datatype
+/// family with a value parameter. Quoting the clause must not rewrite this to the public
+/// typeclass attribute, because the clause codec has an exact roundtrip contract.
+fn build_clause_with_dependent_instance_specialized_method(
+    kernel_context: &mut KernelContext,
+) -> Clause {
+    let (_project, bindings, loaded_context) = load_mock_module(
+        r#"
+            type Bag[T]: axiom
+
+            structure Basis[T] {
+                value: T
+            }
+
+            structure Wrap[T, b: Basis[T]] {
+                value: T
+            }
+
+            define wrap_open[T](b: Basis[T], u: Bag[Wrap[T, b]]) -> Bool {
+                true
+            }
+
+            typeclass X: Top {
+                is_open: Bag[X] -> Bool
+            }
+
+            instance Wrap[T, b: Basis[T]]: Top {
+                let is_open: Bag[Wrap[T, b]] -> Bool = wrap_open[T](b)
+            }
+
+            theorem goal {
+                true
+            }
+        "#,
+    );
+    *kernel_context = loaded_context;
+
+    let wrap_datatype = Datatype {
+        module_id: bindings.module_id(),
+        name: "Wrap".to_string(),
+    };
+    let basis_datatype = Datatype {
+        module_id: bindings.module_id(),
+        name: "Basis".to_string(),
+    };
+    let bag_datatype = Datatype {
+        module_id: bindings.module_id(),
+        name: "Bag".to_string(),
+    };
+    let top_typeclass = bindings
+        .get_typeclass_for_name("Top")
+        .expect("Top typeclass should be registered")
+        .clone();
+    let instance_name = InstanceName {
+        typeclass: top_typeclass,
+        attribute: "is_open".to_string(),
+        datatype: wrap_datatype.clone(),
+    };
+    let is_open_name = ConstantName::instance_attr(bindings.module_id(), instance_name);
+    let is_open = kernel_context
+        .symbol_table
+        .get_symbol(&is_open_name)
+        .expect("Wrap.is_open instance method should be registered");
+
+    let bag_id = kernel_context
+        .type_store
+        .get_datatype_id(&bag_datatype)
+        .expect("Bag datatype should be registered");
+    let basis_id = kernel_context
+        .type_store
+        .get_datatype_id(&basis_datatype)
+        .expect("Basis datatype should be registered");
+    let wrap_id = kernel_context
+        .type_store
+        .get_datatype_id(&wrap_datatype)
+        .expect("Wrap datatype should be registered");
+
+    let t = Term::new_variable(0);
+    let b = Term::new_variable(1);
+    let basis_t = Term::ground_type(basis_id).apply(&[t.clone()]);
+    let wrap_t_b = Term::ground_type(wrap_id).apply(&[t.clone(), b]);
+    let bag_wrap_t_b = Term::ground_type(bag_id).apply(&[wrap_t_b]);
+
+    let application =
+        Term::atom(Atom::Symbol(is_open)).apply(&[t, Term::new_variable(1), Term::new_variable(2)]);
+
+    Clause::from_literals_unnormalized(
+        vec![Literal::positive(application)],
+        &LocalContext::from_types(vec![Term::type_sort(), basis_t, bag_wrap_t_b]),
+    )
+    .normalized_preserving_locals()
+}
+
+/// Builds the extensionality clause shape from `fin_matrix`: a bare generic function equals
+/// a bare datatype attribute whose receiver datatype has multiple hidden value parameters.
+fn build_clause_with_bare_dependent_datatype_attribute_function(
+    kernel_context: &mut KernelContext,
+) -> Clause {
+    let (_project, bindings, loaded_context) = load_mock_module(
+        r#"
+            type Nat: axiom
+            type Fin[n: Nat]: axiom
+
+            structure Matrix[A, m: Nat, n: Nat] {
+                entry: (Fin[m], Fin[n]) -> A
+            }
+
+            define matrix_entry[A](m: Nat, n: Nat, a: Matrix[A, m, n], i: Fin[m], j: Fin[n]) -> A {
+                a.entry(i, j)
+            }
+
+            theorem goal {
+                true
+            }
+        "#,
+    );
+    *kernel_context = loaded_context;
+
+    let matrix_entry = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::unqualified(
+            bindings.module_id(),
+            "matrix_entry",
+        ))
+        .expect("matrix_entry should be registered");
+    let matrix_datatype = Datatype {
+        module_id: bindings.module_id(),
+        name: "Matrix".to_string(),
+    };
+    let matrix_attr = kernel_context
+        .symbol_table
+        .get_symbol(&ConstantName::datatype_attr(
+            bindings.module_id(),
+            matrix_datatype,
+            "entry",
+        ))
+        .expect("Matrix.entry should be registered");
+    let type_arg = Term::new_variable(0);
+    let left = Term::atom(Atom::Symbol(matrix_entry)).apply(&[type_arg.clone()]);
+    let right = Term::atom(Atom::Symbol(matrix_attr)).apply(&[type_arg]);
+
+    Clause::from_literals_unnormalized(
+        vec![Literal::equals(left, right)],
+        &LocalContext::from_types(vec![Term::type_sort()]),
+    )
+    .normalized_preserving_locals()
+}
+
 const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "false_disjunct_literal",
@@ -755,6 +902,14 @@ const KERNEL_CLAUSE_ROUNDTRIP_CASES: &[KernelClauseRoundtripCase] = &[
     KernelClauseRoundtripCase {
         name: "instance_specialized_method",
         build: build_clause_with_instance_specialized_method,
+    },
+    KernelClauseRoundtripCase {
+        name: "dependent_instance_specialized_method",
+        build: build_clause_with_dependent_instance_specialized_method,
+    },
+    KernelClauseRoundtripCase {
+        name: "bare_dependent_datatype_attribute_function",
+        build: build_clause_with_bare_dependent_datatype_attribute_function,
     },
 ];
 

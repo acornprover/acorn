@@ -461,6 +461,7 @@ impl CodeGenerator<'_> {
             match kind {
                 FamilyParamKind::Type(_) => {
                     if let Some(type_param) = remaining_type_params.next() {
+                        let _ = remaining_type_param_names.next();
                         family_args.push(DependentTypeArg::Type(type_param.clone()));
                         continue;
                     }
@@ -1864,6 +1865,7 @@ impl CodeGenerator<'_> {
                         ConstantName::DatatypeAttribute(_, datatype, attr)
                         | ConstantName::SpecificDatatypeAttribute(_, datatype, _, attr)
                             if !c.value_param_types.is_empty()
+                                && c.bound_value_args.is_empty()
                                 && fa.args.len() >= c.value_param_types.len() =>
                         {
                             let family_value_arg_count = c.value_param_types.len();

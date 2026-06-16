@@ -233,7 +233,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     build_dir.create_dir_all().unwrap();
     build_dir
         .child("manifest.json")
-        .write_str(r#"{"version":25,"modules":{}}"#)
+        .write_str(r#"{"version":26,"modules":{}}"#)
         .unwrap();
 
     let args = ServerArgs {
@@ -246,7 +246,7 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 25, but this version of the Acorn VS Code extension only supports up to project format 24. Please update the Acorn VS Code extension.";
+    let expected = "This version of acornlib uses project format 26, but this version of the Acorn VS Code extension only supports up to project format 25. Please update the Acorn VS Code extension.";
 
     assert_eq!(error, expected);
 
@@ -280,7 +280,7 @@ async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization(
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 24. Please run `acorn verify --update-version` to update acornlib's project format.";
+    let expected = "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 25. Please run `acorn verify --update-version` to update acornlib's project format.";
 
     assert_eq!(error, expected);
 }
