@@ -169,7 +169,7 @@ impl Checker {
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<(Term, LocalContext)> {
-        let reduction = clause.positive_exists_reduction(kernel_context)?;
+        let reduction = clause.positive_exists_witness_reduction(kernel_context)?;
         Some(Self::inhabited_type_key(
             &reduction.binder_type,
             clause.get_local_context(),
@@ -180,11 +180,35 @@ impl Checker {
         &mut self,
         clause: &Clause,
         kernel_context: &KernelContext,
-    ) -> bool {
+    ) -> Option<(Term, LocalContext)> {
         let Some(key) = Self::inhabited_type_from_clause(clause, kernel_context) else {
-            return false;
+            return None;
         };
-        self.proven_inhabited.insert(key)
+        self.proven_inhabited.insert(key.clone()).then_some(key)
+    }
+
+    fn negated_exists_true_type_from_clause(clause: &Clause) -> Option<(Term, LocalContext)> {
+        if clause.literals.len() != 1 {
+            return None;
+        }
+        let literal = clause.literals.first()?;
+        if literal.positive || !literal.right.is_true() {
+            return None;
+        }
+        let (binder_type, body) = literal.left.as_ref().split_exists()?;
+        if !body.is_true() {
+            return None;
+        }
+        Some(Self::inhabited_type_key(
+            &binder_type.to_owned(),
+            clause.get_local_context(),
+        ))
+    }
+
+    fn has_negated_exists_true_for(&self, key: &(Term, LocalContext)) -> bool {
+        self.exact_clauses
+            .keys()
+            .any(|clause| Self::negated_exists_true_type_from_clause(clause).as_ref() == Some(key))
     }
 
     fn provably_inhabited_for_elimination(
@@ -412,10 +436,19 @@ impl Checker {
             &reason,
             StepReason::PreviousClaim | StepReason::WitnessDeclaration | StepReason::Testing
         );
-        if self.mark_inhabited_from_clause(clause, kernel_context)
-            && should_reprocess_for_inhabitedness
-        {
-            self.reprocess_boolean_reductions(kernel_context);
+        if let Some(key) = Self::negated_exists_true_type_from_clause(clause) {
+            if self.proven_inhabited.contains(&key) {
+                self.direct_contradiction = true;
+            }
+        }
+
+        if let Some(key) = self.mark_inhabited_from_clause(clause, kernel_context) {
+            if self.has_negated_exists_true_for(&key) {
+                self.direct_contradiction = true;
+            }
+            if should_reprocess_for_inhabitedness {
+                self.reprocess_boolean_reductions(kernel_context);
+            }
         }
 
         if has_any_variable {
@@ -1319,6 +1352,47 @@ mod tests {
         assert!(
             checker.check_clause(&query, &context).is_some(),
             "Bool is inhabited, so equality resolution may remove x != x"
+        );
+    }
+
+    #[test]
+    fn test_checker_uses_obvious_witness_exists_as_inhabited() {
+        let context = KernelContext::new();
+        let local_context = context.parse_local(&["Type", "x0"]);
+        let binder_type = Term::new_variable(0);
+        let bound = Term::atom(Atom::BoundVariable(0));
+        let witness = Term::new_variable(1);
+        let positive_exists = Clause::new(
+            vec![crate::kernel::literal::Literal::positive(Term::exists(
+                binder_type.clone(),
+                Term::eq(binder_type.clone(), bound, witness),
+            ))],
+            &local_context,
+        );
+        let negative_exists = Clause::new(
+            vec![crate::kernel::literal::Literal::negative(Term::exists(
+                binder_type,
+                Term::new_true(),
+            ))],
+            &local_context,
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&positive_exists, StepReason::Testing, &context);
+        checker.insert_clause(&negative_exists, StepReason::Testing, &context);
+
+        assert!(
+            checker.has_contradiction(),
+            "an accepted existential with an obvious witness proves the witness type inhabited"
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&negative_exists, StepReason::Testing, &context);
+        checker.insert_clause(&positive_exists, StepReason::Testing, &context);
+
+        assert!(
+            checker.has_contradiction(),
+            "inhabitedness reprocessing should also close an earlier negated existential"
         );
     }
 

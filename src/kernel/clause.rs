@@ -1220,11 +1220,11 @@ impl Clause {
         .expect("positive exists reduction produces exactly one clause")
     }
 
-    fn find_boolean_reductions_with_kinds_with_options(
+    fn find_boolean_reductions_with_locations_with_options(
         &self,
         kernel_context: &KernelContext,
         _allow_positive_exists_witness: bool,
-    ) -> Vec<(BooleanReductionKind, NormalizedClauseTrace)> {
+    ) -> Vec<(BooleanReductionKind, usize, NormalizedClauseTrace)> {
         let bool_type = Term::bool_type();
 
         let mut answer = vec![];
@@ -1249,7 +1249,7 @@ impl Clause {
                     answer.extend(
                         self.with_replaced_literal_and_context(i, vec![vec![]], &self.context)
                             .into_iter()
-                            .map(|trace| (BooleanReductionKind::FalseLiteralElimination, trace)),
+                            .map(|trace| (BooleanReductionKind::FalseLiteralElimination, i, trace)),
                     );
                 }
                 continue;
@@ -1270,7 +1270,7 @@ impl Clause {
                         &self.context,
                     )
                     .into_iter()
-                    .map(|trace| (BooleanReductionKind::IteSimplifyLeft, trace)),
+                    .map(|trace| (BooleanReductionKind::IteSimplifyLeft, i, trace)),
                 );
             }
             let reduced_right = Self::simplify_ite_term(&literal.right);
@@ -1284,7 +1284,7 @@ impl Clause {
                         &self.context,
                     )
                     .into_iter()
-                    .map(|trace| (BooleanReductionKind::IteSimplifyRight, trace)),
+                    .map(|trace| (BooleanReductionKind::IteSimplifyRight, i, trace)),
                 );
             }
 
@@ -1311,7 +1311,7 @@ impl Clause {
                     answer.extend(
                         self.with_replaced_literal_and_context(i, vec![replacement], &self.context)
                             .into_iter()
-                            .map(|trace| (kind, trace)),
+                            .map(|trace| (kind, i, trace)),
                     );
                 }
             }
@@ -1335,7 +1335,7 @@ impl Clause {
                     answer.extend(
                         self.with_replaced_literal_and_context(i, vec![replacement], &self.context)
                             .into_iter()
-                            .map(|trace| (kind, trace)),
+                            .map(|trace| (kind, i, trace)),
                     );
                 }
             }
@@ -1350,7 +1350,7 @@ impl Clause {
                         &self.context,
                     )
                     .into_iter()
-                    .map(|trace| (BooleanReductionKind::FunctionInequalityToExists, trace)),
+                    .map(|trace| (BooleanReductionKind::FunctionInequalityToExists, i, trace)),
                 );
             }
 
@@ -1374,7 +1374,7 @@ impl Clause {
                     answer.extend(
                         reduced
                             .into_iter()
-                            .map(|trace| (BooleanReductionKind::SignedNot, trace)),
+                            .map(|trace| (BooleanReductionKind::SignedNot, i, trace)),
                     );
                     continue;
                 }
@@ -1394,7 +1394,7 @@ impl Clause {
                             &self.context,
                         )
                         .into_iter()
-                        .map(|trace| (BooleanReductionKind::BooleanEqToEquality, trace)),
+                        .map(|trace| (BooleanReductionKind::BooleanEqToEquality, i, trace)),
                     );
                     continue;
                 }
@@ -1415,7 +1415,7 @@ impl Clause {
                                 &output_context,
                             )
                             .into_iter()
-                            .map(|trace| (BooleanReductionKind::PositiveForallOpen, trace)),
+                            .map(|trace| (BooleanReductionKind::PositiveForallOpen, i, trace)),
                         );
                         continue;
                     }
@@ -1430,7 +1430,7 @@ impl Clause {
                             )
                             .into_iter()
                             .map(|trace| {
-                                (BooleanReductionKind::PositiveExistsObviousWitness, trace)
+                                (BooleanReductionKind::PositiveExistsObviousWitness, i, trace)
                             }),
                         );
                         continue;
@@ -1443,7 +1443,7 @@ impl Clause {
                             &self.context,
                         )
                         .into_iter()
-                        .map(|trace| (BooleanReductionKind::NegatedForallToExists, trace)),
+                        .map(|trace| (BooleanReductionKind::NegatedForallToExists, i, trace)),
                     );
                     continue;
                 } else if let Some((reduced, output_context)) =
@@ -1456,7 +1456,7 @@ impl Clause {
                             &output_context,
                         )
                         .into_iter()
-                        .map(|trace| (BooleanReductionKind::NegatedExistsOpen, trace)),
+                        .map(|trace| (BooleanReductionKind::NegatedExistsOpen, i, trace)),
                     );
                     continue;
                 }
@@ -1489,7 +1489,7 @@ impl Clause {
                                 &self.context,
                             )
                             .into_iter()
-                            .map(|trace| (kind, trace)),
+                            .map(|trace| (kind, i, trace)),
                         );
                     }
                     continue;
@@ -1523,7 +1523,7 @@ impl Clause {
                                 &self.context,
                             )
                             .into_iter()
-                            .map(|trace| (kind, trace)),
+                            .map(|trace| (kind, i, trace)),
                         );
                     }
                     continue;
@@ -1558,10 +1558,12 @@ impl Clause {
             };
             answer.push((
                 first_kind,
+                i,
                 Self::normalize_boolean_reduction(first, self.context.clone(), self.context.len()),
             ));
             answer.push((
                 second_kind,
+                i,
                 Self::normalize_boolean_reduction(second, self.context.clone(), self.context.len()),
             ));
         }
@@ -1581,13 +1583,24 @@ impl Clause {
         kernel_context: &KernelContext,
         allow_positive_exists_witness: bool,
     ) -> Vec<NormalizedClauseTrace> {
-        self.find_boolean_reductions_with_kinds_with_options(
+        self.find_boolean_reductions_with_locations_with_options(
             kernel_context,
             allow_positive_exists_witness,
         )
         .into_iter()
-        .map(|(_kind, trace)| trace)
+        .map(|(_kind, _literal_index, trace)| trace)
         .collect()
+    }
+
+    pub fn find_boolean_reduction_kinds_with_locations_with_options(
+        &self,
+        kernel_context: &KernelContext,
+        allow_positive_exists_witness: bool,
+    ) -> Vec<(BooleanReductionKind, usize, NormalizedClauseTrace)> {
+        self.find_boolean_reductions_with_locations_with_options(
+            kernel_context,
+            allow_positive_exists_witness,
+        )
     }
 
     pub fn find_boolean_reduction_kinds_with_options(
@@ -1595,10 +1608,13 @@ impl Clause {
         kernel_context: &KernelContext,
         allow_positive_exists_witness: bool,
     ) -> Vec<(BooleanReductionKind, NormalizedClauseTrace)> {
-        self.find_boolean_reductions_with_kinds_with_options(
+        self.find_boolean_reductions_with_locations_with_options(
             kernel_context,
             allow_positive_exists_witness,
         )
+        .into_iter()
+        .map(|(kind, _literal_index, trace)| (kind, trace))
+        .collect()
     }
 
     /// Generates all clauses that can be derived from this clause using boolean reduction.

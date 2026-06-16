@@ -305,8 +305,8 @@ fn test_proving_with_free_variable() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo) { not f(x0) or g }(Foo.bar)",
             "function(x0: Foo) { f(x0) }(Foo.bar)",
+            "function(x0: Foo) { not f(x0) or g }(Foo.bar)",
         ],
     );
 }
@@ -391,8 +391,8 @@ fn test_proving_with_theorem_arg() {
         proof,
         &[
             "function[T0: Thing](x0: T0, x1: T0) { x0 + x1 = x1 + x0 }[T](a, b + c)",
-            "function[T0: Thing](x0: T0, x1: T0, x2: T0) { x0 + x1 + x2 = x0 + (x1 + x2) }[T](a, b, c)",
             "a + (b + c) != a + b + c",
+            "function[T0: Thing](x0: T0, x1: T0, x2: T0) { x0 + x1 + x2 = x0 + (x1 + x2) }[T](a, b, c)",
         ],
     );
 }
@@ -508,10 +508,10 @@ fn test_proving_using_unimported_function() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
             "function(x0: Foo) { not f(x0) or lib(foo).g(x0) }(Foo.foo)",
-            "not lib(foo).g(Foo.foo)",
             "lib(foo).g(Foo.foo)",
+            "function(x0: Foo) { not lib(foo).g(x0) or h(x0) }(Foo.foo)",
+            "not lib(foo).g(Foo.foo)",
         ],
     );
 }

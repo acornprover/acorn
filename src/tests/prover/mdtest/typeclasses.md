@@ -345,6 +345,7 @@ that reads `z.carrier`.
     theorem dependent_satisfy_keeps_outer_param(n: Nat, z: Zmod[n]) {
         true
     } by {
+        has_representative(n, z)
         let a: Int satisfy {
             z.carrier = equivalence_class(n, a)
         }
@@ -569,6 +570,8 @@ Simpler test: polymorphic goal using polymorphic axiom (no typeclass)
 
     theorem goal[T](a: T) {
         foo(a)
+    } by {
+        always_foo[T](a)
     }
     
 ```

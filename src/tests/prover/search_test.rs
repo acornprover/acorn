@@ -247,9 +247,9 @@ fn test_proving_with_active_resolution() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)",
             "g(y)",
             "f(y)",
+            "function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)",
             "not f(y)",
         ],
     );
@@ -321,7 +321,12 @@ fn test_proving_an_or() {
     let c = prove(&mut p, "main", "goal");
     assert_eq!(
         c.proof.unwrap(),
-        vec!["not h(Foo.foo)", "not g(Foo.foo)", "g(Foo.foo)"]
+        vec![
+            "not h(Foo.foo)",
+            "not g(Foo.foo)",
+            "h(Foo.foo) or g(Foo.foo) or f(Foo.foo)",
+            "g(Foo.foo)"
+        ]
     );
 }
 
@@ -360,8 +365,8 @@ fn test_proving_removes_duplicates() {
             "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { Foo.foo = x0 }(Foo.foo)",
             "function(x0: Foo) { Foo.foo = x0 }(y)",
-            "function(x0: Foo) { not f(x0) or g(x0) }(Foo.foo)",
             "not g(Foo.foo)",
+            "function(x0: Foo) { not f(x0) or g(x0) }(Foo.foo)",
             "function(x0: Foo) { g(x0) }(Foo.foo)",
         ],
     );
@@ -405,9 +410,9 @@ fn test_proving_with_passive_resolution() {
         proof,
         &[
             "function(x0: Foo) { not h(x0) or f(x0) }(y)",
-            "function(x0: Foo) { not g(x0) or not f(x0) }(y)",
             "function(x0: Foo) { g(x0) }(y)",
             "f(y)",
+            "function(x0: Foo) { not g(x0) or not f(x0) }(y)",
         ],
     );
 }
@@ -587,6 +592,7 @@ fn test_proving_with_equality_factoring_basic() {
         &[
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            "h(y) = f(y) or g(y) = f(y)",
             "g(y) = f(y)",
         ],
     );
@@ -630,6 +636,7 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
         &[
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
+            "h(y) = f(y) or g(y) = f(y)",
             "g(y) = f(y)",
         ],
     );
@@ -668,10 +675,10 @@ fn test_proving_with_equality_resolution() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(x, x)",
             "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(g(x), x)",
             "function(x0: Foo, x1: Foo) { g(x0) != g(x1) or f(x0, x1) }(x, x)",
             "function(x0: Foo) { f(x0, x0) }(x)",
+            "function(x0: Foo, x1: Foo) { not f(x0, x1) or f(g(x0), x1) }(x, x)",
             "not f(g(x), x)",
         ],
     );

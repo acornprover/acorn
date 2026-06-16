@@ -673,9 +673,11 @@ fn test_named_function_witness_can_match_implying_claim() {
         &witness_registry,
         kernel_context.clone(),
         ModuleId::default(),
+        &HashSet::new(),
     )
     .expect("witness emitter should build");
-    assert_eq!(emitter.replacement_indices.get(&local_id), Some(&0));
+    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
+    assert_eq!(emitter.replacement_indices.get(&local_id), None);
 }
 
 #[test]
@@ -697,10 +699,11 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
         &witness_registry,
         kernel_context,
         ModuleId::default(),
+        &HashSet::new(),
     )
     .expect("duplicate matching claims should still anchor successfully");
 
-    assert_eq!(emitter.anchor_indices.get(&local_id), None);
+    assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
     assert_eq!(emitter.replacement_indices.get(&local_id), None);
 }
 
@@ -729,22 +732,19 @@ fn test_emit_named_function_witness_keeps_explicit_specialized_claim() {
 
     assert_eq!(
         emitted.len(),
-        2,
-        "the implying claim is replaced, but the explicit specialized claim remains"
+        3,
+        "the implying claim is kept, then the witness declaration and specialized claim remain"
     );
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Satisfy(_))),
-        "expected the witness declaration to replace the implying claim"
+        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        "expected the implying claim to remain before the witness declaration"
     );
     assert!(
-        matches!(
-            emitted.get(1),
-            Some(CertificateStep::Satisfy(_)) | Some(CertificateStep::Claim(_))
-        ),
-        "expected the witness declaration or explicit specialized claim in the second position"
+        matches!(emitted.get(1), Some(CertificateStep::Satisfy(_))),
+        "expected the witness declaration to be anchored after the implying claim"
     );
     assert!(
-        matches!(emitted.get(1), Some(CertificateStep::Claim(_))),
+        matches!(emitted.get(2), Some(CertificateStep::Claim(_))),
         "expected the specialized claim to remain after the witness declaration"
     );
 }
@@ -848,6 +848,7 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
         &witness_registry,
         kernel_context,
         module_id,
+        &HashSet::new(),
     )
     .expect("named witness emission should succeed");
 
@@ -872,16 +873,27 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
             .to_string(),
         "w0"
     );
-    let CertificateStep::Satisfy(step) = &emitted[0] else {
-        panic!("expected first emitted step to be the witness declaration");
-    };
-    assert_eq!(step.name, "w0");
     assert!(
-        proof[0].starts_with("let w0"),
+        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        "expected the implying claim to justify anchored witness declarations"
+    );
+    let first_witness_index = proof
+        .iter()
+        .position(|line| line.starts_with("let w0"))
+        .expect("expected a compact witness declaration");
+    assert!(
+        first_witness_index > 0,
+        "expected compact witness declaration after its justifying claim"
+    );
+    assert!(
+        proof[first_witness_index].starts_with("let w0"),
         "expected compact witness declaration, got {proof:?}"
     );
     assert!(
-        proof[1].contains("w0"),
+        proof
+            .iter()
+            .skip(first_witness_index + 1)
+            .any(|line| line.contains("w0")),
         "expected later claims to use the compact witness name, got {proof:?}"
     );
     assert!(
@@ -944,6 +956,7 @@ fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step
         &witness_registry,
         post_kernel_context,
         bindings.module_id(),
+        &HashSet::new(),
     )
     .expect("named witness emission should succeed");
 
@@ -980,7 +993,17 @@ fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step
         })
         .collect();
 
-    assert_eq!(reparsed, emitted);
+    assert_eq!(reparsed.len(), emitted.len());
+    assert_eq!(
+        reparsed
+            .iter()
+            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .count(),
+        1,
+        "roundtrip should not synthesize an extra witness declaration"
+    );
+    assert!(matches!(reparsed.first(), Some(CertificateStep::Claim(_))));
+    assert!(matches!(reparsed.get(1), Some(CertificateStep::Satisfy(_))));
 }
 
 #[test]
@@ -1047,6 +1070,7 @@ fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
         &witness_registry,
         kernel_context,
         ModuleId::default(),
+        &HashSet::new(),
     )
     .expect("named witness emission should succeed");
 
@@ -1087,6 +1111,7 @@ fn test_specialized_positive_exists_step_uses_emitter_module_id() {
         &witness_registry,
         kernel_context,
         module_id,
+        &HashSet::new(),
     )
     .expect("witness emitter should build");
 
@@ -1148,6 +1173,7 @@ fn test_synthetic_witness_preserves_unused_binder_contradiction() {
         &WitnessRegistry::new(),
         kernel_context,
         ModuleId::default(),
+        &HashSet::new(),
     )
     .expect("named witness emission should succeed");
 
@@ -1876,6 +1902,7 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     let concrete_steps = vec![ConcreteStep {
         generic: generic.clone(),
         var_maps: vec![(var_map, generic.get_local_context().clone())],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(
@@ -1888,6 +1915,56 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     let proof = cert.proof.expect("proof should exist");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
+}
+
+#[test]
+fn test_from_concrete_steps_preserves_open_identity_step() {
+    let code = r#"
+        theorem goal {
+            true
+        }
+    "#;
+    let (project, bindings, kernel_context) = setup_claim_codec_env(code);
+    let kernel = &kernel_context;
+    let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
+
+    let concrete_steps = vec![ConcreteStep {
+        generic: generic.clone(),
+        var_maps: vec![(VariableMap::new(), generic.get_local_context().clone())],
+        preserve_open: true,
+    }];
+
+    let cert = Certificate::from_concrete_steps(
+        "goal".to_string(),
+        &concrete_steps,
+        &kernel_context,
+        &bindings,
+    )
+    .expect("certificate generation should succeed");
+    let proof = cert.proof.expect("proof should exist");
+    assert_eq!(proof.len(), 1);
+    assert!(
+        proof[0].contains("forall(x0: Bool)"),
+        "open identity step should remain generic: {:?}",
+        proof
+    );
+    assert!(
+        !proof[0].contains("function("),
+        "open identity step should not be materialized with an inhabitant: {:?}",
+        proof
+    );
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step = Certificate::parse_code_line(
+        &proof[0],
+        &project,
+        &mut bindings_cow,
+        &mut kernel_context_cow,
+    )
+    .expect("open identity step should parse");
+    let claim = expect_claim(step);
+    assert_eq!(claim.var_map().len(), 0);
 }
 
 #[test]
@@ -1907,6 +1984,7 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
             VariableMap::new(),
             crate::kernel::local_context::LocalContext::empty(),
         )],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(
@@ -1946,6 +2024,7 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
             VariableMap::new(),
             crate::kernel::local_context::LocalContext::empty(),
         )],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(
@@ -1993,6 +2072,7 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
     let concrete_steps = vec![ConcreteStep {
         generic,
         var_maps: vec![(bad_map, replacement_context)],
+        preserve_open: false,
     }];
 
     let err = Certificate::from_concrete_steps(
@@ -2027,6 +2107,7 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
     let concrete_steps = vec![ConcreteStep {
         generic: generic.clone(),
         var_maps: vec![(var_map, replacement_context)],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(
@@ -2109,6 +2190,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &[ConcreteStep {
             generic,
             var_maps: vec![(var_map, replacement_context.clone())],
+            preserve_open: false,
         }],
         &kernel_context,
         &bindings,
@@ -2164,6 +2246,7 @@ fn test_from_concrete_steps_serializes_partial_logical_builtin_in_claim_map() {
     let concrete_steps = vec![ConcreteStep {
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(
@@ -2215,6 +2298,7 @@ fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
     let concrete_steps = vec![ConcreteStep {
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
+        preserve_open: false,
     }];
 
     let cert = Certificate::from_concrete_steps(

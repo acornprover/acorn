@@ -41,6 +41,7 @@ fn test_foreign_scoped_constant_in_claim_codegen_is_rejected() {
             &clause,
             &VariableMap::new(),
             &LocalContext::empty(),
+            false,
             &mut kernel_context,
             &mut steps,
         )
@@ -72,6 +73,7 @@ fn test_incompatible_claim_mapping_is_rejected() {
             &generic,
             &bad_map,
             &crate::kernel::local_context::LocalContext::empty(),
+            false,
             &mut kernel_context,
             &mut steps,
         )
@@ -110,6 +112,7 @@ fn test_out_of_scope_claim_mapping_is_rejected() {
             &generic,
             &bad_map,
             &replacement_context,
+            false,
             &mut kernel_context,
             &mut steps,
         )
@@ -150,6 +153,7 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
             &generic,
             &var_map,
             &replacement_context,
+            false,
             &mut kernel_context,
             &mut steps,
         )
@@ -209,6 +213,7 @@ fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
             &generic,
             &var_map,
             &replacement_context,
+            false,
             &mut kernel_context,
             &mut steps,
         )

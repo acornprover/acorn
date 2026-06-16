@@ -138,12 +138,37 @@ impl CodeGenerator<'_> {
         var_type: &Term,
         local_context: &LocalContext,
     ) -> Result<Term> {
+        fn has_dependent_family(acorn_type: &AcornType) -> bool {
+            match acorn_type {
+                AcornType::Family(_, _) => true,
+                AcornType::Data(_, params) => params.iter().any(has_dependent_family),
+                AcornType::Function(ft) => {
+                    ft.arg_types.iter().any(has_dependent_family)
+                        || has_dependent_family(&ft.return_type)
+                }
+                AcornType::Bool
+                | AcornType::Variable(_)
+                | AcornType::Arbitrary(_)
+                | AcornType::Type0
+                | AcornType::TypeclassConstraint(_) => false,
+            }
+        }
+
         let acorn_type =
             kernel_context.quote_type_with_context(var_type.clone(), local_context, true);
-        kernel_context
-            .type_store
-            .get_type_term(&acorn_type)
-            .map_err(Error::internal)
+        if has_dependent_family(&acorn_type) {
+            return Ok(var_type.clone());
+        }
+        match kernel_context.type_store.get_type_term(&acorn_type) {
+            Ok(term) => Ok(term),
+            Err(err)
+                if err.contains("dependent family type")
+                    && err.contains("cannot be lowered through TypeStore directly") =>
+            {
+                Ok(var_type.clone())
+            }
+            Err(err) => Err(Error::internal(err)),
+        }
     }
 
     fn find_local_witness_for_concrete_type(
@@ -930,6 +955,7 @@ impl CodeGenerator<'_> {
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
+        preserve_open: bool,
         kernel_context: &mut KernelContext,
         steps: &mut Vec<CertificateStep>,
     ) -> Result<()> {
@@ -949,6 +975,9 @@ impl CodeGenerator<'_> {
             )));
         }
 
+        let preserve_open_locals = preserve_open
+            && var_map.len() == 0
+            && replacement_context == generic.get_local_context();
         let mut clause = var_map.specialize_clause_with_replacement_context_and_compact_vars(
             &generic,
             replacement_context,
@@ -956,13 +985,16 @@ impl CodeGenerator<'_> {
         );
 
         self.ensure_explicit_inhabitants_for_clause(kernel_context, &clause)?;
-        let clause_context = clause.get_local_context().clone();
-        let inhabitant_var_map = self.build_inhabitant_var_map(kernel_context, &clause)?;
-        clause = inhabitant_var_map.specialize_clause_with_replacement_context_and_compact_vars(
-            &clause,
-            &clause_context,
-            kernel_context,
-        );
+        if !preserve_open_locals {
+            let clause_context = clause.get_local_context().clone();
+            let inhabitant_var_map = self.build_inhabitant_var_map(kernel_context, &clause)?;
+            clause = inhabitant_var_map
+                .specialize_clause_with_replacement_context_and_compact_vars(
+                    &clause,
+                    &clause_context,
+                    kernel_context,
+                );
+        }
 
         Self::ensure_no_foreign_scoped_constants_in_clause(
             &clause,
@@ -1060,21 +1092,23 @@ impl CodeGenerator<'_> {
                 &mut claim_var_map,
             );
         }
-        for var_id in 0..generic_len {
-            let var_id = var_id as AtomId;
-            if claim_var_map.has_mapping(var_id) {
-                continue;
-            }
-            let Some(var_type) = generic_context.get_var_type(var_id as usize) else {
-                continue;
-            };
-            if var_type.as_ref().is_type_param_kind() {
-                continue;
-            }
-            if let Some(term) =
-                self.inhabitant_for_variable_type(kernel_context, var_type, generic_context)?
-            {
-                claim_var_map.set(var_id, term);
+        if !preserve_open_locals {
+            for var_id in 0..generic_len {
+                let var_id = var_id as AtomId;
+                if claim_var_map.has_mapping(var_id) {
+                    continue;
+                }
+                let Some(var_type) = generic_context.get_var_type(var_id as usize) else {
+                    continue;
+                };
+                if var_type.as_ref().is_type_param_kind() {
+                    continue;
+                }
+                if let Some(term) =
+                    self.inhabitant_for_variable_type(kernel_context, var_type, generic_context)?
+                {
+                    claim_var_map.set(var_id, term);
+                }
             }
         }
         let used_var_count = generic
@@ -1098,7 +1132,8 @@ impl CodeGenerator<'_> {
                 let var_type = generic_context
                     .get_var_type(*var_id)
                     .expect("generic context should provide all variable types");
-                !var_type.as_ref().is_type_param_kind()
+                !preserve_open_locals
+                    && !var_type.as_ref().is_type_param_kind()
                     && !claim_var_map.has_mapping(*var_id as AtomId)
             })
             .collect();
@@ -1294,6 +1329,7 @@ impl CodeGenerator<'_> {
                 &step.generic,
                 var_map,
                 replacement_context,
+                step.preserve_open,
                 kernel_context,
                 &mut steps,
             )?;

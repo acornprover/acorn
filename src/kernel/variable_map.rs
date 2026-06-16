@@ -261,11 +261,16 @@ impl VariableMap {
                 // Get the variable's type directly from the context (cheap lookup)
                 // rather than computing it via get_type_with_context.
                 let var_type = general_context.get_var_type(*i as usize).unwrap();
+                let mapped_var_type = apply_to_term(var_type.as_ref(), self);
                 let Some(special_type) = type_in_context(special, special_context, kernel_context)
                 else {
                     return false;
                 };
-                if var_type != &special_type {
+                let type_kind_compatible = mapped_var_type == special_type
+                    || (mapped_var_type.as_ref().is_type0()
+                        && special_type.as_ref().is_type_param_kind())
+                    || mapped_var_type.as_ref().as_typeclass().is_some();
+                if !type_kind_compatible {
                     return false;
                 }
                 if let Some(required_tc_id) =
@@ -315,7 +320,7 @@ impl VariableMap {
                 }
 
                 let mut extended_general_context = general_context.clone();
-                extended_general_context.push_type(g_input.to_owned());
+                extended_general_context.push_type(apply_to_term(g_input, self));
                 let mut extended_special_context = special_context.clone();
                 extended_special_context.push_type(s_input.to_owned());
 
@@ -339,7 +344,7 @@ impl VariableMap {
                 }
 
                 let mut extended_general_context = general_context.clone();
-                extended_general_context.push_type(g_input.to_owned());
+                extended_general_context.push_type(apply_to_term(g_input, self));
                 let mut extended_special_context = special_context.clone();
                 extended_special_context.push_type(s_input.to_owned());
 
@@ -366,7 +371,7 @@ impl VariableMap {
                 }
 
                 let mut extended_general_context = general_context.clone();
-                extended_general_context.push_type(g_binder_type.to_owned());
+                extended_general_context.push_type(apply_to_term(g_binder_type, self));
                 let mut extended_special_context = special_context.clone();
                 extended_special_context.push_type(s_binder_type.to_owned());
 
@@ -393,7 +398,7 @@ impl VariableMap {
                 }
 
                 let mut extended_general_context = general_context.clone();
-                extended_general_context.push_type(g_binder_type.to_owned());
+                extended_general_context.push_type(apply_to_term(g_binder_type, self));
                 let mut extended_special_context = special_context.clone();
                 extended_special_context.push_type(s_binder_type.to_owned());
 
@@ -718,6 +723,36 @@ impl VariableMap {
             }
             _ => false,
         }
+    }
+
+    pub fn match_terms_no_type_check(&mut self, general: TermRef, special: TermRef) -> bool {
+        if let (
+            Some((general_type, general_left, general_right)),
+            Some((special_type, special_left, special_right)),
+        ) = (Self::split_eq_args(general), Self::split_eq_args(special))
+        {
+            let mut direct = self.clone();
+            if direct.match_terms_no_type_check(general_type.as_ref(), special_type.as_ref())
+                && direct.match_terms_no_type_check(general_left.as_ref(), special_left.as_ref())
+                && direct.match_terms_no_type_check(general_right.as_ref(), special_right.as_ref())
+            {
+                *self = direct;
+                return true;
+            }
+
+            let mut swapped = self.clone();
+            if swapped.match_terms_no_type_check(general_type.as_ref(), special_type.as_ref())
+                && swapped.match_terms_no_type_check(general_left.as_ref(), special_right.as_ref())
+                && swapped.match_terms_no_type_check(general_right.as_ref(), special_left.as_ref())
+            {
+                *self = swapped;
+                return true;
+            }
+
+            return false;
+        }
+
+        self.match_term_no_type_check(general, special)
     }
 
     /// Match a general literal against a special literal for proof reconstruction.

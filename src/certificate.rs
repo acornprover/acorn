@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -121,6 +121,8 @@ impl StructuredCertificateStep {
                 .as_ref()
                 .map_or_else(Vec::new, |from| from.to_vec()),
             expected,
+            premise_instantiations: vec![],
+            details: Default::default(),
         })
     }
 
@@ -482,17 +484,20 @@ impl Certificate {
                 }
             }
         }
-        let (ordered_steps, generation_kernel_context) =
+        let (mut ordered_steps, generation_kernel_context) =
             if let Some(witness_registry) = witness_registry {
+                let ignored_witnesses = Self::source_bound_witnesses(witness_registry, bindings);
                 Self::emit_named_witnesses_with_context(
                     ordered_steps,
                     witness_registry,
                     generation_kernel_context,
                     bindings.module_id(),
+                    &ignored_witnesses,
                 )?
             } else {
                 (ordered_steps, generation_kernel_context)
             };
+        Self::reorder_late_claim_supports(&mut ordered_steps, &generation_kernel_context);
 
         let mut answer = Vec::new();
         for step in &ordered_steps {
@@ -504,6 +509,138 @@ impl Certificate {
             )?);
         }
         Ok(Certificate::new(goal, answer))
+    }
+
+    fn reorder_late_claim_supports(
+        ordered_steps: &mut Vec<CertificateStep>,
+        kernel_context: &KernelContext,
+    ) {
+        let mut start = 0;
+        while start < ordered_steps.len() {
+            while start < ordered_steps.len()
+                && !matches!(ordered_steps[start], CertificateStep::Claim(_))
+            {
+                start += 1;
+            }
+            let mut end = start;
+            while end < ordered_steps.len()
+                && matches!(ordered_steps[end], CertificateStep::Claim(_))
+            {
+                end += 1;
+            }
+            if end > start + 1 {
+                Self::reorder_claim_block(&mut ordered_steps[start..end], kernel_context);
+            }
+            start = end;
+        }
+    }
+
+    fn reorder_claim_block(steps: &mut [CertificateStep], kernel_context: &KernelContext) {
+        let mut clauses = Vec::with_capacity(steps.len());
+        for step in steps.iter() {
+            let CertificateStep::Claim(claim) = step else {
+                return;
+            };
+            let Ok(clause) = claim.normalized_specialized_clause(kernel_context) else {
+                return;
+            };
+            clauses.push(clause);
+        }
+
+        let mut positive_units = HashMap::new();
+        for (index, clause) in clauses.iter().enumerate() {
+            if clause.literals.len() == 1 && clause.literals[0].positive {
+                positive_units
+                    .entry(clause.literals[0].clone())
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
+        }
+
+        let mut edges = vec![vec![]; clauses.len()];
+        let mut indegree = vec![0usize; clauses.len()];
+        let mut seen_edges = HashSet::new();
+        for (dependent_index, clause) in clauses.iter().enumerate() {
+            if clause.literals.len() <= 1 {
+                continue;
+            }
+            for literal in &clause.literals {
+                if literal.positive {
+                    continue;
+                }
+                let support_literal = literal.negate();
+                let Some(support_indices) = positive_units.get(&support_literal) else {
+                    continue;
+                };
+                for &support_index in support_indices {
+                    if support_index <= dependent_index {
+                        continue;
+                    }
+                    if seen_edges.insert((support_index, dependent_index)) {
+                        edges[support_index].push(dependent_index);
+                        indegree[dependent_index] += 1;
+                    }
+                }
+            }
+        }
+        for (dependent_index, clause) in clauses.iter().enumerate() {
+            if clause.literals.len() != 1 {
+                continue;
+            }
+            let dependent_literal = &clause.literals[0];
+            for (support_index, support_clause) in clauses.iter().enumerate() {
+                if support_index <= dependent_index || support_clause.literals.len() <= 1 {
+                    continue;
+                }
+                if !support_clause
+                    .literals
+                    .iter()
+                    .any(|literal| literal == dependent_literal)
+                {
+                    continue;
+                }
+                if seen_edges.insert((support_index, dependent_index)) {
+                    edges[support_index].push(dependent_index);
+                    indegree[dependent_index] += 1;
+                }
+            }
+        }
+        if seen_edges.is_empty() {
+            return;
+        }
+
+        let mut ready = BTreeSet::new();
+        for (index, degree) in indegree.iter().enumerate() {
+            if *degree == 0 {
+                ready.insert(index);
+            }
+        }
+
+        let mut ordered_indices = Vec::with_capacity(steps.len());
+        while let Some(index) = ready.pop_first() {
+            ordered_indices.push(index);
+            for &dependent in &edges[index] {
+                indegree[dependent] -= 1;
+                if indegree[dependent] == 0 {
+                    ready.insert(dependent);
+                }
+            }
+        }
+        if ordered_indices.len() != steps.len() {
+            return;
+        }
+        if ordered_indices
+            .iter()
+            .enumerate()
+            .all(|(new_index, old_index)| new_index == *old_index)
+        {
+            return;
+        }
+
+        let original = steps.to_vec();
+        for (new_index, old_index) in ordered_indices.into_iter().enumerate() {
+            steps[new_index] = original[old_index].clone();
+        }
     }
 
     /// Convert a ConcreteProof to a Certificate (string format).
@@ -522,6 +659,7 @@ impl Certificate {
             concrete_steps.push(ConcreteStep {
                 generic: clause.clone(),
                 var_maps: vec![(VariableMap::new(), clause.get_local_context().clone())],
+                preserve_open: false,
             });
         }
 
@@ -592,13 +730,38 @@ impl Certificate {
         witness_registry: &WitnessRegistry,
         kernel_context: &KernelContext,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
+        let ignored_witnesses = HashSet::new();
         Ok(Self::emit_named_witnesses_with_context(
             ordered_steps,
             witness_registry,
             kernel_context.clone(),
             ModuleId::default(),
+            &ignored_witnesses,
         )?
         .0)
+    }
+
+    /// Witness metadata can include scoped constants that are already source-bound in the
+    /// certificate environment, such as theorem parameters. Those names are in scope without a
+    /// generated `let ... satisfy` line, and delaying claims until they are "declared" can reorder
+    /// supporting proof lines after the claims that need them.
+    fn source_bound_witnesses(
+        witness_registry: &WitnessRegistry,
+        bindings: &BindingMap,
+    ) -> HashSet<Symbol> {
+        let ignored: HashSet<Symbol> = witness_registry
+            .iter()
+            .filter_map(|(&symbol, witness)| match &witness.name {
+                ConstantName::Unqualified(module_id, name)
+                    if *module_id == bindings.module_id()
+                        && bindings.has_unqualified_constant_name(name) =>
+                {
+                    Some(symbol)
+                }
+                _ => None,
+            })
+            .collect();
+        ignored
     }
 
     /// Emit named witnesses and return the updated kernel context.
@@ -610,8 +773,16 @@ impl Certificate {
         witness_registry: &WitnessRegistry,
         kernel_context: KernelContext,
         module_id: ModuleId,
+        ignored_witnesses: &HashSet<Symbol>,
     ) -> Result<(Vec<CertificateStep>, KernelContext), CodeGenError> {
-        WitnessEmitter::new(ordered_steps, witness_registry, kernel_context, module_id)?.emit()
+        WitnessEmitter::new(
+            ordered_steps,
+            witness_registry,
+            kernel_context,
+            module_id,
+            ignored_witnesses,
+        )?
+        .emit()
     }
 
     /// Convert prover witness metadata into a certificate `let ... satisfy` step.
@@ -796,6 +967,20 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         let line = match step {
+            CertificateStep::Claim(claim)
+                if !claim.clause().get_local_context().is_empty()
+                    && claim.var_map().len() == 0
+                    && !Self::claim_requires_specialized_serialization(claim) =>
+            {
+                generator
+                    .certificate_step_to_code(step, kernel_context)
+                    .map_err(|err| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "{} [while serializing generic certificate step]",
+                            err
+                        ))
+                    })?
+            }
             CertificateStep::Claim(claim)
                 if !claim.clause().get_local_context().is_empty()
                     && !Self::claim_requires_specialized_serialization(claim) =>
@@ -1714,6 +1899,7 @@ struct WitnessEmitter<'a> {
     module_id: ModuleId,
     synthetic_witness_registry: WitnessRegistry,
     witness_registry: &'a WitnessRegistry,
+    ignored_witnesses: HashSet<Symbol>,
     witness_steps: HashMap<Symbol, SatisfyStep>,
     claim_replacements: HashMap<usize, Symbol>,
     replacement_indices: HashMap<Symbol, usize>,
@@ -1742,6 +1928,7 @@ impl<'a> WitnessEmitter<'a> {
         witness_registry: &'a WitnessRegistry,
         kernel_context: KernelContext,
         module_id: ModuleId,
+        ignored_witnesses: &HashSet<Symbol>,
     ) -> Result<Self, CodeGenError> {
         let num_steps = ordered_steps.len();
         let claim_generic_clauses: Vec<Option<Clause>> = ordered_steps
@@ -1757,8 +1944,13 @@ impl<'a> WitnessEmitter<'a> {
             .collect::<Result<_, _>>()?;
         let referenced_symbols: Vec<Vec<Symbol>> = ordered_steps
             .iter()
-            .map(|step| Certificate::collect_claim_witness_symbols(step, &kernel_context))
-            .collect::<Result<_, _>>()?;
+            .map(|step| {
+                let mut symbols =
+                    Certificate::collect_claim_witness_symbols(step, &kernel_context)?;
+                symbols.retain(|symbol| !ignored_witnesses.contains(symbol));
+                Ok(symbols)
+            })
+            .collect::<Result<_, CodeGenError>>()?;
 
         let mut emitter = Self {
             ordered_steps,
@@ -1769,6 +1961,7 @@ impl<'a> WitnessEmitter<'a> {
             module_id,
             synthetic_witness_registry: WitnessRegistry::new(),
             witness_registry,
+            ignored_witnesses: ignored_witnesses.clone(),
             witness_steps: HashMap::new(),
             claim_replacements: HashMap::new(),
             replacement_indices: HashMap::new(),
@@ -1787,7 +1980,71 @@ impl<'a> WitnessEmitter<'a> {
                 emitter.prepare_witness(symbol)?;
             }
         }
-        for (&symbol, _) in witness_registry.iter() {
+        let witness_source_clauses: Vec<Clause> = emitter
+            .claim_clauses
+            .iter()
+            .chain(emitter.claim_generic_clauses.iter())
+            .filter_map(|clause| clause.clone())
+            .collect();
+        for clause in witness_source_clauses {
+            let matching_prepared = witness_registry.iter().any(|(&symbol, witness)| {
+                witness.general_clause == clause && emitter.witness_steps.contains_key(&symbol)
+            });
+            if matching_prepared {
+                continue;
+            }
+            let mut matching_symbols: Vec<Symbol> = witness_registry
+                .iter()
+                .filter_map(|(&symbol, witness)| {
+                    (witness.general_clause == clause).then_some(symbol)
+                })
+                .collect();
+            matching_symbols.sort_unstable();
+            if let Some(symbol) = matching_symbols.first().copied() {
+                emitter.prepare_witness(symbol)?;
+            }
+        }
+        let mut implying_symbols = Vec::new();
+        let mut implying_seen = HashSet::new();
+        for (index, claim_clause) in emitter.claim_clauses.iter().enumerate() {
+            let Some(claim_clause) = claim_clause else {
+                continue;
+            };
+            let mut matching_symbols: Vec<Symbol> = witness_registry
+                .iter()
+                .filter_map(|(&symbol, witness)| {
+                    if ignored_witnesses.contains(&symbol)
+                        || emitter.witness_steps.contains_key(&symbol)
+                        || implying_seen.contains(&symbol)
+                        || emitter.referenced_symbols[index].contains(&symbol)
+                    {
+                        return None;
+                    }
+                    if witness_registry.iter().any(|(&prepared_symbol, prepared)| {
+                        emitter.witness_steps.contains_key(&prepared_symbol)
+                            && prepared.general_clause == witness.general_clause
+                    }) {
+                        return None;
+                    }
+                    let mut checker = Checker::new();
+                    checker.insert_clause(
+                        claim_clause,
+                        StepReason::Testing,
+                        &emitter.kernel_context,
+                    );
+                    checker
+                        .check_clause(&witness.general_clause, &emitter.kernel_context)
+                        .is_some()
+                        .then_some(symbol)
+                })
+                .collect();
+            matching_symbols.sort_unstable();
+            if let Some(symbol) = matching_symbols.first().copied() {
+                implying_seen.insert(symbol);
+                implying_symbols.push(symbol);
+            }
+        }
+        for symbol in implying_symbols {
             emitter.prepare_witness(symbol)?;
         }
         Ok(emitter)
@@ -1812,12 +2069,39 @@ impl<'a> WitnessEmitter<'a> {
 
     /// Delay any step whose first witness use depends on a later replacement claim.
     fn step_needs_future_witness(&self, index: usize, current_index: usize) -> bool {
-        self.referenced_symbols[index].iter().any(|symbol| {
-            !self.declared.contains(symbol)
-                && self
-                    .declaration_index(*symbol)
-                    .is_some_and(|declaration_index| declaration_index > current_index)
-        })
+        self.referenced_symbols[index]
+            .iter()
+            .any(|symbol| !self.witness_ready_by(*symbol, current_index, &mut HashSet::new()))
+    }
+
+    fn witness_ready_by(
+        &self,
+        symbol: Symbol,
+        current_index: usize,
+        seen: &mut HashSet<Symbol>,
+    ) -> bool {
+        if self.ignored_witnesses.contains(&symbol)
+            || self.declared.contains(&symbol)
+            || !self.witness_steps.contains_key(&symbol)
+        {
+            return true;
+        }
+        if !seen.insert(symbol) {
+            return true;
+        }
+        if self
+            .declaration_index(symbol)
+            .is_some_and(|declaration_index| declaration_index > current_index)
+        {
+            return false;
+        }
+        let Some(witness) = self.witness_registry.get(symbol) else {
+            return true;
+        };
+        witness
+            .referenced_symbols()
+            .into_iter()
+            .all(|dependency| self.witness_ready_by(dependency, current_index, seen))
     }
 
     /// Schedule one proof step, buffering it if a later claim still needs to introduce a witness.
@@ -1923,6 +2207,9 @@ impl<'a> WitnessEmitter<'a> {
 
     /// Prepare one witness step and remember which claim it should replace, if any.
     fn prepare_witness(&mut self, symbol: Symbol) -> Result<(), CodeGenError> {
+        if self.ignored_witnesses.contains(&symbol) {
+            return Ok(());
+        }
         if self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
@@ -1977,6 +2264,9 @@ impl<'a> WitnessEmitter<'a> {
         symbol: Symbol,
         current_index: usize,
     ) -> Result<(), CodeGenError> {
+        if self.ignored_witnesses.contains(&symbol) {
+            return Ok(());
+        }
         if self.declared.contains(&symbol) || !self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
@@ -1996,6 +2286,9 @@ impl<'a> WitnessEmitter<'a> {
 
     /// Emit the named-witness step itself after recursively materializing dependencies.
     fn emit_witness(&mut self, symbol: Symbol) -> Result<(), CodeGenError> {
+        if self.ignored_witnesses.contains(&symbol) {
+            return Ok(());
+        }
         if self.declared.contains(&symbol) || !self.witness_steps.contains_key(&symbol) {
             return Ok(());
         }
@@ -2416,11 +2709,14 @@ impl<'a> WitnessEmitter<'a> {
                     .then_some(index)
             })
             .collect();
-        Ok(if implying_claims.len() == 1 {
-            WitnessPlacement::Replace(implying_claims[0])
+        if let Some(index) = implying_claims.first().copied() {
+            // Keep implication-only justifications in the proof. Replacing the
+            // claim can erase the only fact that makes the witness existential
+            // checkable at this point in the certificate stream.
+            Ok(WitnessPlacement::Anchor(index))
         } else {
-            WitnessPlacement::Standalone
-        })
+            Ok(WitnessPlacement::Standalone)
+        }
     }
 }
 

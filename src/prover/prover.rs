@@ -595,6 +595,14 @@ impl Prover {
             .get_proof(effective_kernel_context, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
+        #[cfg(feature = "validate")]
+        proof.validate_structured_trace().map_err(|e| {
+            Error::internal(format!(
+                "structured proof validation failed for goal '{}': {}",
+                goal_name, e
+            ))
+        })?;
+
         if print {
             self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }

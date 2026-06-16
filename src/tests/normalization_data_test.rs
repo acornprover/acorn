@@ -1168,6 +1168,7 @@ fn serialize_claim_line(
                 claim.var_map().clone(),
                 crate::kernel::local_context::LocalContext::empty(),
             )],
+            preserve_open: false,
         }];
         let cert = Certificate::from_concrete_steps(
             "goal".to_string(),

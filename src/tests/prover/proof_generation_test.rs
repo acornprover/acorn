@@ -58,6 +58,63 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
 }
 
 #[test]
+fn test_cert_generation_keeps_support_before_transitive_witnesses() {
+    let text = r#"
+        type Point: axiom
+        let combine: (Point, Point, Point) -> Point = axiom
+
+        define empty_contains(p: Point) -> Bool {
+            false
+        }
+
+        define is_closed(a: (Point, Point, Point) -> Point, contains: Point -> Bool) -> Bool {
+            forall(p: Point, q: Point, r: Point) {
+                contains(p) and contains(q) and contains(r) implies contains(a(p, q, r))
+            }
+        }
+
+        theorem empty_constraint(a: (Point, Point, Point) -> Point) {
+            is_closed(a, empty_contains)
+        } by {
+            forall(p: Point, q: Point, r: Point) {
+                empty_contains(p) = false
+            }
+        }
+    "#;
+
+    let mut project = Project::new_mock();
+    project.mock("/mock/main.ac", text);
+    let module_id = project.load_module_by_name("main").expect("load failed");
+
+    let (mut processor, bindings, normalized_goal) =
+        processor_for_goal_name(&project, module_id, "empty_constraint")
+            .expect("processor setup failed");
+    let goal_kernel_context = &normalized_goal.kernel_context;
+    let outcome = processor.search(
+        ProverMode::Interactive {
+            timeout_secs: 1.0,
+            activation_limit: 2000,
+        },
+        goal_kernel_context,
+    );
+    assert_eq!(outcome, Outcome::Success);
+
+    let cert = processor
+        .prover()
+        .make_cert(bindings, goal_kernel_context, false)
+        .expect("make_cert should succeed");
+    processor
+        .check_cert(
+            &cert,
+            Some(normalized_goal),
+            goal_kernel_context,
+            &project,
+            bindings,
+        )
+        .expect("generated cert should replay with the lowered goal context");
+}
+
+#[test]
 fn test_specializing_to_bound_variable() {
     let text = r#"
     type Elem: axiom

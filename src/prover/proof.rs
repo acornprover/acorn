@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::certificate::Certificate;
 use crate::code_generator::Error;
@@ -9,7 +9,7 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
-use crate::kernel::structured_proof::{StructuredProofStep, StructuredRule};
+use crate::kernel::structured_proof::{StructuredChecker, StructuredProofStep, StructuredRule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::prover::synthetic::WitnessRegistry;
@@ -116,6 +116,9 @@ pub struct ConcreteStep {
     // Each var_map is paired with the context that its replacement terms reference while
     // specializing.
     pub var_maps: Vec<(VariableMap, LocalContext)>,
+
+    // Preserve unmapped value locals as binders instead of materializing inhabitants.
+    pub preserve_open: bool,
 }
 
 /// A structured proof trace generated in memory from prover proof steps.
@@ -133,6 +136,7 @@ impl ConcreteStep {
         ConcreteStep {
             generic,
             var_maps: vec![(var_map, replacement_context)],
+            preserve_open: false,
         }
     }
 
@@ -171,6 +175,124 @@ fn push_concrete_step_if_new(
     steps_in_order.push(concrete_step);
 }
 
+fn has_value_var_mapping(generic: &Clause, var_map: &VariableMap) -> bool {
+    let context = generic.get_local_context();
+    var_map.iter().any(|(var_id, _)| {
+        context
+            .get_var_type(var_id)
+            .is_some_and(|var_type| !var_type.as_ref().is_type_param_kind())
+    })
+}
+
+fn reorder_concrete_steps_by_unit_support(
+    steps_in_order: &mut Vec<ConcreteStep>,
+    kernel_context: &KernelContext,
+) {
+    let clauses: Vec<Clause> = steps_in_order
+        .iter()
+        .filter_map(|step| step.to_clauses(kernel_context).into_iter().next())
+        .collect();
+    if clauses.len() != steps_in_order.len() {
+        return;
+    }
+
+    let mut positive_units = HashMap::new();
+    for (index, clause) in clauses.iter().enumerate() {
+        if clause.literals.len() == 1 && clause.literals[0].positive {
+            positive_units
+                .entry(clause.literals[0].clone())
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+    }
+    let mut edges = vec![vec![]; clauses.len()];
+    let mut indegree = vec![0usize; clauses.len()];
+    let mut seen_edges = HashSet::new();
+    for (dependent_index, clause) in clauses.iter().enumerate() {
+        if clause.literals.len() <= 1 {
+            continue;
+        }
+        for literal in &clause.literals {
+            if literal.positive {
+                continue;
+            }
+            let support_literal = literal.negate();
+            let Some(support_indices) = positive_units.get(&support_literal) else {
+                continue;
+            };
+            for &support_index in support_indices {
+                if support_index <= dependent_index {
+                    continue;
+                }
+                if seen_edges.insert((support_index, dependent_index)) {
+                    edges[support_index].push(dependent_index);
+                    indegree[dependent_index] += 1;
+                }
+            }
+        }
+    }
+    for (dependent_index, clause) in clauses.iter().enumerate() {
+        if clause.literals.len() != 1 {
+            continue;
+        }
+        let dependent_literal = &clause.literals[0];
+        for (support_index, support_clause) in clauses.iter().enumerate() {
+            if support_index <= dependent_index || support_clause.literals.len() <= 1 {
+                continue;
+            }
+            if !support_clause
+                .literals
+                .iter()
+                .any(|literal| literal == dependent_literal)
+            {
+                continue;
+            }
+            if seen_edges.insert((support_index, dependent_index)) {
+                edges[support_index].push(dependent_index);
+                indegree[dependent_index] += 1;
+            }
+        }
+    }
+    if seen_edges.is_empty() {
+        return;
+    }
+
+    let mut ready = BTreeSet::new();
+    for (index, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.insert(index);
+        }
+    }
+
+    let mut ordered_indices = Vec::with_capacity(steps_in_order.len());
+    while let Some(index) = ready.pop_first() {
+        ordered_indices.push(index);
+        for &dependent in &edges[index] {
+            indegree[dependent] -= 1;
+            if indegree[dependent] == 0 {
+                ready.insert(dependent);
+            }
+        }
+    }
+
+    if ordered_indices.len() != steps_in_order.len() {
+        return;
+    }
+    if ordered_indices
+        .iter()
+        .enumerate()
+        .all(|(new_index, old_index)| new_index == *old_index)
+    {
+        return;
+    }
+
+    let original = std::mem::take(steps_in_order);
+    *steps_in_order = ordered_indices
+        .into_iter()
+        .map(|index| original[index].clone())
+        .collect();
+}
+
 fn append_inline_simplification_originals(
     step: &ProofStep,
     step_var_maps: &[(VariableMap, LocalContext)],
@@ -178,12 +300,13 @@ fn append_inline_simplification_originals(
     steps_in_order: &mut Vec<ConcreteStep>,
     skip_clauses: &HashSet<Clause>,
     kernel_context: &KernelContext,
+    only_if_impossible: bool,
 ) {
     let Rule::Simplification(info) = &step.rule else {
         return;
     };
 
-    if !step.clause.is_impossible() {
+    if only_if_impossible && !step.clause.is_impossible() {
         return;
     }
 
@@ -205,6 +328,7 @@ fn append_inline_simplification_originals(
         steps_in_order,
         skip_clauses,
         kernel_context,
+        only_if_impossible,
     );
 
     if info.original.rule.is_assumption() {
@@ -222,6 +346,7 @@ fn append_inline_simplification_originals(
             ConcreteStep {
                 generic: info.original.clause.clone(),
                 var_maps: vec![(var_map.clone(), replacement_context.clone())],
+                preserve_open: false,
             },
             claim_index,
             steps_in_order,
@@ -323,6 +448,26 @@ impl<'a> Proof<'a> {
         )
     }
 
+    #[cfg(any(test, feature = "validate"))]
+    pub fn validate_structured_trace(&self) -> Result<(), Error> {
+        let trace = self
+            .make_structured_trace()
+            .unwrap_or_else(|e| panic!("structured proof generation failed: {}", e));
+        let mut checker = StructuredChecker::new();
+        for clause in &trace.known_clauses {
+            checker.add_known_clause(clause, self.kernel_context);
+        }
+        for (i, step) in trace.steps.iter().enumerate() {
+            if let Err(e) = checker.check_step(step, self.kernel_context) {
+                panic!(
+                    "structured proof trace failed at step {} (rule {}, premises {:?}): {}",
+                    i, step.rule, step.premises, e
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
     /// that we intentionally omit from certificates.
     fn collect_concrete_steps(&self) -> Result<Vec<ConcreteStep>, Error> {
@@ -357,6 +502,21 @@ impl<'a> Proof<'a> {
         // Keep a snapshot for any synthesized certificate steps that need to inspect
         // reconstructed premise instantiations after the main collection pass.
         let reconstructed_steps = concrete_steps.clone();
+        let mut forced_assumptions = HashSet::new();
+        for (_, step) in &self.steps {
+            if let Rule::BooleanReduction(info) = &step.rule {
+                for &source_id in &info.inhabitance_source_ids {
+                    let proof_id = ProofStepId::Active(source_id);
+                    if self
+                        .step_map
+                        .get(&proof_id)
+                        .is_some_and(|premise| matches!(premise.rule, Rule::Assumption(_)))
+                    {
+                        forced_assumptions.insert(proof_id);
+                    }
+                }
+            }
+        }
 
         // Skip direct concrete assumptions because the checker already has them.
         // Skip fully concrete boolean-reduction outputs only when their source
@@ -366,56 +526,81 @@ impl<'a> Proof<'a> {
         // and later certificate steps may depend on them as prerequisites.
         let mut skip_clauses: HashSet<Clause> = HashSet::new();
         let mut skipped_steps: HashMap<ProofStepId, bool> = HashMap::new();
-        for (ps_id, _) in &self.steps {
-            let concrete_id = ConcreteStepId::ProofStep(*ps_id);
+        for (ps_id, step) in &self.steps {
             let should_skip =
                 should_skip_reconstructed_step(self, *ps_id, kernel_context, &mut skipped_steps)?;
 
             if should_skip {
-                let Some(cs) = concrete_steps.remove(&concrete_id) else {
+                if forced_assumptions.contains(ps_id) {
                     continue;
-                };
-                for clause in cs.to_clauses(kernel_context) {
-                    skip_clauses.insert(clause);
+                }
+                for concrete_id in [
+                    ConcreteStepId::Assumption(*ps_id),
+                    ConcreteStepId::ProofStep(*ps_id),
+                ] {
+                    let Some(cs) = concrete_steps.remove(&concrete_id) else {
+                        continue;
+                    };
+                    if !matches!(step.rule, Rule::Assumption(_)) {
+                        for clause in cs.to_clauses(kernel_context) {
+                            skip_clauses.insert(clause);
+                        }
+                    }
                 }
             }
         }
 
-        // Collect all concrete specializations in order.
+        // Collect all concrete specializations in proof order.
         //
-        // Emit specialized assumptions before derived proof-step claims.
-        // The checker cannot instantiate generic assumptions on its own, so a derived
-        // concrete clause like `not bar[Bool](foo)` must come after the concrete
-        // specialization of the source assumption it depends on, such as
-        // `not bar[Bool](foo) or baz`.
+        // Emit a source assumption specialization immediately before the proof-step
+        // claim with the same source id. The checker cannot instantiate generic
+        // assumptions on its own, so a derived concrete clause like
+        // `not bar[Bool](foo)` must come after the concrete specialization of the
+        // source assumption it depends on. However, moving every assumption before
+        // every derived claim can put an assumption specialization ahead of unrelated
+        // simplifications that establish its prerequisites.
         let mut claim_index: HashMap<Clause, usize> = HashMap::new();
         let mut steps_in_order: Vec<ConcreteStep> = Vec::new();
-        for assumption_phase in [true, false] {
-            for (ps_id, _) in &self.steps {
-                let concrete_ids = if assumption_phase {
-                    [ConcreteStepId::Assumption(*ps_id)]
-                } else {
-                    [ConcreteStepId::ProofStep(*ps_id)]
+        for (ps_id, step) in &self.steps {
+            for concrete_id in [
+                ConcreteStepId::Assumption(*ps_id),
+                ConcreteStepId::ProofStep(*ps_id),
+            ] {
+                let Some(cs) = concrete_steps.remove(&concrete_id) else {
+                    continue;
                 };
-                for concrete_id in concrete_ids {
-                    let Some(cs) = concrete_steps.remove(&concrete_id) else {
-                        continue;
-                    };
-                    let ConcreteStep {
-                        generic, var_maps, ..
-                    } = cs;
-                    for (var_map, replacement_context) in var_maps {
-                        push_concrete_step_if_new(
-                            ConcreteStep {
-                                generic: generic.clone(),
-                                var_maps: vec![(var_map, replacement_context)],
-                            },
+                let ConcreteStep {
+                    generic,
+                    var_maps,
+                    preserve_open,
+                } = cs;
+                for (var_map, replacement_context) in var_maps {
+                    if matches!(concrete_id, ConcreteStepId::ProofStep(_))
+                        && matches!(step.rule, Rule::Simplification(_))
+                        && has_value_var_mapping(&generic, &var_map)
+                        && !clause_has_type_params(&generic)
+                    {
+                        append_inline_simplification_originals(
+                            step,
+                            &[(VariableMap::new(), generic.get_local_context().clone())],
                             &mut claim_index,
                             &mut steps_in_order,
                             &skip_clauses,
                             kernel_context,
+                            false,
                         );
                     }
+                    push_concrete_step_if_new(
+                        ConcreteStep {
+                            generic: generic.clone(),
+                            var_maps: vec![(var_map, replacement_context)],
+                            preserve_open,
+                        },
+                        &mut claim_index,
+                        &mut steps_in_order,
+                        &skip_clauses,
+                        kernel_context,
+                    );
                 }
             }
         }
@@ -437,8 +622,11 @@ impl<'a> Proof<'a> {
                 &mut steps_in_order,
                 &skip_clauses,
                 kernel_context,
+                true,
             );
         }
+
+        reorder_concrete_steps_by_unit_support(&mut steps_in_order, kernel_context);
 
         Ok(steps_in_order)
     }
@@ -464,6 +652,19 @@ impl<'a> Proof<'a> {
                 &mut steps,
             )?;
         }
+
+        let mut checker = StructuredChecker::new();
+        for clause in &known_clauses {
+            checker.add_known_clause(clause, self.kernel_context);
+        }
+        let steps = checker
+            .complete_and_check_steps(&steps, self.kernel_context)
+            .map_err(|e| {
+                Error::internal(format!(
+                    "structured proof trace could not be completed: {}",
+                    e
+                ))
+            })?;
 
         Ok(StructuredProofTrace {
             known_clauses,
@@ -519,13 +720,15 @@ impl<'a> Proof<'a> {
         } else {
             self.structured_premises_for_ids(step.rule.premises(), id_map)?
         };
+        let premise_instantiations = self.structured_premise_instantiations(step)?;
         let expected = step.clause.clone();
 
         if matches!(step.rule, Rule::Assumption(_)) && known_seen.insert(expected.clone()) {
             known_clauses.push(expected.clone());
         }
 
-        let structured_step = StructuredProofStep::with_expected(rule, premises, expected);
+        let structured_step = StructuredProofStep::with_expected(rule, premises, expected)
+            .with_premise_instantiations(premise_instantiations);
         let structured_id = steps.len();
         steps.push(structured_step);
         if let Some(proof_id) = proof_id {
@@ -550,6 +753,78 @@ impl<'a> Proof<'a> {
                 })
             })
             .collect()
+    }
+
+    fn structured_premise_instantiations(
+        &self,
+        step: &ProofStep,
+    ) -> Result<Vec<Option<(VariableMap, LocalContext)>>, Error> {
+        if step.premise_map.is_empty() {
+            return Ok(vec![]);
+        }
+
+        if let Rule::BooleanReduction(info) = &step.rule {
+            if !info.inhabitance_source_ids.is_empty() {
+                let source_id = ProofStepId::Active(info.id);
+                let source_clause = self.get_clause(source_id)?;
+                let concrete_premises = step.premise_map.concretize_premises(
+                    &VariableMap::new(),
+                    step.clause.get_local_context(),
+                    &[source_clause.get_local_context()],
+                );
+                let Some((var_map, context)) = concrete_premises.into_iter().next() else {
+                    return Err(Error::internal(
+                        "boolean reduction premise map produced no source instantiation",
+                    ));
+                };
+                let mut instantiations = vec![Some((var_map, context))];
+                instantiations.extend(info.inhabitance_source_ids.iter().map(|_| None));
+                return Ok(instantiations);
+            }
+        }
+
+        let premise_ids = step.rule.premises();
+        let mut premise_contexts: Vec<&LocalContext> = Vec::new();
+        for premise_id in &premise_ids {
+            let premise_clause = self.get_clause(*premise_id)?;
+            premise_contexts.push(premise_clause.get_local_context());
+        }
+        let concrete_premises = step.premise_map.concretize_premises(
+            &VariableMap::new(),
+            step.clause.get_local_context(),
+            &premise_contexts,
+        );
+        if concrete_premises.len() != premise_ids.len() {
+            return Err(Error::internal(format!(
+                "premise map produced {} instantiations for {} premises",
+                concrete_premises.len(),
+                premise_ids.len()
+            )));
+        }
+
+        let mut instantiations = Vec::new();
+        for (premise_id, (mut var_map, mut context)) in
+            premise_ids.into_iter().zip(concrete_premises)
+        {
+            let premise_clause = self.get_clause(premise_id)?;
+            let premise_context = premise_clause.get_local_context();
+            let mut next_var = context.len();
+            for var_id in 0..premise_context.len() {
+                if !var_map.has_mapping(var_id as AtomId) {
+                    if let Some(var_type) = premise_context.get_var_type(var_id) {
+                        var_map.set(var_id as AtomId, Term::new_variable(next_var as AtomId));
+                        let remapped_type = apply_to_term(var_type.as_ref(), &var_map);
+                        context.set_type(next_var, remapped_type);
+                        next_var += 1;
+                    }
+                }
+            }
+            instantiations.push(Some((var_map, context)));
+        }
+        if matches!(step.rule, Rule::Simplification(_)) {
+            instantiations.insert(0, None);
+        }
+        Ok(instantiations)
     }
 
     /// Create a concrete proof from this proof.
@@ -632,6 +907,26 @@ pub fn reconstruct_step<R: ProofResolver>(
     conclusion_map: VariableMap,
     conclusion_map_context: &LocalContext,
     concrete_steps: &mut HashMap<ConcreteStepId, ConcreteStep>,
+) -> Result<(), Error> {
+    reconstruct_step_internal(
+        resolver,
+        id,
+        step,
+        conclusion_map,
+        conclusion_map_context,
+        concrete_steps,
+        false,
+    )
+}
+
+fn reconstruct_step_internal<R: ProofResolver>(
+    resolver: &R,
+    id: ProofStepId,
+    step: &ProofStep,
+    conclusion_map: VariableMap,
+    conclusion_map_context: &LocalContext,
+    concrete_steps: &mut HashMap<ConcreteStepId, ConcreteStep>,
+    force_concrete_assumption: bool,
 ) -> Result<(), Error> {
     // Some rules we can handle without the traces.
     match &step.rule {
@@ -753,13 +1048,14 @@ pub fn reconstruct_step<R: ProofResolver>(
                     conclusion_map_context,
                     info.original.clause.get_local_context(),
                 );
-                reconstruct_step(
+                reconstruct_step_internal(
                     resolver,
                     id,
                     &info.original,
                     inner_map,
                     &inner_context,
                     concrete_steps,
+                    true,
                 )?;
             }
             return Ok(());
@@ -774,8 +1070,18 @@ pub fn reconstruct_step<R: ProofResolver>(
             let needs_explicit_existential = generic
                 .positive_exists_reduction(resolver.kernel_context())
                 .is_some();
-            if conclusion_map.len() == 0 && !needs_explicit_existential {
-                // No concrete instantiation needed.
+            let is_direct_concrete_assumption =
+                !generic.has_any_variable() && !clause_has_type_params(&generic);
+            if conclusion_map.len() == 0
+                && is_direct_concrete_assumption
+                && !needs_explicit_existential
+                && !force_concrete_assumption
+            {
+                // Direct concrete assumptions are already loaded into the checker.
+                // Generic assumptions still need an explicit proof line when a later
+                // certificate step relies on the checker instantiating them.
+                // Concrete assumptions used as an explicit simplification source
+                // are forced past this branch so the checker can replay the step.
                 return Ok(());
             }
             // The assumption trace is always identity (each literal maps to itself),
@@ -834,7 +1140,8 @@ mod tests {
     use crate::module::ModuleId;
     use crate::prover::active_set::ActiveSet;
     use crate::prover::proof::{
-        add_var_map, append_inline_simplification_originals, Proof, ProofResolver,
+        add_var_map, append_inline_simplification_originals,
+        reorder_concrete_steps_by_unit_support, ConcreteStep, Proof, ProofResolver,
     };
     use crate::prover::synthetic::WitnessRegistry;
     use std::collections::{HashMap, HashSet};
@@ -1029,6 +1336,101 @@ mod tests {
             .expect("concrete step");
         let (_, replacement_context) = entry.var_maps.first().expect("replacement context");
         assert_eq!(replacement_context.len(), clause.get_local_context().len());
+    }
+
+    #[test]
+    fn test_reorder_concrete_steps_places_unit_support_before_negative_use() {
+        #[allow(unused_mut)]
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let dependent = ConcreteStep {
+            generic: kctx.parse_clause("not c0 or c1", &[]),
+            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+            preserve_open: false,
+        };
+        let support = ConcreteStep {
+            generic: kctx.parse_clause("c0", &[]),
+            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+            preserve_open: false,
+        };
+        let mut steps = vec![dependent, support];
+
+        reorder_concrete_steps_by_unit_support(&mut steps, &kctx);
+        let clauses: Vec<_> = steps
+            .iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+
+        assert_eq!(clauses[0], kctx.parse_clause("c0", &[]));
+        assert_eq!(clauses[1], kctx.parse_clause("not c0 or c1", &[]));
+    }
+
+    #[test]
+    fn test_reorder_concrete_steps_places_disjunction_before_derived_unit() {
+        #[allow(unused_mut)]
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let derived = ConcreteStep {
+            generic: kctx.parse_clause("not c0", &[]),
+            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+            preserve_open: false,
+        };
+        let source = ConcreteStep {
+            generic: kctx.parse_clause("not c0 or c1", &[]),
+            var_maps: vec![(VariableMap::new(), LocalContext::empty())],
+            preserve_open: false,
+        };
+        let mut steps = vec![derived, source];
+
+        reorder_concrete_steps_by_unit_support(&mut steps, &kctx);
+        let clauses: Vec<_> = steps
+            .iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+
+        assert_eq!(clauses[0], kctx.parse_clause("not c0 or c1", &[]));
+        assert_eq!(clauses[1], kctx.parse_clause("not c0", &[]));
+    }
+
+    #[test]
+    fn test_collect_concrete_steps_keeps_concrete_assumption_simplification_source() {
+        #[allow(unused_mut)]
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let support = ProofStep::mock_from_clause(kctx.parse_clause("c0", &[]));
+        let original = ProofStep::mock_from_clause(kctx.parse_clause("not c0 or c1", &[]));
+        let simplified = kctx.parse_clause("c1", &[]);
+        let simplification = ProofStep::simplification(
+            original,
+            vec![0],
+            &[&support],
+            simplified,
+            Truthiness::Factual,
+            1,
+            0,
+            PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        );
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &support);
+        proof.add_step(ProofStepId::Final, &simplification);
+
+        let steps = proof
+            .collect_concrete_steps()
+            .expect("concrete steps should reconstruct");
+        let clauses: Vec<_> = steps
+            .iter()
+            .flat_map(|step| step.to_clauses(&kctx))
+            .collect();
+
+        assert!(
+            clauses.contains(&kctx.parse_clause("not c0 or c1", &[])),
+            "expected direct concrete assumption source to be emitted; got {:?}",
+            clauses
+        );
     }
 
     #[test]
@@ -1500,6 +1902,7 @@ mod tests {
             &mut steps_in_order,
             &HashSet::new(),
             &kctx,
+            true,
         );
 
         let concrete_clauses: Vec<_> = steps_in_order
@@ -1841,6 +2244,7 @@ mod tests {
         let concrete_steps = vec![crate::prover::proof::ConcreteStep {
             generic: generic_clause,
             var_maps: vec![(var_map, LocalContext::empty())],
+            preserve_open: false,
         }];
 
         let bindings = BindingMap::new(ModuleId::default());
@@ -1915,6 +2319,7 @@ mod tests {
             &mut steps_in_order,
             &HashSet::new(),
             &kctx,
+            true,
         );
 
         let bindings = BindingMap::new(ModuleId::default());
