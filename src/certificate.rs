@@ -283,6 +283,9 @@ pub struct StructuredCertificateSimplificationHint {
     #[serde(rename = "rm", default, skip_serializing_if = "Vec::is_empty")]
     pub removals: Vec<StructuredCertificateSimplificationRemoval>,
 
+    #[serde(rename = "self", default, skip_serializing_if = "Vec::is_empty")]
+    pub self_contradictions: Vec<usize>,
+
     #[serde(rename = "res", default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<StructuredCertificateSimplificationResolution>,
 }
@@ -291,6 +294,7 @@ impl From<StructuredSimplificationHint> for StructuredCertificateSimplificationH
     fn from(hint: StructuredSimplificationHint) -> Self {
         Self {
             removals: hint.removals.into_iter().map(Into::into).collect(),
+            self_contradictions: hint.self_contradictions,
             resolution: hint.resolution.map(Into::into),
         }
     }
@@ -300,6 +304,7 @@ impl From<StructuredCertificateSimplificationHint> for StructuredSimplificationH
     fn from(hint: StructuredCertificateSimplificationHint) -> Self {
         Self {
             removals: hint.removals.into_iter().map(Into::into).collect(),
+            self_contradictions: hint.self_contradictions,
             resolution: hint.resolution.map(Into::into),
         }
     }

@@ -1249,6 +1249,8 @@ mod tests {
             Rule::BooleanReduction(crate::kernel::proof_step::BooleanReductionInfo {
                 id: 0,
                 kind: crate::kernel::clause::BooleanReductionKind::PositiveExistsOpen,
+                literal_index: exists_reduction.literal_index,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduction.clause,
@@ -1346,8 +1348,18 @@ mod tests {
         let long = ProofStep::mock("false = false or true = false", &kernel_context);
         let short = ProofStep::mock("false != false", &kernel_context);
         let clause = kernel_context.parse_clause("true = false", &[]);
-        let resolution =
-            ProofStep::resolution(0, &long, 1, &short, false, clause, PremiseMap::empty());
+        let resolution = ProofStep::resolution(
+            0,
+            &long,
+            0,
+            1,
+            &short,
+            0,
+            false,
+            false,
+            clause,
+            PremiseMap::empty(),
+        );
 
         let mut prover = Prover::new(vec![]);
         prover.active_set.activate(

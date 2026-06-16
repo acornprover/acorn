@@ -341,6 +341,7 @@ pub struct StructuredResolutionHint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredSimplificationHint {
     pub removals: Vec<StructuredSimplificationRemoval>,
+    pub self_contradictions: Vec<usize>,
     pub resolution: Option<StructuredSimplificationResolution>,
 }
 
@@ -425,62 +426,6 @@ impl StructuredChecker {
         Ok(())
     }
 
-    pub fn complete_and_check_steps(
-        &mut self,
-        steps: &[StructuredProofStep],
-        kernel_context: &KernelContext,
-    ) -> Result<Vec<StructuredProofStep>, StructuredCheckError> {
-        let mut completed_steps = Vec::with_capacity(steps.len());
-        for step in steps {
-            let completed = self.complete_step_details(step, kernel_context)?;
-            self.check_step(&completed, kernel_context)?;
-            completed_steps.push(completed);
-        }
-        Ok(completed_steps)
-    }
-
-    pub fn complete_step_details(
-        &self,
-        step: &StructuredProofStep,
-        kernel_context: &KernelContext,
-    ) -> Result<StructuredProofStep, StructuredCheckError> {
-        let mut completed = step.clone();
-        self.validate_step_premise_instantiations(&completed, kernel_context)?;
-        match completed.rule {
-            StructuredRule::Resolve if completed.details.resolution.is_none() => {
-                let expected = Self::required_expected_clause(&completed)?;
-                completed.details.resolution =
-                    Some(self.infer_resolution_hint(&completed, &expected, kernel_context)?);
-            }
-            StructuredRule::Rewrite if completed.details.rewrite.is_none() => {
-                let expected = Self::required_expected_clause(&completed)?;
-                completed.details.rewrite =
-                    Some(self.infer_rewrite_hint(&completed, &expected, kernel_context)?);
-            }
-            StructuredRule::Simplify if completed.details.simplification.is_none() => {
-                let expected = Self::required_expected_clause(&completed)?;
-                completed.details.simplification =
-                    Some(self.infer_simplification_hint(&completed, &expected, kernel_context)?);
-            }
-            rule if rule.boolean_reduction_kind().is_some()
-                && rule != StructuredRule::PosExistsOpen
-                && completed.details.boolean.is_none() =>
-            {
-                let expected = Self::required_expected_clause(&completed)?;
-                match self.infer_boolean_hint(&completed, &expected, kernel_context) {
-                    Ok(hint) => completed.details.boolean = Some(hint),
-                    Err(_) if self.expected_matches_any_premise(&completed, &expected)? => {
-                        completed.rule = StructuredRule::EqGraph;
-                        completed.details = StructuredProofStepDetails::default();
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            _ => {}
-        }
-        Ok(completed)
-    }
-
     pub fn check_step(
         &mut self,
         step: &StructuredProofStep,
@@ -495,20 +440,6 @@ impl StructuredChecker {
 
     fn normalize_input_clause(clause: &Clause) -> Clause {
         normalize_clause_subterms(clause).normalized()
-    }
-
-    fn required_expected_clause(
-        step: &StructuredProofStep,
-    ) -> Result<Clause, StructuredCheckError> {
-        step.expected
-            .as_ref()
-            .map(Self::normalize_input_clause)
-            .ok_or_else(|| {
-                StructuredCheckError::new(format!(
-                    "rule {} from {:?} requires an expected clause to infer explicit details",
-                    step.rule, step.premises
-                ))
-            })
     }
 
     fn validate_step_premise_instantiations(
@@ -533,19 +464,6 @@ impl StructuredChecker {
             }
         }
         Ok(())
-    }
-
-    fn expected_matches_any_premise(
-        &self,
-        step: &StructuredProofStep,
-        expected: &Clause,
-    ) -> Result<bool, StructuredCheckError> {
-        for premise_id in step.premises.iter().copied() {
-            if Self::normalize_input_clause(self.premise_clause(premise_id)?) == *expected {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn derive_step_clause(
@@ -812,250 +730,6 @@ impl StructuredChecker {
         let context = unifier.output_context().clone();
         let normalized = Clause::normalize_with_trace(literals, &context);
         Some(Self::normalize_input_clause(&normalized.clause))
-    }
-
-    fn infer_resolution_hint(
-        &self,
-        step: &StructuredProofStep,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Result<StructuredResolutionHint, StructuredCheckError> {
-        if step.premises.len() != 2 {
-            return Err(StructuredCheckError::new(format!(
-                "resolve expects exactly two premises, got {}",
-                step.premises.len()
-            )));
-        }
-        let short = self.premise_clause(step.premises[0])?;
-        let long = self.premise_clause(step.premises[1])?;
-        for (short_index, short_literal) in short.literals.iter().enumerate() {
-            for (long_index, long_literal) in long.literals.iter().enumerate() {
-                if short_literal.positive == long_literal.positive {
-                    continue;
-                }
-                for flipped in [false, true] {
-                    let Some(candidate) = Self::resolution_candidate(
-                        short,
-                        short_index,
-                        long,
-                        long_index,
-                        flipped,
-                        kernel_context,
-                    ) else {
-                        continue;
-                    };
-                    if &candidate == expected {
-                        return Ok(StructuredResolutionHint {
-                            left_literal: short_index,
-                            right_literal: long_index,
-                            flipped,
-                        });
-                    }
-                }
-            }
-        }
-        Err(StructuredCheckError::new(format!(
-            "could not infer resolution details for {:?}; expected {}; short premise {}; long premise {}",
-            step.premises, expected, short, long
-        )))
-    }
-
-    fn infer_boolean_hint(
-        &self,
-        step: &StructuredProofStep,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Result<StructuredBooleanHint, StructuredCheckError> {
-        let Some(kind) = step.rule.boolean_reduction_kind() else {
-            return Err(StructuredCheckError::new(format!(
-                "rule {} is not a boolean reduction",
-                step.rule
-            )));
-        };
-        let premise = self.first_premise(step)?;
-        let mut seen_for_literal = Vec::<(usize, usize)>::new();
-        for (candidate_kind, literal_index, trace) in
-            premise.find_boolean_reduction_kinds_with_locations_with_options(kernel_context, true)
-        {
-            if candidate_kind != kind {
-                continue;
-            }
-            let candidate_index = match seen_for_literal
-                .iter_mut()
-                .find(|(seen_literal_index, _)| *seen_literal_index == literal_index)
-            {
-                Some((_, count)) => {
-                    let current = *count;
-                    *count += 1;
-                    current
-                }
-                None => {
-                    seen_for_literal.push((literal_index, 1));
-                    0
-                }
-            };
-            let Some(candidate) = self.normalize_trace(&trace, kernel_context) else {
-                continue;
-            };
-            if &candidate == expected {
-                return Ok(StructuredBooleanHint {
-                    literal_index,
-                    candidate_index,
-                });
-            }
-        }
-        Err(StructuredCheckError::new(format!(
-            "could not infer boolean-reduction details for rule {} from {:?}; expected {}; premise {}",
-            step.rule, step.premises, expected, premise
-        )))
-    }
-
-    fn infer_rewrite_hint(
-        &self,
-        step: &StructuredProofStep,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Result<StructuredRewriteHint, StructuredCheckError> {
-        if step.premises.len() != 2 {
-            return Err(StructuredCheckError::new(format!(
-                "rewrite expects exactly two premises, got {}",
-                step.premises.len()
-            )));
-        }
-        let pattern = self.premise_clause(step.premises[0])?;
-        let target = self.premise_clause(step.premises[1])?;
-        let rewrite_seed = step
-            .premise_instantiations
-            .first()
-            .and_then(|instantiation| instantiation.as_ref())
-            .map(|(var_map, _)| var_map.clone());
-        if let Some(hint) = Self::infer_rewrite_hint_with_clauses(
-            step,
-            expected,
-            kernel_context,
-            pattern,
-            target,
-            rewrite_seed.as_ref(),
-            false,
-        ) {
-            return Ok(hint);
-        }
-        let instantiated_pattern = self.instantiated_premise_clause(step, 0, kernel_context)?;
-        let instantiated_target = self.instantiated_premise_clause(step, 1, kernel_context)?;
-        if let Some(hint) = Self::infer_rewrite_hint_with_clauses(
-            step,
-            expected,
-            kernel_context,
-            &instantiated_pattern,
-            &instantiated_target,
-            None,
-            true,
-        ) {
-            return Ok(hint);
-        }
-        Err(StructuredCheckError::new(format!(
-            "could not infer rewrite details for {:?}; expected {}; pattern {}; target {}; instantiated pattern {}; instantiated target {}",
-            step.premises, expected, pattern, target, instantiated_pattern, instantiated_target
-        )))
-    }
-
-    fn infer_rewrite_hint_with_clauses(
-        _step: &StructuredProofStep,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-        pattern: &Clause,
-        target: &Clause,
-        rewrite_seed: Option<&VariableMap>,
-        use_instantiated_premises: bool,
-    ) -> Option<StructuredRewriteHint> {
-        if pattern.literals.len() != 1 || target.literals.len() != 1 {
-            return None;
-        }
-        let pattern_literal = &pattern.literals[0];
-        if !pattern_literal.positive {
-            return None;
-        }
-        let target_literal = &target.literals[0];
-        for (forwards, old_subterm, new_subterm) in [
-            (true, &pattern_literal.left, &pattern_literal.right),
-            (false, &pattern_literal.right, &pattern_literal.left),
-        ] {
-            for target_left in [true, false] {
-                let target_term = if target_left {
-                    &target_literal.left
-                } else {
-                    &target_literal.right
-                };
-                for (path, subterm) in Self::rewritable_subterms_with_paths(target_term) {
-                    let mut candidate_maps = vec![VariableMap::new()];
-                    if let Some(seed) = rewrite_seed {
-                        if seed.len() > 0 {
-                            candidate_maps.push(seed.clone());
-                        }
-                    }
-                    for mut var_map in candidate_maps {
-                        if !Self::match_rewrite_subterm(
-                            old_subterm,
-                            &subterm,
-                            pattern.get_local_context(),
-                            target.get_local_context(),
-                            kernel_context,
-                            &mut var_map,
-                        ) {
-                            continue;
-                        }
-                        if Self::rewrite_matches_expected_subterm(
-                            old_subterm,
-                            new_subterm,
-                            &subterm,
-                            target_literal,
-                            expected,
-                            target_left,
-                            &path,
-                            pattern.get_local_context(),
-                            target.get_local_context(),
-                            kernel_context,
-                            var_map.clone(),
-                        ) {
-                            return Some(StructuredRewriteHint {
-                                forwards,
-                                target_left,
-                                path,
-                                use_instantiated_premises,
-                            });
-                        }
-                        let replacement = apply_to_term(new_subterm.as_ref(), &var_map);
-                        let (candidate_literal, _) =
-                            target_literal.replace_at_path(target_left, &path, replacement);
-                        let candidate_literal = Literal::new(
-                            candidate_literal.positive,
-                            kernel_context.canonicalize_instance_calls(&candidate_literal.left),
-                            kernel_context.canonicalize_instance_calls(&candidate_literal.right),
-                        );
-                        let context = Self::rewrite_context(
-                            target.get_local_context(),
-                            pattern.get_local_context(),
-                            &var_map,
-                        );
-                        if !Self::literal_context_is_complete(&candidate_literal, &context) {
-                            continue;
-                        }
-                        let normalized =
-                            Clause::normalize_with_trace(vec![candidate_literal], &context);
-                        let candidate = Self::normalize_input_clause(&normalized.clause);
-                        if &candidate == expected {
-                            return Some(StructuredRewriteHint {
-                                forwards,
-                                target_left,
-                                path,
-                                use_instantiated_premises,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     fn derive_rewrite(
@@ -1364,33 +1038,6 @@ impl StructuredChecker {
         context
     }
 
-    fn rewritable_subterms_with_paths(term: &Term) -> Vec<(Vec<PathStep>, Term)> {
-        let mut answer = vec![];
-        let mut prefix = vec![];
-        Self::push_rewritable_subterms_with_paths(term, &mut prefix, &mut answer);
-        answer
-    }
-
-    fn push_rewritable_subterms_with_paths(
-        term: &Term,
-        prefix: &mut Vec<PathStep>,
-        answer: &mut Vec<(Vec<PathStep>, Term)>,
-    ) {
-        if term.is_true() {
-            return;
-        }
-        if let Some((func, arg)) = term.as_ref().split_application() {
-            prefix.push(PathStep::Function);
-            Self::push_rewritable_subterms_with_paths(&func.to_owned(), prefix, answer);
-            prefix.pop();
-
-            prefix.push(PathStep::Argument);
-            Self::push_rewritable_subterms_with_paths(&arg.to_owned(), prefix, answer);
-            prefix.pop();
-        }
-        answer.push((prefix.clone(), term.clone()));
-    }
-
     fn derive_positive_exists_open(
         &self,
         step: &StructuredProofStep,
@@ -1562,118 +1209,6 @@ impl StructuredChecker {
         }
     }
 
-    fn infer_simplification_hint(
-        &self,
-        step: &StructuredProofStep,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Result<StructuredSimplificationHint, StructuredCheckError> {
-        if step.premises.len() < 2 {
-            return Err(StructuredCheckError::new(format!(
-                "simplify expects an original premise and at least one simplifying premise, got {}",
-                step.premises.len()
-            )));
-        }
-        let original = self.premise_clause(step.premises[0])?;
-        let mut removals = Vec::new();
-        let mut removed = vec![false; original.literals.len()];
-
-        for (original_index, original_literal) in original.literals.iter().enumerate() {
-            let mut removal = None;
-            'premises: for premise_index in 1..step.premises.len() {
-                let raw_simplifier = Self::normalize_input_clause(
-                    self.premise_clause(step.premises[premise_index])?,
-                );
-                for (use_instantiated_simplifier, simplifier) in [
-                    (false, raw_simplifier.clone()),
-                    (
-                        true,
-                        self.instantiated_premise_clause(step, premise_index, kernel_context)?,
-                    ),
-                ] {
-                    if use_instantiated_simplifier && simplifier == raw_simplifier {
-                        continue;
-                    }
-                    if simplifier.literals.len() != 1 {
-                        continue;
-                    }
-                    for flipped in [false, true] {
-                        if Self::literals_can_resolve_with_flipped(
-                            &simplifier,
-                            0,
-                            original,
-                            original_literal,
-                            flipped,
-                            kernel_context,
-                        ) {
-                            removal = Some(StructuredSimplificationRemoval {
-                                original_literal: original_index,
-                                simplifier_premise: premise_index,
-                                simplifier_literal: 0,
-                                flipped,
-                                use_instantiated_simplifier,
-                            });
-                            break 'premises;
-                        }
-                    }
-                }
-            }
-            if let Some(removal) = removal {
-                removed[original_index] = true;
-                removals.push(removal);
-            }
-        }
-
-        let kept_literals: Vec<_> = original
-            .literals
-            .iter()
-            .enumerate()
-            .filter_map(|(i, literal)| (!removed[i]).then_some(literal.clone()))
-            .collect();
-        let normalized = Clause::normalize_with_trace(kept_literals, original.get_local_context());
-        let candidate = Self::normalize_input_clause(&normalized.clause);
-        if &candidate == expected {
-            return Ok(StructuredSimplificationHint {
-                removals,
-                resolution: None,
-            });
-        }
-
-        for premise_index in 1..step.premises.len() {
-            let raw_simplifier =
-                Self::normalize_input_clause(self.premise_clause(step.premises[premise_index])?);
-            for (use_instantiated_simplifier, simplifier) in [
-                (false, raw_simplifier.clone()),
-                (
-                    true,
-                    self.instantiated_premise_clause(step, premise_index, kernel_context)?,
-                ),
-            ] {
-                if use_instantiated_simplifier && simplifier == raw_simplifier {
-                    continue;
-                }
-                if let Some(mut resolution) = Self::infer_simplification_resolution(
-                    original,
-                    &simplifier,
-                    expected,
-                    kernel_context,
-                ) {
-                    resolution.simplifier_premise = premise_index;
-                    resolution.use_instantiated_simplifier = use_instantiated_simplifier;
-                    return Ok(StructuredSimplificationHint {
-                        removals: vec![],
-                        resolution: Some(resolution),
-                    });
-                }
-            }
-        }
-
-        Err(StructuredCheckError::new(format!(
-            "could not infer simplification details for {:?}; expected {}; original {}; direct removal candidate {}",
-            step.premises, expected, original, candidate
-        )))
-    }
-
     fn derive_simplification(
         &self,
         step: &StructuredProofStep,
@@ -1735,6 +1270,39 @@ impl StructuredChecker {
         }
 
         let mut removed = vec![false; original.literals.len()];
+        for original_literal in &hint.self_contradictions {
+            let original_literal = *original_literal;
+            if original_literal >= original.literals.len() {
+                return Err(StructuredCheckError::new(format!(
+                    "simplify self-contradiction references missing original literal {} in {}",
+                    original_literal, original
+                )));
+            }
+            if removed[original_literal] {
+                return Err(StructuredCheckError::new(format!(
+                    "simplify removes original literal {} more than once",
+                    original_literal
+                )));
+            }
+            let literal = &original.literals[original_literal];
+            if !literal.is_impossible() {
+                return Err(StructuredCheckError::new(format!(
+                    "simplify self-contradiction references non-contradictory literal {}",
+                    literal
+                )));
+            }
+            if !Self::literal_has_inhabited_vars(
+                literal,
+                original.get_local_context(),
+                kernel_context,
+            ) {
+                return Err(StructuredCheckError::new(format!(
+                    "simplify self-contradiction {} may involve an empty type",
+                    literal
+                )));
+            }
+            removed[original_literal] = true;
+        }
         for removal in &hint.removals {
             if removal.original_literal >= original.literals.len() {
                 return Err(StructuredCheckError::new(format!(
@@ -1793,6 +1361,19 @@ impl StructuredChecker {
         )))
     }
 
+    fn literal_has_inhabited_vars(
+        literal: &Literal,
+        context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        literal.iter_atoms().all(|atom| match atom {
+            Atom::FreeVariable(var_id) => context
+                .get_var_type(*var_id as usize)
+                .is_none_or(|var_type| kernel_context.provably_inhabited(var_type, Some(context))),
+            _ => true,
+        })
+    }
+
     fn simplification_hint_clause(
         &self,
         step: &StructuredProofStep,
@@ -1813,59 +1394,6 @@ impl StructuredChecker {
                 self.premise_clause(step.premises[premise_index])?,
             ))
         }
-    }
-
-    fn infer_simplification_resolution(
-        original: &Clause,
-        simplifier: &Clause,
-        expected: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Option<StructuredSimplificationResolution> {
-        for original_index in 0..original.literals.len() {
-            for simplifier_index in 0..simplifier.literals.len() {
-                for flipped in [false, true] {
-                    if let Some(candidate) = Self::binary_resolution_candidate(
-                        original,
-                        original_index,
-                        simplifier,
-                        simplifier_index,
-                        flipped,
-                        kernel_context,
-                    ) {
-                        if &candidate == expected {
-                            return Some(StructuredSimplificationResolution {
-                                original_literal: original_index,
-                                simplifier_premise: 0,
-                                simplifier_literal: simplifier_index,
-                                flipped,
-                                simplifier_first: false,
-                                use_instantiated_simplifier: false,
-                            });
-                        }
-                    }
-                    if let Some(candidate) = Self::binary_resolution_candidate(
-                        simplifier,
-                        simplifier_index,
-                        original,
-                        original_index,
-                        flipped,
-                        kernel_context,
-                    ) {
-                        if &candidate == expected {
-                            return Some(StructuredSimplificationResolution {
-                                original_literal: original_index,
-                                simplifier_premise: 0,
-                                simplifier_literal: simplifier_index,
-                                flipped,
-                                simplifier_first: true,
-                                use_instantiated_simplifier: false,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     fn derive_passive_contradiction(

@@ -8,7 +8,9 @@ use crate::kernel::fingerprint::FingerprintSpecializer;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
-use crate::kernel::proof_step::{PremiseMap, ProofStep};
+use crate::kernel::proof_step::{
+    PremiseMap, ProofStep, SimplificationDetails, SimplificationRemovalInfo,
+};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
 use std::collections::hash_map::Entry;
@@ -140,12 +142,14 @@ fn make_simplified(
     positive: bool,
     activated_var_ids: Option<&[AtomId]>,
     literals: Vec<Literal>,
-) -> Option<(Clause, Vec<AtomId>, Vec<VariableMap>)> {
+) -> Option<(Clause, Vec<AtomId>, Vec<VariableMap>, SimplificationDetails)> {
     let mut new_literals = vec![];
     let mut simp_var_maps = vec![];
-    for literal in literals.into_iter() {
+    let mut simplification_details = SimplificationDetails::default();
+    let reversed_simplifier = activated_var_ids.is_some();
+    for (original_index, literal) in literals.into_iter().enumerate() {
         // Check both directions consistently for all literals.
-        let (eliminated, match_var_map) = if let Some(var_map) = pair_specialization_map(
+        let (eliminated, match_var_map, flipped) = if let Some(var_map) = pair_specialization_map(
             activated_context,
             passive_context,
             kernel_context,
@@ -159,7 +163,11 @@ fn make_simplified(
                 return None;
             }
             // This specific literal is unsatisfiable.
-            (true, remap_var_map_keys(var_map, activated_var_ids))
+            (
+                true,
+                remap_var_map_keys(var_map, activated_var_ids),
+                reversed_simplifier,
+            )
         } else if let Some(var_map) = pair_specialization_map(
             activated_context,
             passive_context,
@@ -174,18 +182,39 @@ fn make_simplified(
                 return None;
             }
             // This specific literal is unsatisfiable with flipped matching.
-            (true, remap_var_map_keys(var_map, activated_var_ids))
+            (
+                true,
+                remap_var_map_keys(var_map, activated_var_ids),
+                !reversed_simplifier,
+            )
         } else {
-            (false, None)
+            (false, None, false)
         };
         if eliminated {
-            simp_var_maps.push(match_var_map?);
+            let match_var_map = match_var_map?;
+            let simplifier_premise = simp_var_maps.len() + 1;
+            let use_instantiated_simplifier = match_var_map.iter().next().is_some();
+            simplification_details
+                .removals
+                .push(SimplificationRemovalInfo {
+                    original_literal: original_index,
+                    simplifier_premise,
+                    simplifier_literal: 0,
+                    flipped,
+                    use_instantiated_simplifier,
+                });
+            simp_var_maps.push(match_var_map);
         } else {
             new_literals.push(literal);
         }
     }
     let normalized = Clause::normalize_with_trace(new_literals, passive_context);
-    Some((normalized.clause, normalized.var_ids, simp_var_maps))
+    Some((
+        normalized.clause,
+        normalized.var_ids,
+        simp_var_maps,
+        simplification_details,
+    ))
 }
 
 impl PassiveSet {
@@ -418,17 +447,19 @@ impl PassiveSet {
                 continue;
             }
             let activated_literal = &activated_step.clause.literals[0];
-            let Some((new_clause, var_ids, simp_var_maps)) = make_simplified(
-                local_context,
-                activated_literal,
-                &passive_context,
-                kernel_context,
-                left,
-                right,
-                positive,
-                activated_var_ids,
-                step.clause.literals.clone(),
-            ) else {
+            let Some((new_clause, var_ids, simp_var_maps, simplification_details)) =
+                make_simplified(
+                    local_context,
+                    activated_literal,
+                    &passive_context,
+                    kernel_context,
+                    left,
+                    right,
+                    positive,
+                    activated_var_ids,
+                    step.clause.literals.clone(),
+                )
+            else {
                 continue;
             };
 
@@ -464,6 +495,7 @@ impl PassiveSet {
                 step,
                 simplifying_ids,
                 &[activated_step],
+                simplification_details,
                 new_clause,
                 truthiness,
                 proof_size,
@@ -621,7 +653,7 @@ mod tests {
             kctx.parse_term("g0(c0(g0(c2, c3)), c1(g0(c2, c3)))"),
             kctx.parse_term("g1(c0, c1, g0(c2, c3))"),
         );
-        let (_new_clause, _var_ids, simp_var_maps) = make_simplified(
+        let (_new_clause, _var_ids, simp_var_maps, details) = make_simplified(
             &reversed_context,
             &active_literal,
             &passive_context,
@@ -638,6 +670,9 @@ mod tests {
         assert_eq!(var_map.get_mapping(0), Some(&kctx.parse_term("c0")));
         assert_eq!(var_map.get_mapping(1), Some(&kctx.parse_term("c1")));
         assert_eq!(var_map.get_mapping(2), Some(&kctx.parse_term("g0(c2, c3)")));
+        assert_eq!(details.removals.len(), 1);
+        assert!(details.removals[0].flipped);
+        assert!(details.removals[0].use_instantiated_simplifier);
     }
 
     #[test]

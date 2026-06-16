@@ -16,7 +16,8 @@ use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::pdt::LiteralSet;
 use crate::kernel::proof_step::{
-    BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, SingleSourceInfo, Truthiness,
+    BooleanReductionInfo, PremiseMap, ProofStep, ProofStepId, Rule, SimplificationDetails,
+    SimplificationRemovalInfo, SingleSourceInfo, Truthiness,
 };
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{PathStep, Term};
@@ -30,7 +31,11 @@ enum LiteralElimination {
     /// The literal is self-contradictory (e.g., x != x).
     Impossible,
     /// The literal was eliminated by matching an existing clause.
-    Eliminated { step: usize, var_map: VariableMap },
+    Eliminated {
+        step: usize,
+        flipped: bool,
+        var_map: VariableMap,
+    },
 }
 
 /// The ActiveSet stores a bunch of clauses that are indexed for various efficient lookups.
@@ -407,10 +412,15 @@ impl ActiveSet {
         let mut answer = Vec::new();
         let extra_source_key_and_id = extra_source.map(|(key, id, _step)| (key, id));
 
-        for (kind, reduction) in source_step
+        let mut seen_candidates = HashMap::<(BooleanReductionKind, usize), usize>::new();
+        for (kind, literal_index, reduction) in source_step
             .clause
-            .find_boolean_reduction_kinds_with_options(kernel_context, false)
+            .find_boolean_reduction_kinds_with_locations_with_options(kernel_context, false)
         {
+            let candidate_index = seen_candidates
+                .entry((kind, literal_index))
+                .and_modify(|count| *count += 1)
+                .or_insert(0);
             let Some(inhabitance_source_ids) = self.inhabitance_sources_for_reduction(
                 &reduction,
                 kernel_context,
@@ -451,6 +461,8 @@ impl ActiveSet {
                 Rule::BooleanReduction(BooleanReductionInfo {
                     id: source_id,
                     kind,
+                    literal_index,
+                    candidate_index: *candidate_index,
                     inhabitance_source_ids,
                 }),
                 reduction.clause,
@@ -694,8 +706,11 @@ impl ActiveSet {
         let step = ProofStep::resolution(
             long_id,
             long_step,
+            long_index,
             short_id,
             short_step,
+            short_index,
+            flipped,
             resolved_long_literal_is_variable_pair,
             clause,
             premise_map,
@@ -884,6 +899,7 @@ impl ActiveSet {
                         &pattern_step,
                         target_id,
                         target_step,
+                        rewrite.forwards,
                         target_left,
                         &path,
                         &new_subterm,
@@ -1002,6 +1018,7 @@ impl ActiveSet {
                         pattern_step,
                         target_id,
                         target_step,
+                        forwards,
                         location.left,
                         &location.path,
                         &new_subterm,
@@ -1201,6 +1218,8 @@ impl ActiveSet {
             let rule = Rule::BooleanReduction(BooleanReductionInfo {
                 id: activated_id,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                literal_index: exists_reduction.literal_index,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             });
             let step = make_boolean_reduction_step(rule, reduction.clause, premise_map);
@@ -1327,9 +1346,14 @@ impl ActiveSet {
             .literal_set
             .find_generalization_with_map(&literal, local_context, kernel_context)
         {
-            Some((positive, step, _flipped, var_map)) => {
-                Some((positive, LiteralElimination::Eliminated { step, var_map }))
-            }
+            Some((positive, step, flipped, var_map)) => Some((
+                positive,
+                LiteralElimination::Eliminated {
+                    step,
+                    flipped,
+                    var_map,
+                },
+            )),
             None => None,
         }
     }
@@ -1422,7 +1446,11 @@ impl ActiveSet {
         // if simplification happens (the original step is stored inline in Rule::Simplification).
         let original_literals = step.clause.literals.clone();
         let mut simplifying_var_maps: Vec<VariableMap> = vec![];
-        for literal in std::mem::take(&mut step.clause.literals) {
+        let mut simplification_details = SimplificationDetails::default();
+        for (original_index, literal) in std::mem::take(&mut step.clause.literals)
+            .into_iter()
+            .enumerate()
+        {
             match self.evaluate_literal(&literal, &local_context, kernel_context) {
                 Some((true, elimination)) => {
                     if initial_num_literals == 1 && step.truthiness != Truthiness::Factual {
@@ -1444,19 +1472,36 @@ impl ActiveSet {
                 Some((false, elimination)) => {
                     // This literal is already known to be false.
                     // Extract the var_map for the simplifying clause.
-                    if let LiteralElimination::Eliminated {
-                        step: simp_id,
-                        var_map,
-                        ..
-                    } = &elimination
-                    {
-                        let simp_step = self.get_step(*simp_id);
-                        new_rules.push((*simp_id, simp_step));
-                        if simp_step.clause.literals.len() == 1 {
-                            simplifying_var_maps.push(var_map.clone());
-                        } else {
-                            // Two-long-clause case - concrete, empty map
-                            simplifying_var_maps.push(VariableMap::new());
+                    match &elimination {
+                        LiteralElimination::Impossible => {
+                            simplification_details
+                                .self_contradictions
+                                .push(original_index);
+                        }
+                        LiteralElimination::Eliminated {
+                            step: simp_id,
+                            flipped,
+                            var_map,
+                        } => {
+                            let simp_step = self.get_step(*simp_id);
+                            let simplifier_premise = new_rules.len() + 1;
+                            new_rules.push((*simp_id, simp_step));
+                            let use_instantiated_simplifier = var_map.iter().next().is_some();
+                            simplification_details
+                                .removals
+                                .push(SimplificationRemovalInfo {
+                                    original_literal: original_index,
+                                    simplifier_premise,
+                                    simplifier_literal: 0,
+                                    flipped: *flipped,
+                                    use_instantiated_simplifier,
+                                });
+                            if simp_step.clause.literals.len() == 1 {
+                                simplifying_var_maps.push(var_map.clone());
+                            } else {
+                                // Two-long-clause case - concrete, empty map
+                                simplifying_var_maps.push(VariableMap::new());
+                            }
                         }
                     }
                     continue;
@@ -1561,6 +1606,7 @@ impl ActiveSet {
             step,
             simplifying_ids,
             &simplifying_steps,
+            simplification_details,
             clause,
             truthiness,
             proof_size,

@@ -9,7 +9,11 @@ use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
-use crate::kernel::structured_proof::{StructuredChecker, StructuredProofStep, StructuredRule};
+use crate::kernel::structured_proof::{
+    StructuredBooleanHint, StructuredChecker, StructuredProofStep, StructuredProofStepDetails,
+    StructuredResolutionHint, StructuredRewriteHint, StructuredRule, StructuredSimplificationHint,
+    StructuredSimplificationRemoval,
+};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::prover::synthetic::WitnessRegistry;
@@ -657,14 +661,14 @@ impl<'a> Proof<'a> {
         for clause in &known_clauses {
             checker.add_known_clause(clause, self.kernel_context);
         }
-        let steps = checker
-            .complete_and_check_steps(&steps, self.kernel_context)
-            .map_err(|e| {
+        for (i, step) in steps.iter().enumerate() {
+            checker.check_step(step, self.kernel_context).map_err(|e| {
                 Error::internal(format!(
-                    "structured proof trace could not be completed: {}",
-                    e
+                    "structured proof trace failed at step {} (rule {}, premises {:?}): {}",
+                    i, step.rule, step.premises, e
                 ))
             })?;
+        }
 
         Ok(StructuredProofTrace {
             known_clauses,
@@ -722,19 +726,81 @@ impl<'a> Proof<'a> {
         };
         let premise_instantiations = self.structured_premise_instantiations(step)?;
         let expected = step.clause.clone();
+        let details = self.structured_details_for_step(step)?;
 
         if matches!(step.rule, Rule::Assumption(_)) && known_seen.insert(expected.clone()) {
             known_clauses.push(expected.clone());
         }
 
         let structured_step = StructuredProofStep::with_expected(rule, premises, expected)
-            .with_premise_instantiations(premise_instantiations);
+            .with_premise_instantiations(premise_instantiations)
+            .with_details(details);
         let structured_id = steps.len();
         steps.push(structured_step);
         if let Some(proof_id) = proof_id {
             id_map.insert(proof_id, structured_id);
         }
         Ok(structured_id)
+    }
+
+    fn structured_details_for_step(
+        &self,
+        step: &ProofStep,
+    ) -> Result<StructuredProofStepDetails, Error> {
+        let mut details = StructuredProofStepDetails::default();
+        match &step.rule {
+            Rule::BooleanReduction(info) => {
+                details.boolean = Some(StructuredBooleanHint {
+                    literal_index: info.literal_index,
+                    candidate_index: info.candidate_index,
+                });
+            }
+            Rule::Resolution(info) => {
+                details.resolution = Some(StructuredResolutionHint {
+                    left_literal: info.short_literal,
+                    right_literal: info.long_literal,
+                    flipped: info.flipped,
+                });
+            }
+            Rule::Rewrite(info) => {
+                details.rewrite = Some(StructuredRewriteHint {
+                    forwards: info.forwards,
+                    target_left: info.target_left,
+                    path: info.path.clone(),
+                    use_instantiated_premises: false,
+                });
+            }
+            Rule::Simplification(info) => {
+                if info.details.removals.is_empty()
+                    && info.details.self_contradictions.is_empty()
+                    && info.original.clause.normalized_preserving_locals()
+                        != step.clause.normalized_preserving_locals()
+                {
+                    return Err(Error::internal(format!(
+                        "structured simplification from {} to {} has no explicit details",
+                        info.original.clause, step.clause
+                    )));
+                }
+                details.simplification = Some(StructuredSimplificationHint {
+                    removals: info
+                        .details
+                        .removals
+                        .iter()
+                        .map(|removal| StructuredSimplificationRemoval {
+                            original_literal: removal.original_literal,
+                            simplifier_premise: removal.simplifier_premise,
+                            simplifier_literal: removal.simplifier_literal,
+                            flipped: removal.flipped,
+                            use_instantiated_simplifier: removal.use_instantiated_simplifier,
+                        })
+                        .collect(),
+                    self_contradictions: info.details.self_contradictions.clone(),
+                    resolution: None,
+                });
+            }
+            _ => {}
+        }
+        Ok(details)
     }
 
     fn structured_premises_for_ids(
@@ -1130,7 +1196,8 @@ mod tests {
     use crate::kernel::local_context::LocalContext;
     use crate::kernel::proof_step::ProofStepId;
     use crate::kernel::proof_step::{
-        BooleanReductionInfo, PremiseMap, ProofStep, RewriteInfo, Rule, ShallowStatus, Truthiness,
+        BooleanReductionInfo, PremiseMap, ProofStep, RewriteInfo, Rule, ShallowStatus,
+        SimplificationDetails, SimplificationRemovalInfo, Truthiness,
     };
     use crate::kernel::structured_proof::{StructuredChecker, StructuredRule};
     use crate::kernel::symbol::Symbol;
@@ -1159,6 +1226,22 @@ mod tests {
             synthetic_witnesses,
             ModuleId::default(),
         )
+    }
+
+    fn single_simplification_removal(
+        original_literal: usize,
+        use_instantiated_simplifier: bool,
+    ) -> SimplificationDetails {
+        SimplificationDetails {
+            removals: vec![SimplificationRemovalInfo {
+                original_literal,
+                simplifier_premise: 1,
+                simplifier_literal: 0,
+                flipped: false,
+                use_instantiated_simplifier,
+            }],
+            self_contradictions: vec![],
+        }
     }
 
     fn check_structured_trace(
@@ -1407,6 +1490,7 @@ mod tests {
             original,
             vec![0],
             &[&support],
+            single_simplification_removal(0, false),
             simplified,
             Truthiness::Factual,
             1,
@@ -1531,6 +1615,7 @@ mod tests {
             original_step,
             vec![0],
             &[&not_b_step],
+            single_simplification_removal(0, false),
             simplified_clause.clone(),
             Truthiness::Factual,
             1,
@@ -1548,6 +1633,8 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveAndLeft,
+                literal_index: 0,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduced_clause.clone(),
@@ -1609,6 +1696,8 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 0,
                 kind: BooleanReductionKind::PositiveAndLeft,
+                literal_index: 0,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduced_clause.clone(),
@@ -1652,8 +1741,11 @@ mod tests {
         let resolution_step = ProofStep::resolution(
             0,
             &long_step,
+            0,
             1,
             &short_step,
+            0,
+            false,
             false,
             resolved_clause.clone(),
             PremiseMap::empty(),
@@ -1687,6 +1779,9 @@ mod tests {
             Rule::Rewrite(RewriteInfo {
                 pattern_id: 0,
                 target_id: 1,
+                forwards: false,
+                target_left: true,
+                path: vec![],
             }),
             rewritten_clause.clone(),
             PremiseMap::empty(),
@@ -1793,6 +1888,7 @@ mod tests {
             original_step,
             vec![0],
             &[&simplifying_step],
+            single_simplification_removal(0, false),
             simplified_clause.clone(),
             Truthiness::Factual,
             1,
@@ -1853,6 +1949,8 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                literal_index: exists_reduction.literal_index,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduction.clause,
@@ -1880,6 +1978,7 @@ mod tests {
             original_step,
             vec![0],
             &[&source_step],
+            single_simplification_removal(0, false),
             Clause::impossible(),
             simplification_truthiness,
             1,
@@ -1962,6 +2061,8 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::PositiveExistsOpen,
+                literal_index: exists_reduction.literal_index,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduction.clause,
@@ -1985,6 +2086,7 @@ mod tests {
             original_step,
             vec![0],
             &[&simplifying_step],
+            single_simplification_removal(0, true),
             Clause::impossible(),
             final_truthiness,
             1,
@@ -2280,6 +2382,8 @@ mod tests {
             Rule::BooleanReduction(BooleanReductionInfo {
                 id: 1,
                 kind: BooleanReductionKind::BooleanInequalityLeftOrRight,
+                literal_index: 0,
+                candidate_index: 0,
                 inhabitance_source_ids: vec![],
             }),
             reduced_clause,
@@ -2294,6 +2398,7 @@ mod tests {
             original_step,
             vec![0],
             &[&source_step],
+            single_simplification_removal(0, false),
             Clause::impossible(),
             simplification_truthiness,
             1,

@@ -110,6 +110,15 @@ pub struct ResolutionInfo {
     /// The long clause will usually have more than one literal. It can have just one literal
     /// if we're finding a contradiction.
     pub long_id: usize,
+
+    /// The literal in the short clause resolved by this inference.
+    pub short_literal: usize,
+
+    /// The literal in the long clause resolved by this inference.
+    pub long_literal: usize,
+
+    /// Whether the long literal's equality sides were swapped during resolution.
+    pub flipped: bool,
 }
 
 /// Information about a specialization.
@@ -132,6 +141,15 @@ pub struct RewriteInfo {
     /// Which clauses were used as the sources.
     pub pattern_id: usize,
     pub target_id: usize,
+
+    /// Whether the pattern equality rewrites left-to-right.
+    pub forwards: bool,
+
+    /// Whether the target subterm is on the left side of the target literal.
+    pub target_left: bool,
+
+    /// Path to the rewritten subterm in the target side, in curried-application form.
+    pub path: Vec<PathStep>,
 }
 
 /// Information about a contradiction found by rewriting one side of an inequality into the other.
@@ -175,9 +193,44 @@ pub struct BooleanReductionInfo {
     /// The specific boolean-reduction rule that fired.
     pub kind: BooleanReductionKind,
 
+    /// The source literal reduced by this inference.
+    pub literal_index: usize,
+
+    /// Which candidate of this kind for that literal was selected.
+    pub candidate_index: usize,
+
     /// Extra active proof steps that demonstrate inhabitedness required by
     /// variable-erasing reductions.
     pub inhabitance_source_ids: Vec<usize>,
+}
+
+/// Details for a simplification literal removal justified by a simplifying clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimplificationRemovalInfo {
+    /// The literal removed from the original clause.
+    pub original_literal: usize,
+
+    /// The premise index in the structured simplification step.
+    /// Premise 0 is the original clause, so simplifier premises start at 1.
+    pub simplifier_premise: usize,
+
+    /// The literal in the simplifying premise.
+    pub simplifier_literal: usize,
+
+    /// Whether the original literal's equality sides were swapped for the match.
+    pub flipped: bool,
+
+    /// Whether the simplifying premise must use the recorded premise instantiation.
+    pub use_instantiated_simplifier: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SimplificationDetails {
+    /// Premise-backed literal removals.
+    pub removals: Vec<SimplificationRemovalInfo>,
+
+    /// Original literals that are self-contradictory, such as an inhabited `x != x`.
+    pub self_contradictions: Vec<usize>,
 }
 
 /// Information about a simplification step.
@@ -188,6 +241,8 @@ pub struct SimplificationInfo {
     pub original: Box<ProofStep>,
     /// Active IDs of clauses used for this simplification.
     pub simplifying_ids: Vec<usize>,
+    /// Explicit details explaining which original literals were removed.
+    pub details: SimplificationDetails,
 }
 
 /// The rules that can generate new clauses, along with the clause ids used to generate.
@@ -910,13 +965,22 @@ impl ProofStep {
     pub fn resolution(
         long_id: usize,
         long_step: &ProofStep,
+        long_literal: usize,
         short_id: usize,
         short_step: &ProofStep,
+        short_literal: usize,
+        flipped: bool,
         resolved_long_literal_is_variable_pair: bool,
         clause: Clause,
         premise_map: PremiseMap,
     ) -> ProofStep {
-        let rule = Rule::Resolution(ResolutionInfo { short_id, long_id });
+        let rule = Rule::Resolution(ResolutionInfo {
+            short_id,
+            long_id,
+            short_literal,
+            long_literal,
+            flipped,
+        });
 
         let truthiness = short_step.truthiness.combine(long_step.truthiness);
         let proof_size = short_step.proof_size + long_step.proof_size + 1;
@@ -967,6 +1031,7 @@ impl ProofStep {
         pattern_step: &ProofStep,
         target_id: usize,
         target_step: &ProofStep,
+        forwards: bool,
         target_left: bool,
         path: &[PathStep],
         new_subterm: &Term,
@@ -1023,6 +1088,9 @@ impl ProofStep {
         let rule = Rule::Rewrite(RewriteInfo {
             pattern_id,
             target_id,
+            forwards,
+            target_left,
+            path: path.to_vec(),
         });
 
         let proof_size = pattern_step.proof_size + target_step.proof_size + 1;
@@ -1085,6 +1153,7 @@ impl ProofStep {
         original: ProofStep,
         simplifying_ids: Vec<usize>,
         simplifying_steps: &[&ProofStep],
+        details: SimplificationDetails,
         clause: Clause,
         truthiness: Truthiness,
         proof_size: u32,
@@ -1099,6 +1168,7 @@ impl ProofStep {
             Rule::Simplification(SimplificationInfo {
                 original: Box::new(original),
                 simplifying_ids,
+                details,
             }),
             proof_size,
             depth,
@@ -1448,6 +1518,7 @@ mod tests {
             &pattern_step,
             1,
             &target_step,
+            true, // forwards
             true, // target_left - replace g1(c0)
             &[],  // path - at root
             &new_subterm,
@@ -1541,7 +1612,18 @@ mod tests {
         short.truthiness = Truthiness::Counterfactual;
         let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
 
-        let step = ProofStep::resolution(0, &long, 1, &short, true, clause, PremiseMap::empty());
+        let step = ProofStep::resolution(
+            0,
+            &long,
+            0,
+            1,
+            &short,
+            0,
+            false,
+            true,
+            clause,
+            PremiseMap::empty(),
+        );
 
         assert_eq!(step.shallow_status, ShallowStatus::Deep);
     }
@@ -1555,7 +1637,18 @@ mod tests {
         short.truthiness = Truthiness::Counterfactual;
         let clause = kernel.parse_clause("x0 = x1", &["Bool", "Bool"]);
 
-        let step = ProofStep::resolution(0, &long, 1, &short, false, clause, PremiseMap::empty());
+        let step = ProofStep::resolution(
+            0,
+            &long,
+            0,
+            1,
+            &short,
+            0,
+            false,
+            false,
+            clause,
+            PremiseMap::empty(),
+        );
 
         assert_eq!(step.shallow_status, ShallowStatus::Spent);
     }

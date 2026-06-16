@@ -496,6 +496,7 @@ fn test_structured_certificate_step_lowers_explicit_details() {
             "res": {"l": 5, "r": 6, "flip": true},
             "simp": {
                 "rm": [{"orig": 7, "prem": 8, "lit": 9, "flip": false, "inst": true}],
+                "self": [13],
                 "res": {
                     "orig": 10,
                     "prem": 11,
@@ -546,6 +547,7 @@ fn test_structured_certificate_step_lowers_explicit_details() {
                 flipped: false,
                 use_instantiated_simplifier: true,
             }],
+            self_contradictions: vec![13],
             resolution: Some(StructuredSimplificationResolution {
                 original_literal: 10,
                 simplifier_premise: 11,
@@ -587,6 +589,7 @@ fn test_structured_certificate_step_serializes_explicit_details() {
                     flipped: false,
                     use_instantiated_simplifier: true,
                 }],
+                self_contradictions: vec![13],
                 resolution: Some(StructuredSimplificationResolution {
                     original_literal: 10,
                     simplifier_premise: 11,
@@ -617,6 +620,7 @@ fn test_structured_certificate_step_serializes_explicit_details() {
             "res": {"l": 5, "r": 6, "flip": true},
             "simp": {
                 "rm": [{"orig": 7, "prem": 8, "lit": 9, "flip": false, "inst": true}],
+                "self": [13],
                 "res": {
                     "orig": 10,
                     "prem": 11,
