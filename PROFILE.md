@@ -191,6 +191,24 @@ Early exact-dedup follow-up:
     and 368.910s summed cached cert checks, this is about 11.7% faster wall-clock and 35.3%
     less summed certificate-checking time.
 
+Post-dedup perf follow-up:
+├── Date: 2026-06-17
+├── Git hash: `e93559cf0c982e966f0b19c69fcd9c5840056ddb`
+├── Command: `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_check
+│   --profile=fastdev`, then `perf record -g --call-graph fp -o perf.data
+│   target/fastdev/profile_check`.
+├── Result: 93,462/93,462 cached certificates OK, 0 searches. The perf capture covered
+│   369.716s and wrote 407 MB with 1,478,838 samples and 0 lost samples.
+├── Main `cpu_core/cycles/P` aggregate inclusive samples:
+│   `Checker::insert_boolean_reductions_with_reason` 64.80%,
+│   `Clause::find_boolean_reductions_with_locations_with_options` 47.32%,
+│   `Clause::normalize_boolean_reduction` 22.59%, and
+│   `Checker::normalize_checker_trace` 10.10%.
+└── Interpretation: early exact dedup reduced absolute check time substantially, but the remaining
+    workload is still dominated by boolean-reduction closure. The next performance gains probably
+    need to avoid enumerating/checking broad closure candidates in the first place, not just dedup
+    them earlier.
+
 Remaining possible improvement areas:
 ├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
 │   insert_boolean_reductions_with_reason dominates the visible certificate-checking profile.
