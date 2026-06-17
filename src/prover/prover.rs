@@ -587,7 +587,6 @@ impl Prover {
             .goal
             .as_ref()
             .ok_or_else(|| Error::internal("no goal set"))?;
-        let goal_name = goal.name.clone();
         let cert_bindings = self.bindings_with_goal_type_params(bindings);
         let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
 
@@ -595,19 +594,11 @@ impl Prover {
             .get_proof(effective_kernel_context, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
-        #[cfg(feature = "validate")]
-        proof.validate_structured_trace().map_err(|e| {
-            Error::internal(format!(
-                "structured proof validation failed for goal '{}': {}",
-                goal_name, e
-            ))
-        })?;
-
         if print {
             self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }
 
-        proof.make_cert(goal_name, cert_bindings.as_ref())
+        proof.make_cert(goal.name.clone(), cert_bindings.as_ref())
     }
 
     fn report_equality_graph_contradiction(

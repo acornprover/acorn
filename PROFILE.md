@@ -68,84 +68,104 @@ Slowest rebuilt modules by total processing time:
 
 ## profile_check
 
-### 2026-06-15 Current Full Check Profile
+### 2026-06-17 Current Full Check Profile
 
-- Date: 2026-06-15
-- Git hash: `62961b97`
+- Date: 2026-06-17
+- Git hash: `6ee1e22cdafc97c16f6d1be98e74106ebfcaf5fa`
 - Command: `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_check --profile=fastdev`, then `perf record -g --call-graph fp -o perf.data target/fastdev/profile_check`. For user-facing timing, also ran `/usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing`.
 - Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: release `acorn check --timing` completed successfully in `47.79s` wall with `559.68s` user time, `25.49s` system time, `1224%` CPU, and `5,072,960 KB` max RSS (`4.84 GiB`). It checked `93,314/93,314` cached certificates, performed `0` searches, printed `604` modules, and rebuilt `583` modules. The measured timing was `47.319s`: `41.352s` target/module load, `46.804s` certificate checking, and `368.748s` summed cached cert checks. The `fastdev` profiling binary checked the same `93,314` certificates in `441.37s` wall with `99%` CPU and `3,909,752 KB` max RSS (`3.73 GiB`); the perf capture sampled `452.684s`, wrote a `512 MB` `perf.data`, collected about `1M` samples, and reported `0` lost samples.
-- Summary: The current check corpus is much larger than the May baseline (`93,314` cached certs vs `64,140`, and `604` printed modules vs `361`). The release command is also less efficient per certificate than the May run: throughput is now `1,994 certs/s` vs the older `5,668 certs/s`. The run averages about `12.2` logical CPUs, so it still does not saturate the 20 logical CPUs. Wall time is dominated by two overlapped phases: target/module loading is `87.4%` of wall time, and certificate checking is `98.9%` of wall time. The perf shape is still checker-heavy: clause insertion recursively triggers boolean reductions, normalization, hashing, persistent-map mutation, and allocator traffic.
+- Timing: release `acorn check --timing` completed successfully in `47.97s` wall with `561.50s` user time, `29.03s` system time, `1230%` CPU, and `5,085,744 KB` max RSS (`4.85 GiB`). It checked `93,462/93,462` cached certificates, performed `0` searches, printed `605` modules, and rebuilt `584` modules. The measured timing was `47.454s`: `40.956s` target/module load, `46.947s` certificate checking, and `368.910s` summed cached cert checks. The `fastdev` perf run checked the same `93,462` certificates; the perf capture sampled `461.848s`, wrote a `517 MB` `perf.data`, collected about `1.85M` samples, and reported `0` lost samples.
+- Summary: The check corpus is essentially the same size as the June 15 baseline, and release throughput remains about `1,991 certs/s`. Wall time is still dominated by two overlapped phases: target/module loading is `86.3%` of wall time, and certificate checking is `98.9%` of wall time. The perf shape is again checker-heavy, with the hot path inside `Checker::insert_clause_internal -> insert_boolean_reductions_with_reason`. The main cost under that path is not a specific theorem lookup; it is repeatedly enumerating boolean reductions, normalizing the candidate traces, splitting applications, type-checking/simplifying boolean terms, and allocating intermediate terms/clauses.
 - Breakdown:
 
 ```text
-Current Full Check Timing (2026-06-15)
+Current Full Check Timing (2026-06-17)
 ======================================
 
 release command: /usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing
-result: 604 modules printed, 583 rebuilt, 93,314/93,314 certificates OK, 0 searches
-max RSS: 5,072,960 KB = 4.84 GiB
-wall clock: 47.79s
-user time: 559.68s
-system time: 25.49s
-CPU: 1224%
-project setup: 33.7ms
-cache load: 30.3ms
-target/module load: 41.352s
+result: 605 modules printed, 584 rebuilt, 93,462/93,462 certificates OK, 0 searches
+max RSS: 5,085,744 KB = 4.85 GiB
+wall clock: 47.97s
+user time: 561.50s
+system time: 29.03s
+CPU: 1230%
+project setup: 32.0ms
+cache load: 29.5ms
+target/module load: 40.956s
 build loading phase: 0.0ms
-certificate checking: 46.804s
-cached cert checks: 368.748s summed worker time
-certificate throughput: 1994 certs/s
+certificate checking: 46.947s
+cached cert checks: 368.910s summed worker time
+certificate throughput: 1991 certs/s
 
 Slowest rebuilt modules by total processing time:
-├── set_lattice: 29.804s total, 28.628s cert time
-├── topological_space: 18.253s total, 17.560s cert time
-├── set: 17.829s total, 17.172s cert time
-├── submodule: 15.058s total, 14.110s cert time
-├── function_product_units: 13.073s total, 11.542s cert time
-├── int.lattice: 11.153s total, 347.4ms cert time
-├── function_product_algebra: 9.907s total, 2.784s cert time
-├── subring: 9.309s total, 8.919s cert time
-├── top100.theorem_071_order_of_a_subgroup: 8.401s total, 3.696s cert time
-├── measurable_space: 8.054s total, 7.642s cert time
-├── simple_graph: 7.594s total, 7.011s cert time
-└── ideal: 7.321s total, 6.901s cert time
+├── set_lattice: 27.516s total, 26.403s cert time
+├── set: 18.372s total, 17.565s cert time
+├── topological_space: 17.830s total, 17.034s cert time
+├── submodule: 13.297s total, 12.341s cert time
+├── int.lattice: 11.932s total, 344.1ms cert time
+├── function_product_units: 11.905s total, 10.250s cert time
+├── function_product_algebra: 11.338s total, 3.186s cert time
+├── subring: 9.358s total, 8.871s cert time
+├── simple_graph: 8.539s total, 7.855s cert time
+├── ideal: 8.161s total, 7.679s cert time
+├── top100.theorem_071_order_of_a_subgroup: 7.901s total, 3.590s cert time
+└── measurable_space: 7.890s total, 7.479s cert time
 
 Fastdev perf command: perf record -g --call-graph fp -o perf.data target/fastdev/profile_check
-fastdev timing: 441.37s wall, 423.80s user, 17.54s system, 99% CPU, 3.73 GiB max RSS
-perf sample: 1M samples over 452.684s, 512 MB perf.data, 0 lost samples
+perf sample: 1.85M samples over 461.848s, 517 MB perf.data, 0 lost samples
 
 Top-down perf shape:
-├── 84-85%  Builder::verify_lowered_module
-│   ├── 48%  Builder::verify_lowered_items
-│   │   └── 25%  Builder::verify_goal
-│   │       └── 23%  Certificate::check_with_usage
-│   │           └── 21%  Checker::check_cert_steps
-│   └── 20-38%  Processor::add_imports_from_bindings
-├── 77%  Checker::insert_clause_internal
-│   └── 68%  Checker::insert_boolean_reductions_with_reason
-├── 35-55%  Checker::check_cert_steps, mostly under insert_clause / boolean reductions
-├── 2-3%  Project::module_path_exists / statx / AppArmor path checks
-└── hot self-time: allocator traffic, normalize_clause_term_with_polarity,
-    Clause::find_boolean_reductions_with_kinds_with_options, Clause::split_symbol_application,
-    TermRef::split_application_multi, normalize_checker_trace, hashing, and im HAMT updates
+├── 92.8%  Builder::process_module_work_batch
+│   └── 92.8%  Builder::verify_lowered_module
+│       └── 68.4%  Builder::verify_lowered_items
+│           └── 41.0%  Builder::verify_goal
+│               └── 41.0%  Processor::check_cert_with_usage
+│                   └── 41.0%  Certificate::check_with_usage
+│                       └── 41.0%  Checker::check_cert_steps
+│                           └── 41.0%  Checker::insert_clause
+│                               └── 41.0%  Checker::insert_clause_internal
+│                                   └── 41.0%  Checker::insert_boolean_reductions_with_reason
+│                                       ├── 23.6%  Clause::find_boolean_reductions_with_locations_with_options
+│                                       │   ├── 7.9%  Clause::normalize_boolean_reduction
+│                                       │   │   └── 6.9%  Clause::normalize_with_var_ids_prefilled
+│                                       │   ├── 5.8%  Clause::with_replaced_literal_and_context
+│                                       │   ├── 4.2%  TermRef::get_type_with_context
+│                                       │   └── 2.7%  Clause::simplify_ite_term
+│                                       └── 13.8%  Checker::normalize_checker_trace
+│                                           └── 11.8%  Clause::normalize_with_var_ids_prefilled
+│                                               └── 10.8%  normalize_signed_clause_term
+└── hot self-time: TermRef::split_application_multi, normalize_clause_term_with_polarity,
+    split_symbol_application, allocator/free traffic, memmove, term construction, and KBO sorting.
 
-Follow-up timing after the duplicate-normalization patch:
-├── release command: /usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn check --timing
-├── result: 47.965s measured, 48.45s wall, 365.937s summed cached cert checks
-├── comparison: previous sample was 47.319s measured, 47.79s wall, 368.748s summed cached cert checks
-└── interpretation: cached cert replay moved slightly in the expected direction, but total wall time
-    was within run-to-run noise.
+Deeper read of the verification subtree:
+├── The visible 41.0% branch is not the total boolean-reduction cost; it is only the largest
+│   recursive `verify_lowered_items -> verify_goal` branch.
+├── The same 68.4% `verify_lowered_items` subtree also contains a separate 26.6% direct
+│   `verify_goal` branch, including 19.2% more sampled time in
+│   `insert_boolean_reductions_with_reason`.
+└── Conservatively, at least about 60% of total sampled time, and roughly 88% of the visible
+    verification subtree, is spent under boolean-reduction insertion/closure.
+
+Interpretation:
+├── Boolean reductions are still the right target. The checker spends a large visible share of
+│   sampled time deriving the full boolean-reduction closure for inserted clauses.
+├── The evidence is strong enough that check-mode boolean reductions should be handled differently:
+│   the checker should not eagerly derive every possible boolean reduction when the certificate only
+│   needs specific reductions.
+├── A compact certificate hint that names the exact boolean reduction used by a proof step should
+│   let check mode avoid enumerating and normalizing many unused candidate reductions.
+└── The committed structured-proof scaffolding does not appear as an active check-mode path in
+    this profile, but it is not the format direction we want if the goal is a small JSONL delta.
 
 Remaining possible improvement areas:
+├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
+│   insert_boolean_reductions_with_reason dominates the visible certificate-checking profile.
+│   Explicit boolean-reduction hints are a good first migration because they target the dominant
+│   cost without replacing the whole certificate format.
 ├── Avoid broader import replay cost. Check-mode module exports already store normalized
 │   CheckExportFact clauses, but each module still constructs a fresh checker and replays the
-│   transitive import facts. An exact import-set cache and a small direct-dependency cache were
-│   both tried after this profile and did not produce a clear wall-time win.
-├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
-│   insert_boolean_reductions_with_reason dominates the profile; caching normalized reduction
-│   results per clause/kernel-context generation or trimming redundant reduction reprocessing is
-│   likely higher leverage than filesystem caching.
+│   transitive import facts. Earlier exact import-set and direct-dependency cache attempts did not
+│   produce a clear wall-time win.
 └── Improve scheduling granularity for large modules. The release run averages 12.2 CPUs, while
     modules like set_lattice, topological_space, set, and submodule dominate the tail. Per-module
     work stealing cannot fully use 20 logical CPUs when a few large modules sit on the critical path.
