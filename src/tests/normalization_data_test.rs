@@ -16,7 +16,7 @@ use crate::kernel::variable_map::VariableMap;
 use crate::module::{LoadState, ModuleId};
 use crate::project::Project;
 use crate::prover::active_set::ActiveSet;
-use crate::prover::proof::{ConcreteStep, Proof};
+use crate::prover::proof::{ConcreteRationale, ConcreteStep, Proof};
 use crate::prover::synthetic::WitnessRegistry;
 use std::borrow::Cow;
 
@@ -1318,6 +1318,7 @@ fn serialize_claim_line(
 ) -> String {
     if claim.clause().get_local_context().is_empty() {
         let concrete_steps = vec![ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: claim.clause().clone(),
             var_maps: vec![(
                 claim.var_map().clone(),
@@ -1691,27 +1692,30 @@ fn test_proof_reconstruction_normalization_cases() {
             proof.add_step(*id, step);
         }
 
-        let concrete_proof = proof
-            .make_concrete_proof("goal".to_string())
+        let concrete_steps = proof
+            .collect_concrete_steps()
             .expect("proof reconstruction should succeed");
+        let concrete_clauses: Vec<_> = concrete_steps
+            .iter()
+            .flat_map(|step| step.to_clauses(&kernel_context))
+            .collect();
         assert!(
-            !concrete_proof.claims.is_empty(),
+            !concrete_clauses.is_empty(),
             "expected proof reconstruction case `{}` to produce at least one claim",
             case.name
         );
 
-        for clause in &concrete_proof.claims {
+        for clause in &concrete_clauses {
             assert_clause_is_already_normalized(clause, case.name, "reconstructed clause");
         }
 
         for expected_clause in &expected_clauses {
             assert!(
-                concrete_proof.claims.contains(expected_clause),
+                concrete_clauses.contains(expected_clause),
                 "expected proof reconstruction case `{}` to include concrete clause {}\nactual clauses:\n{}",
                 case.name,
                 expected_clause,
-                concrete_proof
-                    .claims
+                concrete_clauses
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()

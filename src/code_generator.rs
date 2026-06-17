@@ -1324,6 +1324,9 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
+        if !step.should_emit_legacy_cert() {
+            return Ok(vec![]);
+        }
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_certificate_steps(

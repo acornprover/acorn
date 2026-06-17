@@ -23,7 +23,6 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
-use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
@@ -100,7 +99,7 @@ fn value_to_code(
 /// This means certificates don't break when the *justification* for a claim changes,
 /// only when the claim itself becomes unprovable.
 ///
-/// See also: `ConcreteProof` for the in-memory representation with resolved IDs.
+/// See also: `ConcreteStep` for the in-memory representation with resolved IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Certificate {
     /// The name of the goal that was proved
@@ -350,7 +349,7 @@ impl Certificate {
         self.proof.is_some()
     }
 
-    /// Convert a ConcreteProof to a Certificate (string format).
+    /// Convert concrete proof steps to a Certificate (string format).
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
     /// Requires the kernel_context (to quote clauses)
@@ -554,34 +553,6 @@ impl Certificate {
         for (new_index, old_index) in ordered_indices.into_iter().enumerate() {
             steps[new_index] = original[old_index].clone();
         }
-    }
-
-    /// Convert a ConcreteProof to a Certificate (string format).
-    ///
-    /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to quote clauses)
-    /// and the bindings (to generate readable names).
-    pub fn from_concrete_proof(
-        concrete_proof: &ConcreteProof,
-        kernel_context: &KernelContext,
-        bindings: &BindingMap,
-    ) -> Result<Certificate, CodeGenError> {
-        let mut concrete_steps = Vec::new();
-        for clause in &concrete_proof.claims {
-            // Create a ConcreteStep with an identity mapping (clause is already specialized)
-            concrete_steps.push(ConcreteStep {
-                generic: clause.clone(),
-                var_maps: vec![(VariableMap::new(), clause.get_local_context().clone())],
-                preserve_open: false,
-            });
-        }
-
-        Certificate::from_concrete_steps(
-            concrete_proof.goal.clone(),
-            &concrete_steps,
-            kernel_context,
-            bindings,
-        )
     }
 
     /// Parse all certificate proof lines into kernel-level certificate steps.

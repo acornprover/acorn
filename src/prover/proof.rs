@@ -5,7 +5,6 @@ use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::AtomId;
 use crate::kernel::clause::Clause;
-use crate::kernel::concrete_proof::ConcreteProof;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
@@ -87,7 +86,7 @@ impl ProofResolver for Proof<'_> {
     }
 }
 
-// Each step in the ConcreteProof is associated with a ConcreteStepId.
+// Each reconstructed step is associated with a ConcreteStepId.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConcreteStepId {
     // This concrete step matches the *output* of a proof step.
@@ -99,15 +98,26 @@ pub enum ConcreteStepId {
     Assumption(ProofStepId),
 }
 
+/// The checker-side rationale that should be used to replay a concrete step.
+#[derive(Clone)]
+pub enum ConcreteRationale {
+    /// Check the target clause with the checker's exact/egraph-obvious machinery.
+    Obvious,
+
+    /// Check the target clause as one boolean reduction from a concrete source clause.
+    BooleanReduction { source: Clause, emit_legacy: bool },
+}
+
 /// A reconstructed proof step together with the environments needed to specialize it.
 ///
 /// The stored `(VariableMap, LocalContext)` pairs reconstruct the specialization data needed to
 /// replay this step. The resulting clauses may still contain universally quantified locals; later
 /// certificate generation can either preserve them as binders or choose explicit witnesses.
-///
-/// Also used when converting ConcreteProof to Certificate.
 #[derive(Clone)]
 pub struct ConcreteStep {
+    // The procedure the checker should use for this step.
+    pub rationale: ConcreteRationale,
+
     // The generic clause for this proof step.
     pub generic: Clause,
 
@@ -123,14 +133,26 @@ pub struct ConcreteStep {
 impl ConcreteStep {
     fn new(generic: Clause, var_map: VariableMap, replacement_context: LocalContext) -> Self {
         ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic,
             var_maps: vec![(var_map, replacement_context)],
             preserve_open: false,
         }
     }
 
+    pub fn is_boolean_reduction(&self) -> bool {
+        matches!(self.rationale, ConcreteRationale::BooleanReduction { .. })
+    }
+
+    pub fn should_emit_legacy_cert(&self) -> bool {
+        match self.rationale {
+            ConcreteRationale::Obvious => true,
+            ConcreteRationale::BooleanReduction { emit_legacy, .. } => emit_legacy,
+        }
+    }
+
     /// Convert this `ConcreteStep` to the specialized clauses it represents.
-    fn to_clauses(&self, kernel_context: &KernelContext) -> Vec<Clause> {
+    pub(crate) fn to_clauses(&self, kernel_context: &KernelContext) -> Vec<Clause> {
         self.var_maps
             .iter()
             .map(|(var_map, replacement_context)| {
@@ -154,6 +176,10 @@ fn push_concrete_step_if_new(
     let Some(clause) = concrete_step.to_clauses(kernel_context).into_iter().next() else {
         return;
     };
+    if concrete_step.is_boolean_reduction() {
+        steps_in_order.push(concrete_step);
+        return;
+    }
     if skip_clauses.contains(&clause) {
         return;
     }
@@ -333,6 +359,7 @@ fn append_inline_simplification_originals(
     for (var_map, replacement_context) in &original_var_maps {
         push_concrete_step_if_new(
             ConcreteStep {
+                rationale: ConcreteRationale::Obvious,
                 generic: info.original.clause.clone(),
                 var_maps: vec![(var_map.clone(), replacement_context.clone())],
                 preserve_open: false,
@@ -369,6 +396,49 @@ fn add_var_map<R: ProofResolver>(
             entry.insert(concrete_step);
         }
     }
+}
+
+fn concrete_rationale_for_step<R: ProofResolver>(
+    resolver: &R,
+    step: &ProofStep,
+    var_map: &VariableMap,
+    replacement_context: &LocalContext,
+    emit_legacy: bool,
+) -> Result<ConcreteRationale, Error> {
+    let Rule::BooleanReduction(info) = &step.rule else {
+        return Ok(ConcreteRationale::Obvious);
+    };
+
+    let source_id = ProofStepId::Active(info.id);
+    let source_clause = resolver.get_clause(source_id)?;
+    let source = if step.premise_map.is_empty() {
+        source_clause.clone()
+    } else {
+        let premise_ids = step.rule.premises();
+        let mut premise_contexts = Vec::new();
+        for premise_id in &premise_ids {
+            premise_contexts.push(resolver.get_clause(*premise_id)?.get_local_context());
+        }
+        let concrete_premises =
+            step.premise_map
+                .concretize_premises(var_map, replacement_context, &premise_contexts);
+        let Some((source_map, source_context)) = concrete_premises.into_iter().next() else {
+            return Ok(ConcreteRationale::BooleanReduction {
+                source: source_clause.clone(),
+                emit_legacy,
+            });
+        };
+        source_map.specialize_clause_with_replacement_context_and_compact_vars(
+            source_clause,
+            &source_context,
+            resolver.kernel_context(),
+        )
+    };
+
+    Ok(ConcreteRationale::BooleanReduction {
+        source,
+        emit_legacy,
+    })
 }
 
 fn passive_contradiction_var_map<R: ProofResolver>(
@@ -439,7 +509,7 @@ impl<'a> Proof<'a> {
 
     /// Reconstruct concrete specialization steps in claim order, skipping clauses
     /// that we intentionally omit from certificates.
-    fn collect_concrete_steps(&self) -> Result<Vec<ConcreteStep>, Error> {
+    pub(crate) fn collect_concrete_steps(&self) -> Result<Vec<ConcreteStep>, Error> {
         let kernel_context = self.kernel_context;
 
         // First, reconstruct all the steps, working backwards.
@@ -500,6 +570,9 @@ impl<'a> Proof<'a> {
                 should_skip_reconstructed_step(self, *ps_id, kernel_context, &mut skipped_steps)?;
 
             if should_skip {
+                if matches!(step.rule, Rule::BooleanReduction(_)) {
+                    continue;
+                }
                 if forced_assumptions.contains(ps_id) {
                     continue;
                 }
@@ -539,6 +612,7 @@ impl<'a> Proof<'a> {
                     continue;
                 };
                 let ConcreteStep {
+                    rationale: _,
                     generic,
                     var_maps,
                     preserve_open,
@@ -559,8 +633,21 @@ impl<'a> Proof<'a> {
                             false,
                         );
                     }
+                    let emit_legacy = !skipped_steps.get(ps_id).copied().unwrap_or(false);
+                    let rationale = if matches!(concrete_id, ConcreteStepId::ProofStep(_)) {
+                        concrete_rationale_for_step(
+                            self,
+                            step,
+                            &var_map,
+                            &replacement_context,
+                            emit_legacy,
+                        )?
+                    } else {
+                        ConcreteRationale::Obvious
+                    };
                     push_concrete_step_if_new(
                         ConcreteStep {
+                            rationale,
                             generic: generic.clone(),
                             var_maps: vec![(var_map, replacement_context)],
                             preserve_open,
@@ -598,21 +685,6 @@ impl<'a> Proof<'a> {
         reorder_concrete_steps_by_unit_support(&mut steps_in_order, kernel_context);
 
         Ok(steps_in_order)
-    }
-
-    /// Create a concrete proof from this proof.
-    /// This is an intermediate representation between Proof and Certificate.
-    pub fn make_concrete_proof(&self, goal: String) -> Result<ConcreteProof, Error> {
-        let kernel_context = self.kernel_context;
-        let steps_in_order = self.collect_concrete_steps()?;
-        let mut claims = Vec::new();
-        for step in &steps_in_order {
-            for clause in step.to_clauses(kernel_context) {
-                claims.push(clause);
-            }
-        }
-
-        Ok(ConcreteProof { goal, claims })
     }
 }
 
@@ -914,7 +986,8 @@ mod tests {
     use crate::prover::active_set::ActiveSet;
     use crate::prover::proof::{
         add_var_map, append_inline_simplification_originals,
-        reorder_concrete_steps_by_unit_support, ConcreteStep, Proof, ProofResolver,
+        reorder_concrete_steps_by_unit_support, ConcreteRationale, ConcreteStep, Proof,
+        ProofResolver,
     };
     use crate::prover::synthetic::WitnessRegistry;
     use std::collections::{HashMap, HashSet};
@@ -1120,11 +1193,13 @@ mod tests {
         kctx.parse_constants(&["c0", "c1"], "Bool");
 
         let dependent = ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: kctx.parse_clause("not c0 or c1", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
         };
         let support = ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: kctx.parse_clause("c0", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
@@ -1148,11 +1223,13 @@ mod tests {
         kctx.parse_constants(&["c0", "c1"], "Bool");
 
         let derived = ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: kctx.parse_clause("not c0", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
         };
         let source = ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: kctx.parse_clause("not c0 or c1", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
@@ -1338,10 +1415,11 @@ mod tests {
         proof.add_step(ProofStepId::Active(1), &simplified_step);
         proof.add_step(ProofStepId::Final, &final_step);
 
-        let concrete_clauses: Vec<_> = proof
+        let concrete_steps = proof
             .collect_concrete_steps()
-            .expect("concrete step reconstruction should succeed")
-            .into_iter()
+            .expect("concrete step reconstruction should succeed");
+        let concrete_clauses: Vec<_> = concrete_steps
+            .iter()
             .flat_map(|step| step.to_clauses(&kctx))
             .collect();
 
@@ -1357,13 +1435,123 @@ mod tests {
         );
         assert!(
             !concrete_clauses.contains(&reduced_clause),
-            "expected reconstructed clauses to omit redundant boolean reduction {}\nactual clauses:\n{}",
+            "expected reconstructed clauses to omit final boolean reduction {}\nactual clauses:\n{}",
             reduced_clause,
             concrete_clauses
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    #[test]
+    fn test_collect_concrete_steps_marks_boolean_reduction_rationale() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let source_clause = Clause::new(
+            vec![Literal::positive(Term::and(
+                kctx.parse_term("c0"),
+                kctx.parse_term("c1"),
+            ))],
+            &LocalContext::empty(),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause.clone());
+        let reduced_clause = source_clause
+            .boolean_reductions(&kctx)
+            .into_iter()
+            .find(|clause| *clause == kctx.parse_clause("c0", &[]))
+            .expect("expected conjunction to reduce to left conjunct");
+        let reduction_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 0,
+                kind: BooleanReductionKind::PositiveAndLeft,
+                literal_index: 0,
+                candidate_index: 0,
+                inhabitance_source_ids: vec![],
+            }),
+            reduced_clause.clone(),
+            PremiseMap::new(vec![VariableMap::new()], vec![], LocalContext::empty()),
+        );
+        let contradiction_step = ProofStep::mock_from_clause(kctx.parse_clause("not c0", &[]));
+        let final_step =
+            ProofStep::passive_contradiction(&[reduction_step.clone(), contradiction_step.clone()]);
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &source_step);
+        proof.add_step(ProofStepId::Passive(0), &reduction_step);
+        proof.add_step(ProofStepId::Passive(1), &contradiction_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let concrete_steps = proof
+            .collect_concrete_steps()
+            .expect("concrete step reconstruction should succeed");
+        assert!(
+            concrete_steps.iter().any(|step| {
+                step.is_boolean_reduction()
+                    && step.should_emit_legacy_cert()
+                    && step
+                        .to_clauses(&kctx)
+                        .into_iter()
+                        .any(|clause| clause == reduced_clause)
+            }),
+            "expected concrete IR to preserve active boolean reduction rationale"
+        );
+    }
+
+    #[test]
+    fn test_collect_concrete_steps_keeps_skipped_boolean_reduction_rationale() {
+        let mut kctx = KernelContext::new();
+        kctx.parse_constants(&["c0", "c1"], "Bool");
+
+        let source_clause = Clause::new(
+            vec![Literal::positive(Term::and(
+                Term::new_variable(0),
+                kctx.parse_term("c1"),
+            ))],
+            &LocalContext::from_types(vec![Term::bool_type()]),
+        );
+        let source_step = ProofStep::mock_from_clause(source_clause);
+        let reduced_clause = kctx.parse_clause("c0", &[]);
+        let mut source_map = VariableMap::new();
+        source_map.set(0, kctx.parse_term("c0"));
+        let reduction_step = ProofStep::direct(
+            &source_step,
+            Rule::BooleanReduction(BooleanReductionInfo {
+                id: 0,
+                kind: BooleanReductionKind::PositiveAndLeft,
+                literal_index: 0,
+                candidate_index: 0,
+                inhabitance_source_ids: vec![],
+            }),
+            reduced_clause.clone(),
+            PremiseMap::new(vec![source_map], vec![], LocalContext::empty()),
+        );
+        let contradiction_step = ProofStep::mock_from_clause(kctx.parse_clause("not c0", &[]));
+        let final_step =
+            ProofStep::passive_contradiction(&[reduction_step.clone(), contradiction_step.clone()]);
+
+        let mut proof = Proof::new(&kctx);
+        proof.add_step(ProofStepId::Active(0), &source_step);
+        proof.add_step(ProofStepId::Passive(0), &reduction_step);
+        proof.add_step(ProofStepId::Passive(1), &contradiction_step);
+        proof.add_step(ProofStepId::Final, &final_step);
+
+        let concrete_steps = proof
+            .collect_concrete_steps()
+            .expect("concrete step reconstruction should succeed");
+        assert!(
+            concrete_steps.iter().any(|step| {
+                step.is_boolean_reduction()
+                    && !step.should_emit_legacy_cert()
+                    && step
+                        .to_clauses(&kctx)
+                        .into_iter()
+                        .any(|clause| clause == reduced_clause)
+            }),
+            "expected concrete IR to retain skipped legacy boolean reduction rationale"
         );
     }
 
@@ -1798,6 +1986,7 @@ mod tests {
         var_map.set(0, Term::lambda(Term::bool_type(), Term::new_true()));
         var_map.set(1, Term::new_true());
         let concrete_steps = vec![crate::prover::proof::ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic: generic_clause,
             var_maps: vec![(var_map, LocalContext::empty())],
             preserve_open: false,

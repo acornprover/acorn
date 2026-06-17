@@ -209,6 +209,31 @@ Post-dedup perf follow-up:
     need to avoid enumerating/checking broad closure candidates in the first place, not just dedup
     them earlier.
 
+Processor-phase import replay census:
+├── Date: 2026-06-17
+├── Method: temporary `Processor` timers on `target/release/profile_check`, measuring summed worker
+│   time for imported module export replay, local lowered fact insertion, and cached certificate
+│   checking. This is a checker/proof-processing split after modules are lowered; it does not
+│   include source parsing/lowering or build graph/module loading time.
+├── Result: 93,462 cached certificates checked successfully with 0 searches.
+├── Import behavior: imported facts are replayed into a fresh processor/checker for each checked
+│   module that imports them. `Processor::add_imports_from_bindings` walks direct and transitive
+│   dependencies, `add_check_export_fact` inserts each exported assumption, and checker insertion
+│   runs normal boolean-reduction closure for those imported clauses. Imported modules are deduped
+│   inside one processor, but not across independent module processors.
+├── Exclusive processor-side measured time:
+│   import replay 86.584s (30.36%), 24,301 imported-module replays, 2,318,469 exported facts;
+│   cached cert checking 178.603s (62.63%), 93,462 cert checks;
+│   local lowered fact insertion 19.966s (7.00%), 220,469 calls, 220,095 facts.
+├── Local/cert work together was 198.570s (69.64%) of the same measured processor-side total.
+├── `cert_goal_setup` was also measured as a subphase inside cert checking: 5.219s, 93,462 calls,
+│   99,911 goal clauses. It is not added to the exclusive total above because it is already part of
+│   cached cert checking.
+└── Interpretation: import replay is a major but not majority component of checker-side work:
+    about 30% of measured processor time. Since replaying imports triggers boolean-reduction closure
+    on imported facts, avoiding or caching imported boolean-reduction closure is still a meaningful
+    target, but the larger combined bucket remains per-goal/per-cert local checking.
+
 Remaining possible improvement areas:
 ├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
 │   insert_boolean_reductions_with_reason dominates the visible certificate-checking profile.

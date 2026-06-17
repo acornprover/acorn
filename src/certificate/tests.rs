@@ -3,6 +3,7 @@ use crate::module::LoadState;
 use crate::module::ModuleId;
 use crate::processor::Processor;
 use crate::project::Project;
+use crate::prover::proof::ConcreteRationale;
 use std::borrow::Cow;
 use tempfile::tempdir;
 
@@ -1852,6 +1853,7 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     let mut var_map = VariableMap::new();
     var_map.set(0, Term::new_false());
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic: generic.clone(),
         var_maps: vec![(var_map, generic.get_local_context().clone())],
         preserve_open: false,
@@ -1881,6 +1883,7 @@ fn test_from_concrete_steps_preserves_open_identity_step() {
     let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
 
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic: generic.clone(),
         var_maps: vec![(VariableMap::new(), generic.get_local_context().clone())],
         preserve_open: true,
@@ -1931,6 +1934,7 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
     let generic = kernel.parse_clause("false", &[]);
 
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic,
         var_maps: vec![(
             VariableMap::new(),
@@ -1971,6 +1975,7 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
     );
 
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic,
         var_maps: vec![(
             VariableMap::new(),
@@ -2022,6 +2027,7 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
     bad_map.set(0, Term::new_variable(2));
     let replacement_context = LocalContext::from_types(vec![Term::bool_type()]);
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic,
         var_maps: vec![(bad_map, replacement_context)],
         preserve_open: false,
@@ -2057,6 +2063,7 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
     var_map.set(1, Term::new_true());
     let replacement_context = LocalContext::from_types(vec![Term::type_sort(), Term::bool_type()]);
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic: generic.clone(),
         var_maps: vec![(var_map, replacement_context)],
         preserve_open: false,
@@ -2140,6 +2147,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
     let cert = Certificate::from_concrete_steps(
         "goal".to_string(),
         &[ConcreteStep {
+            rationale: ConcreteRationale::Obvious,
             generic,
             var_maps: vec![(var_map, replacement_context.clone())],
             preserve_open: false,
@@ -2196,6 +2204,7 @@ fn test_from_concrete_steps_serializes_partial_logical_builtin_in_claim_map() {
     var_map.set(2, Term::new_false());
     var_map.set(3, Term::new_true());
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
         preserve_open: false,
@@ -2248,6 +2257,7 @@ fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
     var_map.set(1, kernel.parse_term("eq(Bool)"));
 
     let concrete_steps = vec![ConcreteStep {
+        rationale: ConcreteRationale::Obvious,
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
         preserve_open: false,
