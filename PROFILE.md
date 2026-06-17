@@ -157,6 +157,40 @@ Interpretation:
 └── The committed structured-proof scaffolding does not appear as an active check-mode path in
     this profile, but it is not the format direction we want if the goal is a small JSONL delta.
 
+Targeted boolean-reduction kind probe:
+├── Date: 2026-06-17
+├── Method: temporary checker counters over five slow/representative check targets:
+│   set_lattice, topological_space, set, function_product_units, and function_product_algebra.
+│   Counters tracked candidate counts, per-kind checker-normalization time, insertions, and
+│   post-normalization dedup skips.
+├── Aggregate over those targets: 1,471,939 candidate reductions, 21.505s measured
+│   checker-normalization time, 40,811 inserted reductions, and 1,430,670 dedup skips.
+├── Per-kind normalization-time share:
+│   boolean equality split 29.0%, function inequality to exists 26.8%,
+│   positive conjunction split 15.3%, negative conjunction split 11.2%,
+│   negated forall to exists 9.6%, positive forall open 4.9%, all other kinds 3.2%.
+├── Per-kind candidate-count share:
+│   boolean equality split 30.6%, positive conjunction split 30.2%,
+│   negative conjunction split 14.0%, negated forall to exists 7.7%,
+│   function inequality to exists 6.7%, positive forall open 5.5%, all other kinds 5.3%.
+└── Interpretation: the broad problem is eager closure plus late dedup. The worst cluster is
+    boolean equality/conjunction splitting by volume, while function inequality to exists is much
+    more expensive per candidate and dominates product-algebra-style modules.
+
+Early exact-dedup follow-up:
+├── Change: before checker-normalizing a boolean-reduction trace, skip it if the trace clause is
+│   already in `past_boolean_reductions`. This keeps the existing post-normalization dedup guard,
+│   but avoids the expensive second-stage normalization for candidates that are already exact
+│   known duplicates.
+├── Targeted timings:
+│   set_lattice cached cert time improved from 19.547s to 12.286s, with wall time from 22.69s
+│   to 15.24s. set cached cert time improved from 11.851s to 7.575s, with wall time from
+│   13.86s to 9.47s.
+└── Full check timing: `target/release/acorn check --timing` completed in 42.36s wall, with
+    238.795s summed cached cert checks. Compared with the 2026-06-17 baseline of 47.97s wall
+    and 368.910s summed cached cert checks, this is about 11.7% faster wall-clock and 35.3%
+    less summed certificate-checking time.
+
 Remaining possible improvement areas:
 ├── Reduce boolean-reduction closure cost. Recursive insert_clause_internal ->
 │   insert_boolean_reductions_with_reason dominates the visible certificate-checking profile.

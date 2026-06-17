@@ -292,7 +292,13 @@ impl Checker {
         clause
             .find_boolean_reduction_kinds_with_options(kernel_context, true)
             .into_iter()
-            .filter_map(|(_kind, trace)| self.normalize_checker_trace(&trace, kernel_context))
+            .filter_map(|(_kind, trace)| {
+                if self.past_boolean_reductions.contains(&trace.clause) {
+                    None
+                } else {
+                    self.normalize_checker_trace(&trace, kernel_context)
+                }
+            })
             .collect()
     }
 
