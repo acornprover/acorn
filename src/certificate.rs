@@ -20,7 +20,7 @@ use crate::elaborator::source::Source;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::to_term::{build_type_var_map, lower_type_to_term};
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
+use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -39,6 +39,14 @@ use crate::prover::synthetic::{
 };
 use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Statement, StatementInfo};
+
+const BOOLEAN_REDUCTION_PREFIX: &str = "@br ";
+
+#[derive(Serialize, Deserialize)]
+struct BooleanReductionLine {
+    source: String,
+    result: String,
+}
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
@@ -794,11 +802,14 @@ impl Certificate {
         kernel_context: &KernelContext,
     ) -> Result<Option<Clause>, CodeGenError> {
         match step {
-            CertificateStep::Claim(claim) => Ok(Some(
-                claim
-                    .normalized_specialized_clause(kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?,
-            )),
+            CertificateStep::Claim(claim)
+            | CertificateStep::BooleanReduction(BooleanReductionStep { result: claim, .. }) => {
+                Ok(Some(
+                    claim
+                        .normalized_specialized_clause(kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?,
+                ))
+            }
             CertificateStep::Satisfy(_) => Ok(None),
         }
     }
@@ -821,7 +832,14 @@ impl Certificate {
             }
             _ => {}
         };
-        if let CertificateStep::Claim(claim) = step {
+        let claims: Vec<&Claim> = match step {
+            CertificateStep::Claim(claim) => vec![claim],
+            CertificateStep::BooleanReduction(BooleanReductionStep { source, result }) => {
+                vec![source, result]
+            }
+            CertificateStep::Satisfy(_) => vec![],
+        };
+        for claim in claims {
             let clause = claim
                 .specialized_clause_for_display(kernel_context)
                 .map_err(CodeGenError::GeneratedBadCode)?;
@@ -851,6 +869,9 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         let line = match step {
+            CertificateStep::BooleanReduction(step) => {
+                Self::serialize_boolean_reduction_step(step, generator, kernel_context, bindings)?
+            }
             CertificateStep::Claim(claim)
                 if !claim.clause().get_local_context().is_empty()
                     && claim.var_map().len() == 0
@@ -931,8 +952,38 @@ impl Certificate {
                     ))
                 })
             }
+            CertificateStep::BooleanReduction(_) => Ok(line),
             CertificateStep::Satisfy(_) => Ok(line),
         }
+    }
+
+    fn serialize_boolean_reduction_step(
+        step: &BooleanReductionStep,
+        generator: &mut CodeGenerator,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<String, CodeGenError> {
+        let payload = BooleanReductionLine {
+            source: Self::serialize_certificate_step(
+                &CertificateStep::Claim(step.source.clone()),
+                generator,
+                kernel_context,
+                bindings,
+            )?,
+            result: Self::serialize_certificate_step(
+                &CertificateStep::Claim(step.result.clone()),
+                generator,
+                kernel_context,
+                bindings,
+            )?,
+        };
+        let payload = serde_json::to_string(&payload).map_err(|err| {
+            CodeGenError::GeneratedBadCode(format!(
+                "failed to serialize boolean-reduction certificate payload: {}",
+                err
+            ))
+        })?;
+        Ok(format!("{}{}", BOOLEAN_REDUCTION_PREFIX, payload))
     }
 
     #[cfg(feature = "validate")]
@@ -1008,6 +1059,31 @@ impl Certificate {
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
+        if let Some(payload) = code.strip_prefix(BOOLEAN_REDUCTION_PREFIX) {
+            let payload: BooleanReductionLine = serde_json::from_str(payload).map_err(|err| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "invalid boolean-reduction certificate payload: {}",
+                    err
+                ))
+            })?;
+            let source = Self::parse_boolean_reduction_claim(
+                &payload.source,
+                project,
+                bindings,
+                kernel_context,
+            )?;
+            let result = Self::parse_boolean_reduction_claim(
+                &payload.result,
+                project,
+                bindings,
+                kernel_context,
+            )?;
+            return Ok(CertificateStep::BooleanReduction(BooleanReductionStep {
+                source,
+                result,
+            }));
+        }
+
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new_internal(project, bindings);
         let mut claim_step_from_expr =
@@ -1041,6 +1117,21 @@ impl Certificate {
             StatementInfo::Claim(claim) => claim_step_from_expr(&claim.claim),
             _ => Err(CodeGenError::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
+                code
+            ))),
+        }
+    }
+
+    fn parse_boolean_reduction_claim(
+        code: &str,
+        project: &dyn ProjectLookup,
+        bindings: &mut Cow<BindingMap>,
+        kernel_context: &mut Cow<KernelContext>,
+    ) -> Result<Claim, CodeGenError> {
+        match Self::parse_code_line(code, project, bindings, kernel_context)? {
+            CertificateStep::Claim(claim) => Ok(claim),
+            _ => Err(CodeGenError::GeneratedBadCode(format!(
+                "boolean-reduction certificate payload must contain claim lines, got: {}",
                 code
             ))),
         }
@@ -1806,6 +1897,14 @@ enum WitnessPlacement {
 }
 
 impl<'a> WitnessEmitter<'a> {
+    fn step_result_claim(step: &CertificateStep) -> Option<&Claim> {
+        match step {
+            CertificateStep::Claim(claim) => Some(claim),
+            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => Some(result),
+            CertificateStep::Satisfy(_) => None,
+        }
+    }
+
     /// Precompute the witness steps and the claim positions they should replace.
     fn new(
         ordered_steps: Vec<CertificateStep>,
@@ -1819,6 +1918,9 @@ impl<'a> WitnessEmitter<'a> {
             .iter()
             .map(|step| match step {
                 CertificateStep::Claim(claim) => Some(claim.normalized_generic_clause()),
+                CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
+                    Some(result.normalized_generic_clause())
+                }
                 CertificateStep::Satisfy(_) => None,
             })
             .collect();
@@ -2108,12 +2210,9 @@ impl<'a> WitnessEmitter<'a> {
         let general_clause = witness.general_clause.clone();
         let placement = self.find_witness_placement(symbol, &general_clause, &witness.name)?;
         let justification = match placement {
-            WitnessPlacement::Anchor(index) => {
-                let CertificateStep::Claim(claim) = &self.ordered_steps[index] else {
-                    panic!("claim_clauses only records claim steps");
-                };
-                claim.clone()
-            }
+            WitnessPlacement::Anchor(index) => Self::step_result_claim(&self.ordered_steps[index])
+                .expect("claim_clauses only records claim-producing steps")
+                .clone(),
             WitnessPlacement::Standalone | WitnessPlacement::Replace(_) => {
                 Claim::new(general_clause.clone(), VariableMap::new())
                     .map_err(CodeGenError::GeneratedBadCode)?
@@ -2211,7 +2310,7 @@ impl<'a> WitnessEmitter<'a> {
         assert!(matches!(step, CertificateStep::Satisfy(_)));
         let follow_on_clause = match &step {
             CertificateStep::Satisfy(satisfy_step) => satisfy_step.specialized_clause.clone(),
-            CertificateStep::Claim(_) => unreachable!(),
+            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => unreachable!(),
         };
         self.push_output_step(step)?;
         self.declared.insert(symbol);

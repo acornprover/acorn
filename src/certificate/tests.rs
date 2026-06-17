@@ -16,6 +16,72 @@ fn expect_claim(step: CertificateStep) -> Claim {
 }
 
 #[test]
+fn test_parse_and_check_boolean_reduction_line() {
+    use crate::kernel::checker::{Checker, StepReason};
+
+    let mut project = Project::new_mock();
+    project.mock(
+        "/mock/main.ac",
+        r#"
+        let p: Bool = axiom
+        let q: Bool = axiom
+
+        theorem goal {
+            true
+        }
+        "#,
+    );
+    let module_id = project.load_module_by_name("main").expect("load failed");
+    let lowered = project
+        .get_lowered_module(module_id)
+        .expect("lowered module should be available");
+    let (_goal_id, entry) = lowered
+        .goal_by_name("goal")
+        .expect("lowered goal should be available");
+    let bindings = entry.bindings.clone();
+    let kernel_context = entry.lowered_goal.kernel_context.clone();
+    let payload = BooleanReductionLine {
+        source: "p and q".to_string(),
+        result: "p".to_string(),
+    };
+    let line = format!(
+        "{}{}",
+        BOOLEAN_REDUCTION_PREFIX,
+        serde_json::to_string(&payload).unwrap()
+    );
+
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
+    let step =
+        Certificate::parse_code_line(&line, &project, &mut bindings_cow, &mut kernel_context_cow)
+            .expect("boolean reduction line should parse");
+    assert!(matches!(step, CertificateStep::BooleanReduction(_)));
+
+    let source = expect_claim(
+        Certificate::parse_code_line(
+            "p and q",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("source claim should parse"),
+    )
+    .normalized_specialized_clause(kernel_context_cow.as_ref())
+    .expect("source claim should specialize");
+
+    let mut checker = Checker::new();
+    checker.insert_clause(&source, StepReason::Testing, kernel_context_cow.as_ref());
+    let err = checker
+        .check_cert_steps(&[step], Some(&[line]), kernel_context_cow.as_ref())
+        .expect_err("accepted boolean reduction should only fail the final contradiction check");
+    assert!(
+        err.to_string()
+            .contains("proof does not result in a contradiction"),
+        "unexpected checker error: {err}"
+    );
+}
+
+#[test]
 fn test_save_load_cycle() {
     // Create a temporary directory for testing
     let temp_dir = tempdir().unwrap();

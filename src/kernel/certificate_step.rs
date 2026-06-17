@@ -554,6 +554,35 @@ impl SatisfyStep {
     }
 }
 
+/// A certificate step that validates one explicit boolean reduction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BooleanReductionStep {
+    pub source: Claim,
+    pub result: Claim,
+}
+
+impl BooleanReductionStep {
+    pub fn validate_checker_payload(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.source.validate_checker_payload(kernel_context)?;
+        self.result.validate_checker_payload(kernel_context)?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "validate"))]
+    pub fn validate_normalized_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.source.validate_normalized_shape(kernel_context)?;
+        self.result.validate_normalized_shape(kernel_context)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "validate")]
+    pub fn validate_roundtrip_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
+        self.source.validate_roundtrip_shape(kernel_context)?;
+        self.result.validate_roundtrip_shape(kernel_context)?;
+        Ok(())
+    }
+}
+
 /// A single kernel-level step in certificate generation/checking.
 ///
 /// Parsing and generation both use this representation. Each step corresponds to one
@@ -565,6 +594,9 @@ pub enum CertificateStep {
 
     /// A witness declaration that introduces a named synthetic value/function.
     Satisfy(SatisfyStep),
+
+    /// A declared single boolean-reduction step from a known source claim.
+    BooleanReduction(BooleanReductionStep),
 }
 
 impl CertificateStep {
@@ -572,6 +604,9 @@ impl CertificateStep {
     pub fn validate_normalized_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
         match self {
             CertificateStep::Claim(claim) => claim.validate_normalized_shape(kernel_context),
+            CertificateStep::BooleanReduction(step) => {
+                step.validate_normalized_shape(kernel_context)
+            }
             CertificateStep::Satisfy(step) => {
                 step.justification
                     .validate_normalized_shape(kernel_context)?;
@@ -594,6 +629,9 @@ impl CertificateStep {
     pub fn validate_roundtrip_shape(&self, kernel_context: &KernelContext) -> Result<(), String> {
         match self {
             CertificateStep::Claim(claim) => claim.validate_roundtrip_shape(kernel_context),
+            CertificateStep::BooleanReduction(step) => {
+                step.validate_roundtrip_shape(kernel_context)
+            }
             CertificateStep::Satisfy(step) => {
                 step.justification
                     .validate_roundtrip_shape(kernel_context)?;

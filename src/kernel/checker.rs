@@ -302,6 +302,29 @@ impl Checker {
             .collect()
     }
 
+    fn explicit_boolean_reductions(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Clause> {
+        clause
+            .find_boolean_reduction_kinds_with_options(kernel_context, true)
+            .into_iter()
+            .filter_map(|(_kind, trace)| self.normalize_checker_trace(&trace, kernel_context))
+            .collect()
+    }
+
+    fn boolean_reduces_to(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        self.explicit_boolean_reductions(source, kernel_context)
+            .into_iter()
+            .any(|candidate| candidate == *result)
+    }
+
     fn checker_boolean_reduction_sets(
         &self,
         clause: &Clause,
@@ -840,6 +863,60 @@ impl Checker {
 
                     self.insert_clause(&generic_clause, StepReason::PreviousClaim, &kernel_context);
                     self.insert_clause(&clause, StepReason::PreviousClaim, &kernel_context);
+                }
+                CertificateStep::BooleanReduction(step) => {
+                    step.validate_checker_payload(kernel_context)
+                        .map_err(Error::GeneratedBadCode)?;
+
+                    let source_generic = step.source.normalized_generic_clause();
+                    let source_clause =
+                        Self::instantiate_claim_clause(&step.source, kernel_context)?;
+                    let result_clause =
+                        Self::instantiate_claim_clause(&step.result, kernel_context)?;
+
+                    let source_reason = self
+                        .check_clause_direct(&source_generic, kernel_context)
+                        .or_else(|| self.check_clause_direct(&source_clause, kernel_context));
+
+                    if source_reason.is_none() {
+                        let cert_line_context = code_lines
+                            .and_then(|lines| lines.get(step_index))
+                            .map(|line| {
+                                format!("; certificate line {}: {:?}", step_index + 1, line)
+                            })
+                            .unwrap_or_default();
+                        return Err(Error::GeneratedBadCode(format!(
+                            "Boolean reduction at step {} has unknown source{} (source debug: {:?})",
+                            step_index + 1,
+                            cert_line_context,
+                            source_clause,
+                        )));
+                    }
+
+                    if !self.boolean_reduces_to(&source_clause, &result_clause, kernel_context) {
+                        let cert_line_context = code_lines
+                            .and_then(|lines| lines.get(step_index))
+                            .map(|line| {
+                                format!("; certificate line {}: {:?}", step_index + 1, line)
+                            })
+                            .unwrap_or_default();
+                        return Err(Error::GeneratedBadCode(format!(
+                            "Boolean reduction at step {} does not reduce source to result{} (source debug: {:?}; result debug: {:?})",
+                            step_index + 1,
+                            cert_line_context,
+                            source_clause,
+                            result_clause,
+                        )));
+                    }
+
+                    checked_steps.push(CheckedStep {
+                        clause: result_clause.clone(),
+                        reason: source_reason.unwrap_or(StepReason::PreviousClaim),
+                        code_line: code_lines.and_then(|lines| lines.get(step_index)).cloned(),
+                        prefer_code_line: true,
+                    });
+
+                    self.insert_clause(&result_clause, StepReason::PreviousClaim, kernel_context);
                 }
                 CertificateStep::Satisfy(step) => {
                     step.validate_checker_payload(&mut witness_validation_context)
@@ -1689,7 +1766,9 @@ mod tests {
         .expect("valid satisfy step should parse")
         {
             CertificateStep::Satisfy(step) => step,
-            CertificateStep::Claim(_) => panic!("expected satisfy step"),
+            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => {
+                panic!("expected satisfy step")
+            }
         };
 
         let kernel_context = kernel_context_cow.as_ref();
@@ -1741,7 +1820,9 @@ mod tests {
         .expect("valid satisfy step should parse")
         {
             CertificateStep::Satisfy(step) => step,
-            CertificateStep::Claim(_) => panic!("expected satisfy step"),
+            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => {
+                panic!("expected satisfy step")
+            }
         };
 
         let kernel_context = kernel_context_cow.as_ref();

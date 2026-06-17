@@ -10,7 +10,7 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::{CertificateStep, Claim};
+use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep, Claim};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -19,7 +19,7 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
-use crate::prover::proof::ConcreteStep;
+use crate::prover::proof::{ConcreteRationale, ConcreteStep};
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::TokenType;
 
@@ -1315,6 +1315,9 @@ impl CodeGenerator<'_> {
                 self.value_to_code(&value)
             }
             CertificateStep::Satisfy(step) => self.satisfy_step_to_code(step),
+            CertificateStep::BooleanReduction(_) => Err(Error::GeneratedBadCode(
+                "boolean-reduction certificate steps require certificate serialization".to_string(),
+            )),
         }
     }
 
@@ -1324,6 +1327,47 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
+        if cfg!(feature = "ebr") {
+            if let ConcreteRationale::BooleanReduction { source, .. } = &step.rationale {
+                let mut steps = vec![];
+                for (var_map, replacement_context) in &step.var_maps {
+                    let mut result_steps = vec![];
+                    self.specialization_to_certificate_steps(
+                        &step.generic,
+                        var_map,
+                        replacement_context,
+                        step.preserve_open,
+                        kernel_context,
+                        &mut result_steps,
+                    )?;
+                    let [CertificateStep::Claim(result)] = result_steps.as_slice() else {
+                        return Err(Error::GeneratedBadCode(format!(
+                            "boolean reduction generated unexpected result steps: {:?}",
+                            result_steps
+                        )));
+                    };
+                    let result_clause = result
+                        .normalized_specialized_clause(kernel_context)
+                        .map_err(Error::GeneratedBadCode)?;
+                    if source
+                        .boolean_reductions(kernel_context)
+                        .into_iter()
+                        .any(|candidate| candidate == result_clause)
+                    {
+                        let source = Claim::new(source.clone(), VariableMap::new())
+                            .map_err(Error::GeneratedBadCode)?;
+                        steps.push(CertificateStep::BooleanReduction(BooleanReductionStep {
+                            source,
+                            result: result.clone(),
+                        }));
+                    } else {
+                        steps.extend(result_steps);
+                    }
+                }
+                return Ok(steps);
+            }
+        }
+
         let should_emit = step.should_emit_legacy_cert()
             || (cfg!(feature = "ebr") && step.is_boolean_reduction());
         if !should_emit {

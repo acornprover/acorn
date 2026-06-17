@@ -34,7 +34,7 @@ fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
             VariableMap::new(),
             LocalContext::from_types(vec![Term::bool_type()]),
         )],
-        preserve_open: false,
+        preserve_open: true,
     };
 
     let mut generator = CodeGenerator::new_for_certificate(&bindings);
@@ -44,6 +44,13 @@ fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
 
     if cfg!(feature = "ebr") {
         assert_eq!(steps.len(), 1, "ebr should emit boolean reductions");
+        assert!(
+            matches!(
+                steps.first(),
+                Some(crate::kernel::certificate_step::CertificateStep::BooleanReduction(_))
+            ),
+            "ebr should emit explicit boolean-reduction certificate steps"
+        );
     } else {
         assert!(
             steps.is_empty(),
@@ -211,7 +218,8 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
         .iter()
         .find_map(|step| match step {
             crate::kernel::certificate_step::CertificateStep::Claim(claim) => Some(claim),
-            crate::kernel::certificate_step::CertificateStep::Satisfy(_) => None,
+            crate::kernel::certificate_step::CertificateStep::Satisfy(_)
+            | crate::kernel::certificate_step::CertificateStep::BooleanReduction(_) => None,
         })
         .expect("expected claim step");
     let mapped_value = claim
