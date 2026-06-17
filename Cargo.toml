@@ -51,6 +51,8 @@ tar = "0.4.42"
 
 [features]
 default = []
+# Emit boolean-reduction concrete steps into generated certificates.
+ebr = []
 # Enable thorough type validation. This is always on in tests, but can be
 # enabled in release builds with --features validate for debugging.
 validate = []

@@ -280,14 +280,22 @@ fn test_proving_exact_clause_match() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    assert_eq!(
-        c.proof.unwrap(),
+    let expected = if cfg!(feature = "ebr") {
+        vec![
+            "not f(Foo.foo) and not g(Foo.foo)",
+            "not h(Foo.foo)",
+            "not g(Foo.foo)",
+            "not f(Foo.foo)",
+            "f(Foo.foo)",
+        ]
+    } else {
         vec![
             "not f(Foo.foo) and not g(Foo.foo)",
             "not h(Foo.foo)",
             "f(Foo.foo)",
         ]
-    );
+    };
+    assert_eq!(c.proof.unwrap(), expected);
 }
 
 #[test]

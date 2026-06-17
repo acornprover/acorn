@@ -5,6 +5,54 @@ use crate::project::Project;
 use crate::syntax::expression::Expression;
 
 #[test]
+fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+    use crate::kernel::variable_map::VariableMap;
+    use crate::processor::Processor;
+    use crate::prover::proof::{ConcreteRationale, ConcreteStep};
+
+    let (_processor, bindings, normalized_goal) = Processor::test_goal("theorem goal { true }");
+    let mut kernel_context = normalized_goal.kernel_context;
+    let source = Clause::new(
+        vec![Literal::positive(Term::and(
+            Term::new_variable(0),
+            Term::new_true(),
+        ))],
+        &LocalContext::from_types(vec![Term::bool_type()]),
+    );
+    let reduced = kernel_context.parse_clause("x0", &["Bool"]);
+    let step = ConcreteStep {
+        rationale: ConcreteRationale::BooleanReduction {
+            source,
+            emit_legacy: false,
+        },
+        generic: reduced,
+        var_maps: vec![(
+            VariableMap::new(),
+            LocalContext::from_types(vec![Term::bool_type()]),
+        )],
+        preserve_open: false,
+    };
+
+    let mut generator = CodeGenerator::new_for_certificate(&bindings);
+    let steps = generator
+        .concrete_step_to_certificate_steps(&step, &mut kernel_context)
+        .expect("certificate step generation should succeed");
+
+    if cfg!(feature = "ebr") {
+        assert_eq!(steps.len(), 1, "ebr should emit boolean reductions");
+    } else {
+        assert!(
+            steps.is_empty(),
+            "default mode should preserve legacy skipping"
+        );
+    }
+}
+
+#[test]
 fn test_foreign_scoped_constant_in_claim_codegen_is_rejected() {
     use crate::elaborator::acorn_type::AcornType;
     use crate::elaborator::names::ConstantName;

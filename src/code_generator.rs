@@ -1324,7 +1324,9 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
-        if !step.should_emit_legacy_cert() {
+        let should_emit = step.should_emit_legacy_cert()
+            || (cfg!(feature = "ebr") && step.is_boolean_reduction());
+        if !should_emit {
             return Ok(vec![]);
         }
         let mut steps = vec![];
