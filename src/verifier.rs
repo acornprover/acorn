@@ -827,7 +827,6 @@ mod tests {
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
     use std::io::Read;
-    use std::io::Write;
 
     /// Creates a standard Acorn project layout with acorn.toml, src/, and build/ directories.
     /// Returns (project dir, src_dir, build_dir) for use in tests.
@@ -866,23 +865,26 @@ mod tests {
 
     fn save_cert_store(path: &ChildPath, store: CertificateStore) {
         std::fs::create_dir_all(path.path().parent().unwrap()).unwrap();
-        let file = std::fs::File::create(path.path()).unwrap();
-        let mut writer = std::io::BufWriter::new(file);
-        for cert in store.certs {
-            let json = if cert.gtf.is_some() {
-                serde_json::to_string(&cert).unwrap()
-            } else if cert.proof.is_some() {
-                serde_json::json!({
-                    "goal": cert.goal,
-                    "proof": cert.proof,
-                })
-                .to_string()
-            } else {
-                serde_json::to_string(&cert).unwrap()
-            };
-            writeln!(writer, "{}", json).unwrap();
-        }
-        writer.flush().unwrap();
+        store.save(path.path()).unwrap();
+    }
+
+    fn cert_from_lines(goal: &str, lines: &[&str]) -> Certificate {
+        Certificate::new(
+            goal.to_string(),
+            crate::certificate_trace::ProofTrace {
+                steps: lines
+                    .iter()
+                    .map(|line| crate::certificate_trace::TraceStep::claim((*line).to_string()))
+                    .collect(),
+            },
+        )
+    }
+
+    fn empty_cert(goal: &str) -> Certificate {
+        Certificate::new(
+            goal.to_string(),
+            crate::certificate_trace::ProofTrace { steps: vec![] },
+        )
     }
 
     fn log_text(output: &VerifierOutput) -> String {
@@ -1798,10 +1800,7 @@ mod tests {
         save_cert_store(
             &cert_path,
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "goal".to_string(),
-                    vec!["lib(util).contradiction".to_string()],
-                )],
+                certs: vec![cert_from_lines("goal", &["lib(util).contradiction"])],
             },
         );
 
@@ -1881,10 +1880,7 @@ mod tests {
         save_cert_store(
             &cert_path,
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "simple_truth".to_string(),
-                    vec!["let w0: Bool satisfy { true }".to_string()],
-                )],
+                certs: vec![cert_from_lines("simple_truth", &["true"])],
             },
         );
 
@@ -1904,7 +1900,6 @@ mod tests {
         let loaded = CertificateStore::load(cert_path.path()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
         assert_eq!(loaded.certs[0].goal, "simple_truth");
-        assert_eq!(loaded.certs[0].proof, None);
         assert_eq!(loaded.certs[0].proof_step_count(), Some(0));
     }
 
@@ -1930,11 +1925,8 @@ mod tests {
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
                 certs: vec![
-                    Certificate::new(
-                        "benchmark".to_string(),
-                        vec!["dummy proof step".to_string()],
-                    ),
-                    Certificate::new("skipped".to_string(), vec![]),
+                    cert_from_lines("benchmark", &["dummy proof step"]),
+                    empty_cert("skipped"),
                 ],
             },
         );
@@ -1989,10 +1981,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "goal".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("goal", &["dummy proof step"])],
             },
         );
 
@@ -2052,10 +2041,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "excluded_middle".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("excluded_middle", &["dummy proof step"])],
             },
         );
 
@@ -2159,10 +2145,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "p or q".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("p or q", &["dummy proof step"])],
             },
         );
 
@@ -2236,10 +2219,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "first".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("first", &["dummy proof step"])],
             },
         );
 
@@ -2294,8 +2274,8 @@ mod tests {
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
                 certs: vec![
-                    Certificate::new("first".to_string(), vec!["dummy proof step".to_string()]),
-                    Certificate::new("second".to_string(), vec!["dummy proof step".to_string()]),
+                    cert_from_lines("first", &["dummy proof step"]),
+                    cert_from_lines("second", &["dummy proof step"]),
                 ],
             },
         );
@@ -2354,19 +2334,13 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "foo_goal".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("foo_goal", &["dummy proof step"])],
             },
         );
         save_cert_store(
             &cert_for_source(&src, "bar.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "bar_goal".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("bar_goal", &["dummy proof step"])],
             },
         );
 
@@ -2422,10 +2396,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "p or q".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("p or q", &["dummy proof step"])],
             },
         );
 
@@ -2499,7 +2470,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new("p or q".to_string(), vec![])],
+                certs: vec![empty_cert("p or q")],
             },
         );
 
@@ -2574,10 +2545,7 @@ mod tests {
         save_cert_store(
             &cert_for_source(&src, "foo.ac"),
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "p or q".to_string(),
-                    vec!["dummy proof step".to_string()],
-                )],
+                certs: vec![cert_from_lines("p or q", &["dummy proof step"])],
             },
         );
 
@@ -2632,10 +2600,7 @@ mod tests {
         save_cert_store(
             &cert_path,
             CertificateStore {
-                certs: vec![Certificate::new(
-                    "simple_truth".to_string(),
-                    vec!["let w0: Bool satisfy { true }".to_string()],
-                )],
+                certs: vec![cert_from_lines("simple_truth", &["true"])],
             },
         );
         let original = std::fs::read_to_string(cert_path.path()).unwrap();
@@ -2662,10 +2627,7 @@ mod tests {
         let loaded = CertificateStore::load(cert_path.path()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
         assert_eq!(loaded.certs[0].goal, "simple_truth");
-        assert_eq!(
-            loaded.certs[0].proof,
-            Some(vec!["let w0: Bool satisfy { true }".to_string()])
-        );
+        assert_eq!(loaded.certs[0].proof_step_count(), Some(1));
     }
 
     #[test]

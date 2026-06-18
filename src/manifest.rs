@@ -195,9 +195,9 @@ impl PackageManifest {
     }
 }
 
-/// The manifest structure that stores module hashes
-/// This is the legacy root build/manifest.json format. New cache records are package-local
-/// PackageManifest files; this remains for project_format_version fallback during migration.
+/// Project format version helper and old root manifest representation.
+///
+/// Current cache records are package-local `PackageManifest` files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Version of the manifest format

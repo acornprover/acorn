@@ -7,6 +7,7 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
+use crate::certificate_trace::ProofTrace;
 use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::TypeParam;
@@ -63,33 +64,78 @@ pub struct CertificateLine {
     pub reason: StepReason,
 }
 
-/// A successfully checked certificate, including how many proof lines were consumed.
+/// A successfully checked certificate, including how many proof steps were consumed.
 #[derive(Debug, Clone)]
 pub struct CheckedCertificate {
     pub lines: Vec<CertificateLine>,
     pub consumed_proof_steps: usize,
 }
 
-fn value_to_code(
-    value: &AcornValue,
-    bindings: &Cow<BindingMap>,
-    code_line: Option<&str>,
-) -> String {
-    // First try normal code generation.
-    let mut code_gen = CodeGenerator::new_for_certificate(bindings);
-    if let Ok(code) = code_gen.value_to_code(&value) {
-        return code;
-    }
-
-    // If we have the original certificate line, prefer it over reconstructed internal output.
-    if let Some(code_line) = code_line {
-        return code_line.to_string();
-    }
-
-    "<missing>".to_string()
+#[derive(Debug, Clone)]
+pub(crate) struct SerializedCertificateStep {
+    pub code: String,
 }
 
-/// A proof certificate containing the concrete proof steps as strings.
+/// A certificate assembled from prover output before final trace construction.
+#[derive(Clone)]
+pub struct CertificateDraft {
+    goal: String,
+    steps: Vec<SerializedCertificateStep>,
+    kernel_context: KernelContext,
+}
+
+impl std::fmt::Debug for CertificateDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateDraft")
+            .field("goal", &self.goal)
+            .field("steps", &self.steps.len())
+            .finish()
+    }
+}
+
+impl CertificateDraft {
+    pub fn serialized_lines(&self) -> Vec<String> {
+        self.steps.iter().map(|step| step.code.clone()).collect()
+    }
+
+    pub fn into_certificate(
+        self,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+    ) -> Result<Certificate, CodeGenError> {
+        let kernel_context = self.kernel_context;
+        let trace = ProofTrace::from_certificate_steps_checked(
+            &self.steps,
+            checker.clone(),
+            project,
+            bindings.clone(),
+            Cow::Owned(kernel_context.clone()),
+        )?;
+        trace.check_with_usage(
+            checker.clone(),
+            project,
+            bindings.clone(),
+            Cow::Owned(kernel_context.clone()),
+        )?;
+        let pruned = trace.without_unreferenced_auxiliary_steps();
+        let trace = if pruned.steps.len() < trace.steps.len()
+            && pruned
+                .check_with_usage(checker, project, bindings, Cow::Owned(kernel_context))
+                .is_ok()
+        {
+            pruned
+        } else {
+            trace
+        };
+        Ok(Certificate {
+            goal: self.goal,
+            proof: Some(trace),
+        })
+    }
+}
+
+/// A proof certificate containing a compact checker trace.
 ///
 /// # Design: Robustness to Refactoring
 ///
@@ -99,38 +145,24 @@ fn value_to_code(
 ///   still work because they use names, not numeric IDs.
 /// - **Adding/removing definitions**: Unrelated changes shouldn't invalidate certificates.
 ///
-/// This is achieved by using string-based proof steps that reference constants by name.
+/// This is achieved by using string-based trace steps that reference constants by name.
 /// When a certificate is checked, names are resolved to current IDs at parse time.
 /// This avoids the "brittleness" problem where machine-generated proofs break due to
 /// unrelated codebase changes.
 ///
-/// The string format also allows the checker to figure out *how* to verify each claim
-/// (which theorems to use, etc.) rather than having the certificate spell it out.
-/// This means certificates don't break when the *justification* for a claim changes,
-/// only when the claim itself becomes unprovable.
+/// Each trace step names the checker procedure used to verify it, while still
+/// using Acorn-readable strings for the clauses.
 ///
 /// See also: `ConcreteStep` for the in-memory representation with resolved IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Certificate {
     /// The name of the goal that was proved
     pub goal: String,
 
-    /// The proof steps as strings.
-    /// None indicates no proof exists for this goal.
-    /// This is useful as a placeholder to indicate that we need to find a proof.
-    /// Some(vec![]) indicates a trivial proof requiring no steps.
-    #[serde(skip_serializing)]
-    pub proof: Option<Vec<String>>,
-
-    /// Explicit checker trace.
-    #[serde(
-        rename = "p",
-        alias = "g",
-        alias = "gtf",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub gtf: Option<crate::gtf::GtfProof>,
+    /// The proof trace. None indicates no proof exists for this goal.
+    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<ProofTrace>,
 }
 
 impl Certificate {
@@ -287,7 +319,7 @@ impl Certificate {
         let generic_value =
             Self::rename_generic_type_params_in_value(&value.genericize(&type_params), &renames);
         let (generic_value, value_args) =
-            Self::abstract_closed_value_args_for_gtf(&generic_value, &value, bindings);
+            Self::abstract_closed_value_args_for_trace(&generic_value, &value, bindings);
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let value_arg_names = value_args
             .iter()
@@ -323,7 +355,8 @@ impl Certificate {
         if value_args.is_empty() {
             if type_param_decl_codes.is_empty() {
                 return Err(CodeGenError::GeneratedBadCode(
-                    "closed GTF fallback found no type or value parameters".to_string(),
+                    "closed certificate trace fallback found no type or value parameters"
+                        .to_string(),
                 ));
             }
             Ok(format!(
@@ -588,7 +621,7 @@ impl Certificate {
         }
     }
 
-    fn should_abstract_closed_gtf_constant(
+    fn should_abstract_closed_certificate_trace_constant(
         constant: &ConstantInstance,
         _bindings: &BindingMap,
         can_abstract: bool,
@@ -596,7 +629,7 @@ impl Certificate {
         can_abstract && constant.instance_type.has_generic()
     }
 
-    fn abstract_closed_value_args_for_gtf(
+    fn abstract_closed_value_args_for_trace(
         generic_value: &AcornValue,
         specialized_value: &AcornValue,
         bindings: &BindingMap,
@@ -623,7 +656,7 @@ impl Certificate {
         ) -> AcornValue {
             match generic_value {
                 AcornValue::Constant(constant)
-                    if Certificate::should_abstract_closed_gtf_constant(
+                    if Certificate::should_abstract_closed_certificate_trace_constant(
                         constant,
                         bindings,
                         can_abstract,
@@ -941,14 +974,14 @@ impl Certificate {
         (value, args)
     }
 
-    pub(crate) fn serialize_closed_clause_for_gtf(
+    pub(crate) fn serialize_closed_clause_for_trace(
         clause: &Clause,
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         let claim = Claim::new(clause.clone(), VariableMap::new()).map_err(|err| {
             CodeGenError::GeneratedBadCode(format!(
-                "{} [while preparing closed GTF clause {}]",
+                "{} [while preparing closed certificate trace clause {}]",
                 err, clause
             ))
         })?;
@@ -982,31 +1015,23 @@ impl Certificate {
         candidates.into_iter().next().map(|(_, ty)| ty)
     }
 
-    /// Create a new certificate with proof steps
-    pub fn new(goal: String, proof: Vec<String>) -> Self {
+    /// Create a new certificate with a proof trace.
+    pub fn new(goal: String, proof: ProofTrace) -> Self {
         Certificate {
             goal,
             proof: Some(proof),
-            gtf: None,
         }
     }
 
     /// Create a placeholder certificate with no proof
     pub fn placeholder(goal: String) -> Self {
-        Certificate {
-            goal,
-            proof: None,
-            gtf: None,
-        }
+        Certificate { goal, proof: None }
     }
 
     /// Trim this certificate's proof to the consumed prefix.
     pub fn trim_to_consumed_prefix(mut self, keep_steps: usize) -> Self {
         if let Some(proof) = &mut self.proof {
-            proof.truncate(keep_steps);
-        }
-        if let Some(gtf) = &mut self.gtf {
-            gtf.steps.truncate(keep_steps);
+            proof.steps.truncate(keep_steps);
         }
         self
     }
@@ -1019,26 +1044,23 @@ impl Certificate {
     /// Number of serialized checker steps carried by this certificate, if it has a proof.
     pub fn proof_step_count(&self) -> Option<usize> {
         if let Some(proof) = &self.proof {
-            return Some(proof.len());
-        }
-        if let Some(gtf) = &self.gtf {
-            return Some(gtf.steps.len());
+            return Some(proof.steps.len());
         }
         None
     }
 
-    /// Convert concrete proof steps to a Certificate (string format).
+    /// Convert concrete proof steps to a draft certificate.
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
     /// Requires the kernel_context (to quote clauses)
     /// and the bindings (to generate readable names).
-    pub fn from_concrete_steps(
+    pub fn draft_from_concrete_steps(
         goal: String,
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<Certificate, CodeGenError> {
-        Self::from_concrete_steps_with_witnesses(
+    ) -> Result<CertificateDraft, CodeGenError> {
+        Self::draft_from_concrete_steps_with_witnesses(
             goal,
             concrete_steps,
             kernel_context,
@@ -1048,13 +1070,13 @@ impl Certificate {
     }
 
     /// Serialize a proof while optionally emitting prover-generated named witnesses.
-    pub fn from_concrete_steps_with_witnesses(
+    pub fn draft_from_concrete_steps_with_witnesses(
         goal: String,
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
         witness_registry: Option<&WitnessRegistry>,
-    ) -> Result<Certificate, CodeGenError> {
+    ) -> Result<CertificateDraft, CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
@@ -1089,19 +1111,20 @@ impl Certificate {
             };
         Self::reorder_late_claim_supports(&mut ordered_steps, &generation_kernel_context);
 
-        let mut answer = Vec::new();
+        let mut steps = Vec::new();
         for step in &ordered_steps {
-            answer.push(Self::serialize_certificate_step(
+            let code = Self::serialize_certificate_step(
                 step,
                 &mut generator,
                 &generation_kernel_context,
                 bindings,
-            )?);
+            )?;
+            steps.push(SerializedCertificateStep { code });
         }
-        Ok(Certificate {
+        Ok(CertificateDraft {
             goal,
-            proof: Some(answer),
-            gtf: None,
+            steps,
+            kernel_context: generation_kernel_context,
         })
     }
 
@@ -1726,7 +1749,7 @@ impl Certificate {
         Self::serialize_claim_step(claim, kernel_context, bindings)
     }
 
-    fn local_type_param_infos_for_gtf(
+    fn local_type_param_infos_for_trace(
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Vec<(TypeParam, AcornType)> {
@@ -1756,13 +1779,13 @@ impl Certificate {
         params
     }
 
-    pub(crate) fn serialize_clause_for_gtf(
+    pub(crate) fn serialize_clause_for_trace(
         clause: &Clause,
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<(String, bool), CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
-        let generic_params = Self::local_type_param_infos_for_gtf(clause, kernel_context);
+        let generic_params = Self::local_type_param_infos_for_trace(clause, kernel_context);
         let type_param_names = generic_params
             .iter()
             .map(|(param, _)| param.name.clone())
@@ -1786,7 +1809,7 @@ impl Certificate {
                 .map(|code| (code, true))
                 .map_err(|err| {
                     CodeGenError::GeneratedBadCode(format!(
-                        "{} [while serializing GTF generic clause {}]",
+                        "{} [while serializing certificate trace generic clause {}]",
                         err, clause
                     ))
                 });
@@ -1795,7 +1818,7 @@ impl Certificate {
         ClaimCodec::ensure_claim_code_parses_as_claim(body_code)
             .map_err(|err| {
                 CodeGenError::GeneratedBadCode(format!(
-                    "{} [while serializing GTF clause {}]",
+                    "{} [while serializing certificate trace clause {}]",
                     err, clause
                 ))
             })
@@ -2409,62 +2432,13 @@ impl Certificate {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
     }
 
-    pub fn migrate_legacy_proof_to_gtf(
+    fn check_with_usage_internal(
         &self,
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
-        type_params: &[TypeParam],
-    ) -> Result<Certificate, CodeGenError> {
-        if self.gtf.is_some() && self.proof.is_none() {
-            return Ok(Certificate {
-                goal: self.goal.clone(),
-                proof: None,
-                gtf: self.gtf.clone(),
-            });
-        }
-        let Some(proof) = &self.proof else {
-            return Err(CodeGenError::NoProof);
-        };
-        let gtf = crate::gtf::GtfProof::from_legacy_proof_checked(
-            proof,
-            checker.clone(),
-            project,
-            bindings.clone(),
-            kernel_context.clone(),
-            type_params,
-        )?;
-        gtf.check_with_usage(
-            checker.clone(),
-            project,
-            bindings.clone(),
-            kernel_context.clone(),
-        )?;
-        let pruned = gtf.without_unreferenced_auxiliary_steps();
-        let gtf = if pruned.steps.len() < gtf.steps.len()
-            && pruned
-                .check_with_usage(checker, project, bindings, kernel_context)
-                .is_ok()
-        {
-            pruned
-        } else {
-            gtf
-        };
-        Ok(Certificate {
-            goal: self.goal.clone(),
-            proof: None,
-            gtf: Some(gtf),
-        })
-    }
-
-    fn check_with_usage_internal(
-        &self,
-        mut checker: Checker,
-        project: &dyn ProjectLookup,
-        mut bindings: Cow<BindingMap>,
-        mut kernel_context: Cow<KernelContext>,
-        validate_generated: bool,
+        _validate_generated: bool,
     ) -> Result<CheckedCertificate, CodeGenError> {
         if checker.has_contradiction() {
             return Ok(CheckedCertificate {
@@ -2472,44 +2446,10 @@ impl Certificate {
                 consumed_proof_steps: 0,
             });
         }
-        if let Some(gtf) = &self.gtf {
-            return gtf.check_with_usage(checker, project, bindings, kernel_context);
-        }
         let Some(proof) = &self.proof else {
             return Err(CodeGenError::NoProof);
         };
-        let cert_steps = Self::parse_cert_steps_internal(
-            proof,
-            project,
-            &mut bindings,
-            &mut kernel_context,
-            validate_generated,
-        )?;
-        let (checked_steps, consumed_proof_steps) =
-            checker.check_cert_steps(&cert_steps, Some(proof), &kernel_context)?;
-        let lines = checked_steps
-            .into_iter()
-            .map(|checked_step| {
-                let value = kernel_context.quote_clause(&checked_step.clause, None, None, false);
-                let statement = if checked_step.prefer_code_line {
-                    checked_step
-                        .code_line
-                        .clone()
-                        .unwrap_or_else(|| value_to_code(&value, &bindings, None))
-                } else {
-                    value_to_code(&value, &bindings, checked_step.code_line.as_deref())
-                };
-                CertificateLine {
-                    value,
-                    statement,
-                    reason: checked_step.reason,
-                }
-            })
-            .collect();
-        Ok(CheckedCertificate {
-            lines,
-            consumed_proof_steps,
-        })
+        proof.check_with_usage(checker, project, bindings, kernel_context)
     }
 
     #[cfg(feature = "validate")]
@@ -2554,16 +2494,6 @@ impl CertificateStore {
         let mut writer = BufWriter::new(file);
 
         for cert in &self.certs {
-            if cert.proof.is_some() && cert.gtf.is_none() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "certificate for goal {:?} has only a legacy proof; run GTF migration before saving",
-                        cert.goal
-                    ),
-                )
-                .into());
-            }
             let json = serde_json::to_string(cert)?;
             writeln!(writer, "{}", json)?;
         }

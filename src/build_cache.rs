@@ -51,11 +51,7 @@ impl BuildCache {
 
     /// Load a build cache from package-local certificate and manifest files.
     /// Project checks the project format version before loading the cache.
-    pub fn load(
-        src_dir: PathBuf,
-        build_dir: PathBuf,
-        load_legacy_cache: bool,
-    ) -> Result<Self, ManifestError> {
+    pub fn load(src_dir: PathBuf, _build_dir: PathBuf) -> Result<Self, ManifestError> {
         let mut cache = HashMap::new();
         let mut manifests = HashMap::new();
 
@@ -102,67 +98,11 @@ impl BuildCache {
             }
         }
 
-        let mut build_cache = BuildCache {
+        Ok(BuildCache {
             cache,
             manifests,
             src_dir,
-        };
-
-        if load_legacy_cache {
-            build_cache.load_legacy_certificates(&build_dir)?;
-        }
-
-        Ok(build_cache)
-    }
-
-    fn load_legacy_certificates(&mut self, build_dir: &Path) -> Result<(), ManifestError> {
-        if !build_dir.exists() {
-            return Ok(());
-        }
-
-        for entry in WalkDir::new(build_dir).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(descriptor) = Self::legacy_descriptor_for_cert_path(build_dir, path) else {
-                continue;
-            };
-            let Some(source_path) = self.source_path_for_descriptor(&descriptor) else {
-                continue;
-            };
-            if !source_path.is_file() || self.is_package_interface_path(&source_path) {
-                continue;
-            }
-            if self.cache.contains_key(&descriptor) {
-                continue;
-            }
-            if let Ok(cert_store) = CertificateStore::load(path) {
-                self.cache.insert(descriptor, cert_store);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn legacy_descriptor_for_cert_path(
-        build_dir: &Path,
-        cert_path: &Path,
-    ) -> Option<ModuleDescriptor> {
-        let relative = cert_path.strip_prefix(build_dir).ok()?;
-        let without_extension = relative.with_extension("");
-        let parts = without_extension
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(ModuleDescriptor::Name(parts))
-        }
+        })
     }
 
     fn cert_path_for_source_path(source_path: &Path) -> Option<PathBuf> {
@@ -607,26 +547,5 @@ mod tests {
                 .expect("package root should exist"),
             src
         );
-    }
-
-    #[test]
-    fn legacy_build_certificates_load_for_format_migration() {
-        let temp = tempfile::tempdir().unwrap();
-        let src = temp.path().join("src");
-        let build = temp.path().join("build");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::create_dir_all(&build).unwrap();
-        std::fs::write(src.join("foo.ac"), "theorem goal { true }\n").unwrap();
-        std::fs::write(build.join("foo.jsonl"), r#"{"goal":"goal","proof":[]}"#).unwrap();
-
-        let new_only = BuildCache::load(src.clone(), build.clone(), false).unwrap();
-        assert!(new_only
-            .get_certificates(&ModuleDescriptor::name("foo"))
-            .is_none());
-
-        let migrated = BuildCache::load(src, build, true).unwrap();
-        assert!(migrated
-            .get_certificates(&ModuleDescriptor::name("foo"))
-            .is_some());
     }
 }

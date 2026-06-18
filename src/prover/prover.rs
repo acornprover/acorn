@@ -11,7 +11,6 @@ use super::proof::Proof;
 use super::scorer::{ScoringConfig, ScoringPolicy};
 use super::synthetic::WitnessRegistry;
 use super::trace::{SearchTrace, TraceActivatedStepRecord, TraceSearchMeta};
-use crate::certificate::Certificate;
 use crate::code_generator::{CodeGenerator, Error};
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
@@ -573,16 +572,14 @@ impl Prover {
         Some(proof)
     }
 
-    /// Generate a certificate for the goal.
-    /// If a proof was found, creates a certificate with the proof.
-    /// If no proof was found, creates a placeholder certificate with no proof.
+    /// Generate a draft certificate for the goal.
     /// If `print` is true, we print the proof.
-    pub fn make_cert(
+    pub fn make_certificate_draft(
         &self,
         bindings: &BindingMap,
         kernel_context: &KernelContext,
         print: bool,
-    ) -> Result<Certificate, Error> {
+    ) -> Result<crate::certificate::CertificateDraft, Error> {
         let goal = self
             .goal
             .as_ref()
@@ -598,7 +595,7 @@ impl Prover {
             self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }
 
-        proof.make_cert(goal.name.clone(), cert_bindings.as_ref())
+        proof.make_certificate_draft(goal.name.clone(), cert_bindings.as_ref())
     }
 
     fn report_equality_graph_contradiction(

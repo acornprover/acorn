@@ -1366,8 +1366,7 @@ impl CodeGenerator<'_> {
             return Ok(steps);
         }
 
-        let should_emit = step.should_emit_legacy_cert() || step.is_boolean_reduction();
-        if !should_emit {
+        if !step.should_emit_certificate_step() {
             return Ok(vec![]);
         }
         let mut steps = vec![];

@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn older_manifest_version_is_back_compat_fallback() {
+    fn root_build_manifest_version_is_ignored() {
         let temp_dir = tempfile::tempdir().expect("temp directory should be created");
         let src_dir = temp_dir.path().join("src");
         let build_dir = temp_dir.path().join("build");
@@ -1020,28 +1020,8 @@ mod tests {
         )
         .expect("manifest should be written");
 
-        let error = match Project::new(src_dir.clone(), build_dir.clone(), ProjectConfig::default())
-        {
-            Ok(_) => std::panic!("cache writes should require --update-version"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            ProjectError::Manifest(ManifestError::VersionTooOld { found, supported })
-                if found == old_version && supported == Manifest::current_version()
-        ));
-
-        let read_only_config = ProjectConfig {
-            write_cache: false,
-            ..ProjectConfig::default()
-        };
-        assert!(Project::new(src_dir.clone(), build_dir.clone(), read_only_config).is_ok());
-
-        let update_config = ProjectConfig {
-            update_version: true,
-            ..ProjectConfig::default()
-        };
-        assert!(Project::new(src_dir, build_dir, update_config).is_ok());
+        Project::new(src_dir, build_dir, ProjectConfig::default())
+            .expect("root build manifest should no longer determine project format version");
     }
 
     #[test]
@@ -1578,15 +1558,11 @@ impl Project {
         })
     }
 
-    fn load_project_format_version(src_dir: &Path, build_dir: &Path) -> Result<u32, ProjectError> {
+    fn load_project_format_version(src_dir: &Path, _build_dir: &Path) -> Result<u32, ProjectError> {
         if let Some(acorn_toml) = Self::acorn_toml_path_for_src_dir(src_dir) {
             if let Some(version) = Self::load_project_format_version_from_acorn_toml(&acorn_toml)? {
                 return Ok(version);
             }
-        }
-
-        if let Ok(manifest) = Manifest::load(build_dir) {
-            return Ok(manifest.version);
         }
 
         Ok(Manifest::current_version())
@@ -1642,8 +1618,7 @@ impl Project {
         // manifest entries from other modules during partial builds).
         let cache_load_start = std::time::Instant::now();
         let build_cache = if config.read_cache || config.write_cache {
-            let load_legacy_cache = project_format_version < Manifest::current_version();
-            BuildCache::load(src_dir.clone(), build_dir.clone(), load_legacy_cache)?
+            BuildCache::load(src_dir.clone(), build_dir.clone())?
         } else {
             BuildCache::new(src_dir.clone(), build_dir.clone())
         };

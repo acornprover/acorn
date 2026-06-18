@@ -5,7 +5,7 @@ use crate::project::Project;
 use crate::syntax::expression::Expression;
 
 #[test]
-fn test_non_legacy_boolean_reduction_emission_is_default() {
+fn test_boolean_reduction_emission_is_default() {
     use crate::kernel::clause::Clause;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -25,10 +25,7 @@ fn test_non_legacy_boolean_reduction_emission_is_default() {
     );
     let reduced = kernel_context.parse_clause("x0", &["Bool"]);
     let step = ConcreteStep {
-        rationale: ConcreteRationale::BooleanReduction {
-            source,
-            emit_legacy: false,
-        },
+        rationale: ConcreteRationale::BooleanReduction { source },
         generic: reduced,
         var_maps: vec![(
             VariableMap::new(),
@@ -42,13 +39,17 @@ fn test_non_legacy_boolean_reduction_emission_is_default() {
         .concrete_step_to_certificate_steps(&step, &mut kernel_context)
         .expect("certificate step generation should succeed");
 
-    assert_eq!(steps.len(), 1, "GTF should emit boolean reductions");
+    assert_eq!(
+        steps.len(),
+        1,
+        "certificate trace should emit boolean reductions"
+    );
     assert!(
         matches!(
             steps.first(),
             Some(crate::kernel::certificate_step::CertificateStep::BooleanReduction(_))
         ),
-        "GTF should emit explicit boolean-reduction certificate steps"
+        "certificate trace should emit explicit boolean-reduction certificate steps"
     );
 }
 

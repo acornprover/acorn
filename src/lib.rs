@@ -1,6 +1,7 @@
 pub mod build_cache;
 pub mod builder;
 pub mod certificate;
+pub mod certificate_trace;
 pub mod claim_codec;
 pub mod code_generator;
 pub mod common;
@@ -8,7 +9,6 @@ pub mod doc_generator;
 pub mod elaborator;
 pub mod exporter;
 pub mod goal_partition;
-pub mod gtf;
 pub mod interfaces;
 pub mod kernel;
 pub mod lint;

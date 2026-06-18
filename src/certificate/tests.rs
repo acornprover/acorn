@@ -88,18 +88,14 @@ fn test_save_load_cycle() {
     let file_path = temp_dir.path().join("test_certs.jsonl");
 
     fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
-        let gtf = crate::gtf::GtfProof {
+        let trace = crate::certificate_trace::ProofTrace {
             steps: proof
                 .iter()
                 .cloned()
-                .map(crate::gtf::GtfStep::claim)
+                .map(crate::certificate_trace::TraceStep::claim)
                 .collect(),
         };
-        Certificate {
-            goal,
-            proof: Some(proof),
-            gtf: Some(gtf),
-        }
+        Certificate::new(goal, trace)
     }
 
     // Create some test certificates
@@ -139,8 +135,7 @@ fn test_save_load_cycle() {
 
     for (orig, load) in original.certs.iter().zip(loaded.certs.iter()) {
         assert_eq!(orig.goal, load.goal);
-        assert_eq!(load.proof, None);
-        assert_eq!(orig.gtf, load.gtf);
+        assert_eq!(orig.proof, load.proof);
         assert_eq!(orig.proof_step_count(), load.proof_step_count());
     }
 
@@ -1861,17 +1856,24 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
     );
     assert_eq!(outcome, Outcome::Success);
 
-    let cert = processor
+    let draft = processor
         .prover()
-        .make_cert(&bindings, &normalized_goal.kernel_context, false)
+        .make_certificate_draft(&bindings, &normalized_goal.kernel_context, false)
         .expect("lambda-valued cert should be generated");
-    let proof = cert.proof.as_ref().expect("proof should exist");
+    let proof = draft.serialized_lines();
     assert!(
         proof
             .iter()
             .any(|line| line.contains("is_transitive") && line.contains("}[Nat](rel)")),
         "expected a proof step to normalize the lambda-valued claim argument: {proof:?}"
     );
+    let cert = draft
+        .into_certificate(
+            processor.checker().clone(),
+            &project,
+            Cow::Borrowed(&bindings),
+        )
+        .expect("lambda-valued cert should be finalized");
 
     processor
         .check_cert(
@@ -1942,14 +1944,14 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
 }
@@ -1972,14 +1974,14 @@ fn test_from_concrete_steps_preserves_open_identity_step() {
         preserve_open: true,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("forall(x0: Bool)"),
@@ -2026,14 +2028,14 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "false = true");
 }
@@ -2067,14 +2069,14 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].starts_with('('),
@@ -2116,7 +2118,7 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
         preserve_open: false,
     }];
 
-    let err = Certificate::from_concrete_steps(
+    let err = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
@@ -2152,14 +2154,14 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
 }
@@ -2227,7 +2229,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &kernel_context,
     );
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &[ConcreteStep {
             rationale: ConcreteRationale::Obvious,
@@ -2239,7 +2241,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
 
     let mut bindings_cow = Cow::Borrowed(&bindings);
@@ -2293,14 +2295,14 @@ fn test_from_concrete_steps_serializes_partial_logical_builtin_in_claim_map() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(
         proof,
         vec![
@@ -2346,14 +2348,14 @@ fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::from_concrete_steps(
+    let cert = Certificate::draft_from_concrete_steps(
         "goal".to_string(),
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
     .expect("certificate generation should succeed");
-    let proof = cert.proof.expect("proof should exist");
+    let proof = cert.serialized_lines();
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("(=)"),

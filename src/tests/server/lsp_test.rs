@@ -228,18 +228,14 @@ impl TestFixture {
 #[tokio::test]
 async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     let temp_dir = TempDir::new().unwrap();
-    temp_dir.child("acorn.toml").write_str("").unwrap();
+    let newer_version = PROJECT_FORMAT_VERSION + 1;
+    temp_dir
+        .child("acorn.toml")
+        .write_str(&format!("project_format_version = {}\n", newer_version))
+        .unwrap();
     temp_dir.child("src").create_dir_all().unwrap();
     let build_dir = temp_dir.child("build");
     build_dir.create_dir_all().unwrap();
-    let newer_version = PROJECT_FORMAT_VERSION + 1;
-    build_dir
-        .child("manifest.json")
-        .write_str(&format!(
-            r#"{{"version":{},"modules":{{}}}}"#,
-            newer_version
-        ))
-        .unwrap();
 
     let args = ServerArgs {
         workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),
@@ -269,14 +265,13 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
 #[tokio::test]
 async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization() {
     let temp_dir = TempDir::new().unwrap();
-    temp_dir.child("acorn.toml").write_str("").unwrap();
+    temp_dir
+        .child("acorn.toml")
+        .write_str("project_format_version = 22\n")
+        .unwrap();
     temp_dir.child("src").create_dir_all().unwrap();
     let build_dir = temp_dir.child("build");
     build_dir.create_dir_all().unwrap();
-    build_dir
-        .child("manifest.json")
-        .write_str(r#"{"version":22,"modules":{}}"#)
-        .unwrap();
 
     let args = ServerArgs {
         workspace_root: Some(temp_dir.path().to_str().unwrap().to_string()),

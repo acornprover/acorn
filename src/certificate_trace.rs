@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
+use crate::certificate::{
+    Certificate, CertificateLine, CheckedCertificate, SerializedCertificateStep,
+};
 use crate::code_generator::Error as CodeGenError;
-use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep};
 use crate::kernel::checker::{Checker, StepReason};
@@ -13,20 +14,20 @@ use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::project::ProjectLookup;
 
-/// Experimental "good trace format" proof payload.
+/// Standard certificate proof payload.
 ///
-/// GTF is intentionally rule-oriented: each step says which checker procedure
+/// The certificate trace is intentionally rule-oriented: each step says which checker procedure
 /// accepts it and which earlier steps are its premises.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
-pub struct GtfProof {
-    pub steps: Vec<GtfStep>,
+pub struct ProofTrace {
+    pub steps: Vec<TraceStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GtfStep {
-    #[serde(rename = "r", default, skip_serializing_if = "GtfRule::is_claim")]
-    pub rule: GtfRule,
+pub struct TraceStep {
+    #[serde(rename = "r", default, skip_serializing_if = "TraceRule::is_claim")]
+    pub rule: TraceRule,
 
     #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
     pub claim: Option<String>,
@@ -88,7 +89,7 @@ impl StepClauses {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum GtfRule {
+pub enum TraceRule {
     /// A source/environment fact accepted by direct checker lookup.
     Fact,
 
@@ -126,22 +127,22 @@ pub enum GtfRule {
     Contra,
 }
 
-impl Default for GtfRule {
+impl Default for TraceRule {
     fn default() -> Self {
         Self::Claim
     }
 }
 
-impl GtfRule {
+impl TraceRule {
     fn is_claim(rule: &Self) -> bool {
         matches!(rule, Self::Claim)
     }
 }
 
-impl GtfStep {
+impl TraceStep {
     pub fn fact(claim: String) -> Self {
         Self {
-            rule: GtfRule::Fact,
+            rule: TraceRule::Fact,
             claim: Some(claim),
             premises: vec![],
             generic: false,
@@ -150,7 +151,7 @@ impl GtfStep {
 
     pub fn claim(claim: String) -> Self {
         Self {
-            rule: GtfRule::Claim,
+            rule: TraceRule::Claim,
             claim: Some(claim),
             premises: vec![],
             generic: false,
@@ -159,14 +160,14 @@ impl GtfStep {
 
     pub fn br(source: usize, claim: String) -> Self {
         Self {
-            rule: GtfRule::Br,
+            rule: TraceRule::Br,
             claim: Some(claim),
             premises: vec![source],
             generic: false,
         }
     }
 
-    fn with_rule(rule: GtfRule, claim: String, premises: Vec<usize>, generic: bool) -> Self {
+    fn with_rule(rule: TraceRule, claim: String, premises: Vec<usize>, generic: bool) -> Self {
         Self {
             rule,
             claim: Some(claim),
@@ -176,16 +177,15 @@ impl GtfStep {
     }
 }
 
-impl GtfProof {
-    pub fn from_legacy_proof_checked(
-        proof: &[String],
+impl ProofTrace {
+    pub(crate) fn from_certificate_steps_checked(
+        steps: &[SerializedCertificateStep],
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
-        _type_params: &[TypeParam],
     ) -> Result<Self, CodeGenError> {
-        GtfCompiler::new(checker, project, bindings, kernel_context).compile(proof)
+        TraceBuilder::new(checker, project, bindings, kernel_context).compile(steps)
     }
 
     pub fn without_unreferenced_auxiliary_steps(&self) -> Self {
@@ -201,14 +201,14 @@ impl GtfProof {
         let mut remap = vec![None; self.steps.len()];
         let mut steps = vec![];
         for (old_index, step) in self.steps.iter().enumerate() {
-            let serialized_generic_artifact = matches!(step.rule, GtfRule::Claim)
+            let serialized_generic_artifact = matches!(step.rule, TraceRule::Claim)
                 && step.premises.is_empty()
                 && step
                     .claim
                     .as_deref()
                     .is_some_and(is_serialized_generic_artifact);
             let auxiliary =
-                step.generic || matches!(step.rule, GtfRule::Br) || serialized_generic_artifact;
+                step.generic || matches!(step.rule, TraceRule::Br) || serialized_generic_artifact;
             if auxiliary && !referenced[old_index] {
                 continue;
             }
@@ -220,7 +220,7 @@ impl GtfProof {
                 *premise = remap
                     .get(*premise)
                     .and_then(|mapped| *mapped)
-                    .expect("referenced GTF premise should be retained");
+                    .expect("referenced certificate trace premise should be retained");
             }
         }
         Self { steps }
@@ -233,23 +233,23 @@ impl GtfProof {
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {
-        GtfChecker::new(checker, project, bindings, kernel_context).check(self)
+        TraceChecker::new(checker, project, bindings, kernel_context).check(self)
     }
 }
 
-struct GtfCompiler<'a> {
-    legacy_checker: Checker,
+struct TraceBuilder<'a> {
+    derivation_checker: Checker,
     shadow_checker: Checker,
     project: &'a dyn ProjectLookup,
     bindings: Cow<'a, BindingMap>,
     kernel_context: Cow<'a, KernelContext>,
-    steps: Vec<GtfStep>,
+    steps: Vec<TraceStep>,
     step_clauses: Vec<StepClauses>,
     available: HashMap<Clause, usize>,
-    legacy_to_gtf: HashMap<usize, usize>,
+    inserted_to_trace: HashMap<usize, usize>,
 }
 
-impl<'a> GtfCompiler<'a> {
+impl<'a> TraceBuilder<'a> {
     fn new(
         checker: Checker,
         project: &'a dyn ProjectLookup,
@@ -257,7 +257,7 @@ impl<'a> GtfCompiler<'a> {
         kernel_context: Cow<'a, KernelContext>,
     ) -> Self {
         Self {
-            legacy_checker: checker.clone(),
+            derivation_checker: checker.clone(),
             shadow_checker: checker,
             project,
             bindings,
@@ -265,29 +265,34 @@ impl<'a> GtfCompiler<'a> {
             steps: vec![],
             step_clauses: vec![],
             available: HashMap::new(),
-            legacy_to_gtf: HashMap::new(),
+            inserted_to_trace: HashMap::new(),
         }
     }
 
-    fn compile(mut self, proof: &[String]) -> Result<GtfProof, CodeGenError> {
-        for (line_index, code) in proof.iter().enumerate() {
-            if self.legacy_checker.has_contradiction() {
+    fn compile(mut self, steps: &[SerializedCertificateStep]) -> Result<ProofTrace, CodeGenError> {
+        for (line_index, step) in steps.iter().enumerate() {
+            if self.derivation_checker.has_contradiction() {
                 break;
             }
-            self.compile_legacy_line(line_index, code)?;
+            self.compile_step(line_index, step)?;
         }
-        if !self.legacy_checker.has_contradiction() {
+        if !self.derivation_checker.has_contradiction() {
             return Err(CodeGenError::GeneratedBadCode(
-                "legacy proof did not close while compiling GTF".to_string(),
+                "generated proof steps did not close while compiling certificate trace".to_string(),
             ));
         }
         if !self.shadow_checker.has_contradiction() {
             self.emit_boolean_reduction_contradiction()?;
         }
-        Ok(GtfProof { steps: self.steps })
+        Ok(ProofTrace { steps: self.steps })
     }
 
-    fn compile_legacy_line(&mut self, line_index: usize, code: &str) -> Result<(), CodeGenError> {
+    fn compile_step(
+        &mut self,
+        line_index: usize,
+        serialized: &SerializedCertificateStep,
+    ) -> Result<(), CodeGenError> {
+        let code = serialized.code.as_str();
         let parsed = Certificate::parse_code_line(
             code,
             self.project,
@@ -309,9 +314,9 @@ impl<'a> GtfCompiler<'a> {
             }
         };
 
-        let before = self.legacy_checker.inserted_len();
+        let before = self.derivation_checker.inserted_len();
         let code_lines = [code.to_string()];
-        match self.legacy_checker.check_cert_steps(
+        match self.derivation_checker.check_cert_steps(
             &[parsed],
             Some(&code_lines),
             &self.kernel_context,
@@ -320,7 +325,7 @@ impl<'a> GtfCompiler<'a> {
             Err(err) if err.to_string().contains("proof does not result") => {}
             Err(err) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
-                    "legacy proof line {} failed while compiling GTF: {} ({})",
+                    "proof step {} failed while compiling certificate trace: {} ({})",
                     line_index + 1,
                     code,
                     err
@@ -328,27 +333,29 @@ impl<'a> GtfCompiler<'a> {
             }
         }
 
-        for legacy_id in before..self.legacy_checker.inserted_len() {
+        for inserted_id in before..self.derivation_checker.inserted_len() {
             let inserted = self
-                .legacy_checker
-                .inserted_clause(legacy_id)
+                .derivation_checker
+                .inserted_clause(inserted_id)
                 .ok_or_else(|| {
                     CodeGenError::GeneratedBadCode(format!(
-                        "missing inserted legacy clause {} while compiling GTF",
-                        legacy_id
+                        "missing inserted clause {} while compiling certificate trace",
+                        inserted_id
                     ))
                 })?;
-            let gtf_index = match self.emit_clause(inserted.clause, inserted.reason.clone()) {
-                Ok(index) => index,
-                Err(_)
-                    if matches!(inserted.reason, StepReason::PreviousClaim)
-                        && claim_index.is_some() =>
-                {
-                    claim_index.expect("claim_index checked above")
-                }
-                Err(err) => return Err(err),
-            };
-            self.legacy_to_gtf.insert(legacy_id, gtf_index);
+            let certificate_trace_index =
+                match self.emit_clause(inserted.clause, inserted.reason.clone()) {
+                    Ok(index) => index,
+                    Err(_)
+                        if matches!(inserted.reason, StepReason::PreviousClaim)
+                            && claim_index.is_some() =>
+                    {
+                        claim_index.expect("claim_index checked above")
+                    }
+                    Err(err) => return Err(err),
+                };
+            self.inserted_to_trace
+                .insert(inserted_id, certificate_trace_index);
         }
         Ok(())
     }
@@ -368,7 +375,7 @@ impl<'a> GtfCompiler<'a> {
         if let Some(index) = self.available.get(&generic) {
             if generic != clause {
                 let step_index = self.push_step(
-                    GtfRule::Claim,
+                    TraceRule::Claim,
                     code,
                     vec![],
                     clause.clone(),
@@ -382,14 +389,14 @@ impl<'a> GtfCompiler<'a> {
 
         let reason = self
             .shadow_checker
-            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .check_clause_direct_for_trace(&clause, &self.kernel_context)
             .or_else(|| {
                 self.shadow_checker
-                    .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+                    .check_clause_direct_for_trace(&generic, &self.kernel_context)
             });
         if reason.is_some() {
             return self.push_step(
-                GtfRule::Claim,
+                TraceRule::Claim,
                 code,
                 vec![],
                 clause.clone(),
@@ -399,13 +406,13 @@ impl<'a> GtfCompiler<'a> {
         }
         if self
             .shadow_checker
-            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+            .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
             || self
                 .shadow_checker
-                .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+                .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
         {
             return self.push_step(
-                GtfRule::BrIntro,
+                TraceRule::BrIntro,
                 code,
                 vec![],
                 clause.clone(),
@@ -414,14 +421,14 @@ impl<'a> GtfCompiler<'a> {
             );
         }
         Err(CodeGenError::GeneratedBadCode(format!(
-            "could not compile legacy claim to GTF: {}",
+            "could not compile claim to certificate trace: {}",
             code
         )))
     }
 
     fn insert_step_clauses(&mut self, index: usize, clauses: &StepClauses) {
         for clause in clauses.all() {
-            self.shadow_checker.insert_clause_for_gtf(
+            self.shadow_checker.insert_clause_for_trace(
                 clause,
                 StepReason::PreviousClaim,
                 &self.kernel_context,
@@ -449,33 +456,33 @@ impl<'a> GtfCompiler<'a> {
             .map_err(CodeGenError::GeneratedBadCode)?;
         if self
             .shadow_checker
-            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .check_clause_direct_for_trace(&clause, &self.kernel_context)
             .is_none()
         {
             return Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF witness declaration is missing justification: {}",
+                "certificate trace witness declaration is missing justification: {}",
                 code
             )));
         }
-        self.shadow_checker.insert_clause_for_gtf(
+        self.shadow_checker.insert_clause_for_trace(
             &satisfy.justification.normalized_generic_clause(),
             StepReason::WitnessDeclaration,
             &self.kernel_context,
         );
-        self.shadow_checker.insert_clause_for_gtf(
+        self.shadow_checker.insert_clause_for_trace(
             &clause,
             StepReason::WitnessDeclaration,
             &self.kernel_context,
         );
         if let Some(specialized_clause) = &satisfy.specialized_clause {
-            self.shadow_checker.insert_clause_for_gtf(
+            self.shadow_checker.insert_clause_for_trace(
                 specialized_clause,
                 StepReason::WitnessDeclaration,
                 &self.kernel_context,
             );
         }
         for witness_clause in &satisfy.witness_clauses {
-            self.shadow_checker.insert_clause_for_gtf(
+            self.shadow_checker.insert_clause_for_trace(
                 witness_clause,
                 StepReason::WitnessDeclaration,
                 &self.kernel_context,
@@ -486,7 +493,7 @@ impl<'a> GtfCompiler<'a> {
             aliases.push(specialized_clause.clone());
         }
         aliases.extend(satisfy.witness_clauses.iter().cloned());
-        self.push_step(GtfRule::Wit, code, vec![], clause, false, aliases)
+        self.push_step(TraceRule::Wit, code, vec![], clause, false, aliases)
     }
 
     fn emit_clause(&mut self, clause: Clause, reason: StepReason) -> Result<usize, CodeGenError> {
@@ -496,12 +503,13 @@ impl<'a> GtfCompiler<'a> {
         let (code, generic) = self.serialize_clause_step(&clause)?;
 
         if let Some(source_id) = reason.dependency() {
-            let source_index = if let Some(&source_index) = self.legacy_to_gtf.get(&source_id) {
+            let source_index = if let Some(&source_index) = self.inserted_to_trace.get(&source_id) {
                 Some(source_index)
-            } else if let Some(source_inserted) = self.legacy_checker.inserted_clause(source_id) {
+            } else if let Some(source_inserted) = self.derivation_checker.inserted_clause(source_id)
+            {
                 let source_index =
                     self.emit_clause(source_inserted.clause, source_inserted.reason)?;
-                self.legacy_to_gtf.insert(source_id, source_index);
+                self.inserted_to_trace.insert(source_id, source_index);
                 Some(source_index)
             } else {
                 None
@@ -512,49 +520,51 @@ impl<'a> GtfCompiler<'a> {
                     self.step_clauses[source_index].all().cloned().collect();
                 let rule = source_candidates.iter().find_map(|source| match reason {
                     StepReason::EqualityResolution(_)
-                        if self.shadow_checker.equality_resolution_derives_for_gtf(
+                        if self.shadow_checker.equality_resolution_derives_for_trace(
                             source,
                             &clause,
                             &self.kernel_context,
                         ) =>
                     {
-                        Some(GtfRule::Er)
+                        Some(TraceRule::Er)
                     }
                     StepReason::EqualityFactoring(_)
-                        if self.shadow_checker.equality_factoring_derives_for_gtf(
+                        if self.shadow_checker.equality_factoring_derives_for_trace(
                             source,
                             &clause,
                             &self.kernel_context,
                         ) =>
                     {
-                        Some(GtfRule::Ef)
+                        Some(TraceRule::Ef)
                     }
                     StepReason::Extensionality(_)
-                        if self.shadow_checker.extensionality_derives_for_gtf(
+                        if self.shadow_checker.extensionality_derives_for_trace(
                             source,
                             &clause,
                             &self.kernel_context,
                         ) =>
                     {
-                        Some(GtfRule::Ext)
+                        Some(TraceRule::Ext)
                     }
                     StepReason::Injectivity(_)
-                        if self.shadow_checker.injectivity_derives_for_gtf(
+                        if self.shadow_checker.injectivity_derives_for_trace(
                             source,
                             &clause,
                             &self.kernel_context,
                         ) =>
                     {
-                        Some(GtfRule::Inj)
+                        Some(TraceRule::Inj)
                     }
                     StepReason::BooleanReduction(_)
-                        if self.shadow_checker.boolean_reduction_set_contains_for_gtf(
-                            source,
-                            &clause,
-                            &self.kernel_context,
-                        ) =>
+                        if self
+                            .shadow_checker
+                            .boolean_reduction_set_contains_for_trace(
+                                source,
+                                &clause,
+                                &self.kernel_context,
+                            ) =>
                     {
-                        Some(GtfRule::Br)
+                        Some(TraceRule::Br)
                     }
                     _ => None,
                 });
@@ -569,14 +579,15 @@ impl<'a> GtfCompiler<'a> {
                 let source_candidates: Vec<Clause> =
                     self.step_clauses[source_index].all().cloned().collect();
                 if source_candidates.iter().any(|source| {
-                    self.shadow_checker.boolean_reduction_set_contains_for_gtf(
-                        source,
-                        &clause,
-                        &self.kernel_context,
-                    )
+                    self.shadow_checker
+                        .boolean_reduction_set_contains_for_trace(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        )
                 }) {
                     return self.push_step(
-                        GtfRule::Br,
+                        TraceRule::Br,
                         code,
                         vec![source_index],
                         clause,
@@ -592,14 +603,14 @@ impl<'a> GtfCompiler<'a> {
                 let source_candidates: Vec<Clause> =
                     self.step_clauses[source_index].all().cloned().collect();
                 if source_candidates.iter().any(|source| {
-                    self.shadow_checker.equality_graph_derives_for_gtf(
+                    self.shadow_checker.equality_graph_derives_for_trace(
                         source,
                         &clause,
                         &self.kernel_context,
                     )
                 }) {
                     return self.push_step(
-                        GtfRule::Eq,
+                        TraceRule::Eq,
                         code,
                         vec![source_index],
                         clause,
@@ -612,30 +623,31 @@ impl<'a> GtfCompiler<'a> {
 
         if self
             .shadow_checker
-            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+            .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
         {
-            return self.push_step(GtfRule::BrIntro, code, vec![], clause, generic, vec![]);
+            return self.push_step(TraceRule::BrIntro, code, vec![], clause, generic, vec![]);
         }
         if self
             .shadow_checker
-            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .check_clause_direct_for_trace(&clause, &self.kernel_context)
             .is_some()
         {
-            return self.push_step(GtfRule::Claim, code, vec![], clause, generic, vec![]);
+            return self.push_step(TraceRule::Claim, code, vec![], clause, generic, vec![]);
         }
 
         let dependency_context = reason
             .dependency()
             .map(|source_id| {
-                if let Some(source_index) = self.legacy_to_gtf.get(&source_id) {
+                if let Some(source_index) = self.inserted_to_trace.get(&source_id) {
                     format!(
-                        "; dependency {} mapped to GTF step {}: {}",
+                        "; dependency {} mapped to certificate trace step {}: {}",
                         source_id, source_index, self.step_clauses[*source_index].primary
                     )
-                } else if let Some(source_inserted) = self.legacy_checker.inserted_clause(source_id)
+                } else if let Some(source_inserted) =
+                    self.derivation_checker.inserted_clause(source_id)
                 {
                     format!(
-                        "; dependency {} is unmapped legacy clause: {} ({:?})",
+                        "; dependency {} is unmapped inserted clause: {} ({:?})",
                         source_id, source_inserted.clause, source_inserted.reason
                     )
                 } else {
@@ -644,19 +656,19 @@ impl<'a> GtfCompiler<'a> {
             })
             .unwrap_or_default();
         Err(CodeGenError::GeneratedBadCode(format!(
-            "could not compile inserted legacy clause to GTF: {} ({:?}){}",
+            "could not compile inserted clause to certificate trace: {} ({:?}){}",
             clause, reason, dependency_context
         )))
     }
 
     fn serialize_clause_step(&self, clause: &Clause) -> Result<(String, bool), CodeGenError> {
-        let mut candidates = vec![Certificate::serialize_clause_for_gtf(
+        let mut candidates = vec![Certificate::serialize_clause_for_trace(
             clause,
             &self.kernel_context,
             self.bindings.as_ref(),
         )?];
         if clause.get_local_context().is_empty() {
-            if let Ok(code) = Certificate::serialize_closed_clause_for_gtf(
+            if let Ok(code) = Certificate::serialize_closed_clause_for_trace(
                 clause,
                 &self.kernel_context,
                 self.bindings.as_ref(),
@@ -688,7 +700,7 @@ impl<'a> GtfCompiler<'a> {
         }
 
         Err(CodeGenError::GeneratedBadCode(format!(
-            "GTF serializer did not roundtrip clause {} ({})",
+            "certificate trace serializer did not roundtrip clause {} ({})",
             clause,
             parsed_summaries.join("; ")
         )))
@@ -735,7 +747,7 @@ impl<'a> GtfCompiler<'a> {
         }
         for reduction_set in self
             .shadow_checker
-            .boolean_reduction_sets_for_gtf(source, &self.kernel_context)
+            .boolean_reduction_sets_for_trace(source, &self.kernel_context)
         {
             for candidate in reduction_set {
                 if candidate.is_impossible() {
@@ -774,7 +786,7 @@ impl<'a> GtfCompiler<'a> {
                         self.serialize_clause_step(&clause)?
                     };
                     premise_index = self.push_step(
-                        GtfRule::Br,
+                        TraceRule::Br,
                         code,
                         vec![premise_index],
                         clause,
@@ -788,14 +800,14 @@ impl<'a> GtfCompiler<'a> {
             }
         }
         Err(CodeGenError::GeneratedBadCode(
-            "GTF proof closed in legacy checker, but no explicit contradiction path was found"
+            "certificate trace proof closed in derivation checker, but no explicit contradiction path was found"
                 .to_string(),
         ))
     }
 
     fn push_step(
         &mut self,
-        rule: GtfRule,
+        rule: TraceRule,
         code: String,
         premises: Vec<usize>,
         clause: Clause,
@@ -807,12 +819,12 @@ impl<'a> GtfCompiler<'a> {
         self.insert_step_clauses(index, &step_clauses);
         self.step_clauses.push(step_clauses);
         self.steps
-            .push(GtfStep::with_rule(rule, code, premises, generic));
+            .push(TraceStep::with_rule(rule, code, premises, generic));
         Ok(index)
     }
 }
 
-struct GtfChecker<'a> {
+struct TraceChecker<'a> {
     checker: Checker,
     project: &'a dyn ProjectLookup,
     bindings: Cow<'a, BindingMap>,
@@ -821,7 +833,7 @@ struct GtfChecker<'a> {
     lines: Vec<CertificateLine>,
 }
 
-impl<'a> GtfChecker<'a> {
+impl<'a> TraceChecker<'a> {
     fn new(
         checker: Checker,
         project: &'a dyn ProjectLookup,
@@ -838,7 +850,7 @@ impl<'a> GtfChecker<'a> {
         }
     }
 
-    fn check(mut self, proof: &GtfProof) -> Result<CheckedCertificate, CodeGenError> {
+    fn check(mut self, proof: &ProofTrace) -> Result<CheckedCertificate, CodeGenError> {
         if self.checker.has_contradiction() {
             return Ok(CheckedCertificate {
                 lines: self.lines,
@@ -856,7 +868,7 @@ impl<'a> GtfChecker<'a> {
         }
         if !self.checker.has_contradiction() {
             return Err(CodeGenError::GeneratedBadCode(
-                "GTF proof does not result in a contradiction".to_string(),
+                "certificate trace proof does not result in a contradiction".to_string(),
             ));
         }
         let consumed = proof.steps.len();
@@ -866,9 +878,9 @@ impl<'a> GtfChecker<'a> {
         })
     }
 
-    fn check_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
+    fn check_step(&mut self, index: usize, step: &TraceStep) -> Result<(), CodeGenError> {
         match step.rule {
-            GtfRule::Fact | GtfRule::Claim => {
+            TraceRule::Fact | TraceRule::Claim => {
                 let (generic, specialized, code) =
                     self.parse_required_claim_with_generic(index, step)?;
                 let clause = if step.generic {
@@ -879,32 +891,32 @@ impl<'a> GtfChecker<'a> {
                 let aliases = if is_synthetic_generic_wrapper(&code) {
                     vec![]
                 } else {
-                    GtfCompiler::claim_aliases(generic.clone(), &specialized)
+                    TraceBuilder::claim_aliases(generic.clone(), &specialized)
                 };
                 let reason = self
                     .checker
-                    .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+                    .check_clause_direct_for_trace(&generic, &self.kernel_context)
                     .or_else(|| {
                         self.checker
-                            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+                            .check_clause_direct_for_trace(&clause, &self.kernel_context)
                     })
                     .or_else(|| {
                         self.checker
-                            .check_clause_direct_for_gtf(&specialized, &self.kernel_context)
+                            .check_clause_direct_for_trace(&specialized, &self.kernel_context)
                     })
                     .or_else(|| {
                         self.checker
-                            .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+                            .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
                             .then_some(StepReason::BooleanReduction(index))
                     })
                     .or_else(|| {
                         self.checker
-                            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+                            .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
                             .then_some(StepReason::BooleanReduction(index))
                     })
                     .or_else(|| {
                         self.checker
-                            .boolean_reduction_proves_for_gtf(&specialized, &self.kernel_context)
+                            .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
                             .then_some(StepReason::BooleanReduction(index))
                     })
                     .or_else(|| {
@@ -912,7 +924,7 @@ impl<'a> GtfChecker<'a> {
                     })
                     .ok_or_else(|| {
                         CodeGenError::GeneratedBadCode(format!(
-                            "GTF {:?} step {} is not directly known: {}",
+                            "certificate trace {:?} step {} is not directly known: {}",
                             step.rule,
                             index + 1,
                             code
@@ -920,10 +932,10 @@ impl<'a> GtfChecker<'a> {
                     })?;
                 self.accept_clause_with_aliases(clause, aliases, reason, code);
             }
-            GtfRule::Inst => {
+            TraceRule::Inst => {
                 if step.premises.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF inst step {} needs exactly one premise",
+                        "certificate trace inst step {} needs exactly one premise",
                         index + 1
                     )));
                 }
@@ -933,7 +945,7 @@ impl<'a> GtfChecker<'a> {
                     .get(source_index)
                     .ok_or_else(|| {
                         CodeGenError::GeneratedBadCode(format!(
-                            "GTF inst step {} references missing premise {}",
+                            "certificate trace inst step {} references missing premise {}",
                             index + 1,
                             source_index
                         ))
@@ -945,7 +957,7 @@ impl<'a> GtfChecker<'a> {
                     self.parse_required_claim_with_generic(index, step)?;
                 if !sources.iter().any(|source| *source == generic) {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF inst step {} generic clause does not match premise {}: {}",
+                        "certificate trace inst step {} generic clause does not match premise {}: {}",
                         index + 1,
                         source_index,
                         code
@@ -953,10 +965,10 @@ impl<'a> GtfChecker<'a> {
                 }
                 self.accept_clause(specialized, StepReason::PreviousClaim, code);
             }
-            GtfRule::Br => {
+            TraceRule::Br => {
                 if step.premises.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF br step {} needs exactly one premise",
+                        "certificate trace br step {} needs exactly one premise",
                         index + 1
                     )));
                 }
@@ -966,7 +978,7 @@ impl<'a> GtfChecker<'a> {
                     .get(source_index)
                     .ok_or_else(|| {
                         CodeGenError::GeneratedBadCode(format!(
-                            "GTF br step {} references missing premise {}",
+                            "certificate trace br step {} references missing premise {}",
                             index + 1,
                             source_index
                         ))
@@ -976,7 +988,7 @@ impl<'a> GtfChecker<'a> {
                     .collect();
                 let (result, code) = self.parse_required_claim(index, step)?;
                 if !sources.iter().any(|source| {
-                    self.checker.boolean_reduction_set_contains_for_gtf(
+                    self.checker.boolean_reduction_set_contains_for_trace(
                         source,
                         &result,
                         &self.kernel_context,
@@ -991,7 +1003,7 @@ impl<'a> GtfChecker<'a> {
                         .iter()
                         .flat_map(|source| {
                             self.checker
-                                .boolean_reduction_sets_for_gtf(source, &self.kernel_context)
+                                .boolean_reduction_sets_for_trace(source, &self.kernel_context)
                                 .into_iter()
                                 .flatten()
                         })
@@ -999,7 +1011,7 @@ impl<'a> GtfChecker<'a> {
                         .collect::<Vec<_>>()
                         .join(" | ");
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF br step {} does not reduce premise {} to {} (target: {}; candidates: {}; sources: {})",
+                        "certificate trace br step {} does not reduce premise {} to {} (target: {}; candidates: {}; sources: {})",
                         index + 1,
                         source_index,
                         code,
@@ -1010,7 +1022,7 @@ impl<'a> GtfChecker<'a> {
                 }
                 self.accept_clause(result, StepReason::BooleanReduction(source_index), code);
             }
-            GtfRule::BrIntro => {
+            TraceRule::BrIntro => {
                 let (generic, specialized, code) =
                     self.parse_required_claim_with_generic(index, step)?;
                 let result = if step.generic {
@@ -1020,28 +1032,28 @@ impl<'a> GtfChecker<'a> {
                 };
                 if !self
                     .checker
-                    .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+                    .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
                     && !self
                         .checker
-                        .boolean_reduction_proves_for_gtf(&result, &self.kernel_context)
+                        .boolean_reduction_proves_for_trace(&result, &self.kernel_context)
                     && !self
                         .checker
-                        .boolean_reduction_proves_for_gtf(&specialized, &self.kernel_context)
+                        .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
                     && self
                         .checker
-                        .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+                        .check_clause_direct_for_trace(&generic, &self.kernel_context)
                         .or_else(|| {
                             self.checker
-                                .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                                .check_clause_direct_for_trace(&result, &self.kernel_context)
                         })
                         .or_else(|| {
                             self.checker
-                                .check_clause_direct_for_gtf(&specialized, &self.kernel_context)
+                                .check_clause_direct_for_trace(&specialized, &self.kernel_context)
                         })
                         .is_none()
                 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF br_intro step {} is not justified by known reductions: {}",
+                        "certificate trace br_intro step {} is not justified by known reductions: {}",
                         index + 1,
                         code
                     )));
@@ -1049,7 +1061,7 @@ impl<'a> GtfChecker<'a> {
                 let aliases = if is_synthetic_generic_wrapper(&code) {
                     vec![]
                 } else {
-                    GtfCompiler::claim_aliases(generic, &specialized)
+                    TraceBuilder::claim_aliases(generic, &specialized)
                 };
                 self.accept_clause_with_aliases(
                     result,
@@ -1058,14 +1070,14 @@ impl<'a> GtfChecker<'a> {
                     code,
                 );
             }
-            GtfRule::Eq => {
+            TraceRule::Eq => {
                 let (result, code) = self.parse_required_claim(index, step)?;
                 if step.premises.is_empty() {
                     self.checker
-                        .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                        .check_clause_direct_for_trace(&result, &self.kernel_context)
                         .ok_or_else(|| {
                             CodeGenError::GeneratedBadCode(format!(
-                                "GTF eq step {} is not justified by current facts: {}",
+                                "certificate trace eq step {} is not justified by current facts: {}",
                                 index + 1,
                                 code
                             ))
@@ -1077,7 +1089,7 @@ impl<'a> GtfChecker<'a> {
                         .get(source_index)
                         .ok_or_else(|| {
                             CodeGenError::GeneratedBadCode(format!(
-                                "GTF eq step {} references missing premise {}",
+                                "certificate trace eq step {} references missing premise {}",
                                 index + 1,
                                 source_index
                             ))
@@ -1086,14 +1098,14 @@ impl<'a> GtfChecker<'a> {
                         .cloned()
                         .collect();
                     if !sources.iter().any(|source| {
-                        self.checker.equality_graph_derives_for_gtf(
+                        self.checker.equality_graph_derives_for_trace(
                             source,
                             &result,
                             &self.kernel_context,
                         )
                     }) {
                         return Err(CodeGenError::GeneratedBadCode(format!(
-                            "GTF eq step {} is not justified by premise {}: {}",
+                            "certificate trace eq step {} is not justified by premise {}: {}",
                             index + 1,
                             source_index,
                             code
@@ -1104,13 +1116,13 @@ impl<'a> GtfChecker<'a> {
                     for &premise in &step.premises {
                         let clauses = self.clauses.get(premise).ok_or_else(|| {
                             CodeGenError::GeneratedBadCode(format!(
-                                "GTF eq step {} references missing premise {}",
+                                "certificate trace eq step {} references missing premise {}",
                                 index + 1,
                                 premise
                             ))
                         })?;
                         for clause in clauses.all() {
-                            local.insert_clause_for_gtf(
+                            local.insert_clause_for_trace(
                                 clause,
                                 StepReason::PreviousClaim,
                                 &self.kernel_context,
@@ -1118,10 +1130,10 @@ impl<'a> GtfChecker<'a> {
                         }
                     }
                     local
-                        .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                        .check_clause_direct_for_trace(&result, &self.kernel_context)
                         .ok_or_else(|| {
                             CodeGenError::GeneratedBadCode(format!(
-                                "GTF eq step {} is not justified by its premises: {}",
+                                "certificate trace eq step {} is not justified by its premises: {}",
                                 index + 1,
                                 code
                             ))
@@ -1129,10 +1141,10 @@ impl<'a> GtfChecker<'a> {
                 }
                 self.accept_clause(result, StepReason::EqualityGraph, code);
             }
-            GtfRule::Er | GtfRule::Ef | GtfRule::Ext | GtfRule::Inj => {
+            TraceRule::Er | TraceRule::Ef | TraceRule::Ext | TraceRule::Inj => {
                 if step.premises.len() != 1 {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF {:?} step {} needs exactly one premise",
+                        "certificate trace {:?} step {} needs exactly one premise",
                         step.rule,
                         index + 1
                     )));
@@ -1143,7 +1155,7 @@ impl<'a> GtfChecker<'a> {
                     .get(source_index)
                     .ok_or_else(|| {
                         CodeGenError::GeneratedBadCode(format!(
-                            "GTF {:?} step {} references missing premise {}",
+                            "certificate trace {:?} step {} references missing premise {}",
                             step.rule,
                             index + 1,
                             source_index
@@ -1154,22 +1166,22 @@ impl<'a> GtfChecker<'a> {
                     .collect();
                 let (result, code) = self.parse_required_claim(index, step)?;
                 let ok = sources.iter().any(|source| match step.rule {
-                    GtfRule::Er => self.checker.equality_resolution_derives_for_gtf(
+                    TraceRule::Er => self.checker.equality_resolution_derives_for_trace(
                         source,
                         &result,
                         &self.kernel_context,
                     ),
-                    GtfRule::Ef => self.checker.equality_factoring_derives_for_gtf(
+                    TraceRule::Ef => self.checker.equality_factoring_derives_for_trace(
                         source,
                         &result,
                         &self.kernel_context,
                     ),
-                    GtfRule::Ext => self.checker.extensionality_derives_for_gtf(
+                    TraceRule::Ext => self.checker.extensionality_derives_for_trace(
                         source,
                         &result,
                         &self.kernel_context,
                     ),
-                    GtfRule::Inj => self.checker.injectivity_derives_for_gtf(
+                    TraceRule::Inj => self.checker.injectivity_derives_for_trace(
                         source,
                         &result,
                         &self.kernel_context,
@@ -1185,16 +1197,17 @@ impl<'a> GtfChecker<'a> {
                     let candidate_debug = sources
                         .iter()
                         .flat_map(|source| match step.rule {
-                            GtfRule::Er => self
-                                .checker
-                                .equality_resolution_results_for_gtf(source, &self.kernel_context),
+                            TraceRule::Er => self.checker.equality_resolution_results_for_trace(
+                                source,
+                                &self.kernel_context,
+                            ),
                             _ => vec![],
                         })
                         .map(|candidate| candidate.to_string())
                         .collect::<Vec<_>>()
                         .join(" | ");
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF {:?} step {} does not derive {} from premise {} (target: {}; candidates: {}; sources: {})",
+                        "certificate trace {:?} step {} does not derive {} from premise {} (target: {}; candidates: {}; sources: {})",
                         step.rule,
                         index + 1,
                         code,
@@ -1205,25 +1218,25 @@ impl<'a> GtfChecker<'a> {
                     )));
                 }
                 let reason = match step.rule {
-                    GtfRule::Er => StepReason::EqualityResolution(source_index),
-                    GtfRule::Ef => StepReason::EqualityFactoring(source_index),
-                    GtfRule::Ext => StepReason::Extensionality(source_index),
-                    GtfRule::Inj => StepReason::Injectivity(source_index),
+                    TraceRule::Er => StepReason::EqualityResolution(source_index),
+                    TraceRule::Ef => StepReason::EqualityFactoring(source_index),
+                    TraceRule::Ext => StepReason::Extensionality(source_index),
+                    TraceRule::Inj => StepReason::Injectivity(source_index),
                     _ => unreachable!(),
                 };
                 self.accept_clause(result, reason, code);
             }
-            GtfRule::Wit => {
+            TraceRule::Wit => {
                 self.check_witness_step(index, step)?;
             }
-            GtfRule::Contra => {
+            TraceRule::Contra => {
                 let code = step.claim.clone().unwrap_or_else(|| "false".to_string());
                 if let Some((clause, _)) = self.parse_optional_claim(step)? {
                     self.accept_clause(clause, StepReason::PreviousClaim, code);
                 }
                 if !self.checker.has_contradiction() {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "GTF contra step {} did not close the proof",
+                        "certificate trace contra step {} did not close the proof",
                         index + 1
                     )));
                 }
@@ -1232,10 +1245,10 @@ impl<'a> GtfChecker<'a> {
         Ok(())
     }
 
-    fn check_witness_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
+    fn check_witness_step(&mut self, index: usize, step: &TraceStep) -> Result<(), CodeGenError> {
         let code = step.claim.as_ref().ok_or_else(|| {
             CodeGenError::GeneratedBadCode(format!(
-                "GTF wit step {} is missing declaration text",
+                "certificate trace wit step {} is missing declaration text",
                 index + 1
             ))
         })?;
@@ -1247,7 +1260,7 @@ impl<'a> GtfChecker<'a> {
         )?;
         let CertificateStep::Satisfy(satisfy) = parsed else {
             return Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF wit step {} must contain a witness declaration: {}",
+                "certificate trace wit step {} must contain a witness declaration: {}",
                 index + 1,
                 code
             )));
@@ -1259,39 +1272,39 @@ impl<'a> GtfChecker<'a> {
             .map_err(CodeGenError::GeneratedBadCode)?;
         let justification_ok = self
             .checker
-            .check_clause_direct_for_gtf(&generic_clause, &self.kernel_context)
+            .check_clause_direct_for_trace(&generic_clause, &self.kernel_context)
             .or_else(|| {
                 self.checker
-                    .check_clause_direct_for_gtf(&justification_clause, &self.kernel_context)
+                    .check_clause_direct_for_trace(&justification_clause, &self.kernel_context)
             })
             .is_some();
         if !justification_ok {
             return Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF wit step {} is missing direct justification: {}",
+                "certificate trace wit step {} is missing direct justification: {}",
                 index + 1,
                 code
             )));
         }
 
-        self.checker.insert_clause_for_gtf(
+        self.checker.insert_clause_for_trace(
             &generic_clause,
             StepReason::WitnessDeclaration,
             &self.kernel_context,
         );
-        self.checker.insert_clause_for_gtf(
+        self.checker.insert_clause_for_trace(
             &justification_clause,
             StepReason::WitnessDeclaration,
             &self.kernel_context,
         );
         if let Some(specialized_clause) = &satisfy.specialized_clause {
-            self.checker.insert_clause_for_gtf(
+            self.checker.insert_clause_for_trace(
                 specialized_clause,
                 StepReason::WitnessDeclaration,
                 &self.kernel_context,
             );
         }
         for clause in &satisfy.witness_clauses {
-            self.checker.insert_clause_for_gtf(
+            self.checker.insert_clause_for_trace(
                 clause,
                 StepReason::WitnessDeclaration,
                 &self.kernel_context,
@@ -1313,10 +1326,13 @@ impl<'a> GtfChecker<'a> {
     fn parse_required_claim(
         &mut self,
         index: usize,
-        step: &GtfStep,
+        step: &TraceStep,
     ) -> Result<(Clause, String), CodeGenError> {
         let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!("GTF step {} is missing claim text", index + 1))
+            CodeGenError::GeneratedBadCode(format!(
+                "certificate trace step {} is missing claim text",
+                index + 1
+            ))
         })?;
         let parsed = Certificate::parse_code_line(
             code,
@@ -1345,7 +1361,7 @@ impl<'a> GtfChecker<'a> {
             }
             CertificateStep::Satisfy(_) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
-                    "GTF claim position cannot contain witness declaration: {}",
+                    "certificate trace claim position cannot contain witness declaration: {}",
                     code
                 )));
             }
@@ -1356,10 +1372,13 @@ impl<'a> GtfChecker<'a> {
     fn parse_required_claim_with_generic(
         &mut self,
         index: usize,
-        step: &GtfStep,
+        step: &TraceStep,
     ) -> Result<(Clause, Clause, String), CodeGenError> {
         let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!("GTF step {} is missing claim text", index + 1))
+            CodeGenError::GeneratedBadCode(format!(
+                "certificate trace step {} is missing claim text",
+                index + 1
+            ))
         })?;
         let parsed = Certificate::parse_code_line(
             code,
@@ -1389,7 +1408,7 @@ impl<'a> GtfChecker<'a> {
                 Ok((generic, specialized, code.clone()))
             }
             CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF claim position cannot contain witness declaration: {}",
+                "certificate trace claim position cannot contain witness declaration: {}",
                 code
             ))),
         }
@@ -1397,7 +1416,7 @@ impl<'a> GtfChecker<'a> {
 
     fn parse_optional_claim(
         &mut self,
-        step: &GtfStep,
+        step: &TraceStep,
     ) -> Result<Option<(Clause, String)>, CodeGenError> {
         let Some(code) = &step.claim else {
             return Ok(None);
@@ -1433,7 +1452,7 @@ impl<'a> GtfChecker<'a> {
                 Ok((generic, specialized))
             }
             CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF claim position cannot contain witness declaration: {}",
+                "certificate trace claim position cannot contain witness declaration: {}",
                 code
             ))),
         }
@@ -1452,7 +1471,7 @@ impl<'a> GtfChecker<'a> {
     ) {
         let step_clauses = StepClauses::new(clause, aliases);
         for clause in step_clauses.all() {
-            self.checker.insert_clause_for_gtf(
+            self.checker.insert_clause_for_trace(
                 clause,
                 StepReason::PreviousClaim,
                 &self.kernel_context,
@@ -1481,7 +1500,7 @@ mod tests {
     use crate::processor::Processor;
 
     #[test]
-    fn serialized_gtf_br_step_can_close_simple_goal() {
+    fn serialized_certificate_trace_br_step_can_close_simple_goal() {
         let (processor, bindings, lowered_goal) = Processor::test_goal(
             r#"
             let p: Bool = axiom
@@ -1496,7 +1515,8 @@ mod tests {
             "#,
         );
         let json = r#"{"goal":"goal","p":[{"c":"p and q"},{"r":"br","c":"p","f":[0]}]}"#;
-        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        let cert: Certificate =
+            serde_json::from_str(json).expect("serialized certificate trace should parse");
         processor
             .check_cert(
                 &cert,
@@ -1505,11 +1525,11 @@ mod tests {
                 &crate::project::Project::new_mock(),
                 &bindings,
             )
-            .expect("serialized GTF boolean-reduction proof should check");
+            .expect("serialized certificate trace boolean-reduction proof should check");
     }
 
     #[test]
-    fn serialized_gtf_witness_step_can_close_simple_goal() {
+    fn serialized_certificate_trace_witness_step_can_close_simple_goal() {
         let (processor, bindings, lowered_goal) = Processor::test_goal(
             r#"
             inductive Foo {
@@ -1526,7 +1546,8 @@ mod tests {
             "#,
         );
         let json = r#"{"goal":"goal","p":[{"c":"exists(k0: Foo) { not p(k0) }"},{"r":"wit","c":"let w0: Foo satisfy { not p(w0) }"},{"c":"function(x0: Foo) { p(x0) }(w0)"}]}"#;
-        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        let cert: Certificate =
+            serde_json::from_str(json).expect("serialized certificate trace should parse");
         processor
             .check_cert(
                 &cert,
@@ -1535,11 +1556,11 @@ mod tests {
                 &crate::project::Project::new_mock(),
                 &bindings,
             )
-            .expect("serialized GTF witness proof should check");
+            .expect("serialized certificate trace witness proof should check");
     }
 
     #[test]
-    fn serialized_gtf_er_step_can_close_simple_goal() {
+    fn serialized_certificate_trace_er_step_can_close_simple_goal() {
         let (processor, bindings, lowered_goal) = Processor::test_goal(
             r#"
             inductive Foo {
@@ -1556,7 +1577,8 @@ mod tests {
             "#,
         );
         let json = r#"{"goal":"goal","p":[{"c":"function(x0: Foo) { x0 != x0 or p }"},{"r":"er","c":"p","f":[0]}]}"#;
-        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        let cert: Certificate =
+            serde_json::from_str(json).expect("serialized certificate trace should parse");
         processor
             .check_cert(
                 &cert,
@@ -1565,52 +1587,47 @@ mod tests {
                 &crate::project::Project::new_mock(),
                 &bindings,
             )
-            .expect("serialized GTF equality-resolution proof should check");
+            .expect("serialized certificate trace equality-resolution proof should check");
     }
 
     #[test]
-    fn serialized_gtf_uses_p_for_top_level_proof() {
+    fn serialized_certificate_trace_uses_p_for_top_level_proof() {
         let cert = Certificate {
             goal: "goal".to_string(),
-            proof: None,
-            gtf: Some(GtfProof {
-                steps: vec![GtfStep::claim("p".to_string())],
+            proof: Some(ProofTrace {
+                steps: vec![TraceStep::claim("p".to_string())],
             }),
         };
         let json = serde_json::to_string(&cert).expect("certificate should serialize");
         assert!(
             json.contains(r#""p":"#),
-            "GTF certificates should serialize their proof payload as `p`: {}",
+            "certificate trace certificates should serialize their proof payload as `p`: {}",
             json
         );
         assert!(
-            !json.contains(r#""gtf":"#) && !json.contains(r#""proof":"#),
-            "GTF certificates should not serialize old proof keys: {}",
+            !json.contains(r#""certificate_trace":"#) && !json.contains(r#""proof":"#),
+            "certificate trace certificates should not serialize old proof keys: {}",
             json
         );
 
-        let alias: Certificate =
-            serde_json::from_str(r#"{"goal":"goal","g":[{"c":"p"}]}"#).unwrap();
-        assert!(
-            alias.gtf.is_some(),
-            "old experimental g key should remain readable"
-        );
+        serde_json::from_str::<Certificate>(r#"{"goal":"goal","g":[{"c":"p"}]}"#)
+            .expect_err("old experimental g key should not deserialize");
     }
 
     #[test]
-    fn gtf_rejects_legacy_rule() {
+    fn certificate_trace_rejects_unknown_rule() {
         let err =
-            serde_json::from_str::<Certificate>(r#"{"goal":"goal","p":[{"r":"legacy","c":"p"}]}"#)
-                .expect_err("legacy GTF rule should not deserialize");
+            serde_json::from_str::<Certificate>(r#"{"goal":"goal","p":[{"r":"unknown","c":"p"}]}"#)
+                .expect_err("unknown certificate trace rule should not deserialize");
         assert!(
-            err.to_string().contains("legacy"),
+            err.to_string().contains("unknown"),
             "unexpected serde error: {}",
             err
         );
     }
 
     #[test]
-    fn gtf_claim_and_br_helpers_can_close_simple_goal() {
+    fn certificate_trace_claim_and_br_helpers_can_close_simple_goal() {
         let (processor, bindings, lowered_goal) = Processor::test_goal(
             r#"
             let p: Bool = axiom
@@ -1625,9 +1642,8 @@ mod tests {
         );
         let cert = Certificate {
             goal: "goal".to_string(),
-            proof: None,
-            gtf: Some(GtfProof {
-                steps: vec![GtfStep::claim("p".to_string())],
+            proof: Some(ProofTrace {
+                steps: vec![TraceStep::claim("p".to_string())],
             }),
         };
         processor
@@ -1638,6 +1654,6 @@ mod tests {
                 &crate::project::Project::new_mock(),
                 &bindings,
             )
-            .expect("GTF claim proof should check");
+            .expect("certificate trace claim proof should check");
     }
 }

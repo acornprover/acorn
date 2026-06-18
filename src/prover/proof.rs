@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::certificate::Certificate;
+use crate::certificate::{Certificate, CertificateDraft};
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::AtomId;
@@ -105,7 +105,7 @@ pub enum ConcreteRationale {
     Obvious,
 
     /// Check the target clause as one boolean reduction from a concrete source clause.
-    BooleanReduction { source: Clause, emit_legacy: bool },
+    BooleanReduction { source: Clause },
 }
 
 /// A reconstructed proof step together with the environments needed to specialize it.
@@ -144,10 +144,10 @@ impl ConcreteStep {
         matches!(self.rationale, ConcreteRationale::BooleanReduction { .. })
     }
 
-    pub fn should_emit_legacy_cert(&self) -> bool {
+    pub fn should_emit_certificate_step(&self) -> bool {
         match self.rationale {
             ConcreteRationale::Obvious => true,
-            ConcreteRationale::BooleanReduction { emit_legacy, .. } => emit_legacy,
+            ConcreteRationale::BooleanReduction { .. } => true,
         }
     }
 
@@ -403,7 +403,6 @@ fn concrete_rationale_for_step<R: ProofResolver>(
     step: &ProofStep,
     var_map: &VariableMap,
     replacement_context: &LocalContext,
-    emit_legacy: bool,
 ) -> Result<ConcreteRationale, Error> {
     let Rule::BooleanReduction(info) = &step.rule else {
         return Ok(ConcreteRationale::Obvious);
@@ -425,7 +424,6 @@ fn concrete_rationale_for_step<R: ProofResolver>(
         let Some((source_map, source_context)) = concrete_premises.into_iter().next() else {
             return Ok(ConcreteRationale::BooleanReduction {
                 source: source_clause.clone(),
-                emit_legacy,
             });
         };
         source_map.specialize_clause_with_replacement_context_and_compact_vars(
@@ -435,10 +433,7 @@ fn concrete_rationale_for_step<R: ProofResolver>(
         )
     };
 
-    Ok(ConcreteRationale::BooleanReduction {
-        source,
-        emit_legacy,
-    })
+    Ok(ConcreteRationale::BooleanReduction { source })
 }
 
 fn passive_contradiction_var_map<R: ProofResolver>(
@@ -495,10 +490,14 @@ fn passive_contradiction_var_map<R: ProofResolver>(
 }
 
 impl<'a> Proof<'a> {
-    /// Create a certificate for this proof.
-    pub fn make_cert(&self, goal: String, bindings: &BindingMap) -> Result<Certificate, Error> {
+    /// Create a draft certificate for this proof.
+    pub fn make_certificate_draft(
+        &self,
+        goal: String,
+        bindings: &BindingMap,
+    ) -> Result<CertificateDraft, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        Certificate::from_concrete_steps_with_witnesses(
+        Certificate::draft_from_concrete_steps_with_witnesses(
             goal,
             &concrete_steps,
             self.kernel_context,
@@ -633,15 +632,8 @@ impl<'a> Proof<'a> {
                             false,
                         );
                     }
-                    let emit_legacy = !skipped_steps.get(ps_id).copied().unwrap_or(false);
                     let rationale = if matches!(concrete_id, ConcreteStepId::ProofStep(_)) {
-                        concrete_rationale_for_step(
-                            self,
-                            step,
-                            &var_map,
-                            &replacement_context,
-                            emit_legacy,
-                        )?
+                        concrete_rationale_for_step(self, step, &var_map, &replacement_context)?
                     } else {
                         ConcreteRationale::Obvious
                     };
@@ -1491,7 +1483,6 @@ mod tests {
         assert!(
             concrete_steps.iter().any(|step| {
                 step.is_boolean_reduction()
-                    && step.should_emit_legacy_cert()
                     && step
                         .to_clauses(&kctx)
                         .into_iter()
@@ -1545,13 +1536,12 @@ mod tests {
         assert!(
             concrete_steps.iter().any(|step| {
                 step.is_boolean_reduction()
-                    && !step.should_emit_legacy_cert()
                     && step
                         .to_clauses(&kctx)
                         .into_iter()
                         .any(|clause| clause == reduced_clause)
             }),
-            "expected concrete IR to retain skipped legacy boolean reduction rationale"
+            "expected concrete IR to retain skipped boolean reduction rationale"
         );
     }
 
@@ -1748,7 +1738,7 @@ mod tests {
 
         let bindings = BindingMap::new(ModuleId::default());
         proof
-            .make_cert("goal".to_string(), &bindings)
+            .make_certificate_draft("goal".to_string(), &bindings)
             .expect("certificate generation should succeed");
     }
 
@@ -1960,9 +1950,9 @@ mod tests {
         let bindings =
             crate::elaborator::binding_map::BindingMap::new(crate::module::ModuleId::default());
         let cert = proof
-            .make_cert("goal".to_string(), &bindings)
+            .make_certificate_draft("goal".to_string(), &bindings)
             .expect("certificate generation should succeed");
-        let lines = cert.proof.expect("proof lines should exist");
+        let lines = cert.serialized_lines();
         assert!(
             !lines.is_empty(),
             "expected at least one generated certificate line"
@@ -1993,10 +1983,14 @@ mod tests {
         }];
 
         let bindings = BindingMap::new(ModuleId::default());
-        let cert =
-            Certificate::from_concrete_steps("goal".to_string(), &concrete_steps, &kctx, &bindings)
-                .expect("certificate generation should succeed");
-        let lines = cert.proof.expect("proof lines should exist");
+        let cert = Certificate::draft_from_concrete_steps(
+            "goal".to_string(),
+            &concrete_steps,
+            &kctx,
+            &bindings,
+        )
+        .expect("certificate generation should succeed");
+        let lines = cert.serialized_lines();
 
         // Repro assertion: currently this generated cert does not round-trip through parser.
         let project = Project::new_mock();
@@ -2071,10 +2065,14 @@ mod tests {
         );
 
         let bindings = BindingMap::new(ModuleId::default());
-        let cert =
-            Certificate::from_concrete_steps("goal".to_string(), &steps_in_order, &kctx, &bindings)
-                .expect("live-local inline original should serialize");
-        let proof = cert.proof.expect("proof should exist");
+        let cert = Certificate::draft_from_concrete_steps(
+            "goal".to_string(),
+            &steps_in_order,
+            &kctx,
+            &bindings,
+        )
+        .expect("live-local inline original should serialize");
+        let proof = cert.serialized_lines();
         assert_eq!(proof, vec!["function(x0: Bool) { x0 != false }(true)"]);
     }
 

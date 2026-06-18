@@ -311,16 +311,28 @@ fn test_generated_witness_with_unimported_typeclass_constraint() {
 
     // Generate the certificate
     let cert = processor
-        .prover()
-        .make_cert(bindings, goal_kernel_context, true)
+        .make_cert(
+            bindings,
+            goal_kernel_context,
+            &p,
+            Some(normalized_goal),
+            true,
+        )
         .expect("make_cert failed");
 
     // Debug: print the certificate
     eprintln!("Certificate proof:");
-    if let Some(proof) = &cert.proof {
-        for (i, step) in proof.iter().enumerate() {
-            eprintln!("  Step {}: {}", i, step);
-        }
+    let checked = processor
+        .check_cert(
+            &cert,
+            Some(normalized_goal),
+            goal_kernel_context,
+            &p,
+            bindings,
+        )
+        .expect("check_cert failed");
+    for (i, step) in checked.iter().enumerate() {
+        eprintln!("  Step {}: {}", i, step.statement);
     }
 
     // The certificate should verify successfully
@@ -395,11 +407,29 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let cert = processor
+    let draft = processor
         .prover()
-        .make_cert(bindings, goal_kernel_context, false)
+        .make_certificate_draft(bindings, goal_kernel_context, false)
+        .expect("certificate draft should be generated");
+    let proof = draft.serialized_lines();
+    let cert = processor
+        .make_cert(
+            bindings,
+            goal_kernel_context,
+            &project,
+            Some(normalized_goal),
+            false,
+        )
         .expect("make_cert failed");
-    let proof = cert.proof.expect("proof should exist");
+    processor
+        .check_cert(
+            &cert,
+            Some(normalized_goal),
+            goal_kernel_context,
+            &project,
+            bindings,
+        )
+        .expect("check_cert failed");
 
     assert!(
         proof

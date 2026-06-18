@@ -1326,16 +1326,14 @@ fn serialize_claim_line(
             )],
             preserve_open: false,
         }];
-        let cert = Certificate::from_concrete_steps(
+        let cert = Certificate::draft_from_concrete_steps(
             "goal".to_string(),
             &concrete_steps,
             kernel_context,
             bindings,
         )
         .expect("claim should serialize through concrete-step generation");
-        let mut proof = cert
-            .proof
-            .expect("claim certificate should have one proof line");
+        let mut proof = cert.serialized_lines();
         assert_eq!(proof.len(), 1, "expected one serialized proof line");
         return proof.pop().unwrap();
     }

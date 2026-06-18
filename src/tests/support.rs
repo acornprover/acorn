@@ -1,4 +1,3 @@
-use crate::certificate::Certificate;
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::lowered_module::LoweredGoalId;
 use crate::elaborator::lowering::LoweredGoal;
@@ -71,8 +70,12 @@ pub fn processor_for_goal_name<'a>(
     processor_for_lowered_goal(project, module_id, goal_id)
 }
 
+pub struct TestCertificate {
+    pub proof: Option<Vec<String>>,
+}
+
 /// Expects the proof to succeed, and a valid concrete proof to be generated.
-pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certificate {
+pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> TestCertificate {
     init_test_tracing();
     let module_id = project
         .load_module_by_name(module_name)
@@ -89,18 +92,37 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> Certi
 
     assert_eq!(outcome, Outcome::Success);
 
-    let cert = match processor
+    let draft = match processor
         .prover()
-        .make_cert(bindings, goal_kernel_context, true)
+        .make_certificate_draft(bindings, goal_kernel_context, true)
     {
+        Ok(draft) => draft,
+        Err(e) => panic!("make_certificate_draft failed: {}", e),
+    };
+    let proof = draft.serialized_lines();
+
+    let cert = match processor.make_cert(
+        bindings,
+        goal_kernel_context,
+        &*project,
+        Some(normalized_goal),
+        false,
+    ) {
         Ok(cert) => cert,
         Err(e) => panic!("make_cert failed: {}", e),
     };
 
-    if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, &*project, bindings) {
-        panic!("check_cert failed: {}", e);
-    }
-    cert
+    match processor.check_cert(
+        &cert,
+        Some(normalized_goal),
+        goal_kernel_context,
+        &*project,
+        bindings,
+    ) {
+        Ok(lines) => lines,
+        Err(e) => panic!("check_cert failed: {}", e),
+    };
+    TestCertificate { proof: Some(proof) }
 }
 
 // Does one proof on the provided text for a specific goal.
@@ -199,12 +221,21 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
                         goal.name, shallow_outcome
                     );
                     let cert = processor
-                        .prover()
-                        .make_cert(bindings, goal_kernel_context, true)
+                        .make_cert(
+                            bindings,
+                            goal_kernel_context,
+                            &project,
+                            Some(normalized_goal),
+                            true,
+                        )
                         .map_err(|e| e.to_string())?;
-                    if let Err(e) =
-                        processor.check_cert(&cert, None, goal_kernel_context, &project, bindings)
-                    {
+                    if let Err(e) = processor.check_cert(
+                        &cert,
+                        Some(normalized_goal),
+                        goal_kernel_context,
+                        &project,
+                        bindings,
+                    ) {
                         panic!("check_cert failed: {}", e);
                     }
                 }
@@ -220,10 +251,21 @@ fn verify_with_options(text: &str, options: VerifyOptions) -> Result<VerifyResul
             }));
         }
         let cert = processor
-            .prover()
-            .make_cert(bindings, goal_kernel_context, true)
+            .make_cert(
+                bindings,
+                goal_kernel_context,
+                &project,
+                Some(normalized_goal),
+                true,
+            )
             .map_err(|e| e.to_string())?;
-        if let Err(e) = processor.check_cert(&cert, None, goal_kernel_context, &project, bindings) {
+        if let Err(e) = processor.check_cert(
+            &cert,
+            Some(normalized_goal),
+            goal_kernel_context,
+            &project,
+            bindings,
+        ) {
             panic!("check_cert failed: {}", e);
         }
     }

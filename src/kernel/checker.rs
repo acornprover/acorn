@@ -107,7 +107,7 @@ pub struct CheckedStep {
     pub prefer_code_line: bool,
 }
 
-/// A clause inserted into the legacy checker, together with the reason used for dependency IDs.
+/// A clause inserted into the checker, together with the reason used for dependency IDs.
 #[derive(Debug, Clone)]
 pub struct InsertedClause {
     pub clause: Clause,
@@ -581,23 +581,23 @@ impl Checker {
         self.insert_clause_internal(&clause, reason, kernel_context);
     }
 
-    pub(crate) fn insert_clause_for_gtf(
+    pub(crate) fn insert_clause_for_trace(
         &mut self,
         clause: &Clause,
         reason: StepReason,
         kernel_context: &KernelContext,
     ) {
         let clause = normalize_clause_subterms(clause).normalized();
-        self.insert_clause_shallow_for_gtf(&clause, reason, kernel_context);
+        self.insert_clause_shallow_for_trace(&clause, reason, kernel_context);
     }
 
-    fn insert_clause_shallow_for_gtf(
+    fn insert_clause_shallow_for_trace(
         &mut self,
         clause: &Clause,
         reason: StepReason,
         kernel_context: &KernelContext,
     ) {
-        trace!(clause = %clause, reason = ?reason.description(), "inserting GTF clause");
+        trace!(clause = %clause, reason = ?reason.description(), "inserting certificate trace clause");
 
         if clause.is_impossible() {
             self.direct_contradiction = true;
@@ -689,7 +689,7 @@ impl Checker {
         None
     }
 
-    pub(crate) fn check_clause_direct_for_gtf(
+    pub(crate) fn check_clause_direct_for_trace(
         &mut self,
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -701,7 +701,7 @@ impl Checker {
         self.check_clause_direct(&clause, kernel_context)
     }
 
-    pub(crate) fn boolean_reduction_proves_for_gtf(
+    pub(crate) fn boolean_reduction_proves_for_trace(
         &mut self,
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -711,7 +711,7 @@ impl Checker {
             .is_some()
     }
 
-    pub(crate) fn boolean_reduction_set_contains_for_gtf(
+    pub(crate) fn boolean_reduction_set_contains_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
@@ -723,7 +723,7 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    pub(crate) fn boolean_reduction_sets_for_gtf(
+    pub(crate) fn boolean_reduction_sets_for_trace(
         &self,
         source: &Clause,
         kernel_context: &KernelContext,
@@ -731,7 +731,7 @@ impl Checker {
         self.checker_boolean_reduction_sets(source, kernel_context)
     }
 
-    pub(crate) fn equality_resolution_results_for_gtf(
+    pub(crate) fn equality_resolution_results_for_trace(
         &self,
         source: &Clause,
         kernel_context: &KernelContext,
@@ -745,18 +745,18 @@ impl Checker {
             .collect()
     }
 
-    pub(crate) fn equality_resolution_derives_for_gtf(
+    pub(crate) fn equality_resolution_derives_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
         kernel_context: &KernelContext,
     ) -> bool {
-        self.equality_resolution_results_for_gtf(source, kernel_context)
+        self.equality_resolution_results_for_trace(source, kernel_context)
             .into_iter()
             .any(|candidate| candidate == *result)
     }
 
-    pub(crate) fn equality_factoring_derives_for_gtf(
+    pub(crate) fn equality_factoring_derives_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
@@ -771,7 +771,7 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    pub(crate) fn injectivity_derives_for_gtf(
+    pub(crate) fn injectivity_derives_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
@@ -787,7 +787,7 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    pub(crate) fn extensionality_derives_for_gtf(
+    pub(crate) fn extensionality_derives_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
@@ -799,14 +799,14 @@ impl Checker {
         Clause::new(literals, source.get_local_context()) == *result
     }
 
-    pub(crate) fn equality_graph_derives_for_gtf(
+    pub(crate) fn equality_graph_derives_for_trace(
         &mut self,
         source: &Clause,
         result: &Clause,
         kernel_context: &KernelContext,
     ) -> bool {
         if self
-            .check_clause_direct_for_gtf(result, kernel_context)
+            .check_clause_direct_for_trace(result, kernel_context)
             .is_some()
         {
             return true;

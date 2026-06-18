@@ -2315,29 +2315,6 @@ impl<'a> Builder<'a> {
                     Ok(checked_cert) => {
                         let cert_to_use =
                             cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps);
-                        let cert_to_use = if cert_to_use.gtf.is_none() {
-                            match processor.migrate_cert_to_gtf(
-                                &cert_to_use,
-                                Some(normalized_goal),
-                                goal_kernel_context,
-                                self.project(),
-                                bindings,
-                            ) {
-                                Ok(migrated) => migrated,
-                                Err(e) => {
-                                    let err = BuildError::goal(
-                                        goal,
-                                        format!(
-                                            "certificate failed GTF migration after verifying: {}",
-                                            e
-                                        ),
-                                    );
-                                    return Err(err);
-                                }
-                            }
-                        } else {
-                            cert_to_use
-                        };
                         (cert_to_use, Ok(checked_cert.lines))
                     }
                     Err(e) => (cert, Err(e)),
@@ -2424,7 +2401,13 @@ impl<'a> Builder<'a> {
         self.write_eval_search_trace(processor, goal, outcome, eval_skip)?;
         if outcome == Outcome::Success {
             let cert_result = catch_unwind(AssertUnwindSafe(|| {
-                processor.make_cert(bindings, goal_kernel_context, self.print_found_proof)
+                processor.make_cert(
+                    bindings,
+                    goal_kernel_context,
+                    self.project(),
+                    Some(normalized_goal),
+                    self.print_found_proof,
+                )
             }));
             match cert_result {
                 Err(payload) => {
@@ -2514,21 +2497,6 @@ impl<'a> Builder<'a> {
                                 }
                             }
                         }
-                        let cert = match processor.migrate_cert_to_gtf(
-                            &cert,
-                            Some(normalized_goal),
-                            goal_kernel_context,
-                            self.project(),
-                            bindings,
-                        ) {
-                            Ok(migrated) => migrated,
-                            Err(e) => {
-                                return Err(BuildError::goal(
-                                    goal,
-                                    format!("generated cert failed GTF migration: {}", e),
-                                ))
-                            }
-                        };
                         if let Some(lines) = checked_cert_lines.as_ref() {
                             let display_bindings = Processor::bindings_with_type_params(
                                 bindings,

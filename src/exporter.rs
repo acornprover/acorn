@@ -1487,12 +1487,8 @@ fn get_proof_from_worklist(
     worklist: &crate::certificate::CertificateWorklist,
     goal_name: &str,
 ) -> Option<Vec<String>> {
-    let indexes = worklist.get_indexes(goal_name);
-    if indexes.is_empty() {
-        return None;
-    }
-    let cert = worklist.get_cert(indexes[0])?;
-    cert.proof.clone()
+    let _ = (worklist, goal_name);
+    None
 }
 
 /// Extract the source code proof body from a block's source range.

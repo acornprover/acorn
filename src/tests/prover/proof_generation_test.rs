@@ -43,11 +43,20 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let cert = processor
+    let draft = processor
         .prover()
-        .make_cert(bindings, goal_kernel_context, true)
+        .make_certificate_draft(bindings, goal_kernel_context, true)
+        .expect("certificate draft should be generated");
+    let proof = draft.serialized_lines();
+    let cert = processor
+        .make_cert(
+            bindings,
+            goal_kernel_context,
+            &project,
+            Some(normalized_goal),
+            true,
+        )
         .expect("make_cert should succeed");
-    let proof = cert.proof.as_ref().expect("proof should exist");
     assert!(
         !proof.is_empty(),
         "expected a non-empty generated cert proof: {proof:?}"
@@ -100,8 +109,13 @@ fn test_cert_generation_keeps_support_before_transitive_witnesses() {
     assert_eq!(outcome, Outcome::Success);
 
     let cert = processor
-        .prover()
-        .make_cert(bindings, goal_kernel_context, false)
+        .make_cert(
+            bindings,
+            goal_kernel_context,
+            &project,
+            Some(normalized_goal),
+            false,
+        )
         .expect("make_cert should succeed");
     processor
         .check_cert(
@@ -239,8 +253,13 @@ fn test_cert_generation_replays_flipped_simplification_match() {
     assert_eq!(outcome, Outcome::Success);
 
     let cert = processor
-        .prover()
-        .make_cert(bindings, goal_kernel_context, false)
+        .make_cert(
+            bindings,
+            goal_kernel_context,
+            &project,
+            Some(normalized_goal),
+            false,
+        )
         .expect("make_cert should succeed");
     processor
         .check_cert(&cert, None, goal_kernel_context, &project, bindings)
