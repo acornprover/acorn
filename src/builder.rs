@@ -1745,8 +1745,8 @@ impl<'a> Builder<'a> {
                 {
                     continue;
                 }
-                if let Some(proof) = &cert.proof {
-                    if proof.is_empty() {
+                if let Some(step_count) = cert.proof_step_count() {
+                    if step_count == 0 {
                         if include_empty {
                             counts.entry(cert.goal.clone()).or_default().empty += 1;
                         }
@@ -2312,10 +2312,35 @@ impl<'a> Builder<'a> {
                 let check_succeeded = result.is_ok();
                 self.record_cert_check(check_elapsed, check_succeeded);
                 let (cert_to_use, check_result) = match result {
-                    Ok(checked_cert) => (
-                        cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps),
-                        Ok(checked_cert.lines),
-                    ),
+                    Ok(checked_cert) => {
+                        let cert_to_use =
+                            cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps);
+                        #[cfg(feature = "gtf")]
+                        let cert_to_use = if cert_to_use.gtf.is_none() {
+                            match processor.migrate_cert_to_gtf(
+                                &cert_to_use,
+                                Some(normalized_goal),
+                                goal_kernel_context,
+                                self.project(),
+                                bindings,
+                            ) {
+                                Ok(migrated) => migrated,
+                                Err(e) => {
+                                    let err = BuildError::goal(
+                                        goal,
+                                        format!(
+                                            "certificate failed GTF migration after verifying: {}",
+                                            e
+                                        ),
+                                    );
+                                    return Err(err);
+                                }
+                            }
+                        } else {
+                            cert_to_use
+                        };
+                        (cert_to_use, Ok(checked_cert.lines))
+                    }
                     Err(e) => (cert, Err(e)),
                 };
 
@@ -2490,6 +2515,24 @@ impl<'a> Builder<'a> {
                                 }
                             }
                         }
+                        #[cfg(feature = "gtf")]
+                        let cert = match processor.migrate_cert_to_gtf(
+                            &cert,
+                            Some(normalized_goal),
+                            goal_kernel_context,
+                            self.project(),
+                            bindings,
+                        ) {
+                            Ok(migrated) => migrated,
+                            Err(e) => {
+                                return Err(BuildError::goal(
+                                    goal,
+                                    format!("generated cert failed GTF migration: {}", e),
+                                ))
+                            }
+                        };
+                        #[cfg(not(feature = "gtf"))]
+                        let cert = cert;
                         if let Some(lines) = checked_cert_lines.as_ref() {
                             let display_bindings = Processor::bindings_with_type_params(
                                 bindings,
@@ -2974,8 +3017,8 @@ impl<'a> Builder<'a> {
                     None => true,
                 }
             })
-            .map(|cert| match &cert.proof {
-                Some(proof) if proof.is_empty() => nonzero_skip_count,
+            .map(|cert| match cert.proof_step_count() {
+                Some(0) => nonzero_skip_count,
                 Some(_) => nonzero_skip_count + usize::from(has_skip_zero),
                 None => 0,
             })
@@ -3008,7 +3051,7 @@ impl<'a> Builder<'a> {
                 store
                     .certs
                     .iter()
-                    .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                    .map(|cert| 1 + cert.proof_step_count().unwrap_or(0))
                     .sum::<usize>()
             })
             .filter(|estimate| *estimate > 0)

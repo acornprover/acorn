@@ -42,14 +42,14 @@ fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
         .concrete_step_to_certificate_steps(&step, &mut kernel_context)
         .expect("certificate step generation should succeed");
 
-    if cfg!(feature = "ebr") {
-        assert_eq!(steps.len(), 1, "ebr should emit boolean reductions");
+    if cfg!(any(feature = "ebr", feature = "gtf")) {
+        assert_eq!(steps.len(), 1, "ebr/gtf should emit boolean reductions");
         assert!(
             matches!(
                 steps.first(),
                 Some(crate::kernel::certificate_step::CertificateStep::BooleanReduction(_))
             ),
-            "ebr should emit explicit boolean-reduction certificate steps"
+            "ebr/gtf should emit explicit boolean-reduction certificate steps"
         );
     } else {
         assert!(

@@ -244,7 +244,7 @@ fn test_proving_with_active_resolution() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    let expected = if cfg!(feature = "ebr") {
+    let expected = if cfg!(any(feature = "ebr", feature = "gtf")) {
         vec![
             "@br {\"source\":\"f(y) and g(y)\",\"result\":\"g(y)\"}",
             "@br {\"source\":\"f(y) and g(y)\",\"result\":\"f(y)\"}",
@@ -287,7 +287,7 @@ fn test_proving_exact_clause_match() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    let expected = if cfg!(feature = "ebr") {
+    let expected = if cfg!(any(feature = "ebr", feature = "gtf")) {
         vec![
             "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not f(Foo.foo) and not g(Foo.foo)\"}",
             "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not h(Foo.foo)\"}",
@@ -334,7 +334,7 @@ fn test_proving_an_or() {
     );
 
     let c = prove(&mut p, "main", "goal");
-    let expected = if cfg!(feature = "ebr") {
+    let expected = if cfg!(any(feature = "ebr", feature = "gtf")) {
         vec![
             "@br {\"source\":\"not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not h(Foo.foo)\"}",
             "@br {\"source\":\"not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not g(Foo.foo)\"}",
@@ -566,7 +566,7 @@ fn test_proving_random_bug() {
 
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
-    let expected = if cfg!(feature = "ebr") {
+    let expected = if cfg!(any(feature = "ebr", feature = "gtf")) {
         vec![
             "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
             "@br {\"source\":\"f(y) != h(y) and f(y) != z\",\"result\":\"f(y) != z\"}",

@@ -581,6 +581,69 @@ impl Checker {
         self.insert_clause_internal(&clause, reason, kernel_context);
     }
 
+    #[cfg(feature = "gtf")]
+    pub(crate) fn insert_clause_for_gtf(
+        &mut self,
+        clause: &Clause,
+        reason: StepReason,
+        kernel_context: &KernelContext,
+    ) {
+        let clause = normalize_clause_subterms(clause).normalized();
+        self.insert_clause_shallow_for_gtf(&clause, reason, kernel_context);
+    }
+
+    #[cfg(feature = "gtf")]
+    fn insert_clause_shallow_for_gtf(
+        &mut self,
+        clause: &Clause,
+        reason: StepReason,
+        kernel_context: &KernelContext,
+    ) {
+        trace!(clause = %clause, reason = ?reason.description(), "inserting GTF clause");
+
+        if clause.is_impossible() {
+            self.direct_contradiction = true;
+            return;
+        }
+
+        let has_any_variable = clause.has_any_variable();
+        if has_any_variable {
+            if self
+                .variable_clause_generations
+                .get(clause)
+                .is_some_and(|generation| *generation == self.concrete_generation)
+            {
+                return;
+            }
+            self.variable_clause_generations
+                .insert(clause.clone(), self.concrete_generation);
+        } else if self.exact_clauses.contains_key(clause) {
+            return;
+        }
+
+        let step_id = self.reasons.len();
+        self.reasons.push_back(reason);
+        self.inserted_clauses.push_back(clause.clone());
+        self.exact_clauses.entry(clause.clone()).or_insert(step_id);
+
+        if let Some(key) = Self::negated_exists_true_type_from_clause(clause) {
+            if self.proven_inhabited.contains(&key) {
+                self.direct_contradiction = true;
+            }
+        }
+        if let Some(key) = self.mark_inhabited_from_clause(clause, kernel_context) {
+            if self.has_negated_exists_true_for(&key) {
+                self.direct_contradiction = true;
+            }
+        }
+
+        if !has_any_variable {
+            self.concrete_generation += 1;
+            self.term_graph
+                .insert_clause(clause, StepId(step_id), kernel_context);
+        }
+    }
+
     /// Adds a true clause that was already normalized while lowering.
     pub fn insert_normalized_clause(
         &mut self,
@@ -626,6 +689,143 @@ impl Checker {
 
         trace!(clause = %clause, result = "failed", "checking clause");
         None
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn check_clause_direct_for_gtf(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<StepReason> {
+        let clause = normalize_clause_subterms(clause).normalized();
+        if clause.is_tautology() {
+            return Some(StepReason::EqualityGraph);
+        }
+        self.check_clause_direct(&clause, kernel_context)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn boolean_reduction_proves_for_gtf(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let clause = normalize_clause_subterms(clause).normalized();
+        self.check_clause_via_boolean_reductions(&clause, kernel_context)
+            .is_some()
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn boolean_reduction_set_contains_for_gtf(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        self.checker_boolean_reduction_sets(source, kernel_context)
+            .into_iter()
+            .flatten()
+            .any(|candidate| candidate == *result)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn boolean_reduction_sets_for_gtf(
+        &self,
+        source: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Vec<Clause>> {
+        self.checker_boolean_reduction_sets(source, kernel_context)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn equality_resolution_results_for_gtf(
+        &self,
+        source: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<Clause> {
+        inference::find_equality_resolutions(source, kernel_context)
+            .into_iter()
+            .filter_map(|(literals, context, _)| {
+                let trace = Clause::normalize_with_trace(literals, &context);
+                self.normalize_checker_trace(&trace, kernel_context)
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn equality_resolution_derives_for_gtf(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        self.equality_resolution_results_for_gtf(source, kernel_context)
+            .into_iter()
+            .any(|candidate| candidate == *result)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn equality_factoring_derives_for_gtf(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        inference::find_equality_factorings(source, kernel_context)
+            .into_iter()
+            .filter_map(|(literals, context, _)| {
+                let trace = Clause::normalize_with_trace(literals, &context);
+                self.normalize_checker_trace(&trace, kernel_context)
+            })
+            .any(|candidate| candidate == *result)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn injectivity_derives_for_gtf(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        source
+            .find_injectivities()
+            .into_iter()
+            .filter_map(|literals| {
+                let trace = Clause::normalize_with_trace(literals, source.get_local_context());
+                self.normalize_checker_trace(&trace, kernel_context)
+            })
+            .any(|candidate| candidate == *result)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn extensionality_derives_for_gtf(
+        &self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let Some(literals) = source.find_extensionality(kernel_context) else {
+            return false;
+        };
+        Clause::new(literals, source.get_local_context()) == *result
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn equality_graph_derives_for_gtf(
+        &mut self,
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if self
+            .check_clause_direct_for_gtf(result, kernel_context)
+            .is_some()
+        {
+            return true;
+        }
+        self.simplify_variable_clause_with_concrete_facts(source, kernel_context)
+            .as_ref()
+            == Some(result)
     }
 
     fn check_clause_via_boolean_reductions(

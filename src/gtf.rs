@@ -1,0 +1,1685 @@
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
+use crate::code_generator::Error as CodeGenError;
+use crate::elaborator::acorn_type::TypeParam;
+use crate::elaborator::binding_map::BindingMap;
+use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep};
+use crate::kernel::checker::{Checker, StepReason};
+use crate::kernel::clause::Clause;
+use crate::kernel::kernel_context::KernelContext;
+use crate::project::ProjectLookup;
+
+/// Experimental "good trace format" proof payload.
+///
+/// GTF is intentionally rule-oriented: each step says which checker procedure
+/// accepts it and which earlier steps are its premises.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct GtfProof {
+    pub steps: Vec<GtfStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GtfStep {
+    #[serde(rename = "r", default, skip_serializing_if = "GtfRule::is_claim")]
+    pub rule: GtfRule,
+
+    #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+
+    #[serde(
+        rename = "f",
+        alias = "from",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub premises: Vec<usize>,
+
+    #[serde(rename = "g", default, skip_serializing_if = "is_false")]
+    pub generic: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_serialized_generic_artifact(code: &str) -> bool {
+    code.starts_with("(forall(") || code.starts_with("forall(")
+}
+
+fn is_synthetic_generic_wrapper(code: &str) -> bool {
+    let trimmed = code.trim_start();
+    trimmed.starts_with("function[") && trimmed.ends_with(']')
+}
+
+#[derive(Clone)]
+struct StepClauses {
+    primary: Clause,
+    aliases: Vec<Clause>,
+}
+
+impl StepClauses {
+    fn new(primary: Clause, aliases: Vec<Clause>) -> Self {
+        let mut deduped = vec![];
+        for alias in aliases {
+            if alias != primary && !deduped.contains(&alias) {
+                deduped.push(alias);
+            }
+        }
+        Self {
+            primary,
+            aliases: deduped,
+        }
+    }
+
+    fn all(&self) -> impl Iterator<Item = &Clause> {
+        std::iter::once(&self.primary).chain(self.aliases.iter())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GtfRule {
+    /// A source/environment fact accepted by direct checker lookup.
+    Fact,
+
+    /// A proof claim accepted by direct exact/egraph lookup.
+    Claim,
+
+    /// One explicit boolean reduction from a previous step.
+    Br,
+
+    /// Prove this clause because one of its boolean-reduction sets is already known.
+    BrIntro,
+
+    /// A local equality-graph check using the listed premises.
+    Eq,
+
+    /// One explicit equality-resolution step from a previous step.
+    Er,
+
+    /// One explicit equality-factoring step from a previous step.
+    Ef,
+
+    /// One explicit extensionality step from a previous step.
+    Ext,
+
+    /// One explicit injectivity step from a previous step.
+    Inj,
+
+    /// Instantiate a generic claim from a previous step.
+    Inst,
+
+    /// A certificate-local witness declaration.
+    Wit,
+
+    /// A final contradiction after earlier steps have been inserted.
+    Contra,
+
+    /// Transitional migration rule: check this line with the legacy checker.
+    ///
+    /// The experiment keeps this rule so old certificates can be wrapped in
+    /// GTF before all explicit rule compilers are complete.
+    Legacy,
+}
+
+impl Default for GtfRule {
+    fn default() -> Self {
+        Self::Claim
+    }
+}
+
+impl GtfRule {
+    fn is_claim(rule: &Self) -> bool {
+        matches!(rule, Self::Claim)
+    }
+}
+
+impl GtfStep {
+    pub fn fact(claim: String) -> Self {
+        Self {
+            rule: GtfRule::Fact,
+            claim: Some(claim),
+            premises: vec![],
+            generic: false,
+        }
+    }
+
+    pub fn claim(claim: String) -> Self {
+        Self {
+            rule: GtfRule::Claim,
+            claim: Some(claim),
+            premises: vec![],
+            generic: false,
+        }
+    }
+
+    pub fn br(source: usize, claim: String) -> Self {
+        Self {
+            rule: GtfRule::Br,
+            claim: Some(claim),
+            premises: vec![source],
+            generic: false,
+        }
+    }
+
+    pub fn legacy(claim: String) -> Self {
+        Self {
+            rule: GtfRule::Legacy,
+            claim: Some(claim),
+            premises: vec![],
+            generic: false,
+        }
+    }
+
+    fn with_rule(rule: GtfRule, claim: String, premises: Vec<usize>, generic: bool) -> Self {
+        Self {
+            rule,
+            claim: Some(claim),
+            premises,
+            generic,
+        }
+    }
+}
+
+impl GtfProof {
+    pub fn from_legacy_lines(proof: &[String]) -> Self {
+        Self {
+            steps: proof.iter().cloned().map(GtfStep::legacy).collect(),
+        }
+    }
+
+    pub fn from_legacy_proof_checked(
+        proof: &[String],
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+        _type_params: &[TypeParam],
+    ) -> Result<Self, CodeGenError> {
+        GtfCompiler::new(checker, project, bindings, kernel_context).compile(proof)
+    }
+
+    pub fn from_certificate_steps(
+        steps: &[CertificateStep],
+        proof_lines: &[String],
+    ) -> Result<Self, CodeGenError> {
+        let mut gtf_steps = Vec::with_capacity(steps.len());
+        for (index, step) in steps.iter().enumerate() {
+            let code = proof_lines.get(index).cloned().ok_or_else(|| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "missing serialized proof line for GTF step {}",
+                    index + 1
+                ))
+            })?;
+            match step {
+                CertificateStep::BooleanReduction(BooleanReductionStep { source, .. }) => {
+                    if let Some(source_index) = steps[..index].iter().position(|candidate| {
+                        matches!(
+                            candidate,
+                            CertificateStep::Claim(claim) if claim == source
+                        )
+                    }) {
+                        gtf_steps.push(GtfStep::br(source_index, code));
+                    } else {
+                        gtf_steps.push(GtfStep::legacy(code));
+                    }
+                }
+                CertificateStep::Claim(_) => {
+                    gtf_steps.push(GtfStep::legacy(code));
+                }
+                CertificateStep::Satisfy(_) => {
+                    gtf_steps.push(GtfStep::legacy(code));
+                }
+            }
+        }
+        Ok(Self { steps: gtf_steps })
+    }
+
+    pub fn without_unreferenced_auxiliary_steps(&self) -> Self {
+        let mut referenced = vec![false; self.steps.len()];
+        for step in &self.steps {
+            for &premise in &step.premises {
+                if let Some(slot) = referenced.get_mut(premise) {
+                    *slot = true;
+                }
+            }
+        }
+
+        let mut remap = vec![None; self.steps.len()];
+        let mut steps = vec![];
+        for (old_index, step) in self.steps.iter().enumerate() {
+            let serialized_generic_artifact = matches!(step.rule, GtfRule::Claim)
+                && step.premises.is_empty()
+                && step
+                    .claim
+                    .as_deref()
+                    .is_some_and(is_serialized_generic_artifact);
+            let auxiliary =
+                step.generic || matches!(step.rule, GtfRule::Br) || serialized_generic_artifact;
+            if auxiliary && !referenced[old_index] {
+                continue;
+            }
+            remap[old_index] = Some(steps.len());
+            steps.push(step.clone());
+        }
+        for step in &mut steps {
+            for premise in &mut step.premises {
+                *premise = remap
+                    .get(*premise)
+                    .and_then(|mapped| *mapped)
+                    .expect("referenced GTF premise should be retained");
+            }
+        }
+        Self { steps }
+    }
+
+    pub fn check_with_usage(
+        &self,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<CheckedCertificate, CodeGenError> {
+        GtfChecker::new(checker, project, bindings, kernel_context).check(self)
+    }
+}
+
+struct GtfCompiler<'a> {
+    legacy_checker: Checker,
+    shadow_checker: Checker,
+    project: &'a dyn ProjectLookup,
+    bindings: Cow<'a, BindingMap>,
+    kernel_context: Cow<'a, KernelContext>,
+    steps: Vec<GtfStep>,
+    step_clauses: Vec<StepClauses>,
+    available: HashMap<Clause, usize>,
+    legacy_to_gtf: HashMap<usize, usize>,
+}
+
+impl<'a> GtfCompiler<'a> {
+    fn new(
+        checker: Checker,
+        project: &'a dyn ProjectLookup,
+        bindings: Cow<'a, BindingMap>,
+        kernel_context: Cow<'a, KernelContext>,
+    ) -> Self {
+        Self {
+            legacy_checker: checker.clone(),
+            shadow_checker: checker,
+            project,
+            bindings,
+            kernel_context,
+            steps: vec![],
+            step_clauses: vec![],
+            available: HashMap::new(),
+            legacy_to_gtf: HashMap::new(),
+        }
+    }
+
+    fn compile(mut self, proof: &[String]) -> Result<GtfProof, CodeGenError> {
+        for (line_index, code) in proof.iter().enumerate() {
+            if self.legacy_checker.has_contradiction() {
+                break;
+            }
+            self.compile_legacy_line(line_index, code)?;
+        }
+        if !self.legacy_checker.has_contradiction() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "legacy proof did not close while compiling GTF".to_string(),
+            ));
+        }
+        if !self.shadow_checker.has_contradiction() {
+            self.emit_boolean_reduction_contradiction()?;
+        }
+        Ok(GtfProof { steps: self.steps })
+    }
+
+    fn compile_legacy_line(&mut self, line_index: usize, code: &str) -> Result<(), CodeGenError> {
+        let parsed = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+
+        let claim_index = match &parsed {
+            CertificateStep::Claim(claim) => Some(self.emit_claim_step(code.to_string(), claim)?),
+            CertificateStep::BooleanReduction(_) => None,
+            CertificateStep::Satisfy(satisfy) => {
+                let justification = satisfy
+                    .justification
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                self.emit_clause(justification, StepReason::PreviousClaim)?;
+                self.emit_witness_step(code.to_string(), satisfy)?;
+                None
+            }
+        };
+
+        let before = self.legacy_checker.inserted_len();
+        let code_lines = [code.to_string()];
+        match self.legacy_checker.check_cert_steps(
+            &[parsed],
+            Some(&code_lines),
+            &self.kernel_context,
+        ) {
+            Ok((_checked, _consumed)) => {}
+            Err(err) if err.to_string().contains("proof does not result") => {}
+            Err(err) => {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "legacy proof line {} failed while compiling GTF: {} ({})",
+                    line_index + 1,
+                    code,
+                    err
+                )));
+            }
+        }
+
+        for legacy_id in before..self.legacy_checker.inserted_len() {
+            let inserted = self
+                .legacy_checker
+                .inserted_clause(legacy_id)
+                .ok_or_else(|| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "missing inserted legacy clause {} while compiling GTF",
+                        legacy_id
+                    ))
+                })?;
+            let gtf_index = match self.emit_clause(inserted.clause, inserted.reason.clone()) {
+                Ok(index) => index,
+                Err(_)
+                    if matches!(inserted.reason, StepReason::PreviousClaim)
+                        && claim_index.is_some() =>
+                {
+                    claim_index.expect("claim_index checked above")
+                }
+                Err(err) => return Err(err),
+            };
+            self.legacy_to_gtf.insert(legacy_id, gtf_index);
+        }
+        Ok(())
+    }
+
+    fn emit_claim_step(
+        &mut self,
+        code: String,
+        claim: &crate::kernel::certificate_step::Claim,
+    ) -> Result<usize, CodeGenError> {
+        let generic = claim.normalized_generic_clause();
+        let clause = claim
+            .normalized_specialized_clause(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        if let Some(index) = self.available.get(&clause) {
+            return Ok(*index);
+        }
+        if let Some(index) = self.available.get(&generic) {
+            if generic != clause {
+                let step_index = self.push_step(
+                    GtfRule::Claim,
+                    code,
+                    vec![],
+                    clause.clone(),
+                    false,
+                    Self::claim_aliases(generic, &clause),
+                )?;
+                return Ok(step_index);
+            }
+            return Ok(*index);
+        }
+
+        let reason = self
+            .shadow_checker
+            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .or_else(|| {
+                self.shadow_checker
+                    .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+            });
+        if reason.is_some() {
+            return self.push_step(
+                GtfRule::Claim,
+                code,
+                vec![],
+                clause.clone(),
+                false,
+                Self::claim_aliases(generic, &clause),
+            );
+        }
+        if self
+            .shadow_checker
+            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+            || self
+                .shadow_checker
+                .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+        {
+            return self.push_step(
+                GtfRule::BrIntro,
+                code,
+                vec![],
+                clause.clone(),
+                false,
+                Self::claim_aliases(generic, &clause),
+            );
+        }
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "could not compile legacy claim to GTF: {}",
+            code
+        )))
+    }
+
+    fn insert_step_clauses(&mut self, index: usize, clauses: &StepClauses) {
+        for clause in clauses.all() {
+            self.shadow_checker.insert_clause_for_gtf(
+                clause,
+                StepReason::PreviousClaim,
+                &self.kernel_context,
+            );
+            self.available.entry(clause.clone()).or_insert(index);
+        }
+    }
+
+    fn claim_aliases(generic: Clause, specialized: &Clause) -> Vec<Clause> {
+        if generic == *specialized {
+            vec![]
+        } else {
+            vec![generic]
+        }
+    }
+
+    fn emit_witness_step(
+        &mut self,
+        code: String,
+        satisfy: &crate::kernel::certificate_step::SatisfyStep,
+    ) -> Result<usize, CodeGenError> {
+        let clause = satisfy
+            .justification
+            .normalized_specialized_clause(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        if self
+            .shadow_checker
+            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .is_none()
+        {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF witness declaration is missing justification: {}",
+                code
+            )));
+        }
+        self.shadow_checker.insert_clause_for_gtf(
+            &satisfy.justification.normalized_generic_clause(),
+            StepReason::WitnessDeclaration,
+            &self.kernel_context,
+        );
+        self.shadow_checker.insert_clause_for_gtf(
+            &clause,
+            StepReason::WitnessDeclaration,
+            &self.kernel_context,
+        );
+        if let Some(specialized_clause) = &satisfy.specialized_clause {
+            self.shadow_checker.insert_clause_for_gtf(
+                specialized_clause,
+                StepReason::WitnessDeclaration,
+                &self.kernel_context,
+            );
+        }
+        for witness_clause in &satisfy.witness_clauses {
+            self.shadow_checker.insert_clause_for_gtf(
+                witness_clause,
+                StepReason::WitnessDeclaration,
+                &self.kernel_context,
+            );
+        }
+        let mut aliases = vec![satisfy.justification.normalized_generic_clause()];
+        if let Some(specialized_clause) = &satisfy.specialized_clause {
+            aliases.push(specialized_clause.clone());
+        }
+        aliases.extend(satisfy.witness_clauses.iter().cloned());
+        self.push_step(GtfRule::Wit, code, vec![], clause, false, aliases)
+    }
+
+    fn emit_clause(&mut self, clause: Clause, reason: StepReason) -> Result<usize, CodeGenError> {
+        if let Some(index) = self.available.get(&clause) {
+            return Ok(*index);
+        }
+        let (code, generic) = self.serialize_clause_step(&clause)?;
+
+        if let Some(source_id) = reason.dependency() {
+            let source_index = if let Some(&source_index) = self.legacy_to_gtf.get(&source_id) {
+                Some(source_index)
+            } else if let Some(source_inserted) = self.legacy_checker.inserted_clause(source_id) {
+                let source_index =
+                    self.emit_clause(source_inserted.clause, source_inserted.reason)?;
+                self.legacy_to_gtf.insert(source_id, source_index);
+                Some(source_index)
+            } else {
+                None
+            };
+
+            if let Some(source_index) = source_index {
+                let source_candidates: Vec<Clause> =
+                    self.step_clauses[source_index].all().cloned().collect();
+                let rule = source_candidates.iter().find_map(|source| match reason {
+                    StepReason::EqualityResolution(_)
+                        if self.shadow_checker.equality_resolution_derives_for_gtf(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        ) =>
+                    {
+                        Some(GtfRule::Er)
+                    }
+                    StepReason::EqualityFactoring(_)
+                        if self.shadow_checker.equality_factoring_derives_for_gtf(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        ) =>
+                    {
+                        Some(GtfRule::Ef)
+                    }
+                    StepReason::Extensionality(_)
+                        if self.shadow_checker.extensionality_derives_for_gtf(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        ) =>
+                    {
+                        Some(GtfRule::Ext)
+                    }
+                    StepReason::Injectivity(_)
+                        if self.shadow_checker.injectivity_derives_for_gtf(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        ) =>
+                    {
+                        Some(GtfRule::Inj)
+                    }
+                    StepReason::BooleanReduction(_)
+                        if self.shadow_checker.boolean_reduction_set_contains_for_gtf(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        ) =>
+                    {
+                        Some(GtfRule::Br)
+                    }
+                    _ => None,
+                });
+                if let Some(rule) = rule {
+                    return self.push_step(rule, code, vec![source_index], clause, generic, vec![]);
+                }
+            }
+        }
+
+        if matches!(reason, StepReason::BooleanReduction(_)) {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let source_candidates: Vec<Clause> =
+                    self.step_clauses[source_index].all().cloned().collect();
+                if source_candidates.iter().any(|source| {
+                    self.shadow_checker.boolean_reduction_set_contains_for_gtf(
+                        source,
+                        &clause,
+                        &self.kernel_context,
+                    )
+                }) {
+                    return self.push_step(
+                        GtfRule::Br,
+                        code,
+                        vec![source_index],
+                        clause,
+                        generic,
+                        vec![],
+                    );
+                }
+            }
+        }
+
+        if matches!(reason, StepReason::EqualityGraph) {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let source_candidates: Vec<Clause> =
+                    self.step_clauses[source_index].all().cloned().collect();
+                if source_candidates.iter().any(|source| {
+                    self.shadow_checker.equality_graph_derives_for_gtf(
+                        source,
+                        &clause,
+                        &self.kernel_context,
+                    )
+                }) {
+                    return self.push_step(
+                        GtfRule::Eq,
+                        code,
+                        vec![source_index],
+                        clause,
+                        generic,
+                        vec![],
+                    );
+                }
+            }
+        }
+
+        if self
+            .shadow_checker
+            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+        {
+            return self.push_step(GtfRule::BrIntro, code, vec![], clause, generic, vec![]);
+        }
+        if self
+            .shadow_checker
+            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+            .is_some()
+        {
+            return self.push_step(GtfRule::Claim, code, vec![], clause, generic, vec![]);
+        }
+
+        let dependency_context = reason
+            .dependency()
+            .map(|source_id| {
+                if let Some(source_index) = self.legacy_to_gtf.get(&source_id) {
+                    format!(
+                        "; dependency {} mapped to GTF step {}: {}",
+                        source_id, source_index, self.step_clauses[*source_index].primary
+                    )
+                } else if let Some(source_inserted) = self.legacy_checker.inserted_clause(source_id)
+                {
+                    format!(
+                        "; dependency {} is unmapped legacy clause: {} ({:?})",
+                        source_id, source_inserted.clause, source_inserted.reason
+                    )
+                } else {
+                    format!("; dependency {} is not available", source_id)
+                }
+            })
+            .unwrap_or_default();
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "could not compile inserted legacy clause to GTF: {} ({:?}){}",
+            clause, reason, dependency_context
+        )))
+    }
+
+    fn serialize_clause_step(&self, clause: &Clause) -> Result<(String, bool), CodeGenError> {
+        let mut candidates = vec![Certificate::serialize_clause_for_gtf(
+            clause,
+            &self.kernel_context,
+            self.bindings.as_ref(),
+        )?];
+        if clause.get_local_context().is_empty() {
+            if let Ok(code) = Certificate::serialize_closed_clause_for_gtf(
+                clause,
+                &self.kernel_context,
+                self.bindings.as_ref(),
+            ) {
+                candidates.push((code, false));
+            }
+        }
+
+        let mut parsed_summaries = vec![];
+        for (code, preferred_generic) in candidates {
+            let mut attempted = vec![];
+            for generic in [preferred_generic, !preferred_generic] {
+                if attempted.contains(&generic) {
+                    continue;
+                }
+                attempted.push(generic);
+                match self.parse_serialized_clause(&code, generic) {
+                    Ok(parsed) if parsed == *clause => {
+                        return Ok((code, generic));
+                    }
+                    Ok(parsed) => {
+                        parsed_summaries.push(format!("{} / g={}: {}", code, generic, parsed));
+                    }
+                    Err(err) => {
+                        parsed_summaries.push(format!("{} / g={}: {}", code, generic, err));
+                    }
+                }
+            }
+        }
+
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "GTF serializer did not roundtrip clause {} ({})",
+            clause,
+            parsed_summaries.join("; ")
+        )))
+    }
+
+    fn parse_serialized_clause(&self, code: &str, generic: bool) -> Result<Clause, CodeGenError> {
+        let mut bindings = Cow::Owned(self.bindings.as_ref().clone());
+        let mut kernel_context = Cow::Owned(self.kernel_context.as_ref().clone());
+        match Certificate::parse_code_line(code, self.project, &mut bindings, &mut kernel_context)?
+        {
+            CertificateStep::Claim(claim) => {
+                if generic {
+                    Ok(claim.normalized_generic_clause())
+                } else {
+                    claim
+                        .normalized_specialized_clause(&kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)
+                }
+            }
+            CertificateStep::BooleanReduction(reduction) => {
+                if generic {
+                    Ok(reduction.result.normalized_generic_clause())
+                } else {
+                    reduction
+                        .result
+                        .normalized_specialized_clause(&kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)
+                }
+            }
+            CertificateStep::Satisfy(satisfy) => satisfy
+                .justification
+                .normalized_specialized_clause(&kernel_context)
+                .map_err(CodeGenError::GeneratedBadCode),
+        }
+    }
+
+    fn find_boolean_reduction_contradiction_path(
+        &self,
+        source: &Clause,
+        seen: &mut HashSet<Clause>,
+    ) -> Option<Vec<Clause>> {
+        if !seen.insert(source.clone()) {
+            return None;
+        }
+        for reduction_set in self
+            .shadow_checker
+            .boolean_reduction_sets_for_gtf(source, &self.kernel_context)
+        {
+            for candidate in reduction_set {
+                if candidate.is_impossible() {
+                    return Some(vec![candidate]);
+                }
+                if let Some(mut path) =
+                    self.find_boolean_reduction_contradiction_path(&candidate, seen)
+                {
+                    path.insert(0, candidate);
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn emit_boolean_reduction_contradiction(&mut self) -> Result<(), CodeGenError> {
+        for source_index in (0..self.step_clauses.len()).rev() {
+            let source_candidates: Vec<Clause> =
+                self.step_clauses[source_index].all().cloned().collect();
+            for source in source_candidates {
+                let Some(path) =
+                    self.find_boolean_reduction_contradiction_path(&source, &mut HashSet::new())
+                else {
+                    continue;
+                };
+                let mut premise_index = source_index;
+                for clause in path {
+                    if let Some(existing_index) = self.available.get(&clause) {
+                        premise_index = *existing_index;
+                        continue;
+                    }
+                    let (code, generic) = if clause.is_impossible() {
+                        ("false".to_string(), false)
+                    } else {
+                        self.serialize_clause_step(&clause)?
+                    };
+                    premise_index = self.push_step(
+                        GtfRule::Br,
+                        code,
+                        vec![premise_index],
+                        clause,
+                        generic,
+                        vec![],
+                    )?;
+                }
+                if self.shadow_checker.has_contradiction() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(CodeGenError::GeneratedBadCode(
+            "GTF proof closed in legacy checker, but no explicit contradiction path was found"
+                .to_string(),
+        ))
+    }
+
+    fn push_step(
+        &mut self,
+        rule: GtfRule,
+        code: String,
+        premises: Vec<usize>,
+        clause: Clause,
+        generic: bool,
+        aliases: Vec<Clause>,
+    ) -> Result<usize, CodeGenError> {
+        let index = self.steps.len();
+        let step_clauses = StepClauses::new(clause, aliases);
+        self.insert_step_clauses(index, &step_clauses);
+        self.step_clauses.push(step_clauses);
+        self.steps
+            .push(GtfStep::with_rule(rule, code, premises, generic));
+        Ok(index)
+    }
+}
+
+struct GtfChecker<'a> {
+    checker: Checker,
+    project: &'a dyn ProjectLookup,
+    bindings: Cow<'a, BindingMap>,
+    kernel_context: Cow<'a, KernelContext>,
+    clauses: Vec<StepClauses>,
+    lines: Vec<CertificateLine>,
+}
+
+impl<'a> GtfChecker<'a> {
+    fn new(
+        checker: Checker,
+        project: &'a dyn ProjectLookup,
+        bindings: Cow<'a, BindingMap>,
+        kernel_context: Cow<'a, KernelContext>,
+    ) -> Self {
+        Self {
+            checker,
+            project,
+            bindings,
+            kernel_context,
+            clauses: vec![],
+            lines: vec![],
+        }
+    }
+
+    fn check(mut self, proof: &GtfProof) -> Result<CheckedCertificate, CodeGenError> {
+        if self.checker.has_contradiction() {
+            return Ok(CheckedCertificate {
+                lines: self.lines,
+                consumed_proof_steps: 0,
+            });
+        }
+        for (index, step) in proof.steps.iter().enumerate() {
+            if self.checker.has_contradiction() {
+                return Ok(CheckedCertificate {
+                    lines: self.lines,
+                    consumed_proof_steps: index,
+                });
+            }
+            self.check_step(index, step)?;
+        }
+        if !self.checker.has_contradiction() {
+            return Err(CodeGenError::GeneratedBadCode(
+                "GTF proof does not result in a contradiction".to_string(),
+            ));
+        }
+        let consumed = proof.steps.len();
+        Ok(CheckedCertificate {
+            lines: self.lines,
+            consumed_proof_steps: consumed,
+        })
+    }
+
+    fn check_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
+        match step.rule {
+            GtfRule::Fact | GtfRule::Claim => {
+                let (generic, specialized, code) =
+                    self.parse_required_claim_with_generic(index, step)?;
+                let clause = if step.generic {
+                    generic.clone()
+                } else {
+                    specialized.clone()
+                };
+                let aliases = if is_synthetic_generic_wrapper(&code) {
+                    vec![]
+                } else {
+                    GtfCompiler::claim_aliases(generic.clone(), &specialized)
+                };
+                let reason = self
+                    .checker
+                    .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+                    .or_else(|| {
+                        self.checker
+                            .check_clause_direct_for_gtf(&clause, &self.kernel_context)
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .check_clause_direct_for_gtf(&specialized, &self.kernel_context)
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+                            .then_some(StepReason::BooleanReduction(index))
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .boolean_reduction_proves_for_gtf(&clause, &self.kernel_context)
+                            .then_some(StepReason::BooleanReduction(index))
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .boolean_reduction_proves_for_gtf(&specialized, &self.kernel_context)
+                            .then_some(StepReason::BooleanReduction(index))
+                    })
+                    .or_else(|| {
+                        is_serialized_generic_artifact(&code).then_some(StepReason::PreviousClaim)
+                    })
+                    .ok_or_else(|| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "GTF {:?} step {} is not directly known: {}",
+                            step.rule,
+                            index + 1,
+                            code
+                        ))
+                    })?;
+                self.accept_clause_with_aliases(clause, aliases, reason, code);
+            }
+            GtfRule::Inst => {
+                if step.premises.len() != 1 {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF inst step {} needs exactly one premise",
+                        index + 1
+                    )));
+                }
+                let source_index = step.premises[0];
+                let sources: Vec<Clause> = self
+                    .clauses
+                    .get(source_index)
+                    .ok_or_else(|| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "GTF inst step {} references missing premise {}",
+                            index + 1,
+                            source_index
+                        ))
+                    })?
+                    .all()
+                    .cloned()
+                    .collect();
+                let (generic, specialized, code) =
+                    self.parse_required_claim_with_generic(index, step)?;
+                if !sources.iter().any(|source| *source == generic) {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF inst step {} generic clause does not match premise {}: {}",
+                        index + 1,
+                        source_index,
+                        code
+                    )));
+                }
+                self.accept_clause(specialized, StepReason::PreviousClaim, code);
+            }
+            GtfRule::Br => {
+                if step.premises.len() != 1 {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF br step {} needs exactly one premise",
+                        index + 1
+                    )));
+                }
+                let source_index = step.premises[0];
+                let sources: Vec<Clause> = self
+                    .clauses
+                    .get(source_index)
+                    .ok_or_else(|| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "GTF br step {} references missing premise {}",
+                            index + 1,
+                            source_index
+                        ))
+                    })?
+                    .all()
+                    .cloned()
+                    .collect();
+                let (result, code) = self.parse_required_claim(index, step)?;
+                if !sources.iter().any(|source| {
+                    self.checker.boolean_reduction_set_contains_for_gtf(
+                        source,
+                        &result,
+                        &self.kernel_context,
+                    )
+                }) {
+                    let source_debug = sources
+                        .iter()
+                        .map(|source| source.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let candidate_debug = sources
+                        .iter()
+                        .flat_map(|source| {
+                            self.checker
+                                .boolean_reduction_sets_for_gtf(source, &self.kernel_context)
+                                .into_iter()
+                                .flatten()
+                        })
+                        .map(|candidate| candidate.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF br step {} does not reduce premise {} to {} (target: {}; candidates: {}; sources: {})",
+                        index + 1,
+                        source_index,
+                        code,
+                        result,
+                        candidate_debug,
+                        source_debug
+                    )));
+                }
+                self.accept_clause(result, StepReason::BooleanReduction(source_index), code);
+            }
+            GtfRule::BrIntro => {
+                let (generic, specialized, code) =
+                    self.parse_required_claim_with_generic(index, step)?;
+                let result = if step.generic {
+                    generic.clone()
+                } else {
+                    specialized.clone()
+                };
+                if !self
+                    .checker
+                    .boolean_reduction_proves_for_gtf(&generic, &self.kernel_context)
+                    && !self
+                        .checker
+                        .boolean_reduction_proves_for_gtf(&result, &self.kernel_context)
+                    && !self
+                        .checker
+                        .boolean_reduction_proves_for_gtf(&specialized, &self.kernel_context)
+                    && self
+                        .checker
+                        .check_clause_direct_for_gtf(&generic, &self.kernel_context)
+                        .or_else(|| {
+                            self.checker
+                                .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                        })
+                        .or_else(|| {
+                            self.checker
+                                .check_clause_direct_for_gtf(&specialized, &self.kernel_context)
+                        })
+                        .is_none()
+                {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF br_intro step {} is not justified by known reductions: {}",
+                        index + 1,
+                        code
+                    )));
+                }
+                let aliases = if is_synthetic_generic_wrapper(&code) {
+                    vec![]
+                } else {
+                    GtfCompiler::claim_aliases(generic, &specialized)
+                };
+                self.accept_clause_with_aliases(
+                    result,
+                    aliases,
+                    StepReason::BooleanReduction(index),
+                    code,
+                );
+            }
+            GtfRule::Eq => {
+                let (result, code) = self.parse_required_claim(index, step)?;
+                if step.premises.is_empty() {
+                    self.checker
+                        .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                        .ok_or_else(|| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "GTF eq step {} is not justified by current facts: {}",
+                                index + 1,
+                                code
+                            ))
+                        })?;
+                } else if step.premises.len() == 1 {
+                    let source_index = step.premises[0];
+                    let sources: Vec<Clause> = self
+                        .clauses
+                        .get(source_index)
+                        .ok_or_else(|| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "GTF eq step {} references missing premise {}",
+                                index + 1,
+                                source_index
+                            ))
+                        })?
+                        .all()
+                        .cloned()
+                        .collect();
+                    if !sources.iter().any(|source| {
+                        self.checker.equality_graph_derives_for_gtf(
+                            source,
+                            &result,
+                            &self.kernel_context,
+                        )
+                    }) {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "GTF eq step {} is not justified by premise {}: {}",
+                            index + 1,
+                            source_index,
+                            code
+                        )));
+                    }
+                } else {
+                    let mut local = Checker::new();
+                    for &premise in &step.premises {
+                        let clauses = self.clauses.get(premise).ok_or_else(|| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "GTF eq step {} references missing premise {}",
+                                index + 1,
+                                premise
+                            ))
+                        })?;
+                        for clause in clauses.all() {
+                            local.insert_clause_for_gtf(
+                                clause,
+                                StepReason::PreviousClaim,
+                                &self.kernel_context,
+                            );
+                        }
+                    }
+                    local
+                        .check_clause_direct_for_gtf(&result, &self.kernel_context)
+                        .ok_or_else(|| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "GTF eq step {} is not justified by its premises: {}",
+                                index + 1,
+                                code
+                            ))
+                        })?;
+                }
+                self.accept_clause(result, StepReason::EqualityGraph, code);
+            }
+            GtfRule::Er | GtfRule::Ef | GtfRule::Ext | GtfRule::Inj => {
+                if step.premises.len() != 1 {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF {:?} step {} needs exactly one premise",
+                        step.rule,
+                        index + 1
+                    )));
+                }
+                let source_index = step.premises[0];
+                let sources: Vec<Clause> = self
+                    .clauses
+                    .get(source_index)
+                    .ok_or_else(|| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "GTF {:?} step {} references missing premise {}",
+                            step.rule,
+                            index + 1,
+                            source_index
+                        ))
+                    })?
+                    .all()
+                    .cloned()
+                    .collect();
+                let (result, code) = self.parse_required_claim(index, step)?;
+                let ok = sources.iter().any(|source| match step.rule {
+                    GtfRule::Er => self.checker.equality_resolution_derives_for_gtf(
+                        source,
+                        &result,
+                        &self.kernel_context,
+                    ),
+                    GtfRule::Ef => self.checker.equality_factoring_derives_for_gtf(
+                        source,
+                        &result,
+                        &self.kernel_context,
+                    ),
+                    GtfRule::Ext => self.checker.extensionality_derives_for_gtf(
+                        source,
+                        &result,
+                        &self.kernel_context,
+                    ),
+                    GtfRule::Inj => self.checker.injectivity_derives_for_gtf(
+                        source,
+                        &result,
+                        &self.kernel_context,
+                    ),
+                    _ => unreachable!(),
+                });
+                if !ok {
+                    let source_debug = sources
+                        .iter()
+                        .map(|source| source.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let candidate_debug = sources
+                        .iter()
+                        .flat_map(|source| match step.rule {
+                            GtfRule::Er => self
+                                .checker
+                                .equality_resolution_results_for_gtf(source, &self.kernel_context),
+                            _ => vec![],
+                        })
+                        .map(|candidate| candidate.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF {:?} step {} does not derive {} from premise {} (target: {}; candidates: {}; sources: {})",
+                        step.rule,
+                        index + 1,
+                        code,
+                        source_index,
+                        result,
+                        candidate_debug,
+                        source_debug
+                    )));
+                }
+                let reason = match step.rule {
+                    GtfRule::Er => StepReason::EqualityResolution(source_index),
+                    GtfRule::Ef => StepReason::EqualityFactoring(source_index),
+                    GtfRule::Ext => StepReason::Extensionality(source_index),
+                    GtfRule::Inj => StepReason::Injectivity(source_index),
+                    _ => unreachable!(),
+                };
+                self.accept_clause(result, reason, code);
+            }
+            GtfRule::Wit => {
+                self.check_witness_step(index, step)?;
+            }
+            GtfRule::Contra => {
+                let code = step.claim.clone().unwrap_or_else(|| "false".to_string());
+                if let Some((clause, _)) = self.parse_optional_claim(step)? {
+                    self.accept_clause(clause, StepReason::PreviousClaim, code);
+                }
+                if !self.checker.has_contradiction() {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "GTF contra step {} did not close the proof",
+                        index + 1
+                    )));
+                }
+            }
+            GtfRule::Legacy => {
+                self.check_legacy_step(index, step)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_witness_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
+        let code = step.claim.as_ref().ok_or_else(|| {
+            CodeGenError::GeneratedBadCode(format!(
+                "GTF wit step {} is missing declaration text",
+                index + 1
+            ))
+        })?;
+        let parsed = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+        let CertificateStep::Satisfy(satisfy) = parsed else {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF wit step {} must contain a witness declaration: {}",
+                index + 1,
+                code
+            )));
+        };
+        let generic_clause = satisfy.justification.normalized_generic_clause();
+        let justification_clause = satisfy
+            .justification
+            .normalized_specialized_clause(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        let justification_ok = self
+            .checker
+            .check_clause_direct_for_gtf(&generic_clause, &self.kernel_context)
+            .or_else(|| {
+                self.checker
+                    .check_clause_direct_for_gtf(&justification_clause, &self.kernel_context)
+            })
+            .is_some();
+        if !justification_ok {
+            return Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF wit step {} is missing direct justification: {}",
+                index + 1,
+                code
+            )));
+        }
+
+        self.checker.insert_clause_for_gtf(
+            &generic_clause,
+            StepReason::WitnessDeclaration,
+            &self.kernel_context,
+        );
+        self.checker.insert_clause_for_gtf(
+            &justification_clause,
+            StepReason::WitnessDeclaration,
+            &self.kernel_context,
+        );
+        if let Some(specialized_clause) = &satisfy.specialized_clause {
+            self.checker.insert_clause_for_gtf(
+                specialized_clause,
+                StepReason::WitnessDeclaration,
+                &self.kernel_context,
+            );
+        }
+        for clause in &satisfy.witness_clauses {
+            self.checker.insert_clause_for_gtf(
+                clause,
+                StepReason::WitnessDeclaration,
+                &self.kernel_context,
+            );
+        }
+        let mut aliases = vec![generic_clause];
+        if let Some(specialized_clause) = satisfy.specialized_clause {
+            aliases.push(specialized_clause);
+        }
+        aliases.extend(satisfy.witness_clauses);
+        self.record_clause(
+            StepClauses::new(justification_clause, aliases),
+            StepReason::WitnessDeclaration,
+            code.clone(),
+        );
+        Ok(())
+    }
+
+    fn check_legacy_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
+        let code = step.claim.as_ref().ok_or_else(|| {
+            CodeGenError::GeneratedBadCode(format!(
+                "GTF legacy step {} is missing claim text",
+                index + 1
+            ))
+        })?;
+        let parsed = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+        match parsed {
+            CertificateStep::Claim(claim) => {
+                let clause = claim
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                let cert_step = CertificateStep::Claim(claim);
+                let reason = self.check_legacy_cert_step(index, code, cert_step)?;
+                self.record_clause(StepClauses::new(clause, vec![]), reason, code.clone());
+            }
+            CertificateStep::BooleanReduction(boolean_reduction) => {
+                let result = boolean_reduction.result.clone();
+                let clause = result
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                let reason = self.check_legacy_cert_step(
+                    index,
+                    code,
+                    CertificateStep::BooleanReduction(boolean_reduction),
+                )?;
+                self.record_clause(StepClauses::new(clause, vec![]), reason, code.clone());
+            }
+            CertificateStep::Satisfy(satisfy) => {
+                let clause = satisfy
+                    .justification
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                self.check_legacy_cert_step(index, code, CertificateStep::Satisfy(satisfy))?;
+                let value = self.kernel_context.quote_clause(&clause, None, None, false);
+                self.clauses.push(StepClauses::new(clause, vec![]));
+                self.lines.push(CertificateLine {
+                    value,
+                    statement: code.clone(),
+                    reason: StepReason::WitnessDeclaration,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn check_legacy_cert_step(
+        &mut self,
+        index: usize,
+        code: &str,
+        cert_step: CertificateStep,
+    ) -> Result<StepReason, CodeGenError> {
+        let code_lines = vec![code.to_string()];
+        match self
+            .checker
+            .check_cert_steps(&[cert_step], Some(&code_lines), &self.kernel_context)
+        {
+            Ok((checked, _)) => Ok(checked
+                .into_iter()
+                .next()
+                .map(|step| step.reason)
+                .unwrap_or(StepReason::Contradiction)),
+            Err(err) if err.to_string().contains("proof does not result") => {
+                Ok(StepReason::PreviousClaim)
+            }
+            Err(err) => Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF legacy step {} is not accepted by legacy checking: {} ({})",
+                index + 1,
+                code,
+                err
+            ))),
+        }
+    }
+
+    fn parse_required_claim(
+        &mut self,
+        index: usize,
+        step: &GtfStep,
+    ) -> Result<(Clause, String), CodeGenError> {
+        let code = step.claim.as_ref().ok_or_else(|| {
+            CodeGenError::GeneratedBadCode(format!("GTF step {} is missing claim text", index + 1))
+        })?;
+        let parsed = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+        let clause = match parsed {
+            CertificateStep::Claim(claim) => {
+                if step.generic {
+                    claim.normalized_generic_clause()
+                } else {
+                    claim
+                        .normalized_specialized_clause(&self.kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?
+                }
+            }
+            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
+                if step.generic {
+                    result.normalized_generic_clause()
+                } else {
+                    result
+                        .normalized_specialized_clause(&self.kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?
+                }
+            }
+            CertificateStep::Satisfy(_) => {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "GTF claim position cannot contain witness declaration: {}",
+                    code
+                )));
+            }
+        };
+        Ok((clause, code.clone()))
+    }
+
+    fn parse_required_claim_with_generic(
+        &mut self,
+        index: usize,
+        step: &GtfStep,
+    ) -> Result<(Clause, Clause, String), CodeGenError> {
+        let code = step.claim.as_ref().ok_or_else(|| {
+            CodeGenError::GeneratedBadCode(format!("GTF step {} is missing claim text", index + 1))
+        })?;
+        let parsed = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+        match parsed {
+            CertificateStep::Claim(claim) => {
+                let generic = claim.normalized_generic_clause();
+                if step.generic && is_synthetic_generic_wrapper(code) {
+                    return Ok((generic.clone(), generic, code.clone()));
+                }
+                let specialized = claim
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                Ok((generic, specialized, code.clone()))
+            }
+            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
+                let generic = result.normalized_generic_clause();
+                if step.generic && is_synthetic_generic_wrapper(code) {
+                    return Ok((generic.clone(), generic, code.clone()));
+                }
+                let specialized = result
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                Ok((generic, specialized, code.clone()))
+            }
+            CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF claim position cannot contain witness declaration: {}",
+                code
+            ))),
+        }
+    }
+
+    fn parse_optional_claim(
+        &mut self,
+        step: &GtfStep,
+    ) -> Result<Option<(Clause, String)>, CodeGenError> {
+        let Some(code) = &step.claim else {
+            return Ok(None);
+        };
+        Ok(Some((self.parse_claim_clause(code)?, code.clone())))
+    }
+
+    fn parse_claim_clause(&mut self, code: &str) -> Result<Clause, CodeGenError> {
+        let (_generic, specialized) = self.parse_claim_clauses(code)?;
+        Ok(specialized)
+    }
+
+    fn parse_claim_clauses(&mut self, code: &str) -> Result<(Clause, Clause), CodeGenError> {
+        let step = Certificate::parse_code_line(
+            code,
+            self.project,
+            &mut self.bindings,
+            &mut self.kernel_context,
+        )?;
+        match step {
+            CertificateStep::Claim(claim) => {
+                let generic = claim.normalized_generic_clause();
+                let specialized = claim
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                Ok((generic, specialized))
+            }
+            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
+                let generic = result.normalized_generic_clause();
+                let specialized = result
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                Ok((generic, specialized))
+            }
+            CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
+                "GTF claim position cannot contain witness declaration: {}",
+                code
+            ))),
+        }
+    }
+
+    fn accept_clause(&mut self, clause: Clause, reason: StepReason, code: String) {
+        self.accept_clause_with_aliases(clause, vec![], reason, code);
+    }
+
+    fn accept_clause_with_aliases(
+        &mut self,
+        clause: Clause,
+        aliases: Vec<Clause>,
+        reason: StepReason,
+        code: String,
+    ) {
+        let step_clauses = StepClauses::new(clause, aliases);
+        for clause in step_clauses.all() {
+            self.checker.insert_clause_for_gtf(
+                clause,
+                StepReason::PreviousClaim,
+                &self.kernel_context,
+            );
+        }
+        self.record_clause(step_clauses, reason, code);
+    }
+
+    fn record_clause(&mut self, clauses: StepClauses, reason: StepReason, code: String) {
+        let value = self
+            .kernel_context
+            .quote_clause(&clauses.primary, None, None, false);
+        self.clauses.push(clauses);
+        self.lines.push(CertificateLine {
+            value,
+            statement: code,
+            reason,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::certificate::Certificate;
+    use crate::processor::Processor;
+
+    #[test]
+    fn gtf_legacy_step_can_close_simple_goal() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            let p: Bool = axiom
+            axiom p_true {
+                p
+            }
+
+            theorem goal {
+                p
+            }
+            "#,
+        );
+        let cert = Certificate {
+            goal: "goal".to_string(),
+            proof: None,
+            gtf: Some(GtfProof {
+                steps: vec![GtfStep::legacy("p".to_string())],
+            }),
+        };
+        processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect("GTF legacy proof should check");
+    }
+
+    #[test]
+    fn gtf_br_step_can_close_simple_goal() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            let p: Bool = axiom
+            let q: Bool = axiom
+            axiom both {
+                p and q
+            }
+
+            theorem goal {
+                p
+            }
+            "#,
+        );
+        let cert = Certificate {
+            goal: "goal".to_string(),
+            proof: None,
+            gtf: Some(GtfProof {
+                steps: vec![
+                    GtfStep::legacy("p and q".to_string()),
+                    GtfStep::br(0, "p".to_string()),
+                ],
+            }),
+        };
+        processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect("GTF boolean-reduction proof should check");
+    }
+}

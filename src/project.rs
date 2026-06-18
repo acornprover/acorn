@@ -2460,7 +2460,7 @@ impl Project {
                 store
                     .certs
                     .iter()
-                    .map(|cert| 1 + cert.proof.as_ref().map_or(0, Vec::len))
+                    .map(|cert| 1 + cert.proof_step_count().unwrap_or(0))
                     .sum()
             })
             .unwrap_or(0)

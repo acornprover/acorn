@@ -31,6 +31,46 @@ fn configure_bare_verify(verifier: &mut Verifier) {
     verifier.builder.check_jobs = default_jobs();
 }
 
+#[cfg(feature = "gtf")]
+fn gtf_migrate(
+    path: &std::path::Path,
+    write: bool,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    use acorn::certificate::CertificateStore;
+
+    let mut files = Vec::new();
+    if path.is_file() {
+        files.push(path.to_path_buf());
+    } else {
+        for entry in WalkDir::new(path) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+            {
+                files.push(entry.path().to_path_buf());
+            }
+        }
+    }
+
+    files.sort();
+    let mut files_changed = 0;
+    let mut certs_changed = 0;
+    for file in files {
+        let mut store = CertificateStore::load(&file)?;
+        let changed = store.add_gtf_from_legacy_proofs();
+        if changed == 0 {
+            continue;
+        }
+        files_changed += 1;
+        certs_changed += changed;
+        if write {
+            store.save(&file)?;
+        }
+    }
+
+    Ok((files_changed, certs_changed))
+}
+
 fn exit_project_load_error<T>(error: ProjectError) -> T {
     if error.is_manifest_version_problem() {
         println!("{}", error.cli_message());
@@ -829,6 +869,19 @@ enum Command {
     /// Print every citation statement in the library
     Citations,
 
+    /// Add experimental GTF payloads to cached certificate files
+    #[cfg(feature = "gtf")]
+    #[clap(hide = true)]
+    GtfMigrate {
+        /// Certificate file or directory to migrate. Defaults to the library root.
+        #[clap(value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Rewrite files in place. Without this flag, only reports what would change.
+        #[clap(long)]
+        write: bool,
+    },
+
     /// List all module names in the library
     List,
 
@@ -927,6 +980,33 @@ async fn main() {
                 }
                 Err(e) => {
                     println!("Error generating documentation: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        #[cfg(feature = "gtf")]
+        Some(Command::GtfMigrate { target, write }) => {
+            let target_path = target
+                .map(PathBuf::from)
+                .map(|path| {
+                    if path.is_relative() {
+                        current_dir.join(path)
+                    } else {
+                        path
+                    }
+                })
+                .unwrap_or_else(|| current_dir.clone());
+            match gtf_migrate(&target_path, write) {
+                Ok((files, certs)) => {
+                    let mode = if write { "updated" } else { "would update" };
+                    println!(
+                        "GTF migration {} {} certificates in {} files",
+                        mode, certs, files
+                    );
+                }
+                Err(err) => {
+                    println!("Error migrating GTF certificates: {}", err);
                     std::process::exit(1);
                 }
             }

@@ -87,12 +87,27 @@ fn test_save_load_cycle() {
     let temp_dir = tempdir().unwrap();
     let file_path = temp_dir.path().join("test_certs.jsonl");
 
+    #[cfg(feature = "gtf")]
+    fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
+        let gtf = crate::gtf::GtfProof::from_legacy_lines(&proof);
+        Certificate {
+            goal,
+            proof: Some(proof),
+            gtf: Some(gtf),
+        }
+    }
+
+    #[cfg(not(feature = "gtf"))]
+    fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
+        Certificate::new(goal, proof)
+    }
+
     // Create some test certificates
-    let cert1 = Certificate::new(
+    let cert1 = cert_with_proof(
         "goal1".to_string(),
         vec!["step1".to_string(), "step2".to_string()],
     );
-    let cert2 = Certificate::new(
+    let cert2 = cert_with_proof(
         "goal2".to_string(),
         vec![
             "step3".to_string(),
@@ -100,7 +115,7 @@ fn test_save_load_cycle() {
             "step5".to_string(),
         ],
     );
-    let cert3 = Certificate::new(
+    let cert3 = cert_with_proof(
         "goal3".to_string(),
         vec![], // Trivial proof with no steps
     );
@@ -124,7 +139,14 @@ fn test_save_load_cycle() {
 
     for (orig, load) in original.certs.iter().zip(loaded.certs.iter()) {
         assert_eq!(orig.goal, load.goal);
+        #[cfg(not(feature = "gtf"))]
         assert_eq!(orig.proof, load.proof);
+        #[cfg(feature = "gtf")]
+        {
+            assert_eq!(load.proof, None);
+            assert_eq!(orig.gtf, load.gtf);
+            assert_eq!(orig.proof_step_count(), load.proof_step_count());
+        }
     }
 
     // Test has_proof() helper on loaded certificates

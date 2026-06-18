@@ -375,6 +375,48 @@ impl Processor {
         )
     }
 
+    #[cfg(feature = "gtf")]
+    pub fn migrate_cert_to_gtf(
+        &self,
+        cert: &Certificate,
+        normalized_goal: Option<&LoweredGoal>,
+        kernel_context: &KernelContext,
+        project: impl Into<ProjectView>,
+        bindings: &BindingMap,
+    ) -> Result<Certificate, Error> {
+        let project = project.into();
+        let mut checker = self.checker.clone();
+        let mut cert_bindings = Cow::Borrowed(bindings);
+        let effective_kernel_context: &KernelContext;
+        let type_params: &[crate::elaborator::acorn_type::TypeParam];
+
+        if let Some(normalized_goal) = normalized_goal {
+            checker.insert_lowered_goal(normalized_goal)?;
+            type_params = normalized_goal.goal.proposition.params.as_slice();
+            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
+            effective_kernel_context = &normalized_goal.kernel_context;
+        } else if let Some(prover_type_params) = self
+            .prover
+            .as_ref()
+            .and_then(|prover| prover.goal_type_params())
+        {
+            type_params = prover_type_params;
+            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
+            effective_kernel_context = kernel_context;
+        } else {
+            type_params = &[];
+            effective_kernel_context = kernel_context;
+        }
+
+        cert.migrate_legacy_proof_to_gtf(
+            checker,
+            &project,
+            cert_bindings,
+            Cow::Owned(effective_kernel_context.clone()),
+            type_params,
+        )
+    }
+
     fn check_cert_with_usage_internal(
         &self,
         cert: &Certificate,

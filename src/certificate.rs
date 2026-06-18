@@ -11,7 +11,9 @@ use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::TypeParam;
 use crate::elaborator::acorn_type::{AcornType, DependentTypeArg};
-use crate::elaborator::acorn_value::AcornValue;
+use crate::elaborator::acorn_value::{
+    AcornValue, ConstantInstance, FunctionApplication, MatchCase, TypeApplication,
+};
 use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::names::{ConstantName, DefinedName};
@@ -117,7 +119,18 @@ pub struct Certificate {
     /// None indicates no proof exists for this goal.
     /// This is useful as a placeholder to indicate that we need to find a proof.
     /// Some(vec![]) indicates a trivial proof requiring no steps.
+    #[cfg_attr(feature = "gtf", serde(skip_serializing))]
     pub proof: Option<Vec<String>>,
+
+    /// Experimental explicit checker trace.
+    #[cfg(feature = "gtf")]
+    #[serde(
+        rename = "g",
+        alias = "gtf",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gtf: Option<crate::gtf::GtfProof>,
 }
 
 impl Certificate {
@@ -269,43 +282,678 @@ impl Certificate {
         let mut type_params = vec![];
         Self::collect_value_type_params(&value, &mut type_params);
         type_params.sort_by(|a, b| a.name.cmp(&b.name));
-        if type_params.is_empty() {
-            return Err(CodeGenError::GeneratedBadCode(
-                "closed generic claim has no type parameters".to_string(),
-            ));
-        }
-
-        let generic_value = value.genericize(&type_params);
+        let (wrapper_type_params, renames) =
+            Self::fresh_closed_generic_type_params(&type_params, bindings);
+        let generic_value =
+            Self::rename_generic_type_params_in_value(&value.genericize(&type_params), &renames);
+        let (generic_value, value_args) =
+            Self::abstract_closed_value_args_for_gtf(&generic_value, &value, bindings);
         let mut generator = CodeGenerator::new_for_certificate(bindings);
-        let generic_code = generator.value_to_code(&generic_value)?;
+        let value_arg_names = value_args
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<Vec<_>>();
+        let generic_code = if value_arg_names.is_empty() {
+            generator.value_to_code(&generic_value)?
+        } else {
+            generator.value_to_code_with_initial_vars(&generic_value, &value_arg_names)?
+        };
         let mut type_param_decl_codes = vec![];
         let mut type_arg_codes = vec![];
-        for param in &type_params {
-            let kind = match &param.typeclass {
+        for (source_param, wrapper_param) in type_params.iter().zip(wrapper_type_params.iter()) {
+            let kind = match &source_param.typeclass {
                 Some(typeclass) => AcornType::TypeclassConstraint(typeclass.clone()),
                 None => AcornType::Type0,
             };
             let decl_code = match &kind {
-                AcornType::Type0 => param.name.clone(),
-                _ => format!("{}: {}", param.name, generator.type_to_expr(&kind)?),
+                AcornType::Type0 => wrapper_param.name.clone(),
+                _ => format!("{}: {}", wrapper_param.name, generator.type_to_expr(&kind)?),
             };
             type_param_decl_codes.push(decl_code);
 
             let Some(type_arg) = Self::infer_closed_claim_type_arg(&kind, bindings) else {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "could not infer an in-scope type argument for closed generic claim parameter {}",
-                    param.name
+                    source_param.name
                 )));
             };
             type_arg_codes.push(generator.type_to_expr(&type_arg)?.to_string());
         }
 
-        Ok(format!(
-            "function[{}] {{ {} }}[{}]",
-            type_param_decl_codes.join(", "),
-            generic_code,
-            type_arg_codes.join(", ")
-        ))
+        if value_args.is_empty() {
+            if type_param_decl_codes.is_empty() {
+                return Err(CodeGenError::GeneratedBadCode(
+                    "closed GTF fallback found no type or value parameters".to_string(),
+                ));
+            }
+            Ok(format!(
+                "function[{}] {{ {} }}[{}]",
+                type_param_decl_codes.join(", "),
+                generic_code,
+                type_arg_codes.join(", ")
+            ))
+        } else if type_param_decl_codes.is_empty() {
+            let value_decl_codes = value_args
+                .iter()
+                .map(|(name, arg_type, _)| {
+                    Ok(format!("{}: {}", name, generator.type_to_expr(arg_type)?))
+                })
+                .collect::<Result<Vec<_>, CodeGenError>>()?;
+            let value_arg_codes = value_args
+                .iter()
+                .map(|(_, _, arg)| generator.value_to_code(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!(
+                "function({}) {{ {} }}({})",
+                value_decl_codes.join(", "),
+                generic_code,
+                value_arg_codes.join(", ")
+            ))
+        } else {
+            let value_decl_codes = value_args
+                .iter()
+                .map(|(name, arg_type, _)| {
+                    Ok(format!("{}: {}", name, generator.type_to_expr(arg_type)?))
+                })
+                .collect::<Result<Vec<_>, CodeGenError>>()?;
+            let value_arg_codes = value_args
+                .iter()
+                .map(|(_, _, arg)| generator.value_to_code(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!(
+                "function[{}]({}) {{ {} }}[{}]({})",
+                type_param_decl_codes.join(", "),
+                value_decl_codes.join(", "),
+                generic_code,
+                type_arg_codes.join(", "),
+                value_arg_codes.join(", ")
+            ))
+        }
+    }
+
+    fn fresh_closed_generic_type_params(
+        type_params: &[TypeParam],
+        bindings: &BindingMap,
+    ) -> (Vec<TypeParam>, HashMap<String, TypeParam>) {
+        let mut used = HashSet::new();
+        let mut next = 0usize;
+        let mut wrapper_params = vec![];
+        let mut renames = HashMap::new();
+        for param in type_params {
+            let name = loop {
+                let candidate = format!("T{}", next);
+                next += 1;
+                if used.contains(&candidate)
+                    || bindings.has_typename(&candidate)
+                    || bindings.has_typeclass_name(&candidate)
+                    || bindings.has_unqualified_constant_name(&candidate)
+                    || bindings.is_module(&candidate)
+                {
+                    continue;
+                }
+                break candidate;
+            };
+            used.insert(name.clone());
+            let wrapper_param = TypeParam {
+                name,
+                typeclass: param.typeclass.clone(),
+            };
+            renames.insert(param.name.clone(), wrapper_param.clone());
+            wrapper_params.push(wrapper_param);
+        }
+        (wrapper_params, renames)
+    }
+
+    fn rename_generic_type_params_in_type(
+        acorn_type: &AcornType,
+        renames: &HashMap<String, TypeParam>,
+    ) -> AcornType {
+        match acorn_type {
+            AcornType::Variable(param) => renames
+                .get(&param.name)
+                .cloned()
+                .map(AcornType::Variable)
+                .unwrap_or_else(|| acorn_type.clone()),
+            AcornType::Function(function_type) => AcornType::functional(
+                function_type
+                    .arg_types
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+                Self::rename_generic_type_params_in_type(&function_type.return_type, renames),
+            ),
+            AcornType::Data(datatype, args) => AcornType::Data(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+            ),
+            AcornType::Family(datatype, args) => AcornType::Family(
+                datatype.clone(),
+                args.iter()
+                    .map(|arg| match arg {
+                        DependentTypeArg::Type(acorn_type) => DependentTypeArg::Type(
+                            Self::rename_generic_type_params_in_type(acorn_type, renames),
+                        ),
+                        DependentTypeArg::Value(value) => DependentTypeArg::Value(
+                            Self::rename_generic_type_params_in_value(value, renames),
+                        ),
+                    })
+                    .collect(),
+            ),
+            AcornType::Arbitrary(_)
+            | AcornType::Bool
+            | AcornType::Type0
+            | AcornType::TypeclassConstraint(_) => acorn_type.clone(),
+        }
+    }
+
+    fn rename_type_param_name(name: &str, renames: &HashMap<String, TypeParam>) -> String {
+        renames
+            .get(name)
+            .map(|param| param.name.clone())
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn rename_generic_type_params_in_value(
+        value: &AcornValue,
+        renames: &HashMap<String, TypeParam>,
+    ) -> AcornValue {
+        match value {
+            AcornValue::Variable(id, var_type) => AcornValue::Variable(
+                *id,
+                Self::rename_generic_type_params_in_type(var_type, renames),
+            ),
+            AcornValue::Constant(constant) => {
+                let mut renamed = constant.clone();
+                renamed.params = constant
+                    .params
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect();
+                renamed.instance_type =
+                    Self::rename_generic_type_params_in_type(&constant.instance_type, renames);
+                renamed.generic_type =
+                    Self::rename_generic_type_params_in_type(&constant.generic_type, renames);
+                renamed.type_param_names = constant
+                    .type_param_names
+                    .iter()
+                    .map(|name| Self::rename_type_param_name(name, renames))
+                    .collect();
+                renamed.value_param_types = constant
+                    .value_param_types
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect();
+                renamed.bound_value_args = constant
+                    .bound_value_args
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_value(arg, renames))
+                    .collect();
+                AcornValue::Constant(renamed)
+            }
+            AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
+                function: Box::new(Self::rename_generic_type_params_in_value(
+                    &app.function,
+                    renames,
+                )),
+                args: app
+                    .args
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_value(arg, renames))
+                    .collect(),
+            }),
+            AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                function: Box::new(Self::rename_generic_type_params_in_value(
+                    &app.function,
+                    renames,
+                )),
+                type_param_names: app
+                    .type_param_names
+                    .iter()
+                    .map(|name| Self::rename_type_param_name(name, renames))
+                    .collect(),
+                type_param_constraints: app.type_param_constraints.clone(),
+                type_args: app
+                    .type_args
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+            }),
+            AcornValue::Lambda(arg_types, body) => AcornValue::Lambda(
+                arg_types
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+                Box::new(Self::rename_generic_type_params_in_value(body, renames)),
+            ),
+            AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                *op,
+                Box::new(Self::rename_generic_type_params_in_value(left, renames)),
+                Box::new(Self::rename_generic_type_params_in_value(right, renames)),
+            ),
+            AcornValue::Not(inner) => AcornValue::Not(Box::new(
+                Self::rename_generic_type_params_in_value(inner, renames),
+            )),
+            AcornValue::Try(inner, try_type) => AcornValue::Try(
+                Box::new(Self::rename_generic_type_params_in_value(inner, renames)),
+                Self::rename_generic_type_params_in_type(try_type, renames),
+            ),
+            AcornValue::ForAll(arg_types, body) => AcornValue::ForAll(
+                arg_types
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+                Box::new(Self::rename_generic_type_params_in_value(body, renames)),
+            ),
+            AcornValue::Exists(arg_types, body) => AcornValue::Exists(
+                arg_types
+                    .iter()
+                    .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                    .collect(),
+                Box::new(Self::rename_generic_type_params_in_value(body, renames)),
+            ),
+            AcornValue::Grouping(inner) => AcornValue::Grouping(Box::new(
+                Self::rename_generic_type_params_in_value(inner, renames),
+            )),
+            AcornValue::Bool(value) => AcornValue::Bool(*value),
+            AcornValue::IfThenElse(condition, if_value, else_value) => AcornValue::IfThenElse(
+                Box::new(Self::rename_generic_type_params_in_value(
+                    condition, renames,
+                )),
+                Box::new(Self::rename_generic_type_params_in_value(if_value, renames)),
+                Box::new(Self::rename_generic_type_params_in_value(
+                    else_value, renames,
+                )),
+            ),
+            AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                Box::new(Self::rename_generic_type_params_in_value(
+                    scrutinee, renames,
+                )),
+                cases
+                    .iter()
+                    .map(|case| MatchCase {
+                        new_vars: case
+                            .new_vars
+                            .iter()
+                            .map(|arg| Self::rename_generic_type_params_in_type(arg, renames))
+                            .collect(),
+                        pattern: Self::rename_generic_type_params_in_value(&case.pattern, renames),
+                        result: Self::rename_generic_type_params_in_value(&case.result, renames),
+                        constructor_index: case.constructor_index,
+                        constructor_total: case.constructor_total,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn should_abstract_closed_gtf_constant(
+        constant: &ConstantInstance,
+        _bindings: &BindingMap,
+        can_abstract: bool,
+    ) -> bool {
+        can_abstract && constant.instance_type.has_generic()
+    }
+
+    fn abstract_closed_value_args_for_gtf(
+        generic_value: &AcornValue,
+        specialized_value: &AcornValue,
+        bindings: &BindingMap,
+    ) -> (AcornValue, Vec<(String, AcornType, AcornValue)>) {
+        fn push_value_arg(
+            arg_type: AcornType,
+            arg_value: AcornValue,
+            args: &mut Vec<(String, AcornType, AcornValue)>,
+        ) -> AtomId {
+            let arg_id = args.len() as AtomId;
+            let name = format!("v{}", arg_id);
+            args.push((name, arg_type, arg_value));
+            arg_id
+        }
+
+        fn abstract_value(
+            generic_value: &AcornValue,
+            specialized_value: &AcornValue,
+            bindings: &BindingMap,
+            args: &mut Vec<(String, AcornType, AcornValue)>,
+            arg_by_constant: &mut HashMap<ConstantInstance, AtomId>,
+            arg_by_value: &mut HashMap<AcornValue, AtomId>,
+            can_abstract: bool,
+        ) -> AcornValue {
+            match generic_value {
+                AcornValue::Constant(constant)
+                    if Certificate::should_abstract_closed_gtf_constant(
+                        constant,
+                        bindings,
+                        can_abstract,
+                    ) =>
+                {
+                    let arg_id = if let Some(arg_id) = arg_by_constant.get(constant) {
+                        *arg_id
+                    } else {
+                        let arg_id = push_value_arg(
+                            constant.instance_type.clone(),
+                            specialized_value.clone(),
+                            args,
+                        );
+                        arg_by_constant.insert(constant.clone(), arg_id);
+                        arg_id
+                    };
+                    AcornValue::Variable(arg_id, constant.instance_type.clone())
+                }
+                AcornValue::Lambda(_, _) if can_abstract => {
+                    let arg_id = if let Some(arg_id) = arg_by_value.get(generic_value) {
+                        *arg_id
+                    } else {
+                        let arg_id = push_value_arg(
+                            generic_value.get_type(),
+                            specialized_value.clone(),
+                            args,
+                        );
+                        arg_by_value.insert(generic_value.clone(), arg_id);
+                        arg_id
+                    };
+                    AcornValue::Variable(arg_id, generic_value.get_type())
+                }
+                AcornValue::Variable(..) | AcornValue::Bool(_) => generic_value.clone(),
+                AcornValue::Constant(_) => generic_value.clone(),
+                AcornValue::Application(app) => AcornValue::Application(FunctionApplication {
+                    function: {
+                        let specialized_function = match specialized_value {
+                            AcornValue::Application(specialized_app) => {
+                                specialized_app.function.as_ref()
+                            }
+                            _ => app.function.as_ref(),
+                        };
+                        Box::new(abstract_value(
+                            &app.function,
+                            specialized_function,
+                            bindings,
+                            args,
+                            arg_by_constant,
+                            arg_by_value,
+                            false,
+                        ))
+                    },
+                    args: {
+                        let specialized_args = match specialized_value {
+                            AcornValue::Application(specialized_app) => {
+                                specialized_app.args.as_slice()
+                            }
+                            _ => app.args.as_slice(),
+                        };
+                        app.args
+                            .iter()
+                            .zip(specialized_args.iter())
+                            .map(|(arg, specialized_arg)| {
+                                abstract_value(
+                                    arg,
+                                    specialized_arg,
+                                    bindings,
+                                    args,
+                                    arg_by_constant,
+                                    arg_by_value,
+                                    true,
+                                )
+                            })
+                            .collect()
+                    },
+                }),
+                AcornValue::TypeApplication(app) => AcornValue::TypeApplication(TypeApplication {
+                    function: Box::new(abstract_value(
+                        &app.function,
+                        match specialized_value {
+                            AcornValue::TypeApplication(specialized_app) => {
+                                specialized_app.function.as_ref()
+                            }
+                            _ => app.function.as_ref(),
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        false,
+                    )),
+                    type_param_names: app.type_param_names.clone(),
+                    type_param_constraints: app.type_param_constraints.clone(),
+                    type_args: app.type_args.clone(),
+                }),
+                AcornValue::Lambda(arg_types, body) => AcornValue::Lambda(
+                    arg_types.clone(),
+                    Box::new(abstract_value(
+                        body,
+                        match specialized_value {
+                            AcornValue::Lambda(_, specialized_body) => specialized_body,
+                            _ => body,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                ),
+                AcornValue::Binary(op, left, right) => AcornValue::Binary(
+                    *op,
+                    Box::new(abstract_value(
+                        left,
+                        match specialized_value {
+                            AcornValue::Binary(_, specialized_left, _) => specialized_left,
+                            _ => left,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                    Box::new(abstract_value(
+                        right,
+                        match specialized_value {
+                            AcornValue::Binary(_, _, specialized_right) => specialized_right,
+                            _ => right,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                ),
+                AcornValue::Not(inner) => AcornValue::Not(Box::new(abstract_value(
+                    inner,
+                    match specialized_value {
+                        AcornValue::Not(specialized_inner) => specialized_inner,
+                        _ => inner,
+                    },
+                    bindings,
+                    args,
+                    arg_by_constant,
+                    arg_by_value,
+                    true,
+                ))),
+                AcornValue::Try(inner, try_type) => AcornValue::Try(
+                    Box::new(abstract_value(
+                        inner,
+                        match specialized_value {
+                            AcornValue::Try(specialized_inner, _) => specialized_inner,
+                            _ => inner,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                    try_type.clone(),
+                ),
+                AcornValue::ForAll(arg_types, body) => AcornValue::ForAll(
+                    arg_types.clone(),
+                    Box::new(abstract_value(
+                        body,
+                        match specialized_value {
+                            AcornValue::ForAll(_, specialized_body) => specialized_body,
+                            _ => body,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                ),
+                AcornValue::Exists(arg_types, body) => AcornValue::Exists(
+                    arg_types.clone(),
+                    Box::new(abstract_value(
+                        body,
+                        match specialized_value {
+                            AcornValue::Exists(_, specialized_body) => specialized_body,
+                            _ => body,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                ),
+                AcornValue::Grouping(inner) => AcornValue::Grouping(Box::new(abstract_value(
+                    inner,
+                    match specialized_value {
+                        AcornValue::Grouping(specialized_inner) => specialized_inner,
+                        _ => inner,
+                    },
+                    bindings,
+                    args,
+                    arg_by_constant,
+                    arg_by_value,
+                    true,
+                ))),
+                AcornValue::IfThenElse(condition, if_value, else_value) => AcornValue::IfThenElse(
+                    Box::new(abstract_value(
+                        condition,
+                        match specialized_value {
+                            AcornValue::IfThenElse(specialized_condition, _, _) => {
+                                specialized_condition
+                            }
+                            _ => condition,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                    Box::new(abstract_value(
+                        if_value,
+                        match specialized_value {
+                            AcornValue::IfThenElse(_, specialized_if_value, _) => {
+                                specialized_if_value
+                            }
+                            _ => if_value,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                    Box::new(abstract_value(
+                        else_value,
+                        match specialized_value {
+                            AcornValue::IfThenElse(_, _, specialized_else_value) => {
+                                specialized_else_value
+                            }
+                            _ => else_value,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                ),
+                AcornValue::Match(scrutinee, cases) => AcornValue::Match(
+                    Box::new(abstract_value(
+                        scrutinee,
+                        match specialized_value {
+                            AcornValue::Match(specialized_scrutinee, _) => specialized_scrutinee,
+                            _ => scrutinee,
+                        },
+                        bindings,
+                        args,
+                        arg_by_constant,
+                        arg_by_value,
+                        true,
+                    )),
+                    cases
+                        .iter()
+                        .enumerate()
+                        .map(|(index, case)| {
+                            let specialized_case = match specialized_value {
+                                AcornValue::Match(_, specialized_cases) => {
+                                    specialized_cases.get(index).unwrap_or(case)
+                                }
+                                _ => case,
+                            };
+                            MatchCase {
+                                new_vars: case.new_vars.clone(),
+                                pattern: abstract_value(
+                                    &case.pattern,
+                                    &specialized_case.pattern,
+                                    bindings,
+                                    args,
+                                    arg_by_constant,
+                                    arg_by_value,
+                                    true,
+                                ),
+                                result: abstract_value(
+                                    &case.result,
+                                    &specialized_case.result,
+                                    bindings,
+                                    args,
+                                    arg_by_constant,
+                                    arg_by_value,
+                                    true,
+                                ),
+                                constructor_index: case.constructor_index,
+                                constructor_total: case.constructor_total,
+                            }
+                        })
+                        .collect(),
+                ),
+            }
+        }
+
+        let mut args = vec![];
+        let mut arg_by_constant = HashMap::new();
+        let mut arg_by_value = HashMap::new();
+        let value = abstract_value(
+            generic_value,
+            specialized_value,
+            bindings,
+            &mut args,
+            &mut arg_by_constant,
+            &mut arg_by_value,
+            true,
+        );
+        (value, args)
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn serialize_closed_clause_for_gtf(
+        clause: &Clause,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<String, CodeGenError> {
+        let claim = Claim::new(clause.clone(), VariableMap::new()).map_err(|err| {
+            CodeGenError::GeneratedBadCode(format!(
+                "{} [while preparing closed GTF clause {}]",
+                err, clause
+            ))
+        })?;
+        Self::serialize_closed_generic_claim_step(&claim, kernel_context, bindings)
     }
 
     fn infer_closed_claim_type_arg(kind: &AcornType, bindings: &BindingMap) -> Option<AcornType> {
@@ -322,12 +970,16 @@ impl Certificate {
             else {
                 continue;
             };
-            if acorn_type.has_generic() || acorn_type.has_arbitrary() {
+            if acorn_type.has_generic() {
                 continue;
             }
             candidates.push((name.clone(), acorn_type.clone()));
         }
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.sort_by(|a, b| {
+            let a_arbitrary = matches!(a.1, AcornType::Arbitrary(_));
+            let b_arbitrary = matches!(b.1, AcornType::Arbitrary(_));
+            b_arbitrary.cmp(&a_arbitrary).then_with(|| a.0.cmp(&b.0))
+        });
         candidates.into_iter().next().map(|(_, ty)| ty)
     }
 
@@ -336,12 +988,19 @@ impl Certificate {
         Certificate {
             goal,
             proof: Some(proof),
+            #[cfg(feature = "gtf")]
+            gtf: None,
         }
     }
 
     /// Create a placeholder certificate with no proof
     pub fn placeholder(goal: String) -> Self {
-        Certificate { goal, proof: None }
+        Certificate {
+            goal,
+            proof: None,
+            #[cfg(feature = "gtf")]
+            gtf: None,
+        }
     }
 
     /// Trim this certificate's proof to the consumed prefix.
@@ -349,12 +1008,28 @@ impl Certificate {
         if let Some(proof) = &mut self.proof {
             proof.truncate(keep_steps);
         }
+        #[cfg(feature = "gtf")]
+        if let Some(gtf) = &mut self.gtf {
+            gtf.steps.truncate(keep_steps);
+        }
         self
     }
 
     /// Check if this certificate has a proof
     pub fn has_proof(&self) -> bool {
-        self.proof.is_some()
+        self.proof_step_count().is_some()
+    }
+
+    /// Number of serialized checker steps carried by this certificate, if it has a proof.
+    pub fn proof_step_count(&self) -> Option<usize> {
+        if let Some(proof) = &self.proof {
+            return Some(proof.len());
+        }
+        #[cfg(feature = "gtf")]
+        if let Some(gtf) = &self.gtf {
+            return Some(gtf.steps.len());
+        }
+        None
     }
 
     /// Convert concrete proof steps to a Certificate (string format).
@@ -428,7 +1103,19 @@ impl Certificate {
                 bindings,
             )?);
         }
-        Ok(Certificate::new(goal, answer))
+        #[cfg(feature = "gtf")]
+        {
+            let gtf = crate::gtf::GtfProof::from_certificate_steps(&ordered_steps, &answer)?;
+            return Ok(Certificate {
+                goal,
+                proof: Some(answer),
+                gtf: Some(gtf),
+            });
+        }
+        #[cfg(not(feature = "gtf"))]
+        {
+            Ok(Certificate::new(goal, answer))
+        }
     }
 
     fn reorder_late_claim_supports(
@@ -1052,6 +1739,84 @@ impl Certificate {
         Self::serialize_claim_step(claim, kernel_context, bindings)
     }
 
+    #[cfg(feature = "gtf")]
+    fn local_type_param_infos_for_gtf(
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Vec<(TypeParam, AcornType)> {
+        let mut params = vec![];
+        let local_context = clause.get_local_context();
+        for var_id in 0..local_context.len() {
+            let Some(var_type) = local_context.get_var_type(var_id) else {
+                continue;
+            };
+            if !var_type.as_ref().is_type_param_kind() {
+                continue;
+            }
+            let kind =
+                kernel_context.quote_type_with_context(var_type.clone(), local_context, false);
+            let typeclass = match &kind {
+                AcornType::TypeclassConstraint(typeclass) => Some(typeclass.clone()),
+                _ => None,
+            };
+            params.push((
+                TypeParam {
+                    name: format!("T{}", params.len()),
+                    typeclass,
+                },
+                kind,
+            ));
+        }
+        params
+    }
+
+    #[cfg(feature = "gtf")]
+    pub(crate) fn serialize_clause_for_gtf(
+        clause: &Clause,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<(String, bool), CodeGenError> {
+        let mut generator = CodeGenerator::new_for_certificate(bindings);
+        let generic_params = Self::local_type_param_infos_for_gtf(clause, kernel_context);
+        let type_param_names = generic_params
+            .iter()
+            .map(|(param, _)| param.name.clone())
+            .collect::<Vec<_>>();
+        let type_param_names_ref =
+            (!type_param_names.is_empty()).then_some(type_param_names.as_slice());
+        let value = kernel_context.quote_clause(clause, None, type_param_names_ref, false);
+        let body_code = generator.value_to_code(&value)?;
+
+        if !generic_params.is_empty() {
+            let mut decl_codes = vec![];
+            for (param, kind) in &generic_params {
+                let decl_code = match &kind {
+                    AcornType::Type0 => param.name.clone(),
+                    _ => format!("{}: {}", param.name, generator.type_to_expr(&kind)?),
+                };
+                decl_codes.push(decl_code);
+            }
+            let code = format!("function[{}] {{ {} }}", decl_codes.join(", "), body_code);
+            return ClaimCodec::ensure_claim_code_parses_as_claim(code)
+                .map(|code| (code, true))
+                .map_err(|err| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "{} [while serializing GTF generic clause {}]",
+                        err, clause
+                    ))
+                });
+        }
+
+        ClaimCodec::ensure_claim_code_parses_as_claim(body_code)
+            .map_err(|err| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "{} [while serializing GTF clause {}]",
+                    err, clause
+                ))
+            })
+            .map(|code| (code, false))
+    }
+
     /// Parse a single code line, updating bindings/kernel_context, and return a certificate step.
     pub fn parse_code_line(
         code: &str,
@@ -1659,6 +2424,56 @@ impl Certificate {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
     }
 
+    #[cfg(feature = "gtf")]
+    pub fn migrate_legacy_proof_to_gtf(
+        &self,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+        type_params: &[TypeParam],
+    ) -> Result<Certificate, CodeGenError> {
+        if self.gtf.is_some() && self.proof.is_none() {
+            return Ok(Certificate {
+                goal: self.goal.clone(),
+                proof: None,
+                gtf: self.gtf.clone(),
+            });
+        }
+        let Some(proof) = &self.proof else {
+            return Err(CodeGenError::NoProof);
+        };
+        let gtf = crate::gtf::GtfProof::from_legacy_proof_checked(
+            proof,
+            checker.clone(),
+            project,
+            bindings.clone(),
+            kernel_context.clone(),
+            type_params,
+        )?;
+        gtf.check_with_usage(
+            checker.clone(),
+            project,
+            bindings.clone(),
+            kernel_context.clone(),
+        )?;
+        let pruned = gtf.without_unreferenced_auxiliary_steps();
+        let gtf = if pruned.steps.len() < gtf.steps.len()
+            && pruned
+                .check_with_usage(checker, project, bindings, kernel_context)
+                .is_ok()
+        {
+            pruned
+        } else {
+            gtf
+        };
+        Ok(Certificate {
+            goal: self.goal.clone(),
+            proof: None,
+            gtf: Some(gtf),
+        })
+    }
+
     fn check_with_usage_internal(
         &self,
         mut checker: Checker,
@@ -1672,6 +2487,10 @@ impl Certificate {
                 lines: Vec::new(),
                 consumed_proof_steps: 0,
             });
+        }
+        #[cfg(feature = "gtf")]
+        if let Some(gtf) = &self.gtf {
+            return gtf.check_with_usage(checker, project, bindings, kernel_context);
         }
         let Some(proof) = &self.proof else {
             return Err(CodeGenError::NoProof);
@@ -1786,6 +2605,23 @@ impl CertificateStore {
         for cert in worklist.iter_unused() {
             self.certs.push(cert.clone());
         }
+    }
+
+    #[cfg(feature = "gtf")]
+    pub fn add_gtf_from_legacy_proofs(&mut self) -> usize {
+        let mut changed = 0;
+        for cert in &mut self.certs {
+            if cert.gtf.is_some() {
+                continue;
+            }
+            let Some(proof) = &cert.proof else {
+                continue;
+            };
+            cert.gtf = Some(crate::gtf::GtfProof::from_legacy_lines(proof));
+            cert.proof = None;
+            changed += 1;
+        }
+        changed
     }
 }
 
