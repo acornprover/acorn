@@ -375,7 +375,6 @@ impl Processor {
         )
     }
 
-    #[cfg(feature = "gtf")]
     pub fn migrate_cert_to_gtf(
         &self,
         cert: &Certificate,

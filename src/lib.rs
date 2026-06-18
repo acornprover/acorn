@@ -10,7 +10,6 @@ pub mod doc_generator;
 pub mod elaborator;
 pub mod exporter;
 pub mod goal_partition;
-#[cfg(feature = "gtf")]
 pub mod gtf;
 pub mod interfaces;
 pub mod kernel;

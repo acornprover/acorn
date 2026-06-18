@@ -66,9 +66,6 @@ impl From<serde_json::Error> for ManifestError {
 /// The current version of the project format.
 /// Increment this when making breaking changes to the manifest structure, or to the structure
 /// of other components of the cached build or project layout.
-#[cfg(not(feature = "gtf"))]
-pub const PROJECT_FORMAT_VERSION: u32 = 25;
-#[cfg(feature = "gtf")]
 pub const PROJECT_FORMAT_VERSION: u32 = 26;
 
 /// A newtype wrapper for module names, created by joining parts with "."

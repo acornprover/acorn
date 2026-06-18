@@ -1327,49 +1327,46 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
-        if cfg!(feature = "gtf") {
-            if let ConcreteRationale::BooleanReduction { source, .. } = &step.rationale {
-                let mut steps = vec![];
-                for (var_map, replacement_context) in &step.var_maps {
-                    let mut result_steps = vec![];
-                    self.specialization_to_certificate_steps(
-                        &step.generic,
-                        var_map,
-                        replacement_context,
-                        step.preserve_open,
-                        kernel_context,
-                        &mut result_steps,
-                    )?;
-                    let [CertificateStep::Claim(result)] = result_steps.as_slice() else {
-                        return Err(Error::GeneratedBadCode(format!(
-                            "boolean reduction generated unexpected result steps: {:?}",
-                            result_steps
-                        )));
-                    };
-                    let result_clause = result
-                        .normalized_specialized_clause(kernel_context)
+        if let ConcreteRationale::BooleanReduction { source, .. } = &step.rationale {
+            let mut steps = vec![];
+            for (var_map, replacement_context) in &step.var_maps {
+                let mut result_steps = vec![];
+                self.specialization_to_certificate_steps(
+                    &step.generic,
+                    var_map,
+                    replacement_context,
+                    step.preserve_open,
+                    kernel_context,
+                    &mut result_steps,
+                )?;
+                let [CertificateStep::Claim(result)] = result_steps.as_slice() else {
+                    return Err(Error::GeneratedBadCode(format!(
+                        "boolean reduction generated unexpected result steps: {:?}",
+                        result_steps
+                    )));
+                };
+                let result_clause = result
+                    .normalized_specialized_clause(kernel_context)
+                    .map_err(Error::GeneratedBadCode)?;
+                if source
+                    .boolean_reductions(kernel_context)
+                    .into_iter()
+                    .any(|candidate| candidate == result_clause)
+                {
+                    let source = Claim::new(source.clone(), VariableMap::new())
                         .map_err(Error::GeneratedBadCode)?;
-                    if source
-                        .boolean_reductions(kernel_context)
-                        .into_iter()
-                        .any(|candidate| candidate == result_clause)
-                    {
-                        let source = Claim::new(source.clone(), VariableMap::new())
-                            .map_err(Error::GeneratedBadCode)?;
-                        steps.push(CertificateStep::BooleanReduction(BooleanReductionStep {
-                            source,
-                            result: result.clone(),
-                        }));
-                    } else {
-                        steps.extend(result_steps);
-                    }
+                    steps.push(CertificateStep::BooleanReduction(BooleanReductionStep {
+                        source,
+                        result: result.clone(),
+                    }));
+                } else {
+                    steps.extend(result_steps);
                 }
-                return Ok(steps);
             }
+            return Ok(steps);
         }
 
-        let should_emit = step.should_emit_legacy_cert()
-            || (cfg!(feature = "gtf") && step.is_boolean_reduction());
+        let should_emit = step.should_emit_legacy_cert() || step.is_boolean_reduction();
         if !should_emit {
             return Ok(vec![]);
         }

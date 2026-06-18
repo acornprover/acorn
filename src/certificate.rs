@@ -119,11 +119,10 @@ pub struct Certificate {
     /// None indicates no proof exists for this goal.
     /// This is useful as a placeholder to indicate that we need to find a proof.
     /// Some(vec![]) indicates a trivial proof requiring no steps.
-    #[cfg_attr(feature = "gtf", serde(skip_serializing))]
+    #[serde(skip_serializing)]
     pub proof: Option<Vec<String>>,
 
-    /// Experimental explicit checker trace.
-    #[cfg(feature = "gtf")]
+    /// Explicit checker trace.
     #[serde(
         rename = "p",
         alias = "g",
@@ -942,7 +941,6 @@ impl Certificate {
         (value, args)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn serialize_closed_clause_for_gtf(
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -989,7 +987,6 @@ impl Certificate {
         Certificate {
             goal,
             proof: Some(proof),
-            #[cfg(feature = "gtf")]
             gtf: None,
         }
     }
@@ -999,7 +996,6 @@ impl Certificate {
         Certificate {
             goal,
             proof: None,
-            #[cfg(feature = "gtf")]
             gtf: None,
         }
     }
@@ -1009,7 +1005,6 @@ impl Certificate {
         if let Some(proof) = &mut self.proof {
             proof.truncate(keep_steps);
         }
-        #[cfg(feature = "gtf")]
         if let Some(gtf) = &mut self.gtf {
             gtf.steps.truncate(keep_steps);
         }
@@ -1026,7 +1021,6 @@ impl Certificate {
         if let Some(proof) = &self.proof {
             return Some(proof.len());
         }
-        #[cfg(feature = "gtf")]
         if let Some(gtf) = &self.gtf {
             return Some(gtf.steps.len());
         }
@@ -1104,18 +1098,11 @@ impl Certificate {
                 bindings,
             )?);
         }
-        #[cfg(feature = "gtf")]
-        {
-            return Ok(Certificate {
-                goal,
-                proof: Some(answer),
-                gtf: None,
-            });
-        }
-        #[cfg(not(feature = "gtf"))]
-        {
-            Ok(Certificate::new(goal, answer))
-        }
+        Ok(Certificate {
+            goal,
+            proof: Some(answer),
+            gtf: None,
+        })
     }
 
     fn reorder_late_claim_supports(
@@ -1739,7 +1726,6 @@ impl Certificate {
         Self::serialize_claim_step(claim, kernel_context, bindings)
     }
 
-    #[cfg(feature = "gtf")]
     fn local_type_param_infos_for_gtf(
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -1770,7 +1756,6 @@ impl Certificate {
         params
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn serialize_clause_for_gtf(
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -2424,7 +2409,6 @@ impl Certificate {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
     }
 
-    #[cfg(feature = "gtf")]
     pub fn migrate_legacy_proof_to_gtf(
         &self,
         checker: Checker,
@@ -2488,7 +2472,6 @@ impl Certificate {
                 consumed_proof_steps: 0,
             });
         }
-        #[cfg(feature = "gtf")]
         if let Some(gtf) = &self.gtf {
             return gtf.check_with_usage(checker, project, bindings, kernel_context);
         }
@@ -2571,7 +2554,6 @@ impl CertificateStore {
         let mut writer = BufWriter::new(file);
 
         for cert in &self.certs {
-            #[cfg(feature = "gtf")]
             if cert.proof.is_some() && cert.gtf.is_none() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

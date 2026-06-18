@@ -87,7 +87,6 @@ fn test_save_load_cycle() {
     let temp_dir = tempdir().unwrap();
     let file_path = temp_dir.path().join("test_certs.jsonl");
 
-    #[cfg(feature = "gtf")]
     fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
         let gtf = crate::gtf::GtfProof {
             steps: proof
@@ -101,11 +100,6 @@ fn test_save_load_cycle() {
             proof: Some(proof),
             gtf: Some(gtf),
         }
-    }
-
-    #[cfg(not(feature = "gtf"))]
-    fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
-        Certificate::new(goal, proof)
     }
 
     // Create some test certificates
@@ -145,14 +139,9 @@ fn test_save_load_cycle() {
 
     for (orig, load) in original.certs.iter().zip(loaded.certs.iter()) {
         assert_eq!(orig.goal, load.goal);
-        #[cfg(not(feature = "gtf"))]
-        assert_eq!(orig.proof, load.proof);
-        #[cfg(feature = "gtf")]
-        {
-            assert_eq!(load.proof, None);
-            assert_eq!(orig.gtf, load.gtf);
-            assert_eq!(orig.proof_step_count(), load.proof_step_count());
-        }
+        assert_eq!(load.proof, None);
+        assert_eq!(orig.gtf, load.gtf);
+        assert_eq!(orig.proof_step_count(), load.proof_step_count());
     }
 
     // Test has_proof() helper on loaded certificates

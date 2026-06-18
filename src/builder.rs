@@ -2315,7 +2315,6 @@ impl<'a> Builder<'a> {
                     Ok(checked_cert) => {
                         let cert_to_use =
                             cert.trim_to_consumed_prefix(checked_cert.consumed_proof_steps);
-                        #[cfg(feature = "gtf")]
                         let cert_to_use = if cert_to_use.gtf.is_none() {
                             match processor.migrate_cert_to_gtf(
                                 &cert_to_use,
@@ -2515,7 +2514,6 @@ impl<'a> Builder<'a> {
                                 }
                             }
                         }
-                        #[cfg(feature = "gtf")]
                         let cert = match processor.migrate_cert_to_gtf(
                             &cert,
                             Some(normalized_goal),
@@ -2531,8 +2529,6 @@ impl<'a> Builder<'a> {
                                 ))
                             }
                         };
-                        #[cfg(not(feature = "gtf"))]
-                        let cert = cert;
                         if let Some(lines) = checked_cert_lines.as_ref() {
                             let display_bindings = Processor::bindings_with_type_params(
                                 bindings,

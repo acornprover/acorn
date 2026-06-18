@@ -827,7 +827,6 @@ mod tests {
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
     use std::io::Read;
-    #[cfg(feature = "gtf")]
     use std::io::Write;
 
     /// Creates a standard Acorn project layout with acorn.toml, src/, and build/ directories.
@@ -867,28 +866,23 @@ mod tests {
 
     fn save_cert_store(path: &ChildPath, store: CertificateStore) {
         std::fs::create_dir_all(path.path().parent().unwrap()).unwrap();
-        #[cfg(feature = "gtf")]
-        {
-            let file = std::fs::File::create(path.path()).unwrap();
-            let mut writer = std::io::BufWriter::new(file);
-            for cert in store.certs {
-                let json = if cert.gtf.is_some() {
-                    serde_json::to_string(&cert).unwrap()
-                } else if cert.proof.is_some() {
-                    serde_json::json!({
-                        "goal": cert.goal,
-                        "proof": cert.proof,
-                    })
-                    .to_string()
-                } else {
-                    serde_json::to_string(&cert).unwrap()
-                };
-                writeln!(writer, "{}", json).unwrap();
-            }
-            writer.flush().unwrap();
+        let file = std::fs::File::create(path.path()).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for cert in store.certs {
+            let json = if cert.gtf.is_some() {
+                serde_json::to_string(&cert).unwrap()
+            } else if cert.proof.is_some() {
+                serde_json::json!({
+                    "goal": cert.goal,
+                    "proof": cert.proof,
+                })
+                .to_string()
+            } else {
+                serde_json::to_string(&cert).unwrap()
+            };
+            writeln!(writer, "{}", json).unwrap();
         }
-        #[cfg(not(feature = "gtf"))]
-        store.save(path.path()).unwrap();
+        writer.flush().unwrap();
     }
 
     fn log_text(output: &VerifierOutput) -> String {
@@ -1910,13 +1904,8 @@ mod tests {
         let loaded = CertificateStore::load(cert_path.path()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
         assert_eq!(loaded.certs[0].goal, "simple_truth");
-        #[cfg(not(feature = "gtf"))]
-        assert_eq!(loaded.certs[0].proof, Some(vec![]));
-        #[cfg(feature = "gtf")]
-        {
-            assert_eq!(loaded.certs[0].proof, None);
-            assert_eq!(loaded.certs[0].proof_step_count(), Some(0));
-        }
+        assert_eq!(loaded.certs[0].proof, None);
+        assert_eq!(loaded.certs[0].proof_step_count(), Some(0));
     }
 
     #[test]

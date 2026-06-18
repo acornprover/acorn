@@ -1,14 +1,13 @@
 # Good Trace Format
 
-`gtf` is an experimental certificate payload gated by the Cargo feature `gtf`.
-The goal is to move certificates toward explicit checker traces instead of the
-legacy format where ordinary claim lines rely on the checker to perform hidden
-closure.
+GTF is the current certificate payload. It moves certificates toward explicit
+checker traces instead of the legacy format where ordinary claim lines relied on
+the checker to perform hidden closure.
 
 ## Shape
 
-Certificate JSONL records keep the existing `goal` field. With `gtf` enabled,
-generated or migrated records contain a compact `p` proof payload:
+Certificate JSONL records keep the existing `goal` field. Generated or migrated
+records contain a compact `p` proof payload:
 
 ```json
 {"goal":"goal","p":[{"c":"..."},{"r":"br","c":"...","f":[0]}]}
@@ -43,22 +42,21 @@ Current rules:
 The verifier migration path replays an existing legacy certificate in memory,
 compiles the observed checker trace to GTF, prunes unreferenced auxiliary steps,
 and writes a GTF-only certificate. Existing top-level `g`/`gtf` spellings and
-the `from` premise spelling are accepted as aliases for early experimental files,
-but new writes use `p`/`f`.
+the `from` premise spelling are accepted as aliases for early experimental
+files, but new writes use `p`/`f`.
 
 ## Current Limitations
 
-Migration is intentionally context-aware and runs through `verify --ignore-hash`
-under the `gtf` feature, because compiling explicit traces requires the active
-checker context for imports, local facts, goal assumptions, and witness
-declarations. The old low-level wrapper that could only wrap legacy proof lines
-has been removed.
+Migration is intentionally context-aware and runs through `verify --ignore-hash`,
+because compiling explicit traces requires the active checker context for
+imports, local facts, goal assumptions, and witness declarations. The old
+low-level wrapper that could only wrap legacy proof lines has been removed.
 
 Fresh proof-search generation still passes through the existing legacy
-certificate-step serialization first, but under the `gtf` feature the builder
-immediately compiles those generated proof lines into explicit GTF using the same
-context-aware path. If that compilation fails, generation fails instead of
-writing a legacy or transitional fallback.
+certificate-step serialization first, but the builder immediately compiles those
+generated proof lines into explicit GTF using the same context-aware path. If
+that compilation fails, generation fails instead of writing a legacy or
+transitional fallback.
 
 `br_intro` remains an explicit rule for the small number of cases where the
 target clause is justified because its boolean-reduction closure is already in

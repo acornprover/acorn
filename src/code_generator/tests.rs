@@ -5,7 +5,7 @@ use crate::project::Project;
 use crate::syntax::expression::Expression;
 
 #[test]
-fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
+fn test_non_legacy_boolean_reduction_emission_is_default() {
     use crate::kernel::clause::Clause;
     use crate::kernel::literal::Literal;
     use crate::kernel::local_context::LocalContext;
@@ -42,21 +42,14 @@ fn test_non_legacy_boolean_reduction_emission_is_feature_gated() {
         .concrete_step_to_certificate_steps(&step, &mut kernel_context)
         .expect("certificate step generation should succeed");
 
-    if cfg!(feature = "gtf") {
-        assert_eq!(steps.len(), 1, "gtf should emit boolean reductions");
-        assert!(
-            matches!(
-                steps.first(),
-                Some(crate::kernel::certificate_step::CertificateStep::BooleanReduction(_))
-            ),
-            "gtf should emit explicit boolean-reduction certificate steps"
-        );
-    } else {
-        assert!(
-            steps.is_empty(),
-            "default mode should preserve legacy skipping"
-        );
-    }
+    assert_eq!(steps.len(), 1, "GTF should emit boolean reductions");
+    assert!(
+        matches!(
+            steps.first(),
+            Some(crate::kernel::certificate_step::CertificateStep::BooleanReduction(_))
+        ),
+        "GTF should emit explicit boolean-reduction certificate steps"
+    );
 }
 
 #[test]

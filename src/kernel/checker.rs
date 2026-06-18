@@ -581,7 +581,6 @@ impl Checker {
         self.insert_clause_internal(&clause, reason, kernel_context);
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn insert_clause_for_gtf(
         &mut self,
         clause: &Clause,
@@ -592,7 +591,6 @@ impl Checker {
         self.insert_clause_shallow_for_gtf(&clause, reason, kernel_context);
     }
 
-    #[cfg(feature = "gtf")]
     fn insert_clause_shallow_for_gtf(
         &mut self,
         clause: &Clause,
@@ -691,7 +689,6 @@ impl Checker {
         None
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn check_clause_direct_for_gtf(
         &mut self,
         clause: &Clause,
@@ -704,7 +701,6 @@ impl Checker {
         self.check_clause_direct(&clause, kernel_context)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn boolean_reduction_proves_for_gtf(
         &mut self,
         clause: &Clause,
@@ -715,7 +711,6 @@ impl Checker {
             .is_some()
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn boolean_reduction_set_contains_for_gtf(
         &self,
         source: &Clause,
@@ -728,7 +723,6 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn boolean_reduction_sets_for_gtf(
         &self,
         source: &Clause,
@@ -737,7 +731,6 @@ impl Checker {
         self.checker_boolean_reduction_sets(source, kernel_context)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn equality_resolution_results_for_gtf(
         &self,
         source: &Clause,
@@ -752,7 +745,6 @@ impl Checker {
             .collect()
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn equality_resolution_derives_for_gtf(
         &self,
         source: &Clause,
@@ -764,7 +756,6 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn equality_factoring_derives_for_gtf(
         &self,
         source: &Clause,
@@ -780,7 +771,6 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn injectivity_derives_for_gtf(
         &self,
         source: &Clause,
@@ -797,7 +787,6 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn extensionality_derives_for_gtf(
         &self,
         source: &Clause,
@@ -810,7 +799,6 @@ impl Checker {
         Clause::new(literals, source.get_local_context()) == *result
     }
 
-    #[cfg(feature = "gtf")]
     pub(crate) fn equality_graph_derives_for_gtf(
         &mut self,
         source: &Clause,
