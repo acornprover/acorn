@@ -39,7 +39,12 @@ pub struct GtfStep {
     )]
     pub premises: Vec<usize>,
 
-    #[serde(rename = "g", default, skip_serializing_if = "is_false")]
+    #[serde(
+        rename = "g",
+        alias = "generic",
+        default,
+        skip_serializing_if = "is_false"
+    )]
     pub generic: bool,
 }
 
@@ -119,12 +124,6 @@ pub enum GtfRule {
 
     /// A final contradiction after earlier steps have been inserted.
     Contra,
-
-    /// Transitional migration rule: check this line with the legacy checker.
-    ///
-    /// The experiment keeps this rule so old certificates can be wrapped in
-    /// GTF before all explicit rule compilers are complete.
-    Legacy,
 }
 
 impl Default for GtfRule {
@@ -167,15 +166,6 @@ impl GtfStep {
         }
     }
 
-    pub fn legacy(claim: String) -> Self {
-        Self {
-            rule: GtfRule::Legacy,
-            claim: Some(claim),
-            premises: vec![],
-            generic: false,
-        }
-    }
-
     fn with_rule(rule: GtfRule, claim: String, premises: Vec<usize>, generic: bool) -> Self {
         Self {
             rule,
@@ -187,12 +177,6 @@ impl GtfStep {
 }
 
 impl GtfProof {
-    pub fn from_legacy_lines(proof: &[String]) -> Self {
-        Self {
-            steps: proof.iter().cloned().map(GtfStep::legacy).collect(),
-        }
-    }
-
     pub fn from_legacy_proof_checked(
         proof: &[String],
         checker: Checker,
@@ -202,42 +186,6 @@ impl GtfProof {
         _type_params: &[TypeParam],
     ) -> Result<Self, CodeGenError> {
         GtfCompiler::new(checker, project, bindings, kernel_context).compile(proof)
-    }
-
-    pub fn from_certificate_steps(
-        steps: &[CertificateStep],
-        proof_lines: &[String],
-    ) -> Result<Self, CodeGenError> {
-        let mut gtf_steps = Vec::with_capacity(steps.len());
-        for (index, step) in steps.iter().enumerate() {
-            let code = proof_lines.get(index).cloned().ok_or_else(|| {
-                CodeGenError::GeneratedBadCode(format!(
-                    "missing serialized proof line for GTF step {}",
-                    index + 1
-                ))
-            })?;
-            match step {
-                CertificateStep::BooleanReduction(BooleanReductionStep { source, .. }) => {
-                    if let Some(source_index) = steps[..index].iter().position(|candidate| {
-                        matches!(
-                            candidate,
-                            CertificateStep::Claim(claim) if claim == source
-                        )
-                    }) {
-                        gtf_steps.push(GtfStep::br(source_index, code));
-                    } else {
-                        gtf_steps.push(GtfStep::legacy(code));
-                    }
-                }
-                CertificateStep::Claim(_) => {
-                    gtf_steps.push(GtfStep::legacy(code));
-                }
-                CertificateStep::Satisfy(_) => {
-                    gtf_steps.push(GtfStep::legacy(code));
-                }
-            }
-        }
-        Ok(Self { steps: gtf_steps })
     }
 
     pub fn without_unreferenced_auxiliary_steps(&self) -> Self {
@@ -1280,9 +1228,6 @@ impl<'a> GtfChecker<'a> {
                     )));
                 }
             }
-            GtfRule::Legacy => {
-                self.check_legacy_step(index, step)?;
-            }
         }
         Ok(())
     }
@@ -1363,86 +1308,6 @@ impl<'a> GtfChecker<'a> {
             code.clone(),
         );
         Ok(())
-    }
-
-    fn check_legacy_step(&mut self, index: usize, step: &GtfStep) -> Result<(), CodeGenError> {
-        let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!(
-                "GTF legacy step {} is missing claim text",
-                index + 1
-            ))
-        })?;
-        let parsed = Certificate::parse_code_line(
-            code,
-            self.project,
-            &mut self.bindings,
-            &mut self.kernel_context,
-        )?;
-        match parsed {
-            CertificateStep::Claim(claim) => {
-                let clause = claim
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                let cert_step = CertificateStep::Claim(claim);
-                let reason = self.check_legacy_cert_step(index, code, cert_step)?;
-                self.record_clause(StepClauses::new(clause, vec![]), reason, code.clone());
-            }
-            CertificateStep::BooleanReduction(boolean_reduction) => {
-                let result = boolean_reduction.result.clone();
-                let clause = result
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                let reason = self.check_legacy_cert_step(
-                    index,
-                    code,
-                    CertificateStep::BooleanReduction(boolean_reduction),
-                )?;
-                self.record_clause(StepClauses::new(clause, vec![]), reason, code.clone());
-            }
-            CertificateStep::Satisfy(satisfy) => {
-                let clause = satisfy
-                    .justification
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                self.check_legacy_cert_step(index, code, CertificateStep::Satisfy(satisfy))?;
-                let value = self.kernel_context.quote_clause(&clause, None, None, false);
-                self.clauses.push(StepClauses::new(clause, vec![]));
-                self.lines.push(CertificateLine {
-                    value,
-                    statement: code.clone(),
-                    reason: StepReason::WitnessDeclaration,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn check_legacy_cert_step(
-        &mut self,
-        index: usize,
-        code: &str,
-        cert_step: CertificateStep,
-    ) -> Result<StepReason, CodeGenError> {
-        let code_lines = vec![code.to_string()];
-        match self
-            .checker
-            .check_cert_steps(&[cert_step], Some(&code_lines), &self.kernel_context)
-        {
-            Ok((checked, _)) => Ok(checked
-                .into_iter()
-                .next()
-                .map(|step| step.reason)
-                .unwrap_or(StepReason::Contradiction)),
-            Err(err) if err.to_string().contains("proof does not result") => {
-                Ok(StepReason::PreviousClaim)
-            }
-            Err(err) => Err(CodeGenError::GeneratedBadCode(format!(
-                "GTF legacy step {} is not accepted by legacy checking: {} ({})",
-                index + 1,
-                code,
-                err
-            ))),
-        }
     }
 
     fn parse_required_claim(
@@ -1616,7 +1481,136 @@ mod tests {
     use crate::processor::Processor;
 
     #[test]
-    fn gtf_legacy_step_can_close_simple_goal() {
+    fn serialized_gtf_br_step_can_close_simple_goal() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            let p: Bool = axiom
+            let q: Bool = axiom
+            axiom both {
+                p and q
+            }
+
+            theorem goal {
+                p
+            }
+            "#,
+        );
+        let json = r#"{"goal":"goal","p":[{"c":"p and q"},{"r":"br","c":"p","f":[0]}]}"#;
+        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect("serialized GTF boolean-reduction proof should check");
+    }
+
+    #[test]
+    fn serialized_gtf_witness_step_can_close_simple_goal() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            inductive Foo {
+                foo
+            }
+            let p: Foo -> Bool = axiom
+            axiom all(x: Foo) {
+                p(x)
+            }
+
+            theorem goal {
+                forall(x: Foo) { p(x) }
+            }
+            "#,
+        );
+        let json = r#"{"goal":"goal","p":[{"c":"exists(k0: Foo) { not p(k0) }"},{"r":"wit","c":"let w0: Foo satisfy { not p(w0) }"},{"c":"function(x0: Foo) { p(x0) }(w0)"}]}"#;
+        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect("serialized GTF witness proof should check");
+    }
+
+    #[test]
+    fn serialized_gtf_er_step_can_close_simple_goal() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            inductive Foo {
+                foo
+            }
+            let p: Bool = axiom
+            axiom source(x: Foo) {
+                x != x or p
+            }
+
+            theorem goal {
+                p
+            }
+            "#,
+        );
+        let json = r#"{"goal":"goal","p":[{"c":"function(x0: Foo) { x0 != x0 or p }"},{"r":"er","c":"p","f":[0]}]}"#;
+        let cert: Certificate = serde_json::from_str(json).expect("serialized GTF should parse");
+        processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect("serialized GTF equality-resolution proof should check");
+    }
+
+    #[test]
+    fn serialized_gtf_uses_p_for_top_level_proof() {
+        let cert = Certificate {
+            goal: "goal".to_string(),
+            proof: None,
+            gtf: Some(GtfProof {
+                steps: vec![GtfStep::claim("p".to_string())],
+            }),
+        };
+        let json = serde_json::to_string(&cert).expect("certificate should serialize");
+        assert!(
+            json.contains(r#""p":"#),
+            "GTF certificates should serialize their proof payload as `p`: {}",
+            json
+        );
+        assert!(
+            !json.contains(r#""gtf":"#) && !json.contains(r#""proof":"#),
+            "GTF certificates should not serialize old proof keys: {}",
+            json
+        );
+
+        let alias: Certificate =
+            serde_json::from_str(r#"{"goal":"goal","g":[{"c":"p"}]}"#).unwrap();
+        assert!(
+            alias.gtf.is_some(),
+            "old experimental g key should remain readable"
+        );
+    }
+
+    #[test]
+    fn gtf_rejects_legacy_rule() {
+        let err =
+            serde_json::from_str::<Certificate>(r#"{"goal":"goal","p":[{"r":"legacy","c":"p"}]}"#)
+                .expect_err("legacy GTF rule should not deserialize");
+        assert!(
+            err.to_string().contains("legacy"),
+            "unexpected serde error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn gtf_claim_and_br_helpers_can_close_simple_goal() {
         let (processor, bindings, lowered_goal) = Processor::test_goal(
             r#"
             let p: Bool = axiom
@@ -1633,7 +1627,7 @@ mod tests {
             goal: "goal".to_string(),
             proof: None,
             gtf: Some(GtfProof {
-                steps: vec![GtfStep::legacy("p".to_string())],
+                steps: vec![GtfStep::claim("p".to_string())],
             }),
         };
         processor
@@ -1644,42 +1638,6 @@ mod tests {
                 &crate::project::Project::new_mock(),
                 &bindings,
             )
-            .expect("GTF legacy proof should check");
-    }
-
-    #[test]
-    fn gtf_br_step_can_close_simple_goal() {
-        let (processor, bindings, lowered_goal) = Processor::test_goal(
-            r#"
-            let p: Bool = axiom
-            let q: Bool = axiom
-            axiom both {
-                p and q
-            }
-
-            theorem goal {
-                p
-            }
-            "#,
-        );
-        let cert = Certificate {
-            goal: "goal".to_string(),
-            proof: None,
-            gtf: Some(GtfProof {
-                steps: vec![
-                    GtfStep::legacy("p and q".to_string()),
-                    GtfStep::br(0, "p".to_string()),
-                ],
-            }),
-        };
-        processor
-            .check_cert(
-                &cert,
-                Some(&lowered_goal),
-                &lowered_goal.kernel_context,
-                &crate::project::Project::new_mock(),
-                &bindings,
-            )
-            .expect("GTF boolean-reduction proof should check");
+            .expect("GTF claim proof should check");
     }
 }

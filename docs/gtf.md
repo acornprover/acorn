@@ -8,17 +8,16 @@ closure.
 ## Shape
 
 Certificate JSONL records keep the existing `goal` field. With `gtf` enabled,
-generated or migrated records contain a compact `g` payload:
+generated or migrated records contain a compact `p` proof payload:
 
 ```json
-{"goal":"goal","g":[{"c":"..."},{"r":"br","c":"...","f":[0]}]}
+{"goal":"goal","p":[{"c":"..."},{"r":"br","c":"...","f":[0]}]}
 ```
 
 Each GTF step has:
 
 - `r`: the checker rule. Omitted means `claim`.
-- `c`: the Acorn-readable claim or legacy certificate line, when the rule needs
-  one.
+- `c`: the Acorn-readable claim or witness declaration, when the rule needs one.
 - `f`: premise step indexes, when the rule needs explicit premises.
 - `g`: when present on a step, the step targets the generic clause parsed from
   `c`; otherwise it targets the specialized clause.
@@ -38,30 +37,28 @@ Current rules:
 - `inst`: instantiate a generic claim from a previous step.
 - `wit`: certificate-local witness declaration.
 - `contra`: final contradiction marker.
-- `legacy`: transitional escape hatch that checks one line with the legacy
-  checker path. Context-aware migration is expected to compile old proofs to
-  explicit non-legacy rules; `legacy` is for low-level experiments and old
-  wrapper tests.
 
 ## Migration Plan
 
 The verifier migration path replays an existing legacy certificate in memory,
 compiles the observed checker trace to GTF, prunes unreferenced auxiliary steps,
-and writes a GTF-only certificate. Existing `gtf`/`from` spellings are accepted
-as aliases for early experimental files, but new writes use `g`/`f`.
+and writes a GTF-only certificate. Existing top-level `g`/`gtf` spellings and
+the `from` premise spelling are accepted as aliases for early experimental files,
+but new writes use `p`/`f`.
 
 ## Current Limitations
 
-The raw `gtf-migrate` command is still a low-level wrapper for old files. The
-context-aware migration used for correctness is `verify --ignore-hash` under the
-`gtf` feature, because compiling explicit traces requires the active checker
-context for imports, local facts, goal assumptions, and witness declarations.
+Migration is intentionally context-aware and runs through `verify --ignore-hash`
+under the `gtf` feature, because compiling explicit traces requires the active
+checker context for imports, local facts, goal assumptions, and witness
+declarations. The old low-level wrapper that could only wrap legacy proof lines
+has been removed.
 
-Fresh proof-search generation still passes through the existing
-`ConcreteStep -> Certificate` path first, but under the `gtf` feature the
-builder immediately compiles those generated legacy proof lines into explicit
-GTF using the same context-aware path. If that compilation fails, generation
-fails instead of writing a legacy or transitional fallback.
+Fresh proof-search generation still passes through the existing legacy
+certificate-step serialization first, but under the `gtf` feature the builder
+immediately compiles those generated proof lines into explicit GTF using the same
+context-aware path. If that compilation fails, generation fails instead of
+writing a legacy or transitional fallback.
 
 `br_intro` remains an explicit rule for the small number of cases where the
 target clause is justified because its boolean-reduction closure is already in

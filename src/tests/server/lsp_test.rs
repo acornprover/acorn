@@ -1,4 +1,5 @@
 use crate::interfaces::{ProgressParams, SelectionParams};
+use crate::manifest::PROJECT_FORMAT_VERSION;
 use crate::server::{AcornLanguageServer, LspClient, ServerArgs};
 use assert_fs::fixture::ChildPath;
 use assert_fs::prelude::*;
@@ -231,9 +232,13 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
     temp_dir.child("src").create_dir_all().unwrap();
     let build_dir = temp_dir.child("build");
     build_dir.create_dir_all().unwrap();
+    let newer_version = PROJECT_FORMAT_VERSION + 1;
     build_dir
         .child("manifest.json")
-        .write_str(r#"{"version":26,"modules":{}}"#)
+        .write_str(&format!(
+            r#"{{"version":{},"modules":{{}}}}"#,
+            newer_version
+        ))
         .unwrap();
 
     let args = ServerArgs {
@@ -246,7 +251,10 @@ async fn test_manifest_version_error_is_formatted_for_vscode_initialization() {
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 26, but this version of the Acorn VS Code extension only supports up to project format 25. Please update the Acorn VS Code extension.";
+    let expected = format!(
+        "This version of acornlib uses project format {}, but this version of the Acorn VS Code extension only supports up to project format {}. Please update the Acorn VS Code extension.",
+        newer_version, PROJECT_FORMAT_VERSION
+    );
 
     assert_eq!(error, expected);
 
@@ -280,7 +288,10 @@ async fn test_old_manifest_version_error_is_formatted_for_vscode_initialization(
         Ok(_) => panic!("server creation should fail"),
         Err(error) => error,
     };
-    let expected = "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format 25. Please run `acorn verify --update-version` to update acornlib's project format.";
+    let expected = format!(
+        "This version of acornlib uses project format 22, but this version of the Acorn VS Code extension writes project format {}. Please run `acorn verify --update-version` to update acornlib's project format.",
+        PROJECT_FORMAT_VERSION
+    );
 
     assert_eq!(error, expected);
 }

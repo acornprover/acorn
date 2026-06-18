@@ -872,7 +872,9 @@ mod tests {
             let file = std::fs::File::create(path.path()).unwrap();
             let mut writer = std::io::BufWriter::new(file);
             for cert in store.certs {
-                let json = if cert.proof.is_some() {
+                let json = if cert.gtf.is_some() {
+                    serde_json::to_string(&cert).unwrap()
+                } else if cert.proof.is_some() {
                     serde_json::json!({
                         "goal": cert.goal,
                         "proof": cert.proof,

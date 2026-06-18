@@ -560,7 +560,6 @@ impl BuildCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::certificate::{Certificate, CertificateStore};
 
     #[test]
     fn package_layout_paths_are_source_local() {
@@ -618,11 +617,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&build).unwrap();
         std::fs::write(src.join("foo.ac"), "theorem goal { true }\n").unwrap();
-        CertificateStore {
-            certs: vec![Certificate::new("goal".to_string(), Vec::new())],
-        }
-        .save(&build.join("foo.jsonl"))
-        .unwrap();
+        std::fs::write(build.join("foo.jsonl"), r#"{"goal":"goal","proof":[]}"#).unwrap();
 
         let new_only = BuildCache::load(src.clone(), build.clone(), false).unwrap();
         assert!(new_only

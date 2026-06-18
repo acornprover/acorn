@@ -513,7 +513,6 @@ fn test_filesystem_project_supports_global_lib_module_lookup() {
 }
 
 fn create_cached_certificate_secret_import_project() -> (tempfile::TempDir, Project) {
-    use crate::certificate::{Certificate, CertificateStore};
     use std::fs;
     use tempfile::TempDir;
 
@@ -528,13 +527,10 @@ fn create_cached_certificate_secret_import_project() -> (tempfile::TempDir, Proj
     fs::write(src_dir.join("main.ac"), "theorem goal { true }\n").unwrap();
     let cert_dir = src_dir.join("certs");
     fs::create_dir(&cert_dir).unwrap();
-    CertificateStore {
-        certs: vec![Certificate::new(
-            "goal".to_string(),
-            vec!["lib(util).util_fact".to_string()],
-        )],
-    }
-    .save(&cert_dir.join("main.jsonl"))
+    fs::write(
+        cert_dir.join("main.jsonl"),
+        r#"{"goal":"goal","proof":["lib(util).util_fact"]}"#,
+    )
     .unwrap();
 
     let mut p = Project::new(src_dir, build_dir, ProjectConfig::default()).unwrap();

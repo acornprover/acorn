@@ -89,7 +89,13 @@ fn test_save_load_cycle() {
 
     #[cfg(feature = "gtf")]
     fn cert_with_proof(goal: String, proof: Vec<String>) -> Certificate {
-        let gtf = crate::gtf::GtfProof::from_legacy_lines(&proof);
+        let gtf = crate::gtf::GtfProof {
+            steps: proof
+                .iter()
+                .cloned()
+                .map(crate::gtf::GtfStep::claim)
+                .collect(),
+        };
         Certificate {
             goal,
             proof: Some(proof),

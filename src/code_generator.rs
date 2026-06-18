@@ -1327,7 +1327,7 @@ impl CodeGenerator<'_> {
         step: &ConcreteStep,
         kernel_context: &mut KernelContext,
     ) -> Result<Vec<CertificateStep>> {
-        if cfg!(any(feature = "ebr", feature = "gtf")) {
+        if cfg!(feature = "gtf") {
             if let ConcreteRationale::BooleanReduction { source, .. } = &step.rationale {
                 let mut steps = vec![];
                 for (var_map, replacement_context) in &step.var_maps {
@@ -1369,7 +1369,7 @@ impl CodeGenerator<'_> {
         }
 
         let should_emit = step.should_emit_legacy_cert()
-            || (cfg!(any(feature = "ebr", feature = "gtf")) && step.is_boolean_reduction());
+            || (cfg!(feature = "gtf") && step.is_boolean_reduction());
         if !should_emit {
             return Ok(vec![]);
         }

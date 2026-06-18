@@ -68,6 +68,73 @@ Slowest rebuilt modules by total processing time:
 
 ## profile_check
 
+### 2026-06-17 GTF Full Check Profile
+
+- Date: 2026-06-17
+- Git hash: `a9bd149b` plus local `gtf` feature diff
+- Command: `cargo run --manifest-path /home/lacker/acorn/Cargo.toml --profile release --features gtf -- check --timing` in `/tmp/acornlib-gtf-test`, then `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_check --profile=fastdev --features gtf` and `perf record -g --call-graph fp -o /tmp/gtf-check-perf.data /home/lacker/acorn/target/fastdev/profile_check`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
+- Timing: release GTF check completed successfully in `32.670s` measured time. It checked `93,462/93,462` cached certificates, performed `0` searches, printed `605` modules, and rebuilt `584` modules. The measured phases were `30.208s` target/module load, `32.160s` certificate checking, and `35.145s` summed cached certificate checks, for `2,906 certs/s`.
+- Summary: GTF improves full-check wall time from the current non-GTF baseline of about `47.97s` to `32.67s`, but the profile explains why this is not a complete boolean-reduction win. GTF proof-step replay itself is no longer the dominant path. The remaining hot work is mostly pre-cert and around-cert checker setup: importing facts, inserting local lowered facts/goals, and still eagerly deriving boolean-reduction closure for those clauses. The observed low CPU utilization near the tail is consistent with the timing table: slow modules such as `int.lattice` spend most of their wall time outside summed cert replay (`9.204s` total vs. `210.7ms` cert time), so the long pole is module/import/setup work rather than all workers staying busy on independent cert checks.
+- Breakdown:
+
+```text
+GTF Full Check Timing (2026-06-17)
+==================================
+
+release command: cargo run --manifest-path /home/lacker/acorn/Cargo.toml --profile release --features gtf -- check --timing
+result: 605 modules printed, 584 rebuilt, 93,462/93,462 certificates OK, 0 searches
+total measured: 32.670s
+target/module load: 30.208s
+certificate checking: 32.160s
+cached cert checks: 35.145s summed worker time
+certificate throughput: 2,906 certs/s
+
+Slowest rebuilt modules by total processing time:
+| module                              | total  | cert time |
+|-------------------------------------|--------|-----------|
+| int.lattice                         | 9.204s | 210.7ms   |
+| function_product_algebra            | 6.200s | 1.664s    |
+| top100.theorem_071_order_of_a_subgroup | 3.961s | 168.5ms |
+| finite_group.base                   | 2.292s | 125.7ms   |
+| set_lattice                         | 1.871s | 811.3ms   |
+
+Fastdev perf command: perf record -g --call-graph fp -o /tmp/gtf-check-perf.data /home/lacker/acorn/target/fastdev/profile_check
+perf sample: 887,109 cpu_core samples over 221.799s, 236.7 MB perf.data, 0 lost samples
+
+Top-down perf shape:
+Verifier::run                                         99.9%
+  Builder::process_module_work_batch                  67.7%
+    Builder::verify_lowered_module                    67.2%
+      Processor::with_imports_for_checking            34.1%
+        add_imported_module / add_exported_fact       33.9%
+          Checker::insert_clause_internal             33.7%
+            insert_boolean_reductions_with_reason     26.2%
+      Builder::verify_lowered_items                   32.1%
+        local fact, goal, and certificate setup
+        GTF cert replay proper is much smaller
+  Project::load_target_by_descriptor                  16-20%
+  BuildCache::load                                     6-7%
+
+Hot self-time:
+TermRef::split_application_multi                       7.22%
+_mi_page_malloc                                        6.92%
+mi_free                                                5.61%
+TermRef::to_owned                                      4.88%
+__memmove_avx_unaligned_erms                           4.22%
+TermRef::decompose                                     3.25%
+DefaultHasher::write                                   3.09%
+term_normalization::split_symbol_application           2.99%
+
+Interpretation:
+GTF removed a major source of eager boolean-reduction work from certificate proof-step replay,
+but it did not remove eager boolean-reduction closure from checker setup. Imported exported facts,
+local lowered facts, and goal insertion still flow through `Checker::insert_clause_internal` and
+`insert_boolean_reductions_with_reason`. The next performance target is therefore not the GTF
+step checker itself; it is changing how the checker represents imported/local/goal facts so check
+mode does not eagerly generate broad boolean-reduction closure for facts the proof never uses.
+```
+
 ### 2026-06-17 Current Full Check Profile
 
 - Date: 2026-06-17

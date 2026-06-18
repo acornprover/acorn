@@ -125,7 +125,8 @@ pub struct Certificate {
     /// Experimental explicit checker trace.
     #[cfg(feature = "gtf")]
     #[serde(
-        rename = "g",
+        rename = "p",
+        alias = "g",
         alias = "gtf",
         default,
         skip_serializing_if = "Option::is_none"
@@ -1105,11 +1106,10 @@ impl Certificate {
         }
         #[cfg(feature = "gtf")]
         {
-            let gtf = crate::gtf::GtfProof::from_certificate_steps(&ordered_steps, &answer)?;
             return Ok(Certificate {
                 goal,
                 proof: Some(answer),
-                gtf: Some(gtf),
+                gtf: None,
             });
         }
         #[cfg(not(feature = "gtf"))]
@@ -2571,6 +2571,17 @@ impl CertificateStore {
         let mut writer = BufWriter::new(file);
 
         for cert in &self.certs {
+            #[cfg(feature = "gtf")]
+            if cert.proof.is_some() && cert.gtf.is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "certificate for goal {:?} has only a legacy proof; run GTF migration before saving",
+                        cert.goal
+                    ),
+                )
+                .into());
+            }
             let json = serde_json::to_string(cert)?;
             writeln!(writer, "{}", json)?;
         }
@@ -2605,23 +2616,6 @@ impl CertificateStore {
         for cert in worklist.iter_unused() {
             self.certs.push(cert.clone());
         }
-    }
-
-    #[cfg(feature = "gtf")]
-    pub fn add_gtf_from_legacy_proofs(&mut self) -> usize {
-        let mut changed = 0;
-        for cert in &mut self.certs {
-            if cert.gtf.is_some() {
-                continue;
-            }
-            let Some(proof) = &cert.proof else {
-                continue;
-            };
-            cert.gtf = Some(crate::gtf::GtfProof::from_legacy_lines(proof));
-            cert.proof = None;
-            changed += 1;
-        }
-        changed
     }
 }
 
