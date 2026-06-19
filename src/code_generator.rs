@@ -11,6 +11,7 @@ use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep, Claim};
+use crate::kernel::checker::Checker;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -1348,11 +1349,11 @@ impl CodeGenerator<'_> {
                 let result_clause = result
                     .normalized_specialized_clause(kernel_context)
                     .map_err(Error::GeneratedBadCode)?;
-                if source
-                    .boolean_reductions(kernel_context)
-                    .into_iter()
-                    .any(|candidate| candidate == result_clause)
-                {
+                if Checker::new().boolean_reduction_set_contains_for_trace(
+                    source,
+                    &result_clause,
+                    kernel_context,
+                ) {
                     let source = Claim::new(source.clone(), VariableMap::new())
                         .map_err(Error::GeneratedBadCode)?;
                     steps.push(CertificateStep::BooleanReduction(BooleanReductionStep {

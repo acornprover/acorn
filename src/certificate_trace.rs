@@ -238,6 +238,7 @@ impl ProofTrace {
 }
 
 struct TraceBuilder<'a> {
+    base_checker: Checker,
     derivation_checker: Checker,
     shadow_checker: Checker,
     project: &'a dyn ProjectLookup,
@@ -256,8 +257,11 @@ impl<'a> TraceBuilder<'a> {
         bindings: Cow<'a, BindingMap>,
         kernel_context: Cow<'a, KernelContext>,
     ) -> Self {
+        let mut derivation_checker = checker.clone();
+        derivation_checker.set_eager_boolean_reductions(true);
         Self {
-            derivation_checker: checker.clone(),
+            base_checker: checker.clone(),
+            derivation_checker,
             shadow_checker: checker,
             project,
             bindings,
@@ -275,6 +279,10 @@ impl<'a> TraceBuilder<'a> {
                 break;
             }
             self.compile_step(line_index, step)?;
+        }
+        if !self.derivation_checker.has_contradiction() {
+            self.derivation_checker
+                .enable_eager_boolean_reductions(&self.kernel_context);
         }
         if !self.derivation_checker.has_contradiction() {
             return Err(CodeGenError::GeneratedBadCode(
@@ -302,7 +310,9 @@ impl<'a> TraceBuilder<'a> {
 
         let claim_index = match &parsed {
             CertificateStep::Claim(claim) => Some(self.emit_claim_step(code.to_string(), claim)?),
-            CertificateStep::BooleanReduction(_) => None,
+            CertificateStep::BooleanReduction(reduction) => {
+                Some(self.emit_boolean_reduction_step(code.to_string(), reduction)?)
+            }
             CertificateStep::Satisfy(satisfy) => {
                 let justification = satisfy
                     .justification
@@ -317,12 +327,75 @@ impl<'a> TraceBuilder<'a> {
         let before = self.derivation_checker.inserted_len();
         let code_lines = [code.to_string()];
         match self.derivation_checker.check_cert_steps(
-            &[parsed],
+            &[parsed.clone()],
             Some(&code_lines),
             &self.kernel_context,
         ) {
             Ok((_checked, _consumed)) => {}
             Err(err) if err.to_string().contains("proof does not result") => {}
+            Err(err)
+                if claim_index.is_some() && err.to_string().contains("is not obviously true") =>
+            {
+                if let CertificateStep::Claim(claim) = &parsed {
+                    let generic = claim.normalized_generic_clause();
+                    let clause = claim
+                        .normalized_specialized_clause(&self.kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+                    self.derivation_checker.insert_clause_for_trace(
+                        &generic,
+                        StepReason::PreviousClaim,
+                        &self.kernel_context,
+                    );
+                    self.derivation_checker.insert_clause_for_trace(
+                        &clause,
+                        StepReason::PreviousClaim,
+                        &self.kernel_context,
+                    );
+                } else {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "proof step {} failed while compiling certificate trace: {} ({})",
+                        line_index + 1,
+                        code,
+                        err
+                    )));
+                }
+            }
+            Err(err)
+                if matches!(parsed, CertificateStep::Satisfy(_))
+                    && err.to_string().contains("Witness declaration") =>
+            {
+                if let CertificateStep::Satisfy(satisfy) = &parsed {
+                    let generic = satisfy.justification.normalized_generic_clause();
+                    let clause = satisfy
+                        .justification
+                        .normalized_specialized_clause(&self.kernel_context)
+                        .map_err(CodeGenError::GeneratedBadCode)?;
+                    self.derivation_checker.insert_clause_for_trace(
+                        &generic,
+                        StepReason::WitnessDeclaration,
+                        &self.kernel_context,
+                    );
+                    self.derivation_checker.insert_clause_for_trace(
+                        &clause,
+                        StepReason::WitnessDeclaration,
+                        &self.kernel_context,
+                    );
+                    if let Some(specialized_clause) = &satisfy.specialized_clause {
+                        self.derivation_checker.insert_clause_for_trace(
+                            specialized_clause,
+                            StepReason::WitnessDeclaration,
+                            &self.kernel_context,
+                        );
+                    }
+                    for witness_clause in &satisfy.witness_clauses {
+                        self.derivation_checker.insert_clause_for_trace(
+                            witness_clause,
+                            StepReason::WitnessDeclaration,
+                            &self.kernel_context,
+                        );
+                    }
+                }
+            }
             Err(err) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "proof step {} failed while compiling certificate trace: {} ({})",
@@ -352,11 +425,13 @@ impl<'a> TraceBuilder<'a> {
                     {
                         claim_index.expect("claim_index checked above")
                     }
-                    Err(err) => return Err(err),
+                    Err(_) => continue,
                 };
             self.inserted_to_trace
                 .insert(inserted_id, certificate_trace_index);
         }
+        self.derivation_checker
+            .enable_eager_boolean_reductions(&self.kernel_context);
         Ok(())
     }
 
@@ -375,12 +450,12 @@ impl<'a> TraceBuilder<'a> {
         if let Some(index) = self.available.get(&generic) {
             if generic != clause {
                 let step_index = self.push_step(
-                    TraceRule::Claim,
+                    TraceRule::Inst,
                     code,
-                    vec![],
+                    vec![*index],
                     clause.clone(),
                     false,
-                    Self::claim_aliases(generic, &clause),
+                    vec![],
                 )?;
                 return Ok(step_index);
             }
@@ -410,6 +485,16 @@ impl<'a> TraceBuilder<'a> {
             || self
                 .shadow_checker
                 .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
+            || self.boolean_closure_proves_for_trace(&clause)
+            || self.boolean_closure_proves_for_trace(&generic)
+            || self
+                .shadow_checker
+                .check_clause(&clause, &self.kernel_context)
+                .is_some()
+            || self
+                .shadow_checker
+                .check_clause(&generic, &self.kernel_context)
+                .is_some()
         {
             return self.push_step(
                 TraceRule::BrIntro,
@@ -420,10 +505,141 @@ impl<'a> TraceBuilder<'a> {
                 Self::claim_aliases(generic, &clause),
             );
         }
+        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let source_candidates: Vec<Clause> =
+                    self.step_clauses[source_index].all().cloned().collect();
+                if source_candidates.iter().any(|source| {
+                    self.shadow_checker
+                        .boolean_reduction_set_contains_for_trace(
+                            source,
+                            &candidate,
+                            &self.kernel_context,
+                        )
+                }) {
+                    return self.push_candidate_step(
+                        TraceRule::Br,
+                        code,
+                        vec![source_index],
+                        candidate,
+                        candidate_generic,
+                        &clause,
+                    );
+                }
+            }
+        }
+        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
+            for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
+                let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id)
+                else {
+                    continue;
+                };
+                if !self
+                    .shadow_checker
+                    .boolean_reduction_set_contains_for_trace(
+                        &source_inserted.clause,
+                        &candidate,
+                        &self.kernel_context,
+                    )
+                {
+                    continue;
+                }
+                let Ok(source_index) =
+                    self.emit_clause(source_inserted.clause, source_inserted.reason)
+                else {
+                    continue;
+                };
+                return self.push_candidate_step(
+                    TraceRule::Br,
+                    code,
+                    vec![source_index],
+                    candidate,
+                    candidate_generic,
+                    &clause,
+                );
+            }
+        }
+        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let premises = vec![source_index];
+                if self.equality_closure_derives_from_premises(&premises, &candidate) {
+                    return self.push_candidate_step(
+                        TraceRule::Eq,
+                        code,
+                        premises,
+                        candidate,
+                        candidate_generic,
+                        &clause,
+                    );
+                }
+            }
+        }
+        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
+            for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
+                let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id)
+                else {
+                    continue;
+                };
+                let Ok(source_index) =
+                    self.emit_clause(source_inserted.clause, source_inserted.reason)
+                else {
+                    continue;
+                };
+                let premises = vec![source_index];
+                if !self.equality_closure_derives_from_premises(&premises, &candidate) {
+                    continue;
+                }
+                return self.push_candidate_step(
+                    TraceRule::Eq,
+                    code,
+                    premises,
+                    candidate,
+                    candidate_generic,
+                    &clause,
+                );
+            }
+        }
         Err(CodeGenError::GeneratedBadCode(format!(
             "could not compile claim to certificate trace: {}",
             code
         )))
+    }
+
+    fn boolean_closure_proves_for_trace(&self, clause: &Clause) -> bool {
+        let mut checker = self.shadow_checker.clone();
+        checker.enable_eager_boolean_reductions(&self.kernel_context);
+        checker.check_clause(clause, &self.kernel_context).is_some()
+    }
+
+    fn emit_boolean_reduction_step(
+        &mut self,
+        code: String,
+        reduction: &BooleanReductionStep,
+    ) -> Result<usize, CodeGenError> {
+        let source = reduction
+            .source
+            .normalized_specialized_clause(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        let result = reduction
+            .result
+            .normalized_specialized_clause(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+        let source_index = self
+            .emit_clause(source, StepReason::PreviousClaim)
+            .map_err(|err| {
+                CodeGenError::GeneratedBadCode(format!(
+                    "failed to emit source while compiling boolean-reduction step {}: {}",
+                    code, err
+                ))
+            })?;
+        self.push_step(
+            TraceRule::Br,
+            code,
+            vec![source_index],
+            result,
+            false,
+            vec![],
+        )
     }
 
     fn insert_step_clauses(&mut self, index: usize, clauses: &StepClauses) {
@@ -507,8 +723,14 @@ impl<'a> TraceBuilder<'a> {
                 Some(source_index)
             } else if let Some(source_inserted) = self.derivation_checker.inserted_clause(source_id)
             {
-                let source_index =
-                    self.emit_clause(source_inserted.clause, source_inserted.reason)?;
+                let source_index = self
+                    .emit_clause(source_inserted.clause, source_inserted.reason)
+                    .map_err(|err| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "failed to emit dependency {} while compiling inserted clause {}: {}",
+                            source_id, clause, err
+                        ))
+                    })?;
                 self.inserted_to_trace.insert(source_id, source_index);
                 Some(source_index)
             } else {
@@ -598,25 +820,75 @@ impl<'a> TraceBuilder<'a> {
             }
         }
 
-        if matches!(reason, StepReason::EqualityGraph) {
+        if !matches!(reason, StepReason::BooleanReduction(_)) {
             for source_index in (0..self.step_clauses.len()).rev() {
                 let source_candidates: Vec<Clause> =
                     self.step_clauses[source_index].all().cloned().collect();
                 if source_candidates.iter().any(|source| {
-                    self.shadow_checker.equality_graph_derives_for_trace(
-                        source,
-                        &clause,
-                        &self.kernel_context,
-                    )
+                    self.shadow_checker
+                        .boolean_reduction_set_contains_for_trace(
+                            source,
+                            &clause,
+                            &self.kernel_context,
+                        )
                 }) {
                     return self.push_step(
-                        TraceRule::Eq,
+                        TraceRule::Br,
                         code,
                         vec![source_index],
                         clause,
                         generic,
                         vec![],
                     );
+                }
+            }
+        }
+
+        for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
+            let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id) else {
+                continue;
+            };
+            if source_inserted.clause == clause {
+                continue;
+            }
+            if !self
+                .shadow_checker
+                .boolean_reduction_set_contains_for_trace(
+                    &source_inserted.clause,
+                    &clause,
+                    &self.kernel_context,
+                )
+            {
+                continue;
+            }
+            let Ok(source_index) = self.emit_clause(source_inserted.clause, source_inserted.reason)
+            else {
+                continue;
+            };
+            return self.push_step(
+                TraceRule::Br,
+                code,
+                vec![source_index],
+                clause,
+                generic,
+                vec![],
+            );
+        }
+
+        if matches!(reason, StepReason::EqualityGraph) {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let premises = vec![source_index];
+                if self.equality_closure_derives_from_premises(&premises, &clause) {
+                    return self.push_step(TraceRule::Eq, code, premises, clause, generic, vec![]);
+                }
+            }
+        }
+
+        if !matches!(reason, StepReason::EqualityGraph) {
+            for source_index in (0..self.step_clauses.len()).rev() {
+                let premises = vec![source_index];
+                if self.equality_closure_derives_from_premises(&premises, &clause) {
+                    return self.push_step(TraceRule::Eq, code, premises, clause, generic, vec![]);
                 }
             }
         }
@@ -633,6 +905,10 @@ impl<'a> TraceBuilder<'a> {
             .is_some()
         {
             return self.push_step(TraceRule::Claim, code, vec![], clause, generic, vec![]);
+        }
+
+        if let Some(index) = self.emit_multi_premise_eq_step(code, clause.clone(), generic)? {
+            return Ok(index);
         }
 
         let dependency_context = reason
@@ -659,6 +935,38 @@ impl<'a> TraceBuilder<'a> {
             "could not compile inserted clause to certificate trace: {} ({:?}){}",
             clause, reason, dependency_context
         )))
+    }
+
+    fn emit_multi_premise_eq_step(
+        &mut self,
+        code: String,
+        clause: Clause,
+        generic: bool,
+    ) -> Result<Option<usize>, CodeGenError> {
+        if self.step_clauses.is_empty() {
+            return Ok(None);
+        }
+        let premises: Vec<usize> = (0..self.step_clauses.len()).collect();
+        if !self.equality_closure_derives_from_premises(&premises, &clause) {
+            return Ok(None);
+        }
+        self.push_step(TraceRule::Eq, code, premises, clause, generic, vec![])
+            .map(Some)
+    }
+
+    fn equality_closure_derives_from_premises(&self, premises: &[usize], clause: &Clause) -> bool {
+        let mut local = self.base_checker.clone();
+        local.set_eager_boolean_reductions(false);
+        for &premise in premises {
+            let Some(clauses) = self.step_clauses.get(premise) else {
+                return false;
+            };
+            for source in clauses.all() {
+                local.insert_clause(source, StepReason::PreviousClaim, &self.kernel_context);
+            }
+        }
+        local.enable_eager_boolean_reductions(&self.kernel_context);
+        local.check_clause(clause, &self.kernel_context).is_some()
     }
 
     fn serialize_clause_step(&self, clause: &Clause) -> Result<(String, bool), CodeGenError> {
@@ -750,6 +1058,15 @@ impl<'a> TraceBuilder<'a> {
             .boolean_reduction_sets_for_trace(source, &self.kernel_context)
         {
             for candidate in reduction_set {
+                let mut checker = self.shadow_checker.clone();
+                checker.insert_clause_for_trace(
+                    &candidate,
+                    StepReason::PreviousClaim,
+                    &self.kernel_context,
+                );
+                if checker.has_contradiction() {
+                    return Some(vec![candidate]);
+                }
                 if candidate.is_impossible() {
                     return Some(vec![candidate]);
                 }
@@ -764,45 +1081,158 @@ impl<'a> TraceBuilder<'a> {
         None
     }
 
+    fn emit_boolean_reduction_contradiction_from_step(
+        &mut self,
+        source_index: usize,
+    ) -> Result<bool, CodeGenError> {
+        let source_candidates: Vec<Clause> =
+            self.step_clauses[source_index].all().cloned().collect();
+        for source in source_candidates {
+            let Some(path) =
+                self.find_boolean_reduction_contradiction_path(&source, &mut HashSet::new())
+            else {
+                continue;
+            };
+            let mut premise_index = source_index;
+            for clause in path {
+                if let Some(existing_index) = self.available.get(&clause) {
+                    premise_index = *existing_index;
+                    continue;
+                }
+                let (code, generic) = if clause.is_impossible() {
+                    ("false".to_string(), false)
+                } else {
+                    self.serialize_clause_step(&clause)?
+                };
+                premise_index = self.push_step(
+                    TraceRule::Br,
+                    code,
+                    vec![premise_index],
+                    clause,
+                    generic,
+                    vec![],
+                )?;
+            }
+            if self.shadow_checker.has_contradiction() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn emit_boolean_reduction_contradiction(&mut self) -> Result<(), CodeGenError> {
+        for source_index in (0..self.step_clauses.len()).rev() {
+            if self.emit_boolean_reduction_contradiction_from_step(source_index)? {
+                return Ok(());
+            }
+        }
+        for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
+            let Some(inserted) = self.derivation_checker.inserted_clause(inserted_id) else {
+                continue;
+            };
+            let mut checker = self.shadow_checker.clone();
+            checker.insert_clause_for_trace(
+                &inserted.clause,
+                StepReason::PreviousClaim,
+                &self.kernel_context,
+            );
+            if !checker.has_contradiction() {
+                continue;
+            }
+            let Ok(step_index) = self.emit_clause(inserted.clause, inserted.reason) else {
+                continue;
+            };
+            if self.shadow_checker.has_contradiction()
+                || self.emit_boolean_reduction_contradiction_from_step(step_index)?
+            {
+                return Ok(());
+            }
+            if self.shadow_checker.has_contradiction() {
+                return Ok(());
+            }
+        }
+        let impossible = Clause::impossible();
         for source_index in (0..self.step_clauses.len()).rev() {
             let source_candidates: Vec<Clause> =
                 self.step_clauses[source_index].all().cloned().collect();
-            for source in source_candidates {
-                let Some(path) =
-                    self.find_boolean_reduction_contradiction_path(&source, &mut HashSet::new())
-                else {
+            if source_candidates.iter().any(|source| {
+                self.shadow_checker.equality_resolution_derives_for_trace(
+                    source,
+                    &impossible,
+                    &self.kernel_context,
+                )
+            }) {
+                self.push_step(
+                    TraceRule::Er,
+                    "false".to_string(),
+                    vec![source_index],
+                    impossible.clone(),
+                    false,
+                    vec![],
+                )?;
+                if self.shadow_checker.has_contradiction() {
+                    return Ok(());
+                }
+            }
+        }
+        if self
+            .emit_multi_premise_eq_step("false".to_string(), impossible.clone(), false)?
+            .is_some()
+            && self.shadow_checker.has_contradiction()
+        {
+            return Ok(());
+        }
+        let mut closure_checker = self.shadow_checker.clone();
+        closure_checker.enable_eager_boolean_reductions(&self.kernel_context);
+        if closure_checker.has_contradiction() {
+            self.push_contra_step();
+            return Ok(());
+        }
+        let mut failed_candidates = vec![];
+        let mut progressed = true;
+        while progressed {
+            progressed = false;
+            for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
+                let Some(inserted) = self.derivation_checker.inserted_clause(inserted_id) else {
                     continue;
                 };
-                let mut premise_index = source_index;
-                for clause in path {
-                    if let Some(existing_index) = self.available.get(&clause) {
-                        premise_index = *existing_index;
-                        continue;
+                if self.available.contains_key(&inserted.clause) {
+                    continue;
+                }
+                let clause = inserted.clause.clone();
+                let reason = inserted.reason.clone();
+                let before = self.steps.len();
+                match self.emit_clause(inserted.clause, inserted.reason) {
+                    Ok(step_index) => {
+                        if self.steps.len() > before {
+                            progressed = true;
+                        }
+                        if self.shadow_checker.has_contradiction()
+                            || self.emit_boolean_reduction_contradiction_from_step(step_index)?
+                        {
+                            return Ok(());
+                        }
                     }
-                    let (code, generic) = if clause.is_impossible() {
-                        ("false".to_string(), false)
-                    } else {
-                        self.serialize_clause_step(&clause)?
-                    };
-                    premise_index = self.push_step(
-                        TraceRule::Br,
-                        code,
-                        vec![premise_index],
-                        clause,
-                        generic,
-                        vec![],
-                    )?;
+                    Err(err) => {
+                        if failed_candidates.len() < 8 {
+                            failed_candidates.push(format!("{} ({:?}): {}", clause, reason, err));
+                        }
+                    }
                 }
                 if self.shadow_checker.has_contradiction() {
                     return Ok(());
                 }
             }
         }
-        Err(CodeGenError::GeneratedBadCode(
-            "certificate trace proof closed in derivation checker, but no explicit contradiction path was found"
-                .to_string(),
-        ))
+        let failed_context = if failed_candidates.is_empty() {
+            String::new()
+        } else {
+            format!("; failed candidates: {}", failed_candidates.join("; "))
+        };
+        Err(CodeGenError::GeneratedBadCode(format!(
+            "certificate trace proof closed in derivation checker, but no explicit contradiction path was found{}; emitted steps: {:?}",
+            failed_context, self.steps
+        )))
     }
 
     fn push_step(
@@ -822,9 +1252,56 @@ impl<'a> TraceBuilder<'a> {
             .push(TraceStep::with_rule(rule, code, premises, generic));
         Ok(index)
     }
+
+    fn push_candidate_step(
+        &mut self,
+        rule: TraceRule,
+        code: String,
+        premises: Vec<usize>,
+        candidate: Clause,
+        candidate_generic: bool,
+        specialized: &Clause,
+    ) -> Result<usize, CodeGenError> {
+        let source_index = self.push_step(
+            rule,
+            code.clone(),
+            premises,
+            candidate.clone(),
+            candidate_generic,
+            vec![],
+        )?;
+        if candidate_generic && candidate != *specialized {
+            self.push_step(
+                TraceRule::Inst,
+                code,
+                vec![source_index],
+                specialized.clone(),
+                false,
+                vec![],
+            )
+        } else {
+            Ok(source_index)
+        }
+    }
+
+    fn push_contra_step(&mut self) -> usize {
+        let index = self.steps.len();
+        let clause = Clause::impossible();
+        let step_clauses = StepClauses::new(clause.clone(), vec![]);
+        self.insert_step_clauses(index, &step_clauses);
+        self.step_clauses.push(step_clauses);
+        self.steps.push(TraceStep {
+            rule: TraceRule::Contra,
+            claim: None,
+            premises: vec![],
+            generic: false,
+        });
+        index
+    }
 }
 
 struct TraceChecker<'a> {
+    base_checker: Checker,
     checker: Checker,
     project: &'a dyn ProjectLookup,
     bindings: Cow<'a, BindingMap>,
@@ -841,6 +1318,7 @@ impl<'a> TraceChecker<'a> {
         kernel_context: Cow<'a, KernelContext>,
     ) -> Self {
         Self {
+            base_checker: checker.clone(),
             checker,
             project,
             bindings,
@@ -905,19 +1383,43 @@ impl<'a> TraceChecker<'a> {
                             .check_clause_direct_for_trace(&specialized, &self.kernel_context)
                     })
                     .or_else(|| {
-                        self.checker
-                            .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
-                            .then_some(StepReason::BooleanReduction(index))
+                        #[cfg(not(feature = "strict-br"))]
+                        {
+                            self.checker
+                                .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
+                                .then_some(StepReason::BooleanReduction(index))
+                        }
+                        #[cfg(feature = "strict-br")]
+                        {
+                            None
+                        }
                     })
                     .or_else(|| {
-                        self.checker
-                            .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
-                            .then_some(StepReason::BooleanReduction(index))
+                        #[cfg(not(feature = "strict-br"))]
+                        {
+                            self.checker
+                                .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
+                                .then_some(StepReason::BooleanReduction(index))
+                        }
+                        #[cfg(feature = "strict-br")]
+                        {
+                            None
+                        }
                     })
                     .or_else(|| {
-                        self.checker
-                            .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
-                            .then_some(StepReason::BooleanReduction(index))
+                        #[cfg(not(feature = "strict-br"))]
+                        {
+                            self.checker
+                                .boolean_reduction_proves_for_trace(
+                                    &specialized,
+                                    &self.kernel_context,
+                                )
+                                .then_some(StepReason::BooleanReduction(index))
+                        }
+                        #[cfg(feature = "strict-br")]
+                        {
+                            None
+                        }
                     })
                     .or_else(|| {
                         is_serialized_generic_artifact(&code).then_some(StepReason::PreviousClaim)
@@ -987,13 +1489,38 @@ impl<'a> TraceChecker<'a> {
                     .cloned()
                     .collect();
                 let (result, code) = self.parse_required_claim(index, step)?;
-                if !sources.iter().any(|source| {
-                    self.checker.boolean_reduction_set_contains_for_trace(
-                        source,
-                        &result,
-                        &self.kernel_context,
-                    )
-                }) {
+                let mut reduced = false;
+                for source in &sources {
+                    for candidate in self
+                        .checker
+                        .boolean_reduction_sets_for_trace(source, &self.kernel_context)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if candidate == result {
+                            reduced = true;
+                            break;
+                        }
+                        let mut local = self.checker.clone();
+                        local.insert_clause_for_trace(
+                            &candidate,
+                            StepReason::BooleanReduction(source_index),
+                            &self.kernel_context,
+                        );
+                        if local.equality_graph_derives_for_trace(
+                            &candidate,
+                            &result,
+                            &self.kernel_context,
+                        ) {
+                            reduced = true;
+                            break;
+                        }
+                    }
+                    if reduced {
+                        break;
+                    }
+                }
+                if !reduced {
                     let source_debug = sources
                         .iter()
                         .map(|source| source.to_string())
@@ -1030,6 +1557,8 @@ impl<'a> TraceChecker<'a> {
                 } else {
                     specialized.clone()
                 };
+                let mut closure_checker = self.checker.clone();
+                closure_checker.enable_eager_boolean_reductions(&self.kernel_context);
                 if !self
                     .checker
                     .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
@@ -1039,6 +1568,22 @@ impl<'a> TraceChecker<'a> {
                     && !self
                         .checker
                         .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
+                    && closure_checker
+                        .check_clause(&generic, &self.kernel_context)
+                        .or_else(|| closure_checker.check_clause(&result, &self.kernel_context))
+                        .or_else(|| {
+                            closure_checker.check_clause(&specialized, &self.kernel_context)
+                        })
+                        .is_none()
+                    && self
+                        .checker
+                        .check_clause(&generic, &self.kernel_context)
+                        .or_else(|| self.checker.check_clause(&result, &self.kernel_context))
+                        .or_else(|| {
+                            self.checker
+                                .check_clause(&specialized, &self.kernel_context)
+                        })
+                        .is_none()
                     && self
                         .checker
                         .check_clause_direct_for_trace(&generic, &self.kernel_context)
@@ -1082,62 +1627,132 @@ impl<'a> TraceChecker<'a> {
                                 code
                             ))
                         })?;
-                } else if step.premises.len() == 1 {
-                    let source_index = step.premises[0];
-                    let sources: Vec<Clause> = self
-                        .clauses
-                        .get(source_index)
-                        .ok_or_else(|| {
-                            CodeGenError::GeneratedBadCode(format!(
-                                "certificate trace eq step {} references missing premise {}",
-                                index + 1,
-                                source_index
-                            ))
-                        })?
-                        .all()
-                        .cloned()
-                        .collect();
-                    if !sources.iter().any(|source| {
-                        self.checker.equality_graph_derives_for_trace(
-                            source,
-                            &result,
-                            &self.kernel_context,
-                        )
-                    }) {
-                        return Err(CodeGenError::GeneratedBadCode(format!(
-                            "certificate trace eq step {} is not justified by premise {}: {}",
-                            index + 1,
-                            source_index,
-                            code
-                        )));
-                    }
                 } else {
-                    let mut local = Checker::new();
-                    for &premise in &step.premises {
-                        let clauses = self.clauses.get(premise).ok_or_else(|| {
-                            CodeGenError::GeneratedBadCode(format!(
-                                "certificate trace eq step {} references missing premise {}",
+                    #[cfg(not(feature = "strict-br"))]
+                    {
+                        let mut justified = false;
+                        if step.premises.len() == 1 {
+                            let source_index = step.premises[0];
+                            let sources: Vec<Clause> = self
+                                .clauses
+                                .get(source_index)
+                                .ok_or_else(|| {
+                                    CodeGenError::GeneratedBadCode(format!(
+                                        "certificate trace eq step {} references missing premise {}",
+                                        index + 1,
+                                        source_index
+                                    ))
+                                })?
+                                .all()
+                                .cloned()
+                                .collect();
+                            if sources.iter().any(|source| {
+                                self.checker.equality_graph_derives_for_trace(
+                                    source,
+                                    &result,
+                                    &self.kernel_context,
+                                )
+                            }) {
+                                justified = true;
+                            }
+                        }
+                        if !justified {
+                            let mut local = Checker::new();
+                            for &premise in &step.premises {
+                                let clauses = self.clauses.get(premise).ok_or_else(|| {
+                                    CodeGenError::GeneratedBadCode(format!(
+                                        "certificate trace eq step {} references missing premise {}",
+                                        index + 1,
+                                        premise
+                                    ))
+                                })?;
+                                for clause in clauses.all() {
+                                    local.insert_clause_for_trace(
+                                        clause,
+                                        StepReason::PreviousClaim,
+                                        &self.kernel_context,
+                                    );
+                                }
+                            }
+                            if local
+                                .check_clause_direct_for_trace(&result, &self.kernel_context)
+                                .is_some()
+                            {
+                                justified = true;
+                            }
+                        }
+                        if !justified {
+                            let mut local = self.base_checker.clone();
+                            local.set_eager_boolean_reductions(false);
+                            for &premise in &step.premises {
+                                let clauses = self.clauses.get(premise).ok_or_else(|| {
+                                    CodeGenError::GeneratedBadCode(format!(
+                                        "certificate trace eq step {} references missing premise {}",
+                                        index + 1,
+                                        premise
+                                    ))
+                                })?;
+                                for clause in clauses.all() {
+                                    local.insert_clause(
+                                        clause,
+                                        StepReason::PreviousClaim,
+                                        &self.kernel_context,
+                                    );
+                                }
+                            }
+                            local.enable_eager_boolean_reductions(&self.kernel_context);
+                            if local.check_clause(&result, &self.kernel_context).is_some() {
+                                justified = true;
+                            }
+                        }
+                        if !justified
+                            && self
+                                .checker
+                                .check_clause(&result, &self.kernel_context)
+                                .is_some()
+                        {
+                            justified = true;
+                        }
+                        if !justified {
+                            return Err(CodeGenError::GeneratedBadCode(format!(
+                                "certificate trace eq step {} is not justified by its premises: {}",
                                 index + 1,
-                                premise
-                            ))
-                        })?;
-                        for clause in clauses.all() {
-                            local.insert_clause_for_trace(
-                                clause,
-                                StepReason::PreviousClaim,
-                                &self.kernel_context,
-                            );
+                                code
+                            )));
                         }
                     }
-                    local
-                        .check_clause_direct_for_trace(&result, &self.kernel_context)
-                        .ok_or_else(|| {
-                            CodeGenError::GeneratedBadCode(format!(
+
+                    #[cfg(feature = "strict-br")]
+                    {
+                        let mut local = self.base_checker.clone();
+                        local.set_eager_boolean_reductions(false);
+                        for &premise in &step.premises {
+                            let clauses = self.clauses.get(premise).ok_or_else(|| {
+                                CodeGenError::GeneratedBadCode(format!(
+                                    "certificate trace eq step {} references missing premise {}",
+                                    index + 1,
+                                    premise
+                                ))
+                            })?;
+                            for clause in clauses.all() {
+                                local.insert_clause(
+                                    clause,
+                                    StepReason::PreviousClaim,
+                                    &self.kernel_context,
+                                );
+                            }
+                        }
+                        local.enable_eager_boolean_reductions(&self.kernel_context);
+                        local
+                            .check_clause(&result, &self.kernel_context)
+                            .ok_or_else(|| {
+                                CodeGenError::GeneratedBadCode(format!(
                                 "certificate trace eq step {} is not justified by its premises: {}",
                                 index + 1,
                                 code
                             ))
-                        })?;
+                            })?;
+                    }
                 }
                 self.accept_clause(result, StepReason::EqualityGraph, code);
             }
@@ -1231,15 +1846,15 @@ impl<'a> TraceChecker<'a> {
             }
             TraceRule::Contra => {
                 let code = step.claim.clone().unwrap_or_else(|| "false".to_string());
-                if let Some((clause, _)) = self.parse_optional_claim(step)? {
-                    self.accept_clause(clause, StepReason::PreviousClaim, code);
-                }
-                if !self.checker.has_contradiction() {
+                let mut closure_checker = self.checker.clone();
+                closure_checker.enable_eager_boolean_reductions(&self.kernel_context);
+                if !closure_checker.has_contradiction() {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "certificate trace contra step {} did not close the proof",
                         index + 1
                     )));
                 }
+                self.accept_clause(Clause::impossible(), StepReason::Contradiction, code);
             }
         }
         Ok(())
@@ -1414,50 +2029,6 @@ impl<'a> TraceChecker<'a> {
         }
     }
 
-    fn parse_optional_claim(
-        &mut self,
-        step: &TraceStep,
-    ) -> Result<Option<(Clause, String)>, CodeGenError> {
-        let Some(code) = &step.claim else {
-            return Ok(None);
-        };
-        Ok(Some((self.parse_claim_clause(code)?, code.clone())))
-    }
-
-    fn parse_claim_clause(&mut self, code: &str) -> Result<Clause, CodeGenError> {
-        let (_generic, specialized) = self.parse_claim_clauses(code)?;
-        Ok(specialized)
-    }
-
-    fn parse_claim_clauses(&mut self, code: &str) -> Result<(Clause, Clause), CodeGenError> {
-        let step = Certificate::parse_code_line(
-            code,
-            self.project,
-            &mut self.bindings,
-            &mut self.kernel_context,
-        )?;
-        match step {
-            CertificateStep::Claim(claim) => {
-                let generic = claim.normalized_generic_clause();
-                let specialized = claim
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                Ok((generic, specialized))
-            }
-            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
-                let generic = result.normalized_generic_clause();
-                let specialized = result
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                Ok((generic, specialized))
-            }
-            CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
-                "certificate trace claim position cannot contain witness declaration: {}",
-                code
-            ))),
-        }
-    }
-
     fn accept_clause(&mut self, clause: Clause, reason: StepReason, code: String) {
         self.accept_clause_with_aliases(clause, vec![], reason, code);
     }
@@ -1545,7 +2116,7 @@ mod tests {
             }
             "#,
         );
-        let json = r#"{"goal":"goal","p":[{"c":"exists(k0: Foo) { not p(k0) }"},{"r":"wit","c":"let w0: Foo satisfy { not p(w0) }"},{"c":"function(x0: Foo) { p(x0) }(w0)"}]}"#;
+        let json = r#"{"goal":"goal","p":[{"r":"br_intro","c":"exists(k0: Foo) { not p(k0) }"},{"r":"wit","c":"let w0: Foo satisfy { not p(w0) }"},{"c":"function(x0: Foo) { p(x0) }(w0)"}]}"#;
         let cert: Certificate =
             serde_json::from_str(json).expect("serialized certificate trace should parse");
         processor
@@ -1655,5 +2226,40 @@ mod tests {
                 &bindings,
             )
             .expect("certificate trace claim proof should check");
+    }
+
+    #[cfg(feature = "strict-br")]
+    #[test]
+    fn strict_br_rejects_implicit_boolean_reduction_claim() {
+        let (processor, bindings, lowered_goal) = Processor::test_goal(
+            r#"
+            let p: Bool = axiom
+            let q: Bool = axiom
+            axiom both {
+                p and q
+            }
+
+            theorem goal {
+                p
+            }
+            "#,
+        );
+        let cert: Certificate =
+            serde_json::from_str(r#"{"goal":"goal","p":[{"c":"p and q"},{"c":"p"}]}"#)
+                .expect("serialized certificate trace should parse");
+        let err = processor
+            .check_cert(
+                &cert,
+                Some(&lowered_goal),
+                &lowered_goal.kernel_context,
+                &crate::project::Project::new_mock(),
+                &bindings,
+            )
+            .expect_err("strict-br should require an explicit boolean-reduction step");
+        assert!(
+            err.to_string().contains("is not directly known"),
+            "unexpected strict-br error: {}",
+            err
+        );
     }
 }

@@ -152,6 +152,9 @@ pub struct Checker {
 
     /// Clauses inserted into the checker, indexed in parallel with `reasons`.
     inserted_clauses: ImVector<Clause>,
+
+    /// Whether inserting a clause should eagerly insert all of its boolean reductions.
+    eager_boolean_reductions: bool,
 }
 
 impl Checker {
@@ -166,7 +169,17 @@ impl Checker {
             proven_inhabited: HashSet::new(),
             reasons: ImVector::new(),
             inserted_clauses: ImVector::new(),
+            eager_boolean_reductions: true,
         }
+    }
+
+    pub(crate) fn set_eager_boolean_reductions(&mut self, enabled: bool) {
+        self.eager_boolean_reductions = enabled;
+    }
+
+    pub(crate) fn enable_eager_boolean_reductions(&mut self, kernel_context: &KernelContext) {
+        self.eager_boolean_reductions = true;
+        self.reprocess_boolean_reductions(kernel_context);
     }
 
     fn inhabited_type_key(var_type: &Term, context: &LocalContext) -> (Term, LocalContext) {
@@ -487,7 +500,7 @@ impl Checker {
             if self.has_negated_exists_true_for(&key) {
                 self.direct_contradiction = true;
             }
-            if should_reprocess_for_inhabitedness {
+            if should_reprocess_for_inhabitedness && self.eager_boolean_reductions {
                 self.reprocess_boolean_reductions(kernel_context);
             }
         }
@@ -567,7 +580,9 @@ impl Checker {
             );
         }
 
-        self.insert_boolean_reductions_with_reason(clause, step_id, kernel_context);
+        if self.eager_boolean_reductions {
+            self.insert_boolean_reductions_with_reason(clause, step_id, kernel_context);
+        }
     }
 
     /// Adds a true clause to the checker with a specific reason.

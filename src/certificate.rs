@@ -2635,6 +2635,7 @@ struct WitnessEmitter<'a> {
 enum WitnessPlacement {
     Standalone,
     Anchor(usize),
+    #[allow(dead_code)]
     Replace(usize),
 }
 
@@ -3388,6 +3389,11 @@ impl<'a> WitnessEmitter<'a> {
             })
             .collect();
         if exact_specialized_matches.len() == 1 {
+            #[cfg(feature = "strict-br")]
+            {
+                return Ok(WitnessPlacement::Anchor(exact_specialized_matches[0]));
+            }
+            #[cfg(not(feature = "strict-br"))]
             return Ok(WitnessPlacement::Replace(exact_specialized_matches[0]));
         }
         if let Some(index) = exact_specialized_matches.first().copied() {

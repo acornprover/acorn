@@ -111,6 +111,8 @@ impl Processor {
     ) -> Result<Processor, BuildError> {
         let mut processor =
             Self::new_with_optional_prover(cancellation_token, true, scoring_config);
+        #[cfg(feature = "strict-br")]
+        processor.checker.set_eager_boolean_reductions(false);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
     }
@@ -123,6 +125,8 @@ impl Processor {
     ) -> Result<Processor, BuildError> {
         let mut processor =
             Self::new_with_optional_prover(cancellation_token, false, ScoringConfig::default());
+        #[cfg(feature = "strict-br")]
+        processor.checker.set_eager_boolean_reductions(false);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
     }
@@ -322,11 +326,10 @@ impl Processor {
             .make_certificate_draft(bindings, kernel_context, print)?;
 
         let project = project.into();
-        let mut checker = self.checker.clone();
+        let checker = self.checker.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
 
         if let Some(normalized_goal) = normalized_goal {
-            checker.insert_lowered_goal(normalized_goal)?;
             cert_bindings =
                 Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
         } else if let Some(prover_type_params) = self
