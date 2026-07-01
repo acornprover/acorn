@@ -245,8 +245,8 @@ fn test_proving_with_active_resolution() {
     let c = prove(&mut p, "main", "goal");
     let proof = c.proof.unwrap();
     let expected = vec![
-        "@br {\"source\":\"f(y) and g(y)\",\"result\":\"g(y)\"}",
-        "@br {\"source\":\"f(y) and g(y)\",\"result\":\"f(y)\"}",
+        "g(y)",
+        "f(y)",
         "function(x0: Foo) { not g(x0) or not f(x0) or h(x0) }(y)",
         "not f(y)",
     ];
@@ -279,10 +279,10 @@ fn test_proving_exact_clause_match() {
 
     let c = prove(&mut p, "main", "goal");
     let expected = vec![
-        "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not f(Foo.foo) and not g(Foo.foo)\"}",
-        "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not h(Foo.foo)\"}",
-        "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo)\",\"result\":\"not g(Foo.foo)\"}",
-        "@br {\"source\":\"not f(Foo.foo) and not g(Foo.foo)\",\"result\":\"not f(Foo.foo)\"}",
+        "not f(Foo.foo) and not g(Foo.foo)",
+        "not h(Foo.foo)",
+        "not g(Foo.foo)",
+        "not f(Foo.foo)",
         "f(Foo.foo)",
     ];
     assert_eq!(c.proof.unwrap(), expected);
@@ -318,8 +318,8 @@ fn test_proving_an_or() {
 
     let c = prove(&mut p, "main", "goal");
     let expected = vec![
-        "@br {\"source\":\"not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not h(Foo.foo)\"}",
-        "@br {\"source\":\"not g(Foo.foo) and not h(Foo.foo)\",\"result\":\"not g(Foo.foo)\"}",
+        "not h(Foo.foo)",
+        "not g(Foo.foo)",
         "h(Foo.foo) or g(Foo.foo) or f(Foo.foo)",
         "g(Foo.foo)",
     ];
@@ -542,8 +542,8 @@ fn test_proving_random_bug() {
     let proof = c.proof.unwrap();
     let expected = vec![
         "function(x0: Foo) { z = f(x0) or h(x0) = f(x0) or g(x0) = f(x0) }(y)",
-        "@br {\"source\":\"f(y) != h(y) and f(y) != z\",\"result\":\"f(y) != z\"}",
-        "@br {\"source\":\"f(y) != h(y) and f(y) != z\",\"result\":\"h(y) != f(y)\"}",
+        "f(y) != z",
+        "h(y) != f(y)",
         "g(y) = f(y)",
         "g(y) != f(y)",
     ];

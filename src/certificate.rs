@@ -7,7 +7,7 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::certificate_trace::ProofTrace;
+use crate::certificate_trace::{GeneratedTraceInput, ProofTrace};
 use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::TypeParam;
@@ -34,7 +34,7 @@ use crate::kernel::symbol_table::NewConstantType;
 use crate::kernel::term::{Decomposition, Term};
 use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
-use crate::module::{ModuleDescriptor, ModuleId};
+use crate::module::ModuleId;
 use crate::project::ProjectLookup;
 use crate::proof_order::unit_support_order;
 use crate::prover::proof::ConcreteStep;
@@ -43,14 +43,6 @@ use crate::prover::synthetic::{
 };
 use crate::syntax::expression::Expression;
 use crate::syntax::statement::{Statement, StatementInfo};
-
-const BOOLEAN_REDUCTION_PREFIX: &str = "@br ";
-
-#[derive(Serialize, Deserialize)]
-struct BooleanReductionLine {
-    source: String,
-    result: String,
-}
 
 /// Information about a single line in a checked certificate proof.
 #[derive(Debug, Clone)]
@@ -1023,15 +1015,16 @@ impl Certificate {
         project: &dyn ProjectLookup,
         trace_bindings: Cow<BindingMap>,
     ) -> Result<Certificate, CodeGenError> {
-        let (lines, kernel_context) = Self::generated_lines_from_concrete_steps_with_witnesses(
-            concrete_steps,
-            kernel_context,
-            bindings,
-            witness_registry,
-        )?;
-        Self::from_generated_lines(
+        let (inputs, kernel_context) =
+            Self::generated_trace_inputs_from_concrete_steps_with_witnesses(
+                concrete_steps,
+                kernel_context,
+                bindings,
+                witness_registry,
+            )?;
+        Self::from_generated_inputs(
             goal,
-            lines,
+            inputs,
             kernel_context,
             checker,
             project,
@@ -1039,16 +1032,16 @@ impl Certificate {
         )
     }
 
-    fn from_generated_lines(
+    fn from_generated_inputs(
         goal: String,
-        lines: Vec<String>,
+        inputs: Vec<GeneratedTraceInput>,
         kernel_context: KernelContext,
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
     ) -> Result<Certificate, CodeGenError> {
-        let trace = ProofTrace::from_generated_lines_checked(
-            &lines,
+        let trace = ProofTrace::from_generated_inputs_checked(
+            &inputs,
             checker.clone(),
             project,
             bindings.clone(),
@@ -1076,12 +1069,12 @@ impl Certificate {
         })
     }
 
-    fn generated_lines_from_concrete_steps_with_witnesses(
+    fn generated_trace_inputs_from_concrete_steps_with_witnesses(
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
         witness_registry: Option<&WitnessRegistry>,
-    ) -> Result<(Vec<String>, KernelContext), CodeGenError> {
+    ) -> Result<(Vec<GeneratedTraceInput>, KernelContext), CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
@@ -1116,17 +1109,17 @@ impl Certificate {
             };
         Self::reorder_late_claim_supports(&mut ordered_steps, &generation_kernel_context);
 
-        let mut lines = Vec::new();
+        let mut inputs = Vec::new();
         for step in &ordered_steps {
-            let code = Self::serialize_certificate_step(
+            let input = Self::serialize_generated_trace_input(
                 step,
                 &mut generator,
                 &generation_kernel_context,
                 bindings,
             )?;
-            lines.push(code);
+            inputs.push(input);
         }
-        Ok((lines, generation_kernel_context))
+        Ok((inputs, generation_kernel_context))
     }
 
     #[cfg(test)]
@@ -1135,13 +1128,16 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<Vec<String>, CodeGenError> {
-        Ok(Self::generated_lines_from_concrete_steps_with_witnesses(
+        let (inputs, _) = Self::generated_trace_inputs_from_concrete_steps_with_witnesses(
             concrete_steps,
             kernel_context,
             bindings,
             None,
-        )?
-        .0)
+        )?;
+        Ok(inputs
+            .into_iter()
+            .map(|input| input.code().to_string())
+            .collect())
     }
 
     fn reorder_late_claim_supports(
@@ -1200,42 +1196,9 @@ impl Certificate {
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
-        Self::parse_cert_steps_internal(proof, project, bindings, kernel_context, false)
-    }
-
-    fn parse_cert_steps_internal(
-        proof: &[String],
-        project: &dyn ProjectLookup,
-        bindings: &mut Cow<BindingMap>,
-        kernel_context: &mut Cow<KernelContext>,
-        #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
-    ) -> Result<Vec<CertificateStep>, CodeGenError> {
         let mut steps = Vec::with_capacity(proof.len());
         for code in proof {
-            #[cfg(feature = "validate")]
-            let pre_bindings = validate_generated.then(|| bindings.as_ref().clone());
-            #[cfg(feature = "validate")]
-            let pre_kernel_context = validate_generated.then(|| kernel_context.as_ref().clone());
-
             let step = Self::parse_code_line(code, project, bindings, kernel_context)?;
-
-            #[cfg(feature = "validate")]
-            if validate_generated {
-                Self::validate_certificate_step_roundtrip(
-                    &step,
-                    code,
-                    project,
-                    pre_bindings
-                        .as_ref()
-                        .expect("generated cert validation should capture pre-bindings"),
-                    pre_kernel_context
-                        .as_ref()
-                        .expect("generated cert validation should capture pre-kernel-context"),
-                    bindings.as_ref(),
-                    kernel_context.as_ref(),
-                )?;
-            }
-
             steps.push(step);
         }
         Ok(steps)
@@ -1488,6 +1451,34 @@ impl Certificate {
         Ok(symbols)
     }
 
+    /// Convert a generated proof step into the input form consumed by the trace writer.
+    fn serialize_generated_trace_input(
+        step: &CertificateStep,
+        generator: &mut CodeGenerator,
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<GeneratedTraceInput, CodeGenError> {
+        match step {
+            CertificateStep::BooleanReduction(step) => {
+                let code = Self::serialize_certificate_step(
+                    &CertificateStep::Claim(step.result.clone()),
+                    generator,
+                    kernel_context,
+                    bindings,
+                )?;
+                Ok(GeneratedTraceInput::BooleanReduction {
+                    code,
+                    step: step.clone(),
+                })
+            }
+            CertificateStep::Claim(_) | CertificateStep::Satisfy(_) => {
+                let code =
+                    Self::serialize_certificate_step(step, generator, kernel_context, bindings)?;
+                Ok(GeneratedTraceInput::SourceLine(code))
+            }
+        }
+    }
+
     /// Convert one parsed certificate step back into source code.
     fn serialize_certificate_step(
         step: &CertificateStep,
@@ -1496,8 +1487,10 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         let line = match step {
-            CertificateStep::BooleanReduction(step) => {
-                Self::serialize_boolean_reduction_step(step, generator, kernel_context, bindings)?
+            CertificateStep::BooleanReduction(_) => {
+                return Err(CodeGenError::GeneratedBadCode(
+                    "boolean reductions are typed trace inputs, not source lines".to_string(),
+                ));
             }
             CertificateStep::Claim(claim)
                 if !claim.clause().get_local_context().is_empty()
@@ -1579,78 +1572,9 @@ impl Certificate {
                     ))
                 })
             }
-            CertificateStep::BooleanReduction(_) => Ok(line),
+            CertificateStep::BooleanReduction(_) => unreachable!(),
             CertificateStep::Satisfy(_) => Ok(line),
         }
-    }
-
-    fn serialize_boolean_reduction_step(
-        step: &BooleanReductionStep,
-        generator: &mut CodeGenerator,
-        kernel_context: &KernelContext,
-        bindings: &BindingMap,
-    ) -> Result<String, CodeGenError> {
-        let payload = BooleanReductionLine {
-            source: Self::serialize_certificate_step(
-                &CertificateStep::Claim(step.source.clone()),
-                generator,
-                kernel_context,
-                bindings,
-            )?,
-            result: Self::serialize_certificate_step(
-                &CertificateStep::Claim(step.result.clone()),
-                generator,
-                kernel_context,
-                bindings,
-            )?,
-        };
-        let payload = serde_json::to_string(&payload).map_err(|err| {
-            CodeGenError::GeneratedBadCode(format!(
-                "failed to serialize boolean-reduction certificate payload: {}",
-                err
-            ))
-        })?;
-        Ok(format!("{}{}", BOOLEAN_REDUCTION_PREFIX, payload))
-    }
-
-    #[cfg(feature = "validate")]
-    fn validate_certificate_step_roundtrip(
-        step: &CertificateStep,
-        original_code: &str,
-        project: &dyn ProjectLookup,
-        pre_bindings: &BindingMap,
-        pre_kernel_context: &KernelContext,
-        post_bindings: &BindingMap,
-        post_kernel_context: &KernelContext,
-    ) -> Result<(), CodeGenError> {
-        step.validate_roundtrip_shape(post_kernel_context)
-            .map_err(CodeGenError::GeneratedBadCode)?;
-
-        let mut generator = CodeGenerator::new_for_certificate(post_bindings);
-        let serialized = Self::serialize_certificate_step(
-            step,
-            &mut generator,
-            post_kernel_context,
-            post_bindings,
-        )?;
-
-        let mut roundtrip_bindings = Cow::Owned(pre_bindings.clone());
-        let mut roundtrip_kernel_context = Cow::Owned(pre_kernel_context.clone());
-        let reparsed = Self::parse_code_line(
-            &serialized,
-            project,
-            &mut roundtrip_bindings,
-            &mut roundtrip_kernel_context,
-        )?;
-
-        if &reparsed != step {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "certificate step did not roundtrip in validate mode: original {:?}, serialized {:?}, reparsed {:?}",
-                original_code, serialized, reparsed
-            )));
-        }
-
-        Ok(())
     }
 
     /// Serialize a claim in named form and fail if that form does not round-trip.
@@ -1762,31 +1686,6 @@ impl Certificate {
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
-        if let Some(payload) = code.strip_prefix(BOOLEAN_REDUCTION_PREFIX) {
-            let payload: BooleanReductionLine = serde_json::from_str(payload).map_err(|err| {
-                CodeGenError::GeneratedBadCode(format!(
-                    "invalid boolean-reduction certificate payload: {}",
-                    err
-                ))
-            })?;
-            let source = Self::parse_boolean_reduction_claim(
-                &payload.source,
-                project,
-                bindings,
-                kernel_context,
-            )?;
-            let result = Self::parse_boolean_reduction_claim(
-                &payload.result,
-                project,
-                bindings,
-                kernel_context,
-            )?;
-            return Ok(CertificateStep::BooleanReduction(BooleanReductionStep {
-                source,
-                result,
-            }));
-        }
-
         let statement = Statement::parse_str_with_options(&code, true)?;
         let mut evaluator = Evaluator::new_internal(project, bindings);
         let mut claim_step_from_expr =
@@ -1820,21 +1719,6 @@ impl Certificate {
             StatementInfo::Claim(claim) => claim_step_from_expr(&claim.claim),
             _ => Err(CodeGenError::GeneratedBadCode(format!(
                 "Expected a claim or let...satisfy statement, got: {}",
-                code
-            ))),
-        }
-    }
-
-    fn parse_boolean_reduction_claim(
-        code: &str,
-        project: &dyn ProjectLookup,
-        bindings: &mut Cow<BindingMap>,
-        kernel_context: &mut Cow<KernelContext>,
-    ) -> Result<Claim, CodeGenError> {
-        match Self::parse_code_line(code, project, bindings, kernel_context)? {
-            CertificateStep::Claim(claim) => Ok(claim),
-            _ => Err(CodeGenError::GeneratedBadCode(format!(
-                "boolean-reduction certificate payload must contain claim lines, got: {}",
                 code
             ))),
         }
@@ -2306,13 +2190,13 @@ impl Certificate {
         }))
     }
 
-    /// Serializes a claim in a clause-plus-arguments form.
+    /// Serializes a certificate claim in clause-plus-arguments form.
     ///
     /// Example output:
     /// `function(x0: Nat) { bar(x0) }(a)`
     ///
-    /// This is currently a standalone helper and is not wired into normal certificate
-    /// serialization.
+    /// Normal certificate serialization uses this for claim steps that need explicit
+    /// argument maps.
     pub fn serialize_claim_with_args(
         claim: &Claim,
         kernel_context: &KernelContext,
@@ -2321,10 +2205,7 @@ impl Certificate {
         ClaimCodec::serialize_claim_with_args(claim, kernel_context, bindings)
     }
 
-    /// Deserializes a claim produced by `serialize_claim_with_args`.
-    ///
-    /// This is currently a standalone helper and is not wired into normal certificate
-    /// parsing.
+    /// Deserializes the clause-plus-arguments claim form used by certificate claim steps.
     pub fn deserialize_claim_with_args(
         code: &str,
         project: &dyn ProjectLookup,
@@ -2408,27 +2289,6 @@ impl CertificateStore {
 
         writer.flush()?;
         Ok(())
-    }
-
-    /// Loads a CertificateStore along with its descriptor.
-    /// This expects certificate files to have .jsonl extensions.
-    pub fn load_relative(
-        root: &Path,
-        full_filename: &Path,
-    ) -> Option<(ModuleDescriptor, CertificateStore)> {
-        let relative_filename = full_filename.strip_prefix(root).ok()?;
-        let ext = relative_filename.extension()?;
-        if ext != "jsonl" {
-            return None;
-        }
-        let path_without_extension = relative_filename.with_extension("");
-        let parts = path_without_extension
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        let descriptor = ModuleDescriptor::Name(parts);
-        let cert_store = CertificateStore::load(full_filename).ok()?;
-        Some((descriptor, cert_store))
     }
 
     /// Append all unused certificates from a worklist to this certificate store

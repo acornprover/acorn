@@ -16,7 +16,7 @@ fn expect_claim(step: CertificateStep) -> Claim {
 }
 
 #[test]
-fn test_parse_and_check_boolean_reduction_line() {
+fn test_check_typed_boolean_reduction_step() {
     use crate::kernel::checker::{Checker, StepReason};
 
     let mut project = Project::new_mock();
@@ -40,23 +40,9 @@ fn test_parse_and_check_boolean_reduction_line() {
         .expect("lowered goal should be available");
     let bindings = entry.bindings.clone();
     let kernel_context = entry.lowered_goal.kernel_context.clone();
-    let payload = BooleanReductionLine {
-        source: "p and q".to_string(),
-        result: "p".to_string(),
-    };
-    let line = format!(
-        "{}{}",
-        BOOLEAN_REDUCTION_PREFIX,
-        serde_json::to_string(&payload).unwrap()
-    );
 
     let mut bindings_cow = Cow::Borrowed(&bindings);
     let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-    let step =
-        Certificate::parse_code_line(&line, &project, &mut bindings_cow, &mut kernel_context_cow)
-            .expect("boolean reduction line should parse");
-    assert!(matches!(step, CertificateStep::BooleanReduction(_)));
-
     let source = expect_claim(
         Certificate::parse_code_line(
             "p and q",
@@ -68,11 +54,32 @@ fn test_parse_and_check_boolean_reduction_line() {
     )
     .normalized_specialized_clause(kernel_context_cow.as_ref())
     .expect("source claim should specialize");
+    let source_claim = expect_claim(
+        Certificate::parse_code_line(
+            "p and q",
+            &project,
+            &mut bindings_cow,
+            &mut kernel_context_cow,
+        )
+        .expect("source claim should parse"),
+    );
+    let result_claim = expect_claim(
+        Certificate::parse_code_line("p", &project, &mut bindings_cow, &mut kernel_context_cow)
+            .expect("result claim should parse"),
+    );
+    let step = CertificateStep::BooleanReduction(BooleanReductionStep {
+        source: source_claim,
+        result: result_claim,
+    });
 
     let mut checker = Checker::new();
     checker.insert_clause(&source, StepReason::Testing, kernel_context_cow.as_ref());
     let err = checker
-        .check_cert_steps(&[step], Some(&[line]), kernel_context_cow.as_ref())
+        .check_cert_steps(
+            &[step],
+            Some(&["p".to_string()]),
+            kernel_context_cow.as_ref(),
+        )
         .expect_err("accepted boolean reduction should only fail the final contradiction check");
     assert!(
         err.to_string()

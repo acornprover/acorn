@@ -16,6 +16,25 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Decomposition;
 use crate::project::ProjectLookup;
 
+#[derive(Debug, Clone)]
+pub(crate) enum GeneratedTraceInput {
+    SourceLine(String),
+    BooleanReduction {
+        code: String,
+        step: BooleanReductionStep,
+    },
+}
+
+#[cfg(test)]
+impl GeneratedTraceInput {
+    pub(crate) fn code(&self) -> &str {
+        match self {
+            Self::SourceLine(code) => code,
+            Self::BooleanReduction { code, .. } => code,
+        }
+    }
+}
+
 /// Standard certificate proof payload.
 ///
 /// The certificate trace is intentionally rule-oriented: each step says which checker procedure
@@ -34,20 +53,10 @@ pub struct TraceStep {
     #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
     pub claim: Option<String>,
 
-    #[serde(
-        rename = "f",
-        alias = "from",
-        default,
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(rename = "f", default, skip_serializing_if = "Vec::is_empty")]
     pub premises: Vec<usize>,
 
-    #[serde(
-        rename = "g",
-        alias = "generic",
-        default,
-        skip_serializing_if = "is_false"
-    )]
+    #[serde(rename = "g", default, skip_serializing_if = "is_false")]
     pub generic: bool,
 
     #[serde(rename = "k", skip_serializing_if = "Option::is_none")]
@@ -187,14 +196,14 @@ impl TraceStep {
 }
 
 impl ProofTrace {
-    pub(crate) fn from_generated_lines_checked(
-        lines: &[String],
+    pub(crate) fn from_generated_inputs_checked(
+        inputs: &[GeneratedTraceInput],
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<Self, CodeGenError> {
-        TraceWriter::new(checker.clone(), checker, project, bindings, kernel_context).write(lines)
+        TraceWriter::new(checker.clone(), checker, project, bindings, kernel_context).write(inputs)
     }
 
     pub fn without_unreferenced_auxiliary_steps(&self) -> Self {
@@ -330,14 +339,14 @@ impl<'a> TraceWriter<'a> {
         self.variable_support_depth = checkpoint.variable_support_depth;
     }
 
-    fn write(mut self, lines: &[String]) -> Result<ProofTrace, CodeGenError> {
-        for (line_index, line) in lines.iter().enumerate() {
+    fn write(mut self, inputs: &[GeneratedTraceInput]) -> Result<ProofTrace, CodeGenError> {
+        for (line_index, input) in inputs.iter().enumerate() {
             if self.derivation_checker.has_contradiction()
                 || self.shadow_checker.has_contradiction()
             {
                 break;
             }
-            self.write_step(line_index, line)?;
+            self.write_step(line_index, input)?;
         }
         if !self.derivation_checker.has_contradiction() && !self.shadow_checker.has_contradiction()
         {
@@ -357,13 +366,26 @@ impl<'a> TraceWriter<'a> {
         Ok(ProofTrace { steps: self.steps })
     }
 
-    fn write_step(&mut self, line_index: usize, code: &str) -> Result<(), CodeGenError> {
-        let parsed = Certificate::parse_code_line(
-            code,
-            self.project,
-            &mut self.bindings,
-            &mut self.kernel_context,
-        )?;
+    fn write_step(
+        &mut self,
+        line_index: usize,
+        input: &GeneratedTraceInput,
+    ) -> Result<(), CodeGenError> {
+        let (parsed, code) = match input {
+            GeneratedTraceInput::SourceLine(code) => (
+                Certificate::parse_code_line(
+                    code,
+                    self.project,
+                    &mut self.bindings,
+                    &mut self.kernel_context,
+                )?,
+                code.as_str(),
+            ),
+            GeneratedTraceInput::BooleanReduction { code, step } => (
+                CertificateStep::BooleanReduction(step.clone()),
+                code.as_str(),
+            ),
+        };
 
         let mut deferred_claim_error = None;
         let claim_index = match &parsed {
@@ -2588,16 +2610,10 @@ impl<'a> TraceWriter<'a> {
                         .map_err(CodeGenError::GeneratedBadCode)
                 }
             }
-            CertificateStep::BooleanReduction(reduction) => {
-                if generic {
-                    Ok(reduction.result.normalized_generic_clause())
-                } else {
-                    reduction
-                        .result
-                        .normalized_specialized_clause(&kernel_context)
-                        .map_err(CodeGenError::GeneratedBadCode)
-                }
-            }
+            CertificateStep::BooleanReduction(_) => Err(CodeGenError::GeneratedBadCode(
+                "serialized trace clause unexpectedly parsed as a typed boolean reduction"
+                    .to_string(),
+            )),
             CertificateStep::Satisfy(satisfy) => satisfy
                 .justification
                 .normalized_specialized_clause(&kernel_context)
@@ -3626,14 +3642,11 @@ impl<'a> TraceChecker<'a> {
                         .map_err(CodeGenError::GeneratedBadCode)?
                 }
             }
-            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
-                if step.generic {
-                    result.normalized_generic_clause()
-                } else {
-                    result
-                        .normalized_specialized_clause(&self.kernel_context)
-                        .map_err(CodeGenError::GeneratedBadCode)?
-                }
+            CertificateStep::BooleanReduction(_) => {
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "certificate trace claim position cannot contain typed boolean reduction: {}",
+                    code
+                )));
             }
             CertificateStep::Satisfy(_) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
@@ -3673,16 +3686,10 @@ impl<'a> TraceChecker<'a> {
                     .map_err(CodeGenError::GeneratedBadCode)?;
                 Ok((generic, specialized, code.clone()))
             }
-            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
-                let generic = result.normalized_generic_clause();
-                if step.generic && is_synthetic_generic_wrapper(code) {
-                    return Ok((generic.clone(), generic, code.clone()));
-                }
-                let specialized = result
-                    .normalized_specialized_clause(&self.kernel_context)
-                    .map_err(CodeGenError::GeneratedBadCode)?;
-                Ok((generic, specialized, code.clone()))
-            }
+            CertificateStep::BooleanReduction(_) => Err(CodeGenError::GeneratedBadCode(format!(
+                "certificate trace claim position cannot contain typed boolean reduction: {}",
+                code
+            ))),
             CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
                 "certificate trace claim position cannot contain witness declaration: {}",
                 code

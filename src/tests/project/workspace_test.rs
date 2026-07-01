@@ -529,7 +529,7 @@ fn create_cached_certificate_secret_import_project() -> (tempfile::TempDir, Proj
     fs::create_dir(&cert_dir).unwrap();
     fs::write(
         cert_dir.join("main.jsonl"),
-        r#"{"goal":"goal","proof":["lib(util).util_fact"]}"#,
+        r#"{"goal":"goal","p":[{"c":"lib(util).util_fact"}]}"#,
     )
     .unwrap();
 

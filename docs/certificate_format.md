@@ -4,7 +4,7 @@ Certificates are stored as JSONL. Each line proves one goal and contains a compa
 proof trace under `p`:
 
 ```json
-{"goal":"goal","p":[{"c":"..."},{"r":"br","c":"...","f":[0]}]}
+{"goal":"goal","p":[{"c":"p and q"},{"r":"br","c":"p","f":[0],"k":"pos_and_left","i":0}]}
 ```
 
 Top-level fields:
@@ -19,6 +19,8 @@ Each proof trace step has:
 - `f`: premise step indexes, when the rule needs explicit premises.
 - `g`: when present on a step, the step targets the generic clause parsed from
   `c`; otherwise it targets the specialized clause.
+- `k`: exact boolean-reduction kind for `br` steps.
+- `i`: exact literal index for `br` steps.
 
 Current rules:
 
