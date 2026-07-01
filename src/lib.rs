@@ -20,6 +20,7 @@ pub mod packaged_acornlib;
 pub mod processor;
 pub mod project;
 pub mod proof_display;
+mod proof_order;
 pub mod prover;
 pub mod server;
 pub mod simplifier;

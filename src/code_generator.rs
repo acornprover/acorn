@@ -1367,9 +1367,6 @@ impl CodeGenerator<'_> {
             return Ok(steps);
         }
 
-        if !step.should_emit_certificate_step() {
-            return Ok(vec![]);
-        }
         let mut steps = vec![];
         for (var_map, replacement_context) in &step.var_maps {
             self.specialization_to_certificate_steps(

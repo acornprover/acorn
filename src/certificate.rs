@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -36,6 +36,7 @@ use crate::kernel::term_normalization::normalize_term;
 use crate::kernel::variable_map::VariableMap;
 use crate::module::{ModuleDescriptor, ModuleId};
 use crate::project::ProjectLookup;
+use crate::proof_order::unit_support_order;
 use crate::prover::proof::ConcreteStep;
 use crate::prover::synthetic::{
     witness_application, witness_signature, WitnessEntry, WitnessRegistry,
@@ -1164,95 +1165,9 @@ impl Certificate {
             clauses.push(clause);
         }
 
-        let mut positive_units = HashMap::new();
-        for (index, clause) in clauses.iter().enumerate() {
-            if clause.literals.len() == 1 && clause.literals[0].positive {
-                positive_units
-                    .entry(clause.literals[0].clone())
-                    .or_insert_with(Vec::new)
-                    .push(index);
-            }
-        }
-
-        let mut edges = vec![vec![]; clauses.len()];
-        let mut indegree = vec![0usize; clauses.len()];
-        let mut seen_edges = HashSet::new();
-        for (dependent_index, clause) in clauses.iter().enumerate() {
-            if clause.literals.len() <= 1 {
-                continue;
-            }
-            for literal in &clause.literals {
-                if literal.positive {
-                    continue;
-                }
-                let support_literal = literal.negate();
-                let Some(support_indices) = positive_units.get(&support_literal) else {
-                    continue;
-                };
-                for &support_index in support_indices {
-                    if support_index <= dependent_index {
-                        continue;
-                    }
-                    if seen_edges.insert((support_index, dependent_index)) {
-                        edges[support_index].push(dependent_index);
-                        indegree[dependent_index] += 1;
-                    }
-                }
-            }
-        }
-        for (dependent_index, clause) in clauses.iter().enumerate() {
-            if clause.literals.len() != 1 {
-                continue;
-            }
-            let dependent_literal = &clause.literals[0];
-            for (support_index, support_clause) in clauses.iter().enumerate() {
-                if support_index <= dependent_index || support_clause.literals.len() <= 1 {
-                    continue;
-                }
-                if !support_clause
-                    .literals
-                    .iter()
-                    .any(|literal| literal == dependent_literal)
-                {
-                    continue;
-                }
-                if seen_edges.insert((support_index, dependent_index)) {
-                    edges[support_index].push(dependent_index);
-                    indegree[dependent_index] += 1;
-                }
-            }
-        }
-        if seen_edges.is_empty() {
+        let Some(ordered_indices) = unit_support_order(&clauses) else {
             return;
-        }
-
-        let mut ready = BTreeSet::new();
-        for (index, degree) in indegree.iter().enumerate() {
-            if *degree == 0 {
-                ready.insert(index);
-            }
-        }
-
-        let mut ordered_indices = Vec::with_capacity(steps.len());
-        while let Some(index) = ready.pop_first() {
-            ordered_indices.push(index);
-            for &dependent in &edges[index] {
-                indegree[dependent] -= 1;
-                if indegree[dependent] == 0 {
-                    ready.insert(dependent);
-                }
-            }
-        }
-        if ordered_indices.len() != steps.len() {
-            return;
-        }
-        if ordered_indices
-            .iter()
-            .enumerate()
-            .all(|(new_index, old_index)| new_index == *old_index)
-        {
-            return;
-        }
+        };
 
         let original = steps.to_vec();
         for (new_index, old_index) in ordered_indices.into_iter().enumerate() {
@@ -2429,17 +2344,6 @@ impl Certificate {
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {
-        self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
-    }
-
-    fn check_with_usage_internal(
-        &self,
-        checker: Checker,
-        project: &dyn ProjectLookup,
-        bindings: Cow<BindingMap>,
-        kernel_context: Cow<KernelContext>,
-        _validate_generated: bool,
-    ) -> Result<CheckedCertificate, CodeGenError> {
         if checker.has_contradiction() {
             return Ok(CheckedCertificate {
                 lines: Vec::new(),
@@ -2450,17 +2354,6 @@ impl Certificate {
             return Err(CodeGenError::NoProof);
         };
         proof.check_with_usage(checker, project, bindings, kernel_context)
-    }
-
-    #[cfg(feature = "validate")]
-    pub fn check_generated_with_usage(
-        &self,
-        checker: Checker,
-        project: &dyn ProjectLookup,
-        bindings: Cow<BindingMap>,
-        kernel_context: Cow<KernelContext>,
-    ) -> Result<CheckedCertificate, CodeGenError> {
-        self.check_with_usage_internal(checker, project, bindings, kernel_context, true)
     }
 }
 

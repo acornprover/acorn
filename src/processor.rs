@@ -393,7 +393,6 @@ impl Processor {
             kernel_context,
             project,
             bindings,
-            false,
         )
     }
 
@@ -404,7 +403,6 @@ impl Processor {
         kernel_context: &KernelContext,
         project: impl Into<ProjectView>,
         bindings: &BindingMap,
-        #[cfg_attr(not(feature = "validate"), allow(unused_variables))] validate_generated: bool,
     ) -> Result<CheckedCertificate, Error> {
         let project = project.into();
         let mut checker = self.checker.clone();
@@ -428,16 +426,6 @@ impl Processor {
         }
 
         let kernel_context = Cow::Owned(effective_kernel_context.clone());
-        #[cfg(feature = "validate")]
-        if validate_generated {
-            return cert.check_generated_with_usage(
-                checker,
-                &project,
-                cert_bindings,
-                kernel_context,
-            );
-        }
-
         cert.check_with_usage(checker, &project, cert_bindings, kernel_context)
     }
 
@@ -456,7 +444,6 @@ impl Processor {
             kernel_context,
             project,
             bindings,
-            true,
         )
     }
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::certificate::{Certificate, CertificateDraft};
 use crate::code_generator::Error;
@@ -10,6 +10,7 @@ use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
+use crate::proof_order::unit_support_order;
 use crate::prover::synthetic::WitnessRegistry;
 
 /// Trait for types that can resolve proof step IDs to clauses.
@@ -144,13 +145,6 @@ impl ConcreteStep {
         matches!(self.rationale, ConcreteRationale::BooleanReduction { .. })
     }
 
-    pub fn should_emit_certificate_step(&self) -> bool {
-        match self.rationale {
-            ConcreteRationale::Obvious => true,
-            ConcreteRationale::BooleanReduction { .. } => true,
-        }
-    }
-
     /// Convert this `ConcreteStep` to the specialized clauses it represents.
     pub(crate) fn to_clauses(&self, kernel_context: &KernelContext) -> Vec<Clause> {
         self.var_maps
@@ -211,95 +205,9 @@ fn reorder_concrete_steps_by_unit_support(
         return;
     }
 
-    let mut positive_units = HashMap::new();
-    for (index, clause) in clauses.iter().enumerate() {
-        if clause.literals.len() == 1 && clause.literals[0].positive {
-            positive_units
-                .entry(clause.literals[0].clone())
-                .or_insert_with(Vec::new)
-                .push(index);
-        }
-    }
-    let mut edges = vec![vec![]; clauses.len()];
-    let mut indegree = vec![0usize; clauses.len()];
-    let mut seen_edges = HashSet::new();
-    for (dependent_index, clause) in clauses.iter().enumerate() {
-        if clause.literals.len() <= 1 {
-            continue;
-        }
-        for literal in &clause.literals {
-            if literal.positive {
-                continue;
-            }
-            let support_literal = literal.negate();
-            let Some(support_indices) = positive_units.get(&support_literal) else {
-                continue;
-            };
-            for &support_index in support_indices {
-                if support_index <= dependent_index {
-                    continue;
-                }
-                if seen_edges.insert((support_index, dependent_index)) {
-                    edges[support_index].push(dependent_index);
-                    indegree[dependent_index] += 1;
-                }
-            }
-        }
-    }
-    for (dependent_index, clause) in clauses.iter().enumerate() {
-        if clause.literals.len() != 1 {
-            continue;
-        }
-        let dependent_literal = &clause.literals[0];
-        for (support_index, support_clause) in clauses.iter().enumerate() {
-            if support_index <= dependent_index || support_clause.literals.len() <= 1 {
-                continue;
-            }
-            if !support_clause
-                .literals
-                .iter()
-                .any(|literal| literal == dependent_literal)
-            {
-                continue;
-            }
-            if seen_edges.insert((support_index, dependent_index)) {
-                edges[support_index].push(dependent_index);
-                indegree[dependent_index] += 1;
-            }
-        }
-    }
-    if seen_edges.is_empty() {
+    let Some(ordered_indices) = unit_support_order(&clauses) else {
         return;
-    }
-
-    let mut ready = BTreeSet::new();
-    for (index, degree) in indegree.iter().enumerate() {
-        if *degree == 0 {
-            ready.insert(index);
-        }
-    }
-
-    let mut ordered_indices = Vec::with_capacity(steps_in_order.len());
-    while let Some(index) = ready.pop_first() {
-        ordered_indices.push(index);
-        for &dependent in &edges[index] {
-            indegree[dependent] -= 1;
-            if indegree[dependent] == 0 {
-                ready.insert(dependent);
-            }
-        }
-    }
-
-    if ordered_indices.len() != steps_in_order.len() {
-        return;
-    }
-    if ordered_indices
-        .iter()
-        .enumerate()
-        .all(|(new_index, old_index)| new_index == *old_index)
-    {
-        return;
-    }
+    };
 
     let original = std::mem::take(steps_in_order);
     *steps_in_order = ordered_indices
@@ -1992,7 +1900,7 @@ mod tests {
         .expect("certificate generation should succeed");
         let lines = cert.serialized_lines();
 
-        // Repro assertion: currently this generated cert does not round-trip through parser.
+        // Regression assertion: the generated cert round-trips through the parser.
         let project = Project::new_mock();
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kctx);

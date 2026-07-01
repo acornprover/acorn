@@ -150,17 +150,6 @@ impl TraceRule {
 }
 
 impl TraceStep {
-    pub fn fact(claim: String) -> Self {
-        Self {
-            rule: TraceRule::Fact,
-            claim: Some(claim),
-            premises: vec![],
-            generic: false,
-            br_kind: None,
-            br_literal_index: None,
-        }
-    }
-
     pub fn claim(claim: String) -> Self {
         Self {
             rule: TraceRule::Claim,
@@ -169,22 +158,6 @@ impl TraceStep {
             generic: false,
             br_kind: None,
             br_literal_index: None,
-        }
-    }
-
-    pub fn br(
-        source: usize,
-        claim: String,
-        kind: BooleanReductionKind,
-        literal_index: usize,
-    ) -> Self {
-        Self {
-            rule: TraceRule::Br,
-            claim: Some(claim),
-            premises: vec![source],
-            generic: false,
-            br_kind: Some(kind),
-            br_literal_index: Some(literal_index),
         }
     }
 
@@ -3228,7 +3201,7 @@ impl<'a> TraceChecker<'a> {
                 } else {
                     specialized.clone()
                 };
-                let reduced = match (step.br_kind, step.br_literal_index) {
+                match (step.br_kind, step.br_literal_index) {
                     (Some(kind), Some(literal_index)) => {
                         let reduced = sources.iter().any(|source| {
                             self.checker
@@ -3275,7 +3248,6 @@ impl<'a> TraceChecker<'a> {
                                 source_debug
                             )));
                         }
-                        true
                     }
                     (None, None) => {
                         return Err(CodeGenError::GeneratedBadCode(format!(
@@ -3290,21 +3262,6 @@ impl<'a> TraceChecker<'a> {
                         )));
                     }
                 };
-                if !reduced {
-                    let source_debug = sources
-                        .iter()
-                        .map(|source| source.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    return Err(CodeGenError::GeneratedBadCode(format!(
-                        "certificate trace br step {} is not justified by boolean reduction from premise {} to {} (target: {}; sources: {})",
-                        index + 1,
-                        source_index,
-                        code,
-                        result,
-                        source_debug
-                    )));
-                }
                 self.accept_clause(result, StepReason::BooleanReduction(source_index), code);
             }
             TraceRule::BrIntro => {
