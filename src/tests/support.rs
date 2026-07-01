@@ -92,14 +92,14 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> TestC
 
     assert_eq!(outcome, Outcome::Success);
 
-    let draft = match processor
-        .prover()
-        .make_certificate_draft(bindings, goal_kernel_context, true)
-    {
-        Ok(draft) => draft,
-        Err(e) => panic!("make_certificate_draft failed: {}", e),
+    let proof = match processor.prover().certificate_source_lines_for_test(
+        bindings,
+        goal_kernel_context,
+        true,
+    ) {
+        Ok(lines) => lines,
+        Err(e) => panic!("certificate_source_lines_for_test failed: {}", e),
     };
-    let proof = draft.serialized_lines();
 
     let cert = match processor.make_cert(
         bindings,

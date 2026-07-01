@@ -72,70 +72,6 @@ pub struct CheckedCertificate {
     pub consumed_proof_steps: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SerializedCertificateStep {
-    pub code: String,
-}
-
-/// A certificate assembled from prover output before final trace construction.
-#[derive(Clone)]
-pub struct CertificateDraft {
-    goal: String,
-    steps: Vec<SerializedCertificateStep>,
-    kernel_context: KernelContext,
-}
-
-impl std::fmt::Debug for CertificateDraft {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CertificateDraft")
-            .field("goal", &self.goal)
-            .field("steps", &self.steps.len())
-            .finish()
-    }
-}
-
-impl CertificateDraft {
-    pub fn serialized_lines(&self) -> Vec<String> {
-        self.steps.iter().map(|step| step.code.clone()).collect()
-    }
-
-    pub fn into_certificate(
-        self,
-        checker: Checker,
-        project: &dyn ProjectLookup,
-        bindings: Cow<BindingMap>,
-    ) -> Result<Certificate, CodeGenError> {
-        let kernel_context = self.kernel_context;
-        let trace = ProofTrace::from_certificate_steps_checked(
-            &self.steps,
-            checker.clone(),
-            project,
-            bindings.clone(),
-            Cow::Owned(kernel_context.clone()),
-        )?;
-        trace.check_with_usage(
-            checker.clone(),
-            project,
-            bindings.clone(),
-            Cow::Owned(kernel_context.clone()),
-        )?;
-        let pruned = trace.without_unreferenced_auxiliary_steps();
-        let trace = if pruned.steps.len() < trace.steps.len()
-            && pruned
-                .check_with_usage(checker, project, bindings, Cow::Owned(kernel_context))
-                .is_ok()
-        {
-            pruned
-        } else {
-            trace
-        };
-        Ok(Certificate {
-            goal: self.goal,
-            proof: Some(trace),
-        })
-    }
-}
-
 /// A proof certificate containing a compact checker trace.
 ///
 /// # Design: Robustness to Refactoring
@@ -1050,34 +986,102 @@ impl Certificate {
         None
     }
 
-    /// Convert concrete proof steps to a draft certificate.
+    /// Convert concrete proof steps to a certificate.
     ///
     /// This is the serialization boundary where resolved IDs are converted back to names.
     /// Requires the kernel_context (to quote clauses)
     /// and the bindings (to generate readable names).
-    pub fn draft_from_concrete_steps(
+    pub fn from_concrete_steps(
         goal: String,
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<CertificateDraft, CodeGenError> {
-        Self::draft_from_concrete_steps_with_witnesses(
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        trace_bindings: Cow<BindingMap>,
+    ) -> Result<Certificate, CodeGenError> {
+        Self::from_concrete_steps_with_witnesses(
             goal,
             concrete_steps,
             kernel_context,
             bindings,
             None,
+            checker,
+            project,
+            trace_bindings,
         )
     }
 
-    /// Serialize a proof while optionally emitting prover-generated named witnesses.
-    pub fn draft_from_concrete_steps_with_witnesses(
+    /// Build a certificate proof while optionally emitting prover-generated named witnesses.
+    pub fn from_concrete_steps_with_witnesses(
         goal: String,
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
         witness_registry: Option<&WitnessRegistry>,
-    ) -> Result<CertificateDraft, CodeGenError> {
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        trace_bindings: Cow<BindingMap>,
+    ) -> Result<Certificate, CodeGenError> {
+        let (lines, kernel_context) = Self::generated_lines_from_concrete_steps_with_witnesses(
+            concrete_steps,
+            kernel_context,
+            bindings,
+            witness_registry,
+        )?;
+        Self::from_generated_lines(
+            goal,
+            lines,
+            kernel_context,
+            checker,
+            project,
+            trace_bindings,
+        )
+    }
+
+    fn from_generated_lines(
+        goal: String,
+        lines: Vec<String>,
+        kernel_context: KernelContext,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+    ) -> Result<Certificate, CodeGenError> {
+        let trace = ProofTrace::from_generated_lines_checked(
+            &lines,
+            checker.clone(),
+            project,
+            bindings.clone(),
+            Cow::Owned(kernel_context.clone()),
+        )?;
+        trace.check_with_usage(
+            checker.clone(),
+            project,
+            bindings.clone(),
+            Cow::Owned(kernel_context.clone()),
+        )?;
+        let pruned = trace.without_unreferenced_auxiliary_steps();
+        let trace = if pruned.steps.len() < trace.steps.len()
+            && pruned
+                .check_with_usage(checker, project, bindings, Cow::Owned(kernel_context))
+                .is_ok()
+        {
+            pruned
+        } else {
+            trace
+        };
+        Ok(Certificate {
+            goal,
+            proof: Some(trace),
+        })
+    }
+
+    fn generated_lines_from_concrete_steps_with_witnesses(
+        concrete_steps: &[ConcreteStep],
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+        witness_registry: Option<&WitnessRegistry>,
+    ) -> Result<(Vec<String>, KernelContext), CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
         let mut ordered_steps: Vec<CertificateStep> = Vec::new();
@@ -1112,7 +1116,7 @@ impl Certificate {
             };
         Self::reorder_late_claim_supports(&mut ordered_steps, &generation_kernel_context);
 
-        let mut steps = Vec::new();
+        let mut lines = Vec::new();
         for step in &ordered_steps {
             let code = Self::serialize_certificate_step(
                 step,
@@ -1120,13 +1124,24 @@ impl Certificate {
                 &generation_kernel_context,
                 bindings,
             )?;
-            steps.push(SerializedCertificateStep { code });
+            lines.push(code);
         }
-        Ok(CertificateDraft {
-            goal,
-            steps,
-            kernel_context: generation_kernel_context,
-        })
+        Ok((lines, generation_kernel_context))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn serialized_lines_from_concrete_steps_for_test(
+        concrete_steps: &[ConcreteStep],
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<Vec<String>, CodeGenError> {
+        Ok(Self::generated_lines_from_concrete_steps_with_witnesses(
+            concrete_steps,
+            kernel_context,
+            bindings,
+            None,
+        )?
+        .0)
     }
 
     fn reorder_late_claim_supports(

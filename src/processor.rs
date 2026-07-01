@@ -317,12 +317,6 @@ impl Processor {
         normalized_goal: Option<&LoweredGoal>,
         print: bool,
     ) -> Result<Certificate, Error> {
-        let draft = self
-            .prover
-            .as_ref()
-            .expect("processor was created without prover support")
-            .make_certificate_draft(bindings, kernel_context, print)?;
-
         let project = project.into();
         let checker = self.checker.clone();
         let mut cert_bindings = Cow::Borrowed(bindings);
@@ -338,7 +332,17 @@ impl Processor {
             cert_bindings = Self::bindings_with_type_params(bindings, prover_type_params);
         }
 
-        draft.into_certificate(checker, &project, cert_bindings)
+        self.prover
+            .as_ref()
+            .expect("processor was created without prover support")
+            .make_certificate(
+                bindings,
+                kernel_context,
+                print,
+                checker,
+                &project,
+                cert_bindings,
+            )
     }
 
     /// Checks a certificate.

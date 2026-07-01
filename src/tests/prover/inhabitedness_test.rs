@@ -407,11 +407,10 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let draft = processor
+    let proof = processor
         .prover()
-        .make_certificate_draft(bindings, goal_kernel_context, false)
-        .expect("certificate draft should be generated");
-    let proof = draft.serialized_lines();
+        .certificate_source_lines_for_test(bindings, goal_kernel_context, false)
+        .expect("certificate source lines should be generated");
     let cert = processor
         .make_cert(
             bindings,

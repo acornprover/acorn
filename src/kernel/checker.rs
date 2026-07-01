@@ -1315,13 +1315,20 @@ impl Checker {
         self.check_cert_steps_internal(cert_steps, code_lines, kernel_context, true)
     }
 
-    pub(crate) fn check_cert_steps_partial(
+    pub(crate) fn check_cert_step_for_trace(
         &mut self,
-        cert_steps: &[CertificateStep],
-        code_lines: Option<&[String]>,
+        cert_step: &CertificateStep,
+        code_line: &str,
         kernel_context: &KernelContext,
-    ) -> Result<(Vec<CheckedStep>, usize), Error> {
-        self.check_cert_steps_internal(cert_steps, code_lines, kernel_context, false)
+    ) -> Result<Vec<CheckedStep>, Error> {
+        let code_lines = [code_line.to_string()];
+        self.check_cert_steps_internal(
+            std::slice::from_ref(cert_step),
+            Some(&code_lines),
+            kernel_context,
+            false,
+        )
+        .map(|(checked, _consumed)| checked)
     }
 
     fn check_cert_steps_internal(

@@ -43,11 +43,10 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let draft = processor
+    let proof = processor
         .prover()
-        .make_certificate_draft(bindings, goal_kernel_context, true)
-        .expect("certificate draft should be generated");
-    let proof = draft.serialized_lines();
+        .certificate_source_lines_for_test(bindings, goal_kernel_context, true)
+        .expect("certificate source lines should be generated");
     let cert = processor
         .make_cert(
             bindings,

@@ -3,9 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::certificate::{
-    Certificate, CertificateLine, CheckedCertificate, SerializedCertificateStep,
-};
+use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
 use crate::code_generator::Error as CodeGenError;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::Atom;
@@ -189,15 +187,14 @@ impl TraceStep {
 }
 
 impl ProofTrace {
-    pub(crate) fn from_certificate_steps_checked(
-        steps: &[SerializedCertificateStep],
+    pub(crate) fn from_generated_lines_checked(
+        lines: &[String],
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<Self, CodeGenError> {
-        TraceBuilder::new(checker.clone(), checker, project, bindings, kernel_context)
-            .compile(steps)
+        TraceWriter::new(checker.clone(), checker, project, bindings, kernel_context).write(lines)
     }
 
     pub fn without_unreferenced_auxiliary_steps(&self) -> Self {
@@ -249,7 +246,7 @@ impl ProofTrace {
     }
 }
 
-struct TraceBuilder<'a> {
+struct TraceWriter<'a> {
     base_checker: Checker,
     derivation_checker: Checker,
     shadow_checker: Checker,
@@ -269,11 +266,11 @@ struct TraceBuilder<'a> {
 struct DeferredClaim {
     line_index: usize,
     code: String,
-    compile_error: String,
+    emit_error: String,
     checker_error: String,
 }
 
-struct TraceBuilderCheckpoint {
+struct TraceWriterCheckpoint {
     steps: Vec<TraceStep>,
     step_clauses: Vec<StepClauses>,
     available: HashMap<Clause, usize>,
@@ -283,7 +280,7 @@ struct TraceBuilderCheckpoint {
     variable_support_depth: usize,
 }
 
-impl<'a> TraceBuilder<'a> {
+impl<'a> TraceWriter<'a> {
     fn new(
         checker: Checker,
         derivation_checker: Checker,
@@ -311,8 +308,8 @@ impl<'a> TraceBuilder<'a> {
         }
     }
 
-    fn checkpoint(&self) -> TraceBuilderCheckpoint {
-        TraceBuilderCheckpoint {
+    fn checkpoint(&self) -> TraceWriterCheckpoint {
+        TraceWriterCheckpoint {
             steps: self.steps.clone(),
             step_clauses: self.step_clauses.clone(),
             available: self.available.clone(),
@@ -323,7 +320,7 @@ impl<'a> TraceBuilder<'a> {
         }
     }
 
-    fn restore(&mut self, checkpoint: TraceBuilderCheckpoint) {
+    fn restore(&mut self, checkpoint: TraceWriterCheckpoint) {
         self.steps = checkpoint.steps;
         self.step_clauses = checkpoint.step_clauses;
         self.available = checkpoint.available;
@@ -333,14 +330,14 @@ impl<'a> TraceBuilder<'a> {
         self.variable_support_depth = checkpoint.variable_support_depth;
     }
 
-    fn compile(mut self, steps: &[SerializedCertificateStep]) -> Result<ProofTrace, CodeGenError> {
-        for (line_index, step) in steps.iter().enumerate() {
+    fn write(mut self, lines: &[String]) -> Result<ProofTrace, CodeGenError> {
+        for (line_index, line) in lines.iter().enumerate() {
             if self.derivation_checker.has_contradiction()
                 || self.shadow_checker.has_contradiction()
             {
                 break;
             }
-            self.compile_step(line_index, step)?;
+            self.write_step(line_index, line)?;
         }
         if !self.derivation_checker.has_contradiction() && !self.shadow_checker.has_contradiction()
         {
@@ -350,7 +347,7 @@ impl<'a> TraceBuilder<'a> {
         if !self.derivation_checker.has_contradiction() && !self.shadow_checker.has_contradiction()
         {
             return Err(CodeGenError::GeneratedBadCode(format!(
-                "generated proof steps did not close while compiling certificate trace{}",
+                "generated proof steps did not close while writing certificate trace{}",
                 self.deferred_claim_context()
             )));
         }
@@ -360,12 +357,7 @@ impl<'a> TraceBuilder<'a> {
         Ok(ProofTrace { steps: self.steps })
     }
 
-    fn compile_step(
-        &mut self,
-        line_index: usize,
-        serialized: &SerializedCertificateStep,
-    ) -> Result<(), CodeGenError> {
-        let code = serialized.code.as_str();
+    fn write_step(&mut self, line_index: usize, code: &str) -> Result<(), CodeGenError> {
         let parsed = Certificate::parse_code_line(
             code,
             self.project,
@@ -400,15 +392,13 @@ impl<'a> TraceBuilder<'a> {
             return Ok(());
         }
         let before = self.derivation_checker.inserted_len();
-        let code_lines = [code.to_string()];
         let mut checked_steps = Vec::new();
         let mut reprocess_derivation = false;
-        match self.derivation_checker.check_cert_steps_partial(
-            &[parsed.clone()],
-            Some(&code_lines),
-            &self.kernel_context,
-        ) {
-            Ok((checked, _consumed)) => {
+        match self
+            .derivation_checker
+            .check_cert_step_for_trace(&parsed, code, &self.kernel_context)
+        {
+            Ok(checked) => {
                 checked_steps = checked;
             }
             Err(err) if err.to_string().contains("proof does not result") => {}
@@ -433,7 +423,7 @@ impl<'a> TraceBuilder<'a> {
                     reprocess_derivation = true;
                 } else {
                     return Err(CodeGenError::GeneratedBadCode(format!(
-                        "proof step {} failed while compiling certificate trace: {} ({})",
+                        "proof step {} failed while writing certificate trace: {} ({})",
                         line_index + 1,
                         code,
                         err
@@ -444,7 +434,7 @@ impl<'a> TraceBuilder<'a> {
                 self.deferred_claims.push(DeferredClaim {
                     line_index,
                     code: code.to_string(),
-                    compile_error: deferred_claim_error.unwrap().to_string(),
+                    emit_error: deferred_claim_error.unwrap().to_string(),
                     checker_error: err.to_string(),
                 });
                 return Ok(());
@@ -488,7 +478,7 @@ impl<'a> TraceBuilder<'a> {
             }
             Err(err) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
-                    "proof step {} failed while compiling certificate trace: {} ({})",
+                    "proof step {} failed while writing certificate trace: {} ({})",
                     line_index + 1,
                     code,
                     err
@@ -506,7 +496,7 @@ impl<'a> TraceBuilder<'a> {
                     self.deferred_claims.push(DeferredClaim {
                         line_index,
                         code: code.to_string(),
-                        compile_error: deferred_claim_error
+                        emit_error: deferred_claim_error
                             .as_ref()
                             .expect("checked above")
                             .to_string(),
@@ -514,17 +504,12 @@ impl<'a> TraceBuilder<'a> {
                     });
                     continue;
                 }
-                return Err(
-                    CodeGenError::GeneratedBadCode(format!(
-                        "failed to emit checked proof step {} while compiling certificate trace: {} ({})",
-                        line_index + 1,
-                        checked_step
-                            .code_line
-                            .as_deref()
-                            .unwrap_or(code),
-                        err
-                    ))
-                );
+                return Err(CodeGenError::GeneratedBadCode(format!(
+                    "failed to emit checked proof step {} while writing certificate trace: {} ({})",
+                    line_index + 1,
+                    checked_step.code_line.as_deref().unwrap_or(code),
+                    err
+                )));
             }
         }
         for inserted_id in before..self.derivation_checker.inserted_len() {
@@ -533,7 +518,7 @@ impl<'a> TraceBuilder<'a> {
                 .inserted_clause(inserted_id)
                 .ok_or_else(|| {
                     CodeGenError::GeneratedBadCode(format!(
-                        "missing inserted clause {} while compiling certificate trace",
+                        "missing inserted clause {} while writing certificate trace",
                         inserted_id
                     ))
                 })?;
@@ -567,10 +552,10 @@ impl<'a> TraceBuilder<'a> {
             .take(8)
             .map(|claim| {
                 format!(
-                    "step {} `{}` (compile: {}; checker: {})",
+                    "step {} `{}` (emit: {}; checker: {})",
                     claim.line_index + 1,
                     claim.code,
-                    claim.compile_error,
+                    claim.emit_error,
                     claim.checker_error
                 )
             })
@@ -869,7 +854,7 @@ impl<'a> TraceBuilder<'a> {
             }
         }
         Err(CodeGenError::GeneratedBadCode(format!(
-            "could not compile claim to certificate trace: {}",
+            "could not emit claim to certificate trace: {}",
             code
         )))
     }
@@ -913,7 +898,7 @@ impl<'a> TraceBuilder<'a> {
                     return Ok(index);
                 }
                 return Err(CodeGenError::GeneratedBadCode(format!(
-                    "failed to emit source while compiling boolean-reduction step {}: {}",
+                    "failed to emit source while writing boolean-reduction step {}: {}",
                     code, source_err
                 )));
             }
@@ -1074,7 +1059,7 @@ impl<'a> TraceBuilder<'a> {
                 {
                     let source_index = self.emit_inserted_clause(dependency).map_err(|err| {
                         CodeGenError::GeneratedBadCode(format!(
-                            "failed to emit dependency {} while compiling inserted clause {}: {}",
+                            "failed to emit dependency {} while writing inserted clause {}: {}",
                             dependency, clause, err
                         ))
                     })?;
@@ -1121,7 +1106,7 @@ impl<'a> TraceBuilder<'a> {
             } else if self.derivation_checker.inserted_clause(source_id).is_some() {
                 let source_index = self.emit_inserted_clause(source_id).map_err(|err| {
                     CodeGenError::GeneratedBadCode(format!(
-                        "failed to emit dependency {} while compiling inserted clause {}: {}",
+                        "failed to emit dependency {} while writing inserted clause {}: {}",
                         source_id, clause, err
                     ))
                 })?;
@@ -1493,7 +1478,7 @@ impl<'a> TraceBuilder<'a> {
             String::new()
         };
         Err(CodeGenError::GeneratedBadCode(format!(
-            "could not compile inserted clause to certificate trace: {} ({:?}){}{}",
+            "could not emit inserted clause to certificate trace: {} ({:?}){}{}",
             clause, reason, dependency_context, equality_graph_context
         )))
     }
@@ -3117,7 +3102,7 @@ impl<'a> TraceChecker<'a> {
                 let aliases = if is_synthetic_generic_wrapper(&code) {
                     vec![]
                 } else {
-                    TraceBuilder::claim_aliases(generic.clone(), &specialized)
+                    TraceWriter::claim_aliases(generic.clone(), &specialized)
                 };
                 let reason = self
                     .checker
@@ -3291,7 +3276,7 @@ impl<'a> TraceChecker<'a> {
                 let aliases = if is_synthetic_generic_wrapper(&code) {
                     vec![]
                 } else {
-                    TraceBuilder::claim_aliases(generic, &specialized)
+                    TraceWriter::claim_aliases(generic, &specialized)
                 };
                 self.accept_clause_with_aliases(
                     result,

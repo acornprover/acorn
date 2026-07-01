@@ -572,14 +572,17 @@ impl Prover {
         Some(proof)
     }
 
-    /// Generate a draft certificate for the goal.
+    /// Generate a certificate for the goal.
     /// If `print` is true, we print the proof.
-    pub fn make_certificate_draft(
+    pub fn make_certificate(
         &self,
         bindings: &BindingMap,
         kernel_context: &KernelContext,
         print: bool,
-    ) -> Result<crate::certificate::CertificateDraft, Error> {
+        checker: crate::kernel::checker::Checker,
+        project: &dyn crate::project::ProjectLookup,
+        trace_bindings: std::borrow::Cow<BindingMap>,
+    ) -> Result<crate::certificate::Certificate, Error> {
         let goal = self
             .goal
             .as_ref()
@@ -595,7 +598,38 @@ impl Prover {
             self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }
 
-        proof.make_certificate_draft(goal.name.clone(), cert_bindings.as_ref())
+        proof.make_certificate(
+            goal.name.clone(),
+            cert_bindings.as_ref(),
+            checker,
+            project,
+            trace_bindings,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn certificate_source_lines_for_test(
+        &self,
+        bindings: &BindingMap,
+        kernel_context: &KernelContext,
+        print: bool,
+    ) -> Result<Vec<String>, Error> {
+        let cert_bindings = self.bindings_with_goal_type_params(bindings);
+        let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
+        let proof = self
+            .get_proof(effective_kernel_context, false)
+            .ok_or_else(|| Error::internal("No proof found"))?;
+
+        if print {
+            self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
+        }
+
+        let concrete_steps = proof.collect_concrete_steps()?;
+        crate::certificate::Certificate::serialized_lines_from_concrete_steps_for_test(
+            &concrete_steps,
+            effective_kernel_context,
+            cert_bindings.as_ref(),
+        )
     }
 
     fn report_equality_graph_contradiction(

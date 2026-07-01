@@ -1856,22 +1856,23 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
     );
     assert_eq!(outcome, Outcome::Success);
 
-    let draft = processor
+    let proof = processor
         .prover()
-        .make_certificate_draft(&bindings, &normalized_goal.kernel_context, false)
-        .expect("lambda-valued cert should be generated");
-    let proof = draft.serialized_lines();
+        .certificate_source_lines_for_test(&bindings, &normalized_goal.kernel_context, false)
+        .expect("lambda-valued cert source lines should be generated");
     assert!(
         proof
             .iter()
             .any(|line| line.contains("is_transitive") && line.contains("}[Nat](rel)")),
         "expected a proof step to normalize the lambda-valued claim argument: {proof:?}"
     );
-    let cert = draft
-        .into_certificate(
-            processor.checker().clone(),
+    let cert = processor
+        .make_cert(
+            &bindings,
+            &normalized_goal.kernel_context,
             &project,
-            Cow::Borrowed(&bindings),
+            Some(&normalized_goal),
+            false,
         )
         .expect("lambda-valued cert should be finalized");
 
@@ -1938,20 +1939,18 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
     let mut var_map = VariableMap::new();
     var_map.set(0, Term::new_false());
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic: generic.clone(),
         var_maps: vec![(var_map, generic.get_local_context().clone())],
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
 }
@@ -1968,20 +1967,18 @@ fn test_from_concrete_steps_preserves_open_identity_step() {
     let generic = kernel.parse_clause("x0 = x0", &["Bool"]);
 
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic: generic.clone(),
         var_maps: vec![(VariableMap::new(), generic.get_local_context().clone())],
         preserve_open: true,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("forall(x0: Bool)"),
@@ -2019,7 +2016,7 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
     let generic = kernel.parse_clause("false", &[]);
 
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic,
         var_maps: vec![(
             VariableMap::new(),
@@ -2028,14 +2025,12 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "false = true");
 }
@@ -2060,7 +2055,7 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
     );
 
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic,
         var_maps: vec![(
             VariableMap::new(),
@@ -2069,14 +2064,12 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].starts_with('('),
@@ -2112,14 +2105,13 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
     bad_map.set(0, Term::new_variable(2));
     let replacement_context = LocalContext::from_types(vec![Term::bool_type()]);
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic,
         var_maps: vec![(bad_map, replacement_context)],
         preserve_open: false,
     }];
 
-    let err = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let err = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
@@ -2148,20 +2140,18 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
     var_map.set(1, Term::new_true());
     let replacement_context = LocalContext::from_types(vec![Term::type_sort(), Term::bool_type()]);
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic: generic.clone(),
         var_maps: vec![(var_map, replacement_context)],
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
 }
@@ -2229,10 +2219,9 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &kernel_context,
     );
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &[ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic,
             var_maps: vec![(var_map, replacement_context.clone())],
             preserve_open: false,
@@ -2240,8 +2229,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
 
     let mut bindings_cow = Cow::Borrowed(&bindings);
@@ -2289,20 +2277,18 @@ fn test_from_concrete_steps_serializes_partial_logical_builtin_in_claim_map() {
     var_map.set(2, Term::new_false());
     var_map.set(3, Term::new_true());
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(
         proof,
         vec![
@@ -2342,20 +2328,18 @@ fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
     var_map.set(1, kernel.parse_term("eq(Bool)"));
 
     let concrete_steps = vec![ConcreteStep {
-        rationale: ConcreteRationale::Obvious,
+        rationale: ConcreteRationale::Direct,
         generic,
         var_maps: vec![(var_map, LocalContext::empty())],
         preserve_open: false,
     }];
 
-    let cert = Certificate::draft_from_concrete_steps(
-        "goal".to_string(),
+    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
         &concrete_steps,
         &kernel_context,
         &bindings,
     )
-    .expect("certificate generation should succeed");
-    let proof = cert.serialized_lines();
+    .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("(=)"),

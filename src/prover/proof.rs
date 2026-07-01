@@ -1,15 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::certificate::{Certificate, CertificateDraft};
+use std::borrow::Cow;
+
+use crate::certificate::Certificate;
 use crate::code_generator::Error;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::AtomId;
+use crate::kernel::checker::Checker;
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{ProofStep, ProofStepId, Rule};
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
+use crate::project::ProjectLookup;
 use crate::proof_order::unit_support_order;
 use crate::prover::synthetic::WitnessRegistry;
 
@@ -102,8 +106,8 @@ pub enum ConcreteStepId {
 /// The checker-side rationale that should be used to replay a concrete step.
 #[derive(Clone)]
 pub enum ConcreteRationale {
-    /// Check the target clause with the checker's exact/egraph-obvious machinery.
-    Obvious,
+    /// Check the target clause directly from the checker's current exact/egraph facts.
+    Direct,
 
     /// Check the target clause as one boolean reduction from a concrete source clause.
     BooleanReduction { source: Clause },
@@ -134,7 +138,7 @@ pub struct ConcreteStep {
 impl ConcreteStep {
     fn new(generic: Clause, var_map: VariableMap, replacement_context: LocalContext) -> Self {
         ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic,
             var_maps: vec![(var_map, replacement_context)],
             preserve_open: false,
@@ -267,7 +271,7 @@ fn append_inline_simplification_originals(
     for (var_map, replacement_context) in &original_var_maps {
         push_concrete_step_if_new(
             ConcreteStep {
-                rationale: ConcreteRationale::Obvious,
+                rationale: ConcreteRationale::Direct,
                 generic: info.original.clause.clone(),
                 var_maps: vec![(var_map.clone(), replacement_context.clone())],
                 preserve_open: false,
@@ -313,7 +317,7 @@ fn concrete_rationale_for_step<R: ProofResolver>(
     replacement_context: &LocalContext,
 ) -> Result<ConcreteRationale, Error> {
     let Rule::BooleanReduction(info) = &step.rule else {
-        return Ok(ConcreteRationale::Obvious);
+        return Ok(ConcreteRationale::Direct);
     };
 
     let source_id = ProofStepId::Active(info.id);
@@ -398,19 +402,25 @@ fn passive_contradiction_var_map<R: ProofResolver>(
 }
 
 impl<'a> Proof<'a> {
-    /// Create a draft certificate for this proof.
-    pub fn make_certificate_draft(
+    /// Create a certificate for this proof.
+    pub fn make_certificate(
         &self,
         goal: String,
         bindings: &BindingMap,
-    ) -> Result<CertificateDraft, Error> {
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        trace_bindings: Cow<BindingMap>,
+    ) -> Result<Certificate, Error> {
         let concrete_steps = self.collect_concrete_steps()?;
-        Certificate::draft_from_concrete_steps_with_witnesses(
+        Certificate::from_concrete_steps_with_witnesses(
             goal,
             &concrete_steps,
             self.kernel_context,
             bindings,
             self.witness_registry,
+            checker,
+            project,
+            trace_bindings,
         )
     }
 
@@ -543,7 +553,7 @@ impl<'a> Proof<'a> {
                     let rationale = if matches!(concrete_id, ConcreteStepId::ProofStep(_)) {
                         concrete_rationale_for_step(self, step, &var_map, &replacement_context)?
                     } else {
-                        ConcreteRationale::Obvious
+                        ConcreteRationale::Direct
                     };
                     push_concrete_step_if_new(
                         ConcreteStep {
@@ -1093,13 +1103,13 @@ mod tests {
         kctx.parse_constants(&["c0", "c1"], "Bool");
 
         let dependent = ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: kctx.parse_clause("not c0 or c1", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
         };
         let support = ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: kctx.parse_clause("c0", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
@@ -1123,13 +1133,13 @@ mod tests {
         kctx.parse_constants(&["c0", "c1"], "Bool");
 
         let derived = ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: kctx.parse_clause("not c0", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
         };
         let source = ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: kctx.parse_clause("not c0 or c1", &[]),
             var_maps: vec![(VariableMap::new(), LocalContext::empty())],
             preserve_open: false,
@@ -1645,9 +1655,15 @@ mod tests {
         proof.add_step(ProofStepId::Final, &final_step);
 
         let bindings = BindingMap::new(ModuleId::default());
-        proof
-            .make_certificate_draft("goal".to_string(), &bindings)
-            .expect("certificate generation should succeed");
+        let concrete_steps = proof
+            .collect_concrete_steps()
+            .expect("proof reconstruction should succeed");
+        Certificate::serialized_lines_from_concrete_steps_for_test(
+            &concrete_steps,
+            &kctx,
+            &bindings,
+        )
+        .expect("certificate source lines should be generated");
     }
 
     /// Test that resolution with polymorphic simplification works correctly.
@@ -1857,10 +1873,15 @@ mod tests {
 
         let bindings =
             crate::elaborator::binding_map::BindingMap::new(crate::module::ModuleId::default());
-        let cert = proof
-            .make_certificate_draft("goal".to_string(), &bindings)
-            .expect("certificate generation should succeed");
-        let lines = cert.serialized_lines();
+        let concrete_steps = proof
+            .collect_concrete_steps()
+            .expect("proof reconstruction should succeed");
+        let lines = Certificate::serialized_lines_from_concrete_steps_for_test(
+            &concrete_steps,
+            &kctx,
+            &bindings,
+        )
+        .expect("certificate source lines should be generated");
         assert!(
             !lines.is_empty(),
             "expected at least one generated certificate line"
@@ -1884,21 +1905,19 @@ mod tests {
         var_map.set(0, Term::lambda(Term::bool_type(), Term::new_true()));
         var_map.set(1, Term::new_true());
         let concrete_steps = vec![crate::prover::proof::ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: generic_clause,
             var_maps: vec![(var_map, LocalContext::empty())],
             preserve_open: false,
         }];
 
         let bindings = BindingMap::new(ModuleId::default());
-        let cert = Certificate::draft_from_concrete_steps(
-            "goal".to_string(),
+        let lines = Certificate::serialized_lines_from_concrete_steps_for_test(
             &concrete_steps,
             &kctx,
             &bindings,
         )
-        .expect("certificate generation should succeed");
-        let lines = cert.serialized_lines();
+        .expect("certificate source lines should be generated");
 
         // Regression assertion: the generated cert round-trips through the parser.
         let project = Project::new_mock();
@@ -1973,14 +1992,12 @@ mod tests {
         );
 
         let bindings = BindingMap::new(ModuleId::default());
-        let cert = Certificate::draft_from_concrete_steps(
-            "goal".to_string(),
+        let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
             &steps_in_order,
             &kctx,
             &bindings,
         )
         .expect("live-local inline original should serialize");
-        let proof = cert.serialized_lines();
         assert_eq!(proof, vec!["function(x0: Bool) { x0 != false }(true)"]);
     }
 

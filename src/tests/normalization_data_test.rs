@@ -1318,7 +1318,7 @@ fn serialize_claim_line(
 ) -> String {
     if claim.clause().get_local_context().is_empty() {
         let concrete_steps = vec![ConcreteStep {
-            rationale: ConcreteRationale::Obvious,
+            rationale: ConcreteRationale::Direct,
             generic: claim.clause().clone(),
             var_maps: vec![(
                 claim.var_map().clone(),
@@ -1326,14 +1326,12 @@ fn serialize_claim_line(
             )],
             preserve_open: false,
         }];
-        let cert = Certificate::draft_from_concrete_steps(
-            "goal".to_string(),
+        let mut proof = Certificate::serialized_lines_from_concrete_steps_for_test(
             &concrete_steps,
             kernel_context,
             bindings,
         )
         .expect("claim should serialize through concrete-step generation");
-        let mut proof = cert.serialized_lines();
         assert_eq!(proof.len(), 1, "expected one serialized proof line");
         return proof.pop().unwrap();
     }
