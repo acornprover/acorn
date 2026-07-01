@@ -2432,83 +2432,6 @@ impl Certificate {
         self.check_with_usage_internal(checker, project, bindings, kernel_context, false)
     }
 
-    /// Rebuild this cached certificate into the current explicit trace format.
-    ///
-    /// This is used by cache migrations: it replays the existing proof text through the trace
-    /// compiler without invoking the prover. The input checker should represent the strict
-    /// starting state for the target goal; the trace compiler uses an eager derivation clone
-    /// internally to understand legacy certificates.
-    pub fn migrate_to_explicit_trace(
-        &self,
-        checker: Checker,
-        derivation_checker: Checker,
-        preferred_root_inserted_ids: Vec<usize>,
-        project: &dyn ProjectLookup,
-        bindings: Cow<BindingMap>,
-        kernel_context: Cow<KernelContext>,
-    ) -> Result<Certificate, CodeGenError> {
-        let Some(proof) = &self.proof else {
-            return Err(CodeGenError::NoProof);
-        };
-        let existing_trace_error = match proof.check_with_usage(
-            checker.clone(),
-            project,
-            bindings.clone(),
-            Cow::Owned(kernel_context.as_ref().clone()),
-        ) {
-            Ok(_) => "existing trace accepted by compatibility checker".to_string(),
-            Err(err) => err.to_string(),
-        };
-        let steps = proof.serialized_steps();
-        let trace = ProofTrace::from_certificate_steps_checked_with_preferred_roots(
-            &steps,
-            checker.clone(),
-            derivation_checker,
-            preferred_root_inserted_ids,
-            project,
-            bindings.clone(),
-            Cow::Owned(kernel_context.as_ref().clone()),
-        )
-        .map_err(|err| {
-            CodeGenError::GeneratedBadCode(format!(
-                "existing trace failed strict check: {}; legacy replay failed: {}",
-                existing_trace_error, err
-            ))
-        })?;
-        trace.check_with_usage(
-            checker.clone(),
-            project,
-            bindings.clone(),
-            Cow::Owned(kernel_context.as_ref().clone()),
-        )?;
-        let frontloaded = trace.with_steps_frontloaded_by_premise_depth();
-        let trace = if frontloaded.steps.len() == trace.steps.len()
-            && frontloaded
-                .check_with_usage(
-                    checker.clone(),
-                    project,
-                    bindings.clone(),
-                    Cow::Owned(kernel_context.as_ref().clone()),
-                )
-                .is_ok()
-        {
-            frontloaded
-        } else {
-            trace
-        };
-        let pruned = trace.without_unreferenced_auxiliary_steps();
-        let trace = if pruned.steps.len() < trace.steps.len()
-            && pruned
-                .check_with_usage(checker, project, bindings, kernel_context)
-                .is_ok()
-        {
-            pruned
-        } else {
-            trace
-        };
-        Ok(Certificate::new(self.goal.clone(), trace))
-    }
-
     fn check_with_usage_internal(
         &self,
         checker: Checker,
@@ -2674,16 +2597,6 @@ impl CertificateWorklist {
             .values()
             .flat_map(|indexes| indexes.iter())
             .filter_map(move |&index| self.store.certs.get(index))
-    }
-
-    /// Intentionally leak the legacy certificate input.
-    ///
-    /// The cert migrator consumes old-format proof objects whose recursive drops can overflow the
-    /// stack after large modules. The process is short-lived and already holds these certs in
-    /// memory while migrating, so leaking the input worklist is safer than stack-overflowing while
-    /// dropping it.
-    pub fn leak(self) {
-        std::mem::forget(self);
     }
 }
 
@@ -3476,12 +3389,7 @@ impl<'a> WitnessEmitter<'a> {
             })
             .collect();
         if exact_specialized_matches.len() == 1 {
-            #[cfg(feature = "strict-br")]
-            {
-                return Ok(WitnessPlacement::Anchor(exact_specialized_matches[0]));
-            }
-            #[cfg(not(feature = "strict-br"))]
-            return Ok(WitnessPlacement::Replace(exact_specialized_matches[0]));
+            return Ok(WitnessPlacement::Anchor(exact_specialized_matches[0]));
         }
         if let Some(index) = exact_specialized_matches.first().copied() {
             // Exact matching claims can legitimately repeat in the displayed proof.

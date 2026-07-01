@@ -19,8 +19,6 @@ use std::path::PathBuf;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use walkdir::WalkDir;
 
-const MIGRATE_CERTS_STACK_SIZE: usize = 512 * 1024 * 1024;
-
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|threads| threads.get())
@@ -40,66 +38,6 @@ fn exit_project_load_error<T>(error: ProjectError) -> T {
         println!("Error loading project: {}", error.cli_message());
     }
     std::process::exit(1);
-}
-
-fn run_migrate_certs_command(
-    current_dir: PathBuf,
-    update_version: bool,
-    target: Option<String>,
-    line_selection: Option<VerifierLineSelection>,
-    jobs: Option<usize>,
-    timing: bool,
-    exact: bool,
-) -> i32 {
-    let migration_jobs = jobs.unwrap_or(1);
-    if migration_jobs == 0 {
-        println!("Error: --jobs must be at least 1");
-        return 1;
-    }
-
-    let config = ProjectConfig {
-        usage_mode: UsageMode::Verify,
-        use_filesystem: true,
-        read_cache: true,
-        write_cache: true,
-        update_version,
-    };
-
-    let mut verifier = match Verifier::new(current_dir, config, target) {
-        Ok(v) => v,
-        Err(e) => {
-            println!("{}", e.cli_message());
-            return 1;
-        }
-    };
-
-    verifier.exact_target = exact;
-    verifier.builder.print_proof = false;
-    verifier.line_selection = line_selection;
-    verifier.builder.check_mode = false;
-    verifier.builder.check_hashes = false;
-    verifier.builder.force_search = false;
-    verifier.builder.migrate_certs = true;
-    verifier.builder.check_jobs = migration_jobs;
-    verifier.builder.operation_verb = "migrated";
-
-    match verifier.run() {
-        Err(e) => {
-            println!("{}", e);
-            1
-        }
-        Ok(output) => {
-            if timing {
-                output.print_timing_breakdown("Migrate certs", "certificate migration", true);
-                output.print_verify_module_timing();
-            }
-            if output.is_success() {
-                0
-            } else {
-                1
-            }
-        }
-    }
 }
 
 /// Represents a line selection: either a single line or a range.
@@ -677,51 +615,6 @@ enum Command {
         #[clap(
             long = "timing",
             help = "Print phase timing information for this check run."
-        )]
-        timing: bool,
-    },
-
-    /// Rewrite cached certificates into the current explicit trace format without proof search
-    MigrateCerts {
-        /// Target module or file to migrate. If not provided, migrates all files in the library.
-        #[clap(
-            value_name = "TARGET",
-            help = "Module or filename to migrate. Supports TARGET:LINE for debugging a single goal without writing the module cache. This rewrites cached certificates without running proof search."
-        )]
-        target: Option<String>,
-
-        /// Line number as positional argument (alternative to --line)
-        #[clap(value_name = "LINE")]
-        line_positional: Option<u32>,
-
-        /// Migrate a specific line without writing the module cache
-        #[clap(
-            long = "line",
-            help = "Migrate a specific line without writing the module cache.",
-            value_name = "LINE"
-        )]
-        line_flag: Option<u32>,
-
-        /// Number of worker threads to use for full-module migration
-        #[clap(
-            short = 'j',
-            long = "jobs",
-            value_name = "JOBS",
-            help = "Number of worker threads to use for full-module migration. Defaults to 1."
-        )]
-        jobs: Option<usize>,
-
-        /// Migrate only the resolved target module, without expanding package interfaces
-        #[clap(
-            long = "exact",
-            help = "Migrate only the resolved target module, not every implementation in its package."
-        )]
-        exact: bool,
-
-        /// Print phase timing information
-        #[clap(
-            long = "timing",
-            help = "Print phase timing information for this migration run."
         )]
         timing: bool,
     },
@@ -1307,54 +1200,6 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
-            }
-        }
-
-        Some(Command::MigrateCerts {
-            target,
-            line_positional,
-            line_flag,
-            jobs,
-            exact,
-            timing,
-        }) => {
-            let (target, line_sel) = match parse_target_and_line(target, line_positional, line_flag)
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    println!("Error: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let line_selection = match line_sel {
-                Some(LineSelection::Single(line)) => Some(VerifierLineSelection::Single(line)),
-                Some(LineSelection::Range(_, _)) => {
-                    println!("Error: migrate-certs command does not support line ranges");
-                    std::process::exit(1);
-                }
-                None => None,
-            };
-            let handle = std::thread::Builder::new()
-                .stack_size(MIGRATE_CERTS_STACK_SIZE)
-                .spawn(move || {
-                    run_migrate_certs_command(
-                        current_dir,
-                        update_version,
-                        target,
-                        line_selection,
-                        jobs,
-                        timing,
-                        exact,
-                    )
-                })
-                .expect("failed to spawn certificate migration thread");
-            match handle.join() {
-                Ok(code) => {
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
-                }
-                Err(payload) => std::panic::resume_unwind(payload),
             }
         }
 
@@ -2286,39 +2131,6 @@ mod tests {
                 assert!(dry_run);
                 assert_eq!(timeout, 0.2);
                 assert_eq!(activations, Some(50));
-            }
-            _ => panic!("unexpected command"),
-        }
-    }
-
-    #[test]
-    fn test_migrate_certs_command_parses() {
-        let args = Args::try_parse_from([
-            "acorn",
-            "migrate-certs",
-            "logic",
-            "--jobs",
-            "3",
-            "--exact",
-            "--timing",
-        ])
-        .expect("migrate-certs command should parse");
-
-        match args.command {
-            Some(Command::MigrateCerts {
-                target,
-                line_positional,
-                line_flag,
-                jobs,
-                exact,
-                timing,
-            }) => {
-                assert_eq!(target.as_deref(), Some("logic"));
-                assert_eq!(line_positional, None);
-                assert_eq!(line_flag, None);
-                assert_eq!(jobs, Some(3));
-                assert!(exact);
-                assert!(timing);
             }
             _ => panic!("unexpected command"),
         }

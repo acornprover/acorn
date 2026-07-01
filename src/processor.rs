@@ -24,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 pub struct Processor {
     prover: Option<Prover>,
     checker: Checker,
-    legacy_checker: Option<Checker>,
     imported_modules: HashSet<ModuleId>,
 }
 
@@ -40,7 +39,6 @@ impl Processor {
                 None => Prover::with_config(vec![], scoring_config),
             }),
             checker: Checker::new(),
-            legacy_checker: None,
             imported_modules: HashSet::new(),
         }
     }
@@ -113,7 +111,6 @@ impl Processor {
     ) -> Result<Processor, BuildError> {
         let mut processor =
             Self::new_with_optional_prover(cancellation_token, true, scoring_config);
-        #[cfg(feature = "strict-br")]
         processor.checker.set_eager_boolean_reductions(false);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
@@ -127,25 +124,6 @@ impl Processor {
     ) -> Result<Processor, BuildError> {
         let mut processor =
             Self::new_with_optional_prover(cancellation_token, false, ScoringConfig::default());
-        #[cfg(feature = "strict-br")]
-        processor.checker.set_eager_boolean_reductions(false);
-        processor.add_imports_from_bindings(bindings, project)?;
-        Ok(processor)
-    }
-
-    /// Creates a certificate-only processor that inserts imports without eager boolean reductions.
-    ///
-    /// This is used by certificate migration: the new trace should replay from the same initial
-    /// state that strict-br checking will use, while the trace compiler keeps a separate eager
-    /// derivation checker for understanding legacy certificates.
-    pub fn with_imports_for_cert_migration(
-        cancellation_token: Option<CancellationToken>,
-        bindings: &BindingMap,
-        project: impl Into<ProjectView>,
-    ) -> Result<Processor, BuildError> {
-        let mut processor =
-            Self::new_with_optional_prover(cancellation_token, false, ScoringConfig::default());
-        processor.legacy_checker = Some(Checker::new());
         processor.checker.set_eager_boolean_reductions(false);
         processor.add_imports_from_bindings(bindings, project)?;
         Ok(processor)
@@ -243,16 +221,9 @@ impl Processor {
             };
             self.checker.insert_clause(
                 &step.clause,
-                StepReason::Assumption(step_source.clone()),
+                StepReason::Assumption(step_source),
                 kernel_context,
             );
-            if let Some(legacy_checker) = self.legacy_checker.as_mut() {
-                legacy_checker.insert_clause(
-                    &step.clause,
-                    StepReason::Assumption(step_source),
-                    kernel_context,
-                );
-            }
         }
         if let Some(prover) = self.prover.as_mut() {
             prover.add_steps(normalized.steps.clone(), kernel_context);
@@ -273,13 +244,6 @@ impl Processor {
                 StepReason::Assumption(assumption.source.clone()),
                 &fact.kernel_context,
             );
-            if let Some(legacy_checker) = self.legacy_checker.as_mut() {
-                legacy_checker.insert_normalized_clause(
-                    &assumption.clause,
-                    StepReason::Assumption(assumption.source.clone()),
-                    &fact.kernel_context,
-                );
-            }
         }
         Ok(())
     }
@@ -308,13 +272,6 @@ impl Processor {
                 StepReason::Assumption(step_source.clone()),
                 kernel_context,
             );
-            if let Some(legacy_checker) = self.legacy_checker.as_mut() {
-                legacy_checker.insert_clause(
-                    &step.clause,
-                    StepReason::Assumption(step_source.clone()),
-                    kernel_context,
-                );
-            }
         }
         if let Some(prover) = self.prover.as_mut() {
             prover.set_goal(
@@ -437,61 +394,6 @@ impl Processor {
             project,
             bindings,
             false,
-        )
-    }
-
-    pub fn migrate_cert_to_explicit_trace(
-        &self,
-        cert: &Certificate,
-        normalized_goal: Option<&LoweredGoal>,
-        kernel_context: &KernelContext,
-        project: impl Into<ProjectView>,
-        bindings: &BindingMap,
-    ) -> Result<Certificate, Error> {
-        let project = project.into();
-        let mut checker = self.checker.clone();
-        let mut derivation_checker = self
-            .legacy_checker
-            .clone()
-            .unwrap_or_else(|| self.checker.clone());
-        let mut cert_bindings = Cow::Borrowed(bindings);
-        let effective_kernel_context: &KernelContext;
-        let mut preferred_root_inserted_ids = vec![];
-
-        if let Some(normalized_goal) = normalized_goal {
-            let before_derivation_goal = derivation_checker.inserted_len();
-            checker.insert_lowered_goal(normalized_goal)?;
-            derivation_checker.insert_lowered_goal(normalized_goal)?;
-            preferred_root_inserted_ids
-                .extend(before_derivation_goal..derivation_checker.inserted_len());
-            for step in &normalized_goal.steps {
-                if let Some(inserted_id) = derivation_checker.exact_clause_id(&step.clause) {
-                    if !preferred_root_inserted_ids.contains(&inserted_id) {
-                        preferred_root_inserted_ids.push(inserted_id);
-                    }
-                }
-            }
-            cert_bindings =
-                Self::bindings_with_type_params(bindings, &normalized_goal.goal.proposition.params);
-            effective_kernel_context = &normalized_goal.kernel_context;
-        } else if let Some(type_params) = self
-            .prover
-            .as_ref()
-            .and_then(|prover| prover.goal_type_params())
-        {
-            cert_bindings = Self::bindings_with_type_params(bindings, type_params);
-            effective_kernel_context = kernel_context;
-        } else {
-            effective_kernel_context = kernel_context;
-        }
-
-        cert.migrate_to_explicit_trace(
-            checker,
-            derivation_checker,
-            preferred_root_inserted_ids,
-            &project,
-            cert_bindings,
-            Cow::Owned(effective_kernel_context.clone()),
         )
     }
 

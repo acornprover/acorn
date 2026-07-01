@@ -320,10 +320,6 @@ pub struct Verifier {
 
     target_spec: TargetSpec,
 
-    /// If set, a specific target is built as exactly that module instead of expanding package
-    /// interfaces to every implementation in the package.
-    pub exact_target: bool,
-
     include_surface_check_dirs: bool,
     surface_check_explicit_targets: bool,
 
@@ -432,7 +428,6 @@ impl Verifier {
             project_ptr,
             target: normalized_target,
             target_spec,
-            exact_target: false,
             include_surface_check_dirs,
             surface_check_explicit_targets,
             line_selection: None,
@@ -466,7 +461,6 @@ impl Verifier {
         let target_spec = self.target_spec.clone();
         let include_surface_check_dirs = self.include_surface_check_dirs;
         let surface_check_explicit_targets = self.surface_check_explicit_targets;
-        let exact_target = self.exact_target;
         let project = self.project_mut();
         let mut targets = Vec::new();
         let mut load_order = Vec::new();
@@ -495,30 +489,17 @@ impl Verifier {
                 let descriptor =
                     if surface_check_explicit_targets && project.is_surface_check_path(&path) {
                         project.add_unloaded_surface_target_by_descriptor(&descriptor)
-                    } else if exact_target {
-                        project.add_unloaded_exact_target_by_descriptor(&descriptor)
                     } else {
                         project.add_unloaded_target_by_descriptor(&descriptor)
                     };
-                let build_descriptors = if exact_target {
-                    vec![descriptor]
-                } else {
-                    project.build_descriptors_for_target(&descriptor)
-                };
+                let build_descriptors = project.build_descriptors_for_target(&descriptor);
                 targets.extend(build_descriptors.clone());
                 load_order.extend(build_descriptors);
             }
             TargetSpec::Name(name) => {
-                let descriptor = if exact_target {
-                    project.add_unloaded_exact_target_by_descriptor(&ModuleDescriptor::name(&name))
-                } else {
-                    project.add_unloaded_target_by_descriptor(&ModuleDescriptor::name(&name))
-                };
-                let build_descriptors = if exact_target {
-                    vec![descriptor]
-                } else {
-                    project.build_descriptors_for_target(&descriptor)
-                };
+                let descriptor =
+                    project.add_unloaded_target_by_descriptor(&ModuleDescriptor::name(&name));
+                let build_descriptors = project.build_descriptors_for_target(&descriptor);
                 targets.extend(build_descriptors.clone());
                 load_order.extend(build_descriptors);
             }
@@ -542,7 +523,6 @@ impl Verifier {
         let target_spec = self.target_spec.clone();
         let include_surface_check_dirs = self.include_surface_check_dirs;
         let surface_check_explicit_targets = self.surface_check_explicit_targets;
-        let exact_target = self.exact_target;
         let project = self.project_mut();
         match target_spec {
             TargetSpec::All => {
@@ -556,14 +536,6 @@ impl Verifier {
                     project
                         .add_surface_target_by_path(&path)
                         .map_err(|e| format!("Error loading target '{}': {}", path.display(), e))?;
-                } else if exact_target {
-                    let descriptor = project.descriptor_from_path(&path).map_err(|e| {
-                        format!("Error resolving target '{}': {}", path.display(), e)
-                    })?;
-                    let descriptor = project.add_unloaded_exact_target_by_descriptor(&descriptor);
-                    project
-                        .load_target_by_descriptor(&descriptor)
-                        .map_err(|e| format!("Error loading target '{}': {}", path.display(), e))?;
                 } else {
                     project
                         .add_target_by_path(&path)
@@ -571,17 +543,9 @@ impl Verifier {
                 }
             }
             TargetSpec::Name(name) => {
-                if exact_target {
-                    let descriptor = project
-                        .add_unloaded_exact_target_by_descriptor(&ModuleDescriptor::name(&name));
-                    project
-                        .load_target_by_descriptor(&descriptor)
-                        .map_err(|e| format!("Error loading module '{}': {}", name, e))?;
-                } else {
-                    project
-                        .add_target_by_name(&name)
-                        .map_err(|e| format!("Error loading module '{}': {}", name, e))?;
-                }
+                project
+                    .add_target_by_name(&name)
+                    .map_err(|e| format!("Error loading module '{}': {}", name, e))?;
             }
         }
         Ok(start.elapsed())
@@ -591,7 +555,6 @@ impl Verifier {
         let (targets, load_order) = self.prepare_targets()?;
         let batch_limit = self.builder.check_jobs.max(1);
         let propagate_load_errors = !matches!(self.target_spec, TargetSpec::All);
-        let exact_target = self.exact_target;
 
         self.builder.begin_module_work_build(targets.len());
 
@@ -650,13 +613,8 @@ impl Verifier {
                     }
                 }
 
-                let work = unsafe {
-                    if exact_target {
-                        (&mut *project_ptr).take_lowered_modules_for_exact_targets(&targets)
-                    } else {
-                        (&mut *project_ptr).take_lowered_modules_for_targets(&targets)
-                    }
-                };
+                let work =
+                    unsafe { (&mut *project_ptr).take_lowered_modules_for_targets(&targets) };
                 let project = if work.is_empty() {
                     None
                 } else {
@@ -692,13 +650,8 @@ impl Verifier {
                 }
             }
 
-            let work = unsafe {
-                if exact_target {
-                    (&mut *self.project_ptr).take_lowered_modules_for_exact_targets(&targets)
-                } else {
-                    (&mut *self.project_ptr).take_lowered_modules_for_targets(&targets)
-                }
-            };
+            let work =
+                unsafe { (&mut *self.project_ptr).take_lowered_modules_for_targets(&targets) };
             if !work.is_empty() {
                 let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
                 self.builder.set_project_view(project_view);
@@ -1249,94 +1202,6 @@ mod tests {
         let output = verifier.run().unwrap();
         assert_eq!(output.status, BuildStatus::Good);
         assert_eq!(output.metrics.pending_modules_total, 1);
-    }
-
-    #[test]
-    fn test_migrate_certs_rewrites_empty_legacy_boolean_reduction_cert_without_search() {
-        let (acornlib, src, _build) = setup();
-        src.child("logic.ac")
-            .write_str(
-                r#"
-                theorem and_left(p: Bool, q: Bool) {
-                    p and q implies p
-                }
-                "#,
-            )
-            .unwrap();
-        let cert_path = cert_for_source(&src, "logic.ac");
-        save_cert_store(
-            &cert_path,
-            CertificateStore {
-                certs: vec![empty_cert("and_left")],
-            },
-        );
-
-        let migrate_config = ProjectConfig {
-            usage_mode: UsageMode::Verify,
-            use_filesystem: true,
-            read_cache: true,
-            write_cache: true,
-            update_version: false,
-        };
-        let mut migrate = Verifier::new(
-            acornlib.path().to_path_buf(),
-            migrate_config,
-            Some("logic".into()),
-        )
-        .expect("migrate verifier should construct");
-        migrate.builder.check_hashes = false;
-        migrate.builder.migrate_certs = true;
-        migrate.builder.check_jobs = 1;
-        migrate.builder.operation_verb = "migrated";
-
-        let output = migrate.run().expect("migration should run");
-        assert_eq!(
-            output.status,
-            BuildStatus::Good,
-            "migration should succeed\n{}",
-            log_text(&output)
-        );
-        assert_eq!(output.metrics.searches_total, 0);
-        assert_eq!(output.metrics.certs_created, 1);
-
-        let migrated = CertificateStore::load(cert_path.path()).expect("migrated cert should load");
-        let proof = migrated.certs[0]
-            .proof
-            .as_ref()
-            .expect("migrated cert should have a proof");
-        assert!(
-            proof.steps.iter().any(|step| matches!(
-                step.rule,
-                crate::certificate_trace::TraceRule::Br
-            ) && step.br_kind.is_some()
-                && step.br_literal_index.is_some()),
-            "migration should make the implicit boolean reduction explicit with exact detail: {:?}",
-            proof
-        );
-
-        let check_config = ProjectConfig {
-            usage_mode: UsageMode::Check,
-            use_filesystem: true,
-            read_cache: true,
-            write_cache: false,
-            update_version: false,
-        };
-        let mut check = Verifier::new_for_check(
-            acornlib.path().to_path_buf(),
-            check_config,
-            Some("logic".into()),
-        )
-        .expect("check verifier should construct");
-        check.builder.check_mode = true;
-        check.builder.check_hashes = false;
-        check.builder.operation_verb = "checked";
-        let output = check.run().expect("migrated check should run");
-        assert_eq!(
-            output.status,
-            BuildStatus::Good,
-            "migrated cert should check\n{}",
-            log_text(&output)
-        );
     }
 
     #[test]

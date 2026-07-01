@@ -1802,15 +1802,6 @@ impl Project {
         canonical_descriptor
     }
 
-    pub fn add_unloaded_exact_target_by_descriptor(
-        &mut self,
-        descriptor: &ModuleDescriptor,
-    ) -> ModuleDescriptor {
-        let canonical_descriptor = self.canonicalize_name_descriptor(descriptor);
-        self.targets.insert(canonical_descriptor.clone());
-        canonical_descriptor
-    }
-
     pub fn add_unloaded_surface_target_by_descriptor(
         &mut self,
         descriptor: &ModuleDescriptor,
@@ -2626,29 +2617,6 @@ impl Project {
         for target in targets {
             target_set.extend(self.build_descriptors_for_target(target));
         }
-        let mut lowered = Vec::new();
-        for module in &mut self.modules {
-            if !target_set.contains(&module.descriptor) {
-                continue;
-            }
-            let LoadState::Ok(loaded) = &mut module.state else {
-                continue;
-            };
-            let Some(work) = loaded.lowered.take() else {
-                continue;
-            };
-            let work = Arc::try_unwrap(work).unwrap_or_else(|work| (*work).clone());
-            lowered.push((module.descriptor.clone(), work));
-        }
-        lowered.sort_by(|(left, _), (right, _)| left.cmp(right));
-        lowered
-    }
-
-    pub fn take_lowered_modules_for_exact_targets(
-        &mut self,
-        targets: &[ModuleDescriptor],
-    ) -> Vec<(ModuleDescriptor, LoweredModule)> {
-        let target_set: HashSet<_> = targets.iter().cloned().collect();
         let mut lowered = Vec::new();
         for module in &mut self.modules {
             if !target_set.contains(&module.descriptor) {
