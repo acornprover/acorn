@@ -2435,7 +2435,7 @@ impl Project {
                 store
                     .certs
                     .iter()
-                    .map(|cert| 1 + cert.proof_step_count().unwrap_or(0))
+                    .map(|cert| 1 + cert.proof_step_count())
                     .sum()
             })
             .unwrap_or(0)

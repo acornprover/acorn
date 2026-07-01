@@ -947,18 +947,17 @@ impl CodeGenerator<'_> {
         Ok(())
     }
 
-    /// Convert one specialization to certificate steps.
+    /// Convert one specialization to a certificate claim.
     /// The replacement_context is the context that the var_map's replacement terms reference.
     /// This is needed to look up variable types when specializing.
-    pub(crate) fn specialization_to_certificate_steps(
+    pub(crate) fn specialization_to_claim(
         &mut self,
         generic: &Clause,
         var_map: &VariableMap,
         replacement_context: &LocalContext,
         preserve_open: bool,
         kernel_context: &mut KernelContext,
-        steps: &mut Vec<CertificateStep>,
-    ) -> Result<()> {
+    ) -> Result<Claim> {
         let replacement_scope_error = var_map.iter().find_map(|(var_id, term)| {
             term.max_variable()
                 .filter(|id| *id as usize >= replacement_context.len())
@@ -1293,10 +1292,7 @@ impl CodeGenerator<'_> {
                 generic, claim_var_map, replayed, concretized_clause, clause
             )));
         }
-        let claim = Claim::new(claim_generic, claim_var_map).map_err(Error::GeneratedBadCode)?;
-
-        steps.push(CertificateStep::Claim(claim));
-        Ok(())
+        Claim::new(claim_generic, claim_var_map).map_err(Error::GeneratedBadCode)
     }
 
     /// Converts a certificate step to one line of code.
@@ -2196,9 +2192,6 @@ pub enum Error {
     // The code contains the explicit goal, which we can't generate code for.
     ExplicitGoal,
 
-    // When you try to generate code but there is no proof
-    NoProof,
-
     // Generated code that failed checking
     GeneratedBadCode(String),
 
@@ -2225,7 +2218,6 @@ impl Error {
             Error::UnnamedType(_) => "UnnamedType",
             Error::UnhandledValue(_) => "UnhandledValue",
             Error::ExplicitGoal => "ExplicitGoal",
-            Error::NoProof => "NoProof",
             Error::GeneratedBadCode(_) => "GeneratedInvalidCode",
             Error::InternalError(_) => "InternalError",
         }
@@ -2251,7 +2243,6 @@ impl fmt::Display for Error {
             Error::ExplicitGoal => {
                 write!(f, "could not isolate the goal at the end of the proof")
             }
-            Error::NoProof => write!(f, "no proof"),
             Error::GeneratedBadCode(s) => {
                 write!(f, "generated invalid code: {}", s)
             }

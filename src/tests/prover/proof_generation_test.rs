@@ -54,8 +54,6 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
         .expect("make_cert should succeed");
     let proof = cert
         .proof
-        .as_ref()
-        .expect("certificate should include a proof trace")
         .steps
         .iter()
         .filter_map(|step| step.claim.as_ref())

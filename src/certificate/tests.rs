@@ -136,13 +136,10 @@ fn test_save_load_cycle() {
         "goal3".to_string(),
         vec![], // Trivial proof with no steps
     );
-    let cert4 = Certificate::placeholder(
-        "goal4".to_string(), // No proof exists for this goal
-    );
 
     // Create original certificate store
     let original = CertificateStore {
-        certs: vec![cert1, cert2, cert3, cert4],
+        certs: vec![cert1, cert2, cert3],
     };
 
     // Save to file
@@ -159,12 +156,6 @@ fn test_save_load_cycle() {
         assert_eq!(orig.proof, load.proof);
         assert_eq!(orig.proof_step_count(), load.proof_step_count());
     }
-
-    // Test has_proof() helper on loaded certificates
-    assert!(loaded.certs[0].has_proof());
-    assert!(loaded.certs[1].has_proof());
-    assert!(loaded.certs[2].has_proof());
-    assert!(!loaded.certs[3].has_proof());
 
     // Clean up is automatic when temp_dir goes out of scope
 }
@@ -1906,8 +1897,6 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
         .expect("lambda-valued cert should be finalized");
     let proof = cert
         .proof
-        .as_ref()
-        .expect("certificate should include a proof trace")
         .steps
         .iter()
         .filter_map(|step| step.claim.as_ref())

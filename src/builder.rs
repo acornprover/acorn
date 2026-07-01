@@ -1745,14 +1745,13 @@ impl<'a> Builder<'a> {
                 {
                     continue;
                 }
-                if let Some(step_count) = cert.proof_step_count() {
-                    if step_count == 0 {
-                        if include_empty {
-                            counts.entry(cert.goal.clone()).or_default().empty += 1;
-                        }
-                    } else {
-                        counts.entry(cert.goal.clone()).or_default().nonempty += 1;
+                let step_count = cert.proof_step_count();
+                if step_count == 0 {
+                    if include_empty {
+                        counts.entry(cert.goal.clone()).or_default().empty += 1;
                     }
+                } else {
+                    counts.entry(cert.goal.clone()).or_default().nonempty += 1;
                 }
             }
         }
@@ -2982,9 +2981,8 @@ impl<'a> Builder<'a> {
                 }
             })
             .map(|cert| match cert.proof_step_count() {
-                Some(0) => nonzero_skip_count,
-                Some(_) => nonzero_skip_count + usize::from(has_skip_zero),
-                None => 0,
+                0 => nonzero_skip_count,
+                _ => nonzero_skip_count + usize::from(has_skip_zero),
             })
             .sum()
     }
@@ -3015,7 +3013,7 @@ impl<'a> Builder<'a> {
                 store
                     .certs
                     .iter()
-                    .map(|cert| 1 + cert.proof_step_count().unwrap_or(0))
+                    .map(|cert| 1 + cert.proof_step_count())
                     .sum::<usize>()
             })
             .filter(|estimate| *estimate > 0)

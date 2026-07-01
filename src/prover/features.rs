@@ -142,18 +142,6 @@ impl Default for Features {
     }
 }
 
-pub const LEGACY_MODEL_FEATURE_NAMES: [&str; 9] = [
-    "is_contradiction",
-    "atom_count",
-    "is_counterfactual",
-    "is_hypothetical",
-    "is_factual",
-    "is_assumption",
-    "is_negated_goal",
-    "proof_size",
-    "depth",
-];
-
 pub const FEATURE_CATALOG_NAMES: [&str; 60] = [
     "is_contradiction",
     "atom_count",
@@ -419,10 +407,6 @@ impl Features {
         &FEATURE_CATALOG_NAMES
     }
 
-    pub fn legacy_model_feature_names() -> &'static [&'static str] {
-        &LEGACY_MODEL_FEATURE_NAMES
-    }
-
     pub fn feature_value(&self, name: &str) -> Option<f32> {
         Some(match name {
             "is_contradiction" => bool_float(self.is_contradiction),
@@ -506,22 +490,8 @@ impl Features {
         self.to_named_floats(Self::catalog_feature_names())
     }
 
-    pub fn to_floats(&self) -> Vec<f32> {
-        self.to_named_floats(Self::legacy_model_feature_names())
-    }
-
-    pub fn to_array(&self) -> Array1<f32> {
-        Array1::from(self.to_floats())
-    }
-
     pub fn to_array_for_names<S: AsRef<str>>(&self, names: &[S]) -> Array1<f32> {
         Array1::from(self.to_named_floats(names))
-    }
-
-    // Create an array of size (number of items, number of features) from a slice of features.
-    // Each row is a feature vector.
-    pub fn to_array2(features_slice: &[Features]) -> Array2<f32> {
-        Self::to_array2_for_names(features_slice, Self::legacy_model_feature_names())
     }
 
     pub fn to_array2_for_names<S: AsRef<str>>(

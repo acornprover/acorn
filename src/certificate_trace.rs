@@ -61,6 +61,13 @@ fn is_synthetic_generic_wrapper(code: &str) -> bool {
 }
 
 #[derive(Clone)]
+pub(crate) struct CertificateTraceInput {
+    pub step: CertificateStep,
+    pub code: String,
+    pub boolean_reduction_source: Option<Clause>,
+}
+
+#[derive(Clone)]
 struct StepClauses {
     primary: Clause,
     aliases: Vec<Clause>,
@@ -178,7 +185,7 @@ impl TraceStep {
 
 impl ProofTrace {
     pub(crate) fn from_certificate_steps_checked(
-        inputs: &[(CertificateStep, String, Option<Clause>)],
+        inputs: &[CertificateTraceInput],
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
@@ -320,10 +327,7 @@ impl<'a> TraceWriter<'a> {
         self.variable_support_depth = checkpoint.variable_support_depth;
     }
 
-    fn write(
-        mut self,
-        inputs: &[(CertificateStep, String, Option<Clause>)],
-    ) -> Result<ProofTrace, CodeGenError> {
+    fn write(mut self, inputs: &[CertificateTraceInput]) -> Result<ProofTrace, CodeGenError> {
         for (line_index, input) in inputs.iter().enumerate() {
             if self.derivation_checker.has_contradiction()
                 || self.shadow_checker.has_contradiction()
@@ -353,24 +357,23 @@ impl<'a> TraceWriter<'a> {
     fn write_step(
         &mut self,
         line_index: usize,
-        input: &(CertificateStep, String, Option<Clause>),
+        input: &CertificateTraceInput,
     ) -> Result<(), CodeGenError> {
-        let (step, code, boolean_reduction_source) = input;
-        let parsed = match step {
+        let parsed = match &input.step {
             CertificateStep::Satisfy(_) => Certificate::parse_code_line(
-                code,
+                &input.code,
                 self.project,
                 &mut self.bindings,
                 &mut self.kernel_context,
             )?,
-            CertificateStep::Claim(_) => step.clone(),
+            CertificateStep::Claim(_) => input.step.clone(),
         };
-        let code = code.as_str();
+        let code = input.code.as_str();
 
         let mut deferred_claim_error = None;
         let claim_index = match &parsed {
             CertificateStep::Claim(claim) => {
-                if let Some(source) = boolean_reduction_source {
+                if let Some(source) = &input.boolean_reduction_source {
                     Some(self.emit_boolean_reduction_claim_step(
                         code.to_string(),
                         source.clone(),
@@ -406,7 +409,7 @@ impl<'a> TraceWriter<'a> {
         match self.apply_step_to_derivation_checker(
             &parsed,
             code,
-            boolean_reduction_source.as_ref(),
+            input.boolean_reduction_source.as_ref(),
         ) {
             Ok(checked) => {
                 checked_steps = checked;
@@ -3939,9 +3942,9 @@ mod tests {
     fn serialized_certificate_trace_uses_p_for_top_level_proof() {
         let cert = Certificate {
             goal: "goal".to_string(),
-            proof: Some(ProofTrace {
+            proof: ProofTrace {
                 steps: vec![TraceStep::claim("p".to_string())],
-            }),
+            },
         };
         let json = serde_json::to_string(&cert).expect("certificate should serialize");
         assert!(
@@ -3987,9 +3990,9 @@ mod tests {
         );
         let cert = Certificate {
             goal: "goal".to_string(),
-            proof: Some(ProofTrace {
+            proof: ProofTrace {
                 steps: vec![TraceStep::claim("p".to_string())],
-            }),
+            },
         };
         processor
             .check_cert(

@@ -35,15 +35,13 @@ fn test_foreign_scoped_constant_in_claim_codegen_is_rejected() {
     );
 
     let mut generator = CodeGenerator::new(&bindings);
-    let mut steps = vec![];
     let err = generator
-        .specialization_to_certificate_steps(
+        .specialization_to_claim(
             &clause,
             &VariableMap::new(),
             &LocalContext::empty(),
             false,
             &mut kernel_context,
-            &mut steps,
         )
         .expect_err("foreign scoped constants should fail certificate generation");
     assert!(
@@ -67,21 +65,15 @@ fn test_incompatible_claim_mapping_is_rejected() {
     bad_map.set(0, Term::type_sort());
 
     let mut generator = CodeGenerator::new(&bindings);
-    let mut steps = vec![];
     let err = generator
-        .specialization_to_certificate_steps(
+        .specialization_to_claim(
             &generic,
             &bad_map,
             &crate::kernel::local_context::LocalContext::empty(),
             false,
             &mut kernel_context,
-            &mut steps,
         )
         .expect_err("incompatible mappings should fail certificate specialization");
-    assert!(
-        steps.is_empty(),
-        "failing specialization should not emit steps"
-    );
     assert!(
         err.to_string()
             .contains("certificate claim map type mismatch"),
@@ -106,21 +98,15 @@ fn test_out_of_scope_claim_mapping_is_rejected() {
     let replacement_context = LocalContext::from_types(vec![Term::bool_type()]);
 
     let mut generator = CodeGenerator::new(&bindings);
-    let mut steps = vec![];
     let err = generator
-        .specialization_to_certificate_steps(
+        .specialization_to_claim(
             &generic,
             &bad_map,
             &replacement_context,
             false,
             &mut kernel_context,
-            &mut steps,
         )
         .expect_err("out-of-scope mappings should fail certificate specialization");
-    assert!(
-        steps.is_empty(),
-        "failing specialization should not emit steps"
-    );
     assert!(
         err.to_string().contains("out-of-scope term"),
         "unexpected error: {}",
@@ -147,25 +133,16 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
     var_map.set(1, kernel_context.parse_term("g1(x0, Bool, x1)"));
 
     let mut generator = CodeGenerator::new(&bindings);
-    let mut steps = vec![];
-    generator
-        .specialization_to_certificate_steps(
+    let claim = generator
+        .specialization_to_claim(
             &generic,
             &var_map,
             &replacement_context,
             false,
             &mut kernel_context,
-            &mut steps,
         )
         .expect("specialization should succeed without replay mismatch");
 
-    let claim = steps
-        .iter()
-        .find_map(|step| match step {
-            crate::kernel::certificate_step::CertificateStep::Claim(claim) => Some(claim),
-            crate::kernel::certificate_step::CertificateStep::Satisfy(_) => None,
-        })
-        .expect("expected claim step");
     let mapped_value = claim
         .var_map()
         .get_mapping(1)
@@ -179,7 +156,6 @@ fn test_claim_replay_handles_replacement_type_var_inference() {
 
 #[test]
 fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
-    use crate::kernel::certificate_step::CertificateStep;
     use crate::kernel::variable_map::VariableMap;
     use crate::processor::Processor;
 
@@ -207,22 +183,16 @@ fn test_claim_replay_preserves_replacement_context_for_surviving_type_local() {
     );
 
     let mut generator = CodeGenerator::new(&bindings);
-    let mut steps = vec![];
-    generator
-        .specialization_to_certificate_steps(
+    let claim = generator
+        .specialization_to_claim(
             &generic,
             &var_map,
             &replacement_context,
             false,
             &mut kernel_context,
-            &mut steps,
         )
         .expect("claim replay should preserve the replacement context for surviving type locals");
 
-    assert_eq!(steps.len(), 1, "expected one generated claim step");
-    let CertificateStep::Claim(claim) = &steps[0] else {
-        panic!("expected a claim step");
-    };
     assert_eq!(
         claim.clause().get_local_context().get_var_type(1),
         replacement_context.get_var_type(0),

@@ -188,11 +188,8 @@ Those are related but not the same policy decision.
 
 ## Current Features
 
-`Features` now has two distinct vector views:
-
-- the wide feature catalog, exported in eval traces via `Features::to_catalog_floats`
-- the old nine-feature input, still available through `Features::legacy_model_feature_names` for
-  historical training compatibility
+`Features` exposes the wide feature catalog exported in eval traces via
+`Features::to_catalog_floats`.
 
 The catalog is intended for serious training data. It includes the original nine model inputs plus
 refactor-resistant shape/count/category features:
@@ -291,17 +288,6 @@ better scorer is not saving 8 ms of scoring time; it is trying to avoid hundreds
 of unnecessary active inference.
 
 ## Current Training Code
-
-There are two training paths in the tree.
-
-The older Rust dataset type in `src/prover/dataset.rs` is still present. It was designed around
-activated proof steps:
-
-- `features`: the feature vector for a proof step
-- `label`: whether the activated step was used in the final proof
-
-It writes `.npz` files under `files/datasets`. This is legacy infrastructure; the newer trace
-exporter is the path we are using for eval-shaped training.
 
 The current Python code under `python/` is a uv package named `acorn_training`. Its CLIs build
 tensor shards from traces and train from either raw traces or shard directories. The trainer:

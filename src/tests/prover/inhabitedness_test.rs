@@ -418,8 +418,6 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
         .expect("make_cert failed");
     let proof = cert
         .proof
-        .as_ref()
-        .expect("certificate should include a proof trace")
         .steps
         .iter()
         .filter_map(|step| step.claim.as_ref())

@@ -1900,7 +1900,7 @@ mod tests {
         let loaded = CertificateStore::load(cert_path.path()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
         assert_eq!(loaded.certs[0].goal, "simple_truth");
-        assert_eq!(loaded.certs[0].proof_step_count(), Some(0));
+        assert_eq!(loaded.certs[0].proof_step_count(), 0);
     }
 
     #[test]
@@ -2627,7 +2627,7 @@ mod tests {
         let loaded = CertificateStore::load(cert_path.path()).unwrap();
         assert_eq!(loaded.certs.len(), 1);
         assert_eq!(loaded.certs[0].goal, "simple_truth");
-        assert_eq!(loaded.certs[0].proof_step_count(), Some(1));
+        assert_eq!(loaded.certs[0].proof_step_count(), 1);
     }
 
     #[test]

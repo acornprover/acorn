@@ -4,7 +4,6 @@ use std::fmt;
 use crate::kernel::proof_step::{ProofStep, Truthiness};
 
 pub mod active_set;
-pub mod dataset;
 pub mod features;
 pub mod passive_set;
 pub mod proof;

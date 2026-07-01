@@ -317,15 +317,10 @@ pub(crate) fn normalize_signed_clause_term(term: &Term, positive: bool) -> (Term
     (normalize_clause_term(term), positive)
 }
 
-/// Compatibility wrapper while callers migrate to `normalize_term`.
-pub fn normalize_boolean_subterms(term: &Term) -> Term {
-    normalize_term(term)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        beta_reduce_clause_subterms, normalize_boolean_subterms, normalize_clause_subterms,
+        beta_reduce_clause_subterms, normalize_clause_subterms,
         normalize_clause_term_with_polarity, normalize_signed_clause_term, normalize_term,
     };
     use crate::kernel::atom::Atom;
@@ -336,21 +331,21 @@ mod tests {
     use crate::kernel::term::Term;
 
     #[test]
-    fn test_normalize_boolean_subterms_cancels_double_negation() {
+    fn test_normalize_term_cancels_double_negation() {
         let atom = Term::parse("c0");
         let term = Term::not(Term::not(atom.clone()));
         assert_eq!(normalize_term(&term), atom);
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_beta_reduces_head_lambda_application() {
+    fn test_normalize_term_beta_reduces_head_lambda_application() {
         let body = Term::not(Term::not(Term::atom(Atom::BoundVariable(0))));
         let term = Term::lambda(Term::bool_type(), body).apply(&[Term::parse("c0")]);
         assert_eq!(normalize_term(&term), Term::parse("c0"));
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_beta_reduces_capture_avoiding() {
+    fn test_normalize_term_beta_reduces_capture_avoiding() {
         let term = Term::lambda(
             Term::bool_type(),
             Term::lambda(Term::bool_type(), Term::atom(Atom::BoundVariable(1))),
@@ -361,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_eta_reduces_simple_lambda() {
+    fn test_normalize_term_eta_reduces_simple_lambda() {
         let term = Term::lambda(
             Term::bool_type(),
             Term::parse("c0").apply(&[Term::atom(Atom::BoundVariable(0))]),
@@ -370,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_eta_reduces_nested_lambdas() {
+    fn test_normalize_term_eta_reduces_nested_lambdas() {
         let term = Term::lambda(
             Term::bool_type(),
             Term::lambda(
@@ -385,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_eta_reduction_preserves_outer_binders() {
+    fn test_normalize_term_eta_reduction_preserves_outer_binders() {
         let term = Term::lambda(
             Term::bool_type(),
             Term::lambda(
@@ -409,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_eta_reduction_requires_forwarding_shape() {
+    fn test_normalize_term_eta_reduction_requires_forwarding_shape() {
         let term = Term::lambda(
             Term::bool_type(),
             Term::parse("c0").apply(&[
@@ -469,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_preserves_connective_shape() {
+    fn test_normalize_term_preserves_connective_shape() {
         let c0 = Term::parse("c0");
         let c1 = Term::parse("c1");
         let term = Term::not(Term::and(c0.clone(), Term::not(Term::not(c1.clone()))));
@@ -478,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_preserves_quantifier_heads() {
+    fn test_normalize_term_preserves_quantifier_heads() {
         let bound = Term::atom(Atom::BoundVariable(0));
         let predicate = Term::parse("c0").apply(&[bound.clone()]);
         let term = Term::not(Term::exists(
@@ -490,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_recurses_under_quantifier_bodies() {
+    fn test_normalize_term_recurses_under_quantifier_bodies() {
         let bound = Term::atom(Atom::BoundVariable(0));
         let predicate = Term::parse("c0").apply(&[bound.clone()]);
         let term = Term::forall(
@@ -502,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_recurses_inside_non_formula_terms() {
+    fn test_normalize_term_recurses_inside_non_formula_terms() {
         let term = Term::parse("c0").apply(&[Term::not(Term::not(Term::and(
             Term::parse("c1"),
             Term::parse("c2"),
@@ -512,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_leaves_other_builtins_alone() {
+    fn test_normalize_term_leaves_other_builtins_alone() {
         let term = Term::atom(Atom::Symbol(Symbol::Eq)).apply(&[
             Term::bool_type(),
             Term::not(Term::not(Term::and(Term::parse("c0"), Term::parse("c1")))),
@@ -527,14 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_orders_fully_applied_eq() {
+    fn test_normalize_term_orders_fully_applied_eq() {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
         assert_eq!(normalize_term(&term), expected);
     }
 
     #[test]
-    fn test_normalize_boolean_subterms_orders_fully_applied_eq_free_variables() {
+    fn test_normalize_term_orders_fully_applied_eq_free_variables() {
         let term = Term::eq(
             Term::bool_type(),
             Term::new_variable(2),
@@ -567,15 +562,5 @@ mod tests {
         let term = Term::eq(Term::bool_type(), Term::parse("c1"), Term::parse("c0"));
         let expected = Term::eq(Term::bool_type(), Term::parse("c0"), Term::parse("c1"));
         assert_eq!(normalize_clause_term_with_polarity(&term, true), expected);
-    }
-
-    #[test]
-    fn test_normalize_boolean_subterms_wrapper_matches_normalize_term() {
-        let term = Term::not(Term::not(Term::eq(
-            Term::bool_type(),
-            Term::parse("c1"),
-            Term::parse("c0"),
-        )));
-        assert_eq!(normalize_boolean_subterms(&term), normalize_term(&term));
     }
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::certificate_trace::ProofTrace;
+use crate::certificate_trace::{CertificateTraceInput, ProofTrace};
 use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::TypeParam;
@@ -104,9 +104,9 @@ pub struct Certificate {
     /// The name of the goal that was proved
     pub goal: String,
 
-    /// The proof trace. None indicates no proof exists for this goal.
-    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
-    pub proof: Option<ProofTrace>,
+    /// The proof trace.
+    #[serde(rename = "p")]
+    pub proof: ProofTrace,
 }
 
 impl Certificate {
@@ -961,36 +961,18 @@ impl Certificate {
 
     /// Create a new certificate with a proof trace.
     pub fn new(goal: String, proof: ProofTrace) -> Self {
-        Certificate {
-            goal,
-            proof: Some(proof),
-        }
-    }
-
-    /// Create a placeholder certificate with no proof
-    pub fn placeholder(goal: String) -> Self {
-        Certificate { goal, proof: None }
+        Certificate { goal, proof }
     }
 
     /// Trim this certificate's proof to the consumed prefix.
     pub fn trim_to_consumed_prefix(mut self, keep_steps: usize) -> Self {
-        if let Some(proof) = &mut self.proof {
-            proof.steps.truncate(keep_steps);
-        }
+        self.proof.steps.truncate(keep_steps);
         self
     }
 
-    /// Check if this certificate has a proof
-    pub fn has_proof(&self) -> bool {
-        self.proof_step_count().is_some()
-    }
-
-    /// Number of serialized checker steps carried by this certificate, if it has a proof.
-    pub fn proof_step_count(&self) -> Option<usize> {
-        if let Some(proof) = &self.proof {
-            return Some(proof.steps.len());
-        }
-        None
+    /// Number of serialized checker steps carried by this certificate.
+    pub fn proof_step_count(&self) -> usize {
+        self.proof.steps.len()
     }
 
     /// Build a certificate proof while optionally emitting prover-generated named witnesses.
@@ -1022,7 +1004,7 @@ impl Certificate {
 
     fn from_prepared_steps(
         goal: String,
-        steps: Vec<(CertificateStep, String, Option<Clause>)>,
+        steps: Vec<CertificateTraceInput>,
         kernel_context: KernelContext,
         checker: Checker,
         project: &dyn ProjectLookup,
@@ -1051,10 +1033,7 @@ impl Certificate {
         } else {
             trace
         };
-        Ok(Certificate {
-            goal,
-            proof: Some(trace),
-        })
+        Ok(Certificate { goal, proof: trace })
     }
 
     fn prepared_steps_from_concrete_steps_with_witnesses(
@@ -1062,62 +1041,54 @@ impl Certificate {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
         witness_registry: Option<&WitnessRegistry>,
-    ) -> Result<
-        (
-            Vec<(CertificateStep, String, Option<Clause>)>,
-            KernelContext,
-        ),
-        CodeGenError,
-    > {
+    ) -> Result<(Vec<CertificateTraceInput>, KernelContext), CodeGenError> {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
         let mut ordered_steps: Vec<PreparedCertificateStep> = Vec::new();
 
         for step in concrete_steps {
             for (var_map, replacement_context) in &step.var_maps {
-                let mut cert_steps = Vec::new();
-                generator
-                    .specialization_to_certificate_steps(
-                        &step.generic,
-                        var_map,
-                        replacement_context,
-                        step.preserve_open,
-                        &mut generation_kernel_context,
-                        &mut cert_steps,
-                    )
-                    .map_err(|err| {
-                        CodeGenError::GeneratedBadCode(format!(
-                            "{} [while converting concrete clause {}]",
-                            err, step.generic
-                        ))
-                    })?;
+                let cert_step = CertificateStep::Claim(
+                    generator
+                        .specialization_to_claim(
+                            &step.generic,
+                            var_map,
+                            replacement_context,
+                            step.preserve_open,
+                            &mut generation_kernel_context,
+                        )
+                        .map_err(|err| {
+                            CodeGenError::GeneratedBadCode(format!(
+                                "{} [while converting concrete clause {}]",
+                                err, step.generic
+                            ))
+                        })?,
+                );
 
-                for cert_step in cert_steps {
-                    let boolean_reduction_source = match (&step.rationale, &cert_step) {
-                        (
-                            crate::prover::proof::ConcreteRationale::BooleanReduction { source },
-                            CertificateStep::Claim(result),
-                        ) => {
-                            let result_clause = result
-                                .normalized_specialized_clause(&generation_kernel_context)
-                                .map_err(CodeGenError::GeneratedBadCode)?;
-                            Checker::new()
-                                .boolean_reduction_set_contains_for_trace(
-                                    source,
-                                    &result_clause,
-                                    &generation_kernel_context,
-                                )
-                                .then_some(source.clone())
-                        }
-                        _ => None,
-                    };
-                    let prepared = PreparedCertificateStep {
-                        step: cert_step,
-                        boolean_reduction_source,
-                    };
-                    if !ordered_steps.contains(&prepared) {
-                        ordered_steps.push(prepared);
+                let boolean_reduction_source = match (&step.rationale, &cert_step) {
+                    (
+                        crate::prover::proof::ConcreteRationale::BooleanReduction { source },
+                        CertificateStep::Claim(result),
+                    ) => {
+                        let result_clause = result
+                            .normalized_specialized_clause(&generation_kernel_context)
+                            .map_err(CodeGenError::GeneratedBadCode)?;
+                        Checker::new()
+                            .boolean_reduction_set_contains_for_trace(
+                                source,
+                                &result_clause,
+                                &generation_kernel_context,
+                            )
+                            .then_some(source.clone())
                     }
+                    _ => None,
+                };
+                let prepared = PreparedCertificateStep {
+                    step: cert_step,
+                    boolean_reduction_source,
+                };
+                if !ordered_steps.contains(&prepared) {
+                    ordered_steps.push(prepared);
                 }
             }
         }
@@ -1161,7 +1132,7 @@ impl Certificate {
             bindings,
             None,
         )?;
-        Ok(inputs.into_iter().map(|(_, code, _)| code).collect())
+        Ok(inputs.into_iter().map(|input| input.code).collect())
     }
 
     fn reorder_late_claim_supports(
@@ -1471,14 +1442,14 @@ impl Certificate {
         generator: &mut CodeGenerator,
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<(CertificateStep, String, Option<Clause>), CodeGenError> {
+    ) -> Result<CertificateTraceInput, CodeGenError> {
         let code =
             Self::serialize_certificate_step(&step.step, generator, kernel_context, bindings)?;
-        Ok((
-            step.step.clone(),
+        Ok(CertificateTraceInput {
+            step: step.step.clone(),
             code,
-            step.boolean_reduction_source.clone(),
-        ))
+            boolean_reduction_source: step.boolean_reduction_source.clone(),
+        })
     }
 
     /// Convert one parsed certificate step back into source code.
@@ -2211,21 +2182,6 @@ impl Certificate {
         ClaimCodec::deserialize_claim_with_args(code, project, bindings, kernel_context)
     }
 
-    /// Check this certificate. It is expected that it has a proof.
-    ///
-    /// Consumes checker/bindings/kernel_context since checking mutates all three.
-    pub fn check(
-        &self,
-        checker: Checker,
-        project: &dyn ProjectLookup,
-        bindings: Cow<BindingMap>,
-        kernel_context: Cow<KernelContext>,
-    ) -> Result<Vec<CertificateLine>, CodeGenError> {
-        Ok(self
-            .check_with_usage(checker, project, bindings, kernel_context)?
-            .lines)
-    }
-
     /// Check this certificate and report how many proof lines were actually consumed.
     ///
     /// Consumes checker/bindings/kernel_context since checking mutates all three.
@@ -2242,10 +2198,8 @@ impl Certificate {
                 consumed_proof_steps: 0,
             });
         }
-        let Some(proof) = &self.proof else {
-            return Err(CodeGenError::NoProof);
-        };
-        proof.check_with_usage(checker, project, bindings, kernel_context)
+        self.proof
+            .check_with_usage(checker, project, bindings, kernel_context)
     }
 }
 
