@@ -1,117 +1,161 @@
 # Profile Baselines
 
-Keep this file updated with the most recent profiling result for each profiling target. Each
-section is the current baseline for that script, so replace stale data when a newer run is
-collected. Rollout-era migration notes should stay in git history rather than accumulating here.
+Keep this file focused on current performance baselines. Historical rollout notes and old-format
+migration comparisons belong in git history, not in the active profiling record.
 
-## profile_reprove
+## How To Read Check Performance
 
-- Date:
-- Git hash:
-- Command:
-- Machine:
-- Timing:
-- Summary:
-- Breakdown:
+Track `check` in two modes:
 
-## profile_verify
+- `--jobs 1`: best for total work and code-level profiling. Phase times are easy to interpret and
+  mostly additive.
+- `--jobs 20` or default jobs: best for user-visible wall time. This captures scheduling,
+  dependency ordering, memory pressure, and the long-pole effect.
 
-- Date: 2026-05-13
-- Git hash: `bdbc9b47` plus local parallel verify cache-merge refactor
-- Command: `/usr/bin/time -v target/release/profile_verify`
-- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31.2 GiB RAM
-- Timing: full acornlib cached verify replay completed successfully in `0:32.06` wall with `548.19s` user time, `13.50s` system time, `1751%` CPU, and `4,950,528 KB` max RSS (`4.72 GiB`). A matching CLI timing sample, `/usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --jobs 20 --timing`, reported `30.457s` measured time: `9.462s` target/module load, `30.213s` verification/search, and `61.701s` summed cached cert checks.
-- Summary: parallel verify processing with per-worker build-cache deltas cut cached replay wall time by roughly `83%` versus the old sequential baseline (`3:10.77` wall). The tradeoff is peak RSS rising from about `1.83 GiB` to about `4.72 GiB`.
-- Breakdown:
-
-```text
-profile_verify
-==============
-
-profile command: /usr/bin/time -v target/release/profile_verify
-profile result: 356 modules rebuilt, 64,140/64,140 certificates OK, 0 searches
-profile wall clock: 0:32.06
-profile max RSS: 4.72 GiB
-
-timing command: /usr/bin/time -v target/release/acorn verify --ignore-hash --read-only --jobs 20 --timing
-total measured: 30.457s
-target/module load: 9.462s
-verification/search: 30.213s
-cached cert checks: 61.701s summed worker time
-```
-
-## profile_load
-
-### 2026-06-30 module-load profile
-
-- Date: 2026-06-30
-- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local certificate-trace rollout diff
-- Command:
-  - `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_load --profile=fastdev`
-  - `target/fastdev/profile_load`
-  - `perf record -g --call-graph fp -o perf.data target/fastdev/profile_load`
-- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF, 20 logical CPUs, 31 GiB RAM
-- Timing: `profile_load` loaded `real.double_sum` and dependencies without build/check/search. The timing run reported `8.722s` total measured, `8.686s` target/dependency load, `36.8ms` project setup, `36.1ms` cache load, `596` modules loaded, and `117` targets.
-- Summary: isolated module loading does not show checker boolean-reduction expansion. `perf report` had no `Checker::`, `insert_boolean_reductions_with_reason`, or `find_boolean_reductions` symbols above `0.01%`. The load phase is dominated by recursive dependency loading, parse/elaborate/lower work, symbol/type import merging, and statement/block elaboration.
-- Breakdown:
-
-```text
-profile_load: real.double_sum
-=============================
-
-target/dependency load: 8.686s of 8.722s total
-
-Dominant branch:
-Project::add_target_by_name
-└── Project::load_build_descriptors
-    └── Project::load_module
-        ├── recursive dependency load_module calls
-        └── module_loader::elaborate_and_lower_module
-
-Hot self-time:
-memmove, mi_free, AcornType::clone, _mi_page_malloc, clear_page_erms
-```
+In parallel `check`, printed phase counters are not a simple sum of wall time. A 20-thread run can
+report target/module load and certificate checking counters that are each close to total wall time,
+because module loading and module work are overlapped in the streaming build path. Use the total
+measured time and slowest-module table for wall-time interpretation.
 
 ## profile_check
 
-### 2026-07-01 certificate-trace single-thread full-check profile
+### 2026-07-01 Current Full-Library Check Baseline
 
-- Date: 2026-07-01
-- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local certificate-trace rollout diff
-- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
-- Scope: full acornlib `check --jobs 1 --timing`, before/after timing plus `perf` samples. Both runs checked `93,462/93,462` cached certificates with `0` searches across `605` modules.
-- Timing:
-  - Pre-trace baseline: `201.471s` measured in the perf run (`201.565s` in the plain timing run), `69.452s` target/module load, `131.808s` certificate checking, `30.811s` cached cert checks, `100.998s` other verification, `709 certs/s`.
-  - Certificate trace: `140.039s` measured in the perf run (`138.356s` in the plain timing run), `69.762s` target/module load, `70.030s` certificate checking, `43.495s` cached cert checks, `26.535s` other verification, `1,335 certs/s`.
-  - Net: certificate trace is `61.432s` faster in the perf run (`30.5%` by measured time). Target/module load is effectively unchanged (`+0.310s`). Certificate-checking wall time drops by `61.778s`. Cached cert replay gets `12.684s` slower, but other verification drops by `74.463s`.
-- Summary: single-thread timing is much easier to interpret than the parallel wall-clock run. The speedup is entirely in the checking phase, not module loading. Before the current certificate-trace format, most check time was around-cert verification work, especially imported/local fact insertion with eager boolean-reduction closure. After the trace rollout, that around-cert bucket is much smaller, while explicit trace replay is slower because the certs are larger and each trace step has more parsing/replay work.
-- Breakdown:
+- Git hash: `1d8efa5e21022464861d617f7126f54407546cb0`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF; 20 logical CPUs; 31 GiB RAM
+- Scope: full acornlib cached certificate check, `605` modules, `93,462/93,462` cached
+  certificates OK, `0` searches.
+
+Commands:
+
+```bash
+cargo build --profile release
+/usr/bin/time -v target/release/acorn check --jobs 1 --timing
+/usr/bin/time -v target/release/acorn check --jobs 20 --timing
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=acorn --profile=fastdev
+perf record -g --call-graph fp -o perf.data target/fastdev/acorn check --jobs 1 --timing
+```
+
+Single-thread timing:
 
 ```text
-Single-thread full check
-========================
-
-Pre-trace baseline
-├── total measured: 201.471s
-├── target/module load: 69.452s
-├── certificate checking: 131.808s
-│   ├── cached cert checks: 30.811s
-│   └── other verification: 100.998s
-└── throughput: 709 certs/s
-
-Certificate trace
-├── total measured: 140.039s
-├── target/module load: 69.762s
-├── certificate checking: 70.030s
-│   ├── cached cert checks: 43.495s
-│   └── other verification: 26.535s
-└── throughput: 1,335 certs/s
-
-Perf interpretation:
-├── pre-trace profile: imported/local fact insertion with eager boolean-reduction closure
-│   is the dominant visible checker branch.
-├── current profile: eager boolean-reduction discovery is no longer a visible top branch.
-└── explicit trace replay is slower after the certificate-trace rollout because it includes
-    claim parsing, generic/specialized normalization, trace insertion, and exact one-step
-    boolean-reduction checks.
+target/module load: 67.337s
+certificate checking: 67.745s
+  cached cert checks: 42.472s
+  other verification: 25.273s
+total measured: 135.325s
+certificate throughput: 1,380 certs/s
+wall clock: 2:15.69
+max RSS: 3.49 GiB
 ```
+
+20-thread timing:
+
+```text
+target/module load counter: 28.143s
+certificate checking counter: 28.521s
+  cached cert checks: 46.613s summed worker time
+total measured: 29.053s
+certificate throughput: 3,277 certs/s
+wall clock: 0:29.52
+CPU: 482%
+max RSS: 4.36 GiB
+```
+
+Slowest modules in the 20-thread wall-time run:
+
+```text
+int.lattice                         4.722s total, 3.429s cert time
+function_product_algebra            3.067s total, 2.549s cert time
+real.real_field                     1.789s total, 1.447s cert time
+set                                 1.638s total, 1.368s cert time
+set_lattice                         1.607s total, 1.268s cert time
+top100.theorem_071_order_of_a_subgroup
+                                    1.356s total, 0.713s cert time
+submodule                           1.122s total, 0.909s cert time
+real.cauchy                         1.026s total, 0.782s cert time
+```
+
+Single-thread perf summary:
+
+```text
+Verifier::run
+├── ~50% Builder::process_module_work_batch / verify lowered modules
+│   ├── certificate trace replay
+│   │   ├── Certificate::parse_code_line / claim deserialization
+│   │   ├── TraceChecker::accept_clause_with_aliases
+│   │   │   └── TermBridge::quote_clause / quote_term
+│   │   ├── Checker::insert_clause_for_trace
+│   │   └── Checker::check_clause_direct_for_trace
+│   ├── checker cloning before cert replay
+│   └── imported/local fact insertion into the checker
+└── ~30% Project::load_target_by_descriptor / load_module
+    └── module_loader::elaborate_and_lower_module
+```
+
+Hot self-time is broad rather than a single smoking gun:
+
+```text
+allocator work: _mi_page_malloc, mi_free, mi_heap_collect_ex, alloc/realloc
+copying: memmove, Vec clone, String clone
+term operations: TermRef::split_application_multi, decompose, Term::apply
+hashing/maps: DefaultHasher::write, im::HashMap operations
+syntax/loading: Token::scan_with_start_line, Expression::parse
+normalization: normalize_clause_term_with_polarity, split_symbol_application
+```
+
+Current interpretation:
+
+- Single-thread `check` is roughly half module load/lower and half certificate checking.
+- Multi-thread wall time is much lower, but only uses about `4.8` cores on average. The parallel
+  run is limited by streaming load, dependencies, memory/cache pressure, and slow modules rather
+  than by perfect distribution over 20 workers.
+- Certificate replay is no longer dominated by eager boolean-reduction expansion. Current replay
+  cost is mostly parsing Acorn-readable trace claims, normalizing/lowering them, inserting them into
+  the trace checker, and quoting clauses for diagnostics/line records.
+- Further `check` wins probably need to reduce repeated load/elaboration work, reduce trace replay
+  parsing/normalization/quoting, or improve parallel scheduling around the slowest modules.
+
+## profile_load
+
+### 2026-07-01 Current Target Load Baseline
+
+- Git hash: `1d8efa5e21022464861d617f7126f54407546cb0`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF; 20 logical CPUs; 31 GiB RAM
+- Target: `real.double_sum`
+
+Commands:
+
+```bash
+cargo build --profile release --bin profile_load
+/usr/bin/time -v target/release/profile_load
+```
+
+Timing:
+
+```text
+project setup: 60.4ms
+  cache load: 59.4ms
+target/dependency load: 8.768s
+total measured: 8.828s
+modules loaded: 596
+targets: 117
+wall clock: 0:09.16
+max RSS: 3.49 GiB
+```
+
+Interpretation:
+
+- Target/dependency load is still substantial on its own.
+- For full `check`, load/lower work is now important enough to profile alongside certificate
+  replay rather than treating it as setup noise.
+
+## profile_verify
+
+No current baseline collected in this pass. Refresh this section only when measuring edit-loop or
+no-change `verify` performance.
+
+## profile_reprove
+
+No current baseline collected in this pass. Refresh this section only when measuring prover/search
+performance.
