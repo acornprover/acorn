@@ -37,32 +37,57 @@ pub struct PositiveExistsReduction {
     pub body: Term,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum BooleanReductionKind {
+    #[serde(rename = "false_lit")]
     FalseLiteralElimination,
+    #[serde(rename = "ite_left")]
     IteSimplifyLeft,
+    #[serde(rename = "ite_right")]
     IteSimplifyRight,
+    #[serde(rename = "ite_left_then")]
     IteSplitLeftThenBranch,
+    #[serde(rename = "ite_left_else")]
     IteSplitLeftElseBranch,
+    #[serde(rename = "ite_right_then")]
     IteSplitRightThenBranch,
+    #[serde(rename = "ite_right_else")]
     IteSplitRightElseBranch,
+    #[serde(rename = "fn_neq_exists")]
     FunctionInequalityToExists,
+    #[serde(rename = "signed_not")]
     SignedNot,
+    #[serde(rename = "bool_eq_to_eq")]
     BooleanEqToEquality,
+    #[serde(rename = "pos_forall")]
     PositiveForallOpen,
+    #[serde(rename = "pos_exists_wit")]
     PositiveExistsObviousWitness,
+    #[serde(rename = "pos_exists")]
     PositiveExistsOpen,
+    #[serde(rename = "neg_forall_exists")]
     NegatedForallToExists,
+    #[serde(rename = "neg_exists")]
     NegatedExistsOpen,
+    #[serde(rename = "pos_and_left")]
     PositiveAndLeft,
+    #[serde(rename = "pos_and_right")]
     PositiveAndRight,
+    #[serde(rename = "neg_and")]
     NegativeAnd,
+    #[serde(rename = "pos_or")]
     PositiveOr,
+    #[serde(rename = "neg_or_left")]
     NegativeOrLeft,
+    #[serde(rename = "neg_or_right")]
     NegativeOrRight,
+    #[serde(rename = "bool_eq_l_or_not_r")]
     BooleanEqualityLeftOrNotRight,
+    #[serde(rename = "bool_eq_not_l_or_r")]
     BooleanEqualityNotLeftOrRight,
+    #[serde(rename = "bool_neq_not_l_or_not_r")]
     BooleanInequalityNotLeftOrNotRight,
+    #[serde(rename = "bool_neq_l_or_r")]
     BooleanInequalityLeftOrRight,
 }
 
@@ -1218,6 +1243,322 @@ impl Clause {
         .into_iter()
         .next()
         .expect("positive exists reduction produces exactly one clause")
+    }
+
+    pub fn boolean_reduction_at_with_options(
+        &self,
+        kind: BooleanReductionKind,
+        literal_index: usize,
+        kernel_context: &KernelContext,
+        _allow_positive_exists_witness: bool,
+    ) -> Option<NormalizedClauseTrace> {
+        let literal = self.literals.get(literal_index)?;
+        let bool_type = Term::bool_type();
+        let reduce = |replacements: Vec<Literal>, context: &LocalContext| {
+            self.with_replaced_literal_and_context(literal_index, vec![replacements], context)
+                .into_iter()
+                .next()
+        };
+
+        match kind {
+            BooleanReductionKind::FalseLiteralElimination => {
+                if !literal.is_signed_term()
+                    || (!literal.left.is_true() && literal.left != Term::new_false())
+                {
+                    return None;
+                }
+                let literal_is_true = if literal.left.is_true() {
+                    literal.positive
+                } else {
+                    !literal.positive
+                };
+                (!literal_is_true)
+                    .then(|| reduce(vec![], &self.context))
+                    .flatten()
+            }
+            BooleanReductionKind::IteSimplifyLeft => {
+                let reduced_left = Self::simplify_ite_term(&literal.left);
+                if reduced_left == literal.left {
+                    return None;
+                }
+                let reduced_lit =
+                    Literal::new(literal.positive, reduced_left, literal.right.clone());
+                reduce(vec![reduced_lit], &self.context)
+            }
+            BooleanReductionKind::IteSimplifyRight => {
+                let reduced_right = Self::simplify_ite_term(&literal.right);
+                if reduced_right == literal.right {
+                    return None;
+                }
+                let reduced_lit =
+                    Literal::new(literal.positive, literal.left.clone(), reduced_right);
+                reduce(vec![reduced_lit], &self.context)
+            }
+            BooleanReductionKind::IteSplitLeftThenBranch
+            | BooleanReductionKind::IteSplitLeftElseBranch => {
+                let args = Self::split_symbol_application(&literal.left, Symbol::Ite, 4)?;
+                let condition = args[1].clone();
+                let then_lit =
+                    Literal::new(literal.positive, args[2].clone(), literal.right.clone());
+                let else_lit =
+                    Literal::new(literal.positive, args[3].clone(), literal.right.clone());
+                let replacement = match kind {
+                    BooleanReductionKind::IteSplitLeftThenBranch => {
+                        vec![Literal::negative(condition), then_lit]
+                    }
+                    BooleanReductionKind::IteSplitLeftElseBranch => {
+                        vec![Literal::positive(condition), else_lit]
+                    }
+                    _ => unreachable!(),
+                };
+                reduce(replacement, &self.context)
+            }
+            BooleanReductionKind::IteSplitRightThenBranch
+            | BooleanReductionKind::IteSplitRightElseBranch => {
+                let args = Self::split_symbol_application(&literal.right, Symbol::Ite, 4)?;
+                let condition = args[1].clone();
+                let then_lit =
+                    Literal::new(literal.positive, literal.left.clone(), args[2].clone());
+                let else_lit =
+                    Literal::new(literal.positive, literal.left.clone(), args[3].clone());
+                let replacement = match kind {
+                    BooleanReductionKind::IteSplitRightThenBranch => {
+                        vec![Literal::negative(condition), then_lit]
+                    }
+                    BooleanReductionKind::IteSplitRightElseBranch => {
+                        vec![Literal::positive(condition), else_lit]
+                    }
+                    _ => unreachable!(),
+                };
+                reduce(replacement, &self.context)
+            }
+            BooleanReductionKind::FunctionInequalityToExists => {
+                let reduced = Self::reduce_function_inequality_to_exists(
+                    literal,
+                    &self.context,
+                    kernel_context,
+                )?;
+                reduce(vec![Literal::positive(reduced)], &self.context)
+            }
+            BooleanReductionKind::SignedNot => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::Not, 1)?;
+                reduce(
+                    vec![Literal::from_signed_term(
+                        args[0].clone(),
+                        !literal.positive,
+                    )],
+                    &self.context,
+                )
+            }
+            BooleanReductionKind::BooleanEqToEquality => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::Eq, 3)?;
+                let eq_left = args[1].clone();
+                let eq_right = args[2].clone();
+                let reduced_lit = if literal.positive {
+                    Literal::equals(eq_left, eq_right)
+                } else {
+                    Literal::not_equals(eq_left, eq_right)
+                };
+                reduce(vec![reduced_lit], &self.context)
+            }
+            BooleanReductionKind::PositiveForallOpen => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || !literal.positive
+                {
+                    return None;
+                }
+                let (reduced, output_context) =
+                    Self::reduce_positive_forall(&literal.left, &self.context)?;
+                reduce(vec![Literal::positive(reduced)], &output_context)
+            }
+            BooleanReductionKind::PositiveExistsObviousWitness => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || !literal.positive
+                    || (self.literals.len() > 1 && literal.left.as_ref().is_exists())
+                {
+                    return None;
+                }
+                let (_witness, reduced) = Self::reduce_exists_with_obvious_witness(&literal.left)?;
+                reduce(vec![Literal::positive(reduced)], &self.context)
+            }
+            BooleanReductionKind::PositiveExistsOpen => None,
+            BooleanReductionKind::NegatedForallToExists => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || literal.positive
+                {
+                    return None;
+                }
+                let reduced = Self::reduce_negated_forall(&literal.left)?;
+                reduce(vec![Literal::positive(reduced)], &self.context)
+            }
+            BooleanReductionKind::NegatedExistsOpen => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || literal.positive
+                {
+                    return None;
+                }
+                let (reduced, output_context) =
+                    Self::reduce_negated_exists(&literal.left, &self.context)?;
+                reduce(vec![Literal::negative(reduced)], &output_context)
+            }
+            BooleanReductionKind::PositiveAndLeft | BooleanReductionKind::PositiveAndRight => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || !literal.positive
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::And, 2)?;
+                let reduced = match kind {
+                    BooleanReductionKind::PositiveAndLeft => args[0].clone(),
+                    BooleanReductionKind::PositiveAndRight => args[1].clone(),
+                    _ => unreachable!(),
+                };
+                reduce(vec![Literal::positive(reduced)], &self.context)
+            }
+            BooleanReductionKind::NegativeAnd => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || literal.positive
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::And, 2)?;
+                reduce(
+                    vec![
+                        Literal::negative(args[0].clone()),
+                        Literal::negative(args[1].clone()),
+                    ],
+                    &self.context,
+                )
+            }
+            BooleanReductionKind::PositiveOr => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || !literal.positive
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::Or, 2)?;
+                reduce(
+                    vec![
+                        Literal::positive(args[0].clone()),
+                        Literal::positive(args[1].clone()),
+                    ],
+                    &self.context,
+                )
+            }
+            BooleanReductionKind::NegativeOrLeft | BooleanReductionKind::NegativeOrRight => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || !literal.right.is_true()
+                    || literal.positive
+                {
+                    return None;
+                }
+                let args = Self::split_symbol_application(&literal.left, Symbol::Or, 2)?;
+                let reduced = match kind {
+                    BooleanReductionKind::NegativeOrLeft => args[0].clone(),
+                    BooleanReductionKind::NegativeOrRight => args[1].clone(),
+                    _ => unreachable!(),
+                };
+                reduce(vec![Literal::negative(reduced)], &self.context)
+            }
+            BooleanReductionKind::BooleanEqualityLeftOrNotRight
+            | BooleanReductionKind::BooleanEqualityNotLeftOrRight
+            | BooleanReductionKind::BooleanInequalityNotLeftOrNotRight
+            | BooleanReductionKind::BooleanInequalityLeftOrRight => {
+                if literal
+                    .left
+                    .get_type_with_context(&self.context, kernel_context)
+                    != bool_type
+                    || literal.right.is_true()
+                {
+                    return None;
+                }
+                let mut literals = self.literals[..literal_index].to_vec();
+                match kind {
+                    BooleanReductionKind::BooleanEqualityLeftOrNotRight => {
+                        if !literal.positive {
+                            return None;
+                        }
+                        literals.push(Literal::positive(literal.left.clone()));
+                        literals.push(Literal::negative(literal.right.clone()));
+                    }
+                    BooleanReductionKind::BooleanEqualityNotLeftOrRight => {
+                        if !literal.positive {
+                            return None;
+                        }
+                        literals.push(Literal::negative(literal.left.clone()));
+                        literals.push(Literal::positive(literal.right.clone()));
+                    }
+                    BooleanReductionKind::BooleanInequalityNotLeftOrNotRight => {
+                        if literal.positive {
+                            return None;
+                        }
+                        literals.push(Literal::negative(literal.left.clone()));
+                        literals.push(Literal::negative(literal.right.clone()));
+                    }
+                    BooleanReductionKind::BooleanInequalityLeftOrRight => {
+                        if literal.positive {
+                            return None;
+                        }
+                        literals.push(Literal::positive(literal.left.clone()));
+                        literals.push(Literal::positive(literal.right.clone()));
+                    }
+                    _ => unreachable!(),
+                }
+                literals.extend_from_slice(&self.literals[literal_index + 1..]);
+                Some(Self::normalize_boolean_reduction(
+                    literals,
+                    self.context.clone(),
+                    self.context.len(),
+                ))
+            }
+        }
     }
 
     fn find_boolean_reductions_with_locations_with_options(

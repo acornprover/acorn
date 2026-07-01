@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 const MDTEST_DIR: &str = "src/tests/prover/mdtest";
 const FILTER_ENV: &str = "ACORN_MDTEST_FILTER";
+const MDTEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MdExpectation {
@@ -275,6 +276,17 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 #[test]
 fn mdtests() {
+    let handle = std::thread::Builder::new()
+        .stack_size(MDTEST_STACK_SIZE)
+        .spawn(mdtests_inner)
+        .expect("mdtest thread should spawn");
+    match handle.join() {
+        Ok(()) => {}
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn mdtests_inner() {
     let root = mdtest_root();
     let files = discover_markdown_files(&root);
     assert!(

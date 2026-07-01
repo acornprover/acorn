@@ -66,7 +66,313 @@ Slowest rebuilt modules by total processing time:
 └── quotient_algebra: 12.387s total, 1.221s cert time
 ```
 
+## profile_load
+
+### 2026-06-30 module-load profile
+
+- Date: 2026-06-30
+- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local strict-BR/exact-BR migration diff
+- Command:
+  - `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin=profile_load --profile=fastdev`
+  - `target/fastdev/profile_load`
+  - `perf record -g --call-graph fp -o perf.data target/fastdev/profile_load`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF, 20 logical CPUs, 31 GiB RAM
+- Timing: `profile_load` loaded `real.double_sum` and dependencies without build/check/search. The timing run reported `8.722s` total measured, `8.686s` target/dependency load, `36.8ms` project setup, `36.1ms` cache load, `596` modules loaded, and `117` targets. The perf run reported `8.345s` total measured and `8.306s` target/dependency load.
+- Perf sample: `8.662s` sampled duration, `25,932` samples, `0` lost. Intel hybrid CPU split events; the dominant `cpu_core` section had `25K` samples.
+- Summary: isolated module loading does not show checker boolean-reduction expansion. `perf report` had no `Checker::`, `insert_boolean_reductions_with_reason`, or `find_boolean_reductions` symbols above `0.01%`. The load phase is dominated by recursive dependency loading, parse/elaborate/lower work, symbol/type import merging, and statement/block elaboration. The expensive boolean-reduction closure seen before exact-BR is in the builder verification phase (`Processor::with_imports_for_checking` while checking modules), not in pure module loading.
+- Breakdown:
+
+```text
+profile_load: real.double_sum
+=============================
+
+├── 96.0%  Project::add_target_by_name
+│   └── 96.0%  Project::load_build_descriptors
+│       └── 95.4%  Project::load_module
+│           ├── recursive dependency load_module calls
+│           └── module_loader::elaborate_and_lower_module
+│               ├── Environment::run_lowering_pass
+│               │   ├── Environment::lower_nodes_pass
+│               │   │   └── lowering facts/goals/propositions to clauses
+│               │   ├── SymbolTable::merge_imports
+│               │   └── TypeStore::merge
+│               └── Environment::add_statement
+│                   └── Block::new_with_local_obligations / add_conditional
+└── no visible Checker boolean-reduction expansion
+
+Hot self-time:
+├── 6.9%  memmove
+├── 4.8%  mi_free
+├── 4.5%  AcornType::clone
+├── 4.1%  _mi_page_malloc
+├── 3.0%  clear_page_erms
+└── 3.0%  mi_heap_malloc_aligned_at
+```
+
 ## profile_check
+
+### 2026-07-01 strict-br single-thread full-check profile
+
+- Date: 2026-07-01
+- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local strict-br rollout diff
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
+- Scope: full acornlib `check --jobs 1 --timing`, before/after timing plus `perf` samples. The preserved pre-strict baseline used `/tmp/acorn-check-baseline-target/release/acorn --lib /tmp/acorn-check-baseline/acornlib`; strict-BR used `/tmp/acorn-strict-br-migrate --lib /home/lacker/acornlib`. Both runs checked `93,462/93,462` cached certificates with `0` searches across `605` modules.
+- Commands:
+  - Timing: `/tmp/acorn-check-baseline-target/release/acorn --lib /tmp/acorn-check-baseline/acornlib check --jobs 1 --timing`
+  - Timing: `/tmp/acorn-strict-br-migrate --lib /home/lacker/acornlib check --jobs 1 --timing`
+  - Perf: `perf record -F 99 -g --call-graph dwarf,8192 -o /tmp/acorn-old-jobs1.perf.data /tmp/acorn-check-baseline-target/release/acorn --lib /tmp/acorn-check-baseline/acornlib check --jobs 1 --timing`
+  - Perf: `perf record -F 99 -g --call-graph dwarf,8192 -o /tmp/acorn-new-jobs1.perf.data /tmp/acorn-strict-br-migrate --lib /home/lacker/acornlib check --jobs 1 --timing`
+- Timing:
+  - Old baseline: `201.471s` measured in the perf run (`201.565s` in the plain timing run), `69.452s` target/module load, `131.808s` certificate checking, `30.811s` cached cert checks, `100.998s` other verification, `709 certs/s`.
+  - Strict-BR: `140.039s` measured in the perf run (`138.356s` in the plain timing run), `69.762s` target/module load, `70.030s` certificate checking, `43.495s` cached cert checks, `26.535s` other verification, `1,335 certs/s`.
+  - Net: strict-BR is `61.432s` faster in the perf run (`30.5%` by measured time). Target/module load is effectively unchanged (`+0.310s`). Certificate-checking wall time drops by `61.778s`. Cached cert replay gets `12.684s` slower, but other verification drops by `74.463s`.
+- Summary: Single-thread timing is much easier to interpret than the parallel wall-clock run. The speedup is entirely in the checking phase, not module loading. Before strict-BR, most check time was not the measured per-certificate replay; it was around-cert verification work, especially imported/local fact insertion with eager boolean-reduction closure. After strict-BR, that around-cert bucket is much smaller, while explicit trace replay is slower because the certs are larger and each trace step has more parsing/replay work.
+- Breakdown:
+
+```text
+Single-thread full check
+========================
+
+Old baseline
+├── total measured: 201.471s
+├── target/module load: 69.452s
+├── certificate checking: 131.808s
+│   ├── cached cert checks: 30.811s
+│   └── other verification: 100.998s
+└── throughput: 709 certs/s
+
+Strict-BR
+├── total measured: 140.039s
+├── target/module load: 69.762s
+├── certificate checking: 70.030s
+│   ├── cached cert checks: 43.495s
+│   └── other verification: 26.535s
+└── throughput: 1335 certs/s
+
+Delta
+├── target/module load: +0.310s
+├── cached cert checks: +12.684s
+├── other verification: -74.463s
+└── total measured: -61.432s
+
+Perf interpretation, qualitative because the preserved release binaries use DWARF unwinding:
+├── old profile: Processor::with_imports_for_checking / add_exported_fact /
+│   Checker::insert_clause_internal / insert_boolean_reductions_with_reason is the dominant
+│   visible branch; Clause::find_boolean_reductions_with_locations_with_options appears at
+│   about 12% inclusive.
+├── new profile: eager boolean-reduction discovery is no longer a visible top branch; the
+│   remaining major work is ordinary load/lowering, imported/local fact insertion, allocation,
+│   and explicit trace replay.
+└── explicit trace replay is slower after strict-BR, visible in the timer rather than as a
+    single dominant symbol: it includes claim parsing, generic/specialized normalization,
+    shallow trace insertion, and exact one-step BR checks.
+```
+
+### 2026-07-01 strict-br full-check timing recheck
+
+- Date: 2026-07-01
+- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local strict-br rollout diff
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
+- Scope: full acornlib `check --timing`, timing only, no perf sample. The preserved pre-strict baseline used `/tmp/acorn-check-baseline-target/release/acorn --lib /tmp/acorn-check-baseline/acornlib`; the migrated strict run used `/tmp/acorn-strict-br-migrate --lib /home/lacker/acornlib`. Both runs checked `93,462/93,462` cached certificates with `0` searches across `605` modules. The old cert corpus was `21,091,127` bytes; the migrated strict cert corpus is `43,424,816` bytes (`2.06x`).
+- Timing:
+  - Default worker count (`20` threads), three alternating old/new pairs:
+    - Old baseline measured totals: `32.228s`, `32.542s`, `32.670s`; average `32.480s`.
+    - Migrated strict measured totals: `29.187s`, `29.265s`, `28.966s`; average `29.139s`.
+    - Old average breakdown: `30.272s` target/module load, `31.964s` certificate checking, `33.526s` summed cached cert checks, `2,924 certs/s`.
+    - Migrated strict average breakdown: `28.224s` target/module load, `28.591s` certificate checking, `45.348s` summed cached cert checks, `3,269 certs/s`.
+  - Four workers (`--jobs 4`), one pair: old baseline `42.992s` measured, `36.511s` target/module load, `42.371s` certificate checking, `28.960s` summed cached cert checks, `2,206 certs/s`. Migrated strict `43.332s` measured, `42.477s` target/module load, `42.784s` certificate checking, `41.906s` summed cached cert checks, `2,184 certs/s`.
+- Summary: Full-check timing has large single-run variance; one old-baseline default-worker run measured `24.290s`, but the immediately following three alternating old/new pairs put old consistently around `32.5s` and migrated strict around `29.1s`. On the repeated default-worker comparison, strict-BR is about `3.341s` faster (`10.3%` by measured time), and wall-time certificate checking is about `3.373s` faster. However, summed cached cert replay is slower by about `35.3%` (`33.526s` to `45.348s`) because the explicit trace format is larger and more parse/replay-heavy. The apparent win comes from reducing around-cert/import/local checker work enough to offset the slower per-cert replay. With `--jobs 4`, one timing pair was essentially flat, so this should be treated as throughput-sensitive and noisy rather than a clean universal speedup.
+- Breakdown:
+
+```text
+Full check, default workers
+===========================
+
+Old baseline
+├── total measured avg: 32.480s
+├── target/module load avg: 30.272s
+├── certificate checking avg: 31.964s
+├── cached cert checks, summed worker time avg: 33.526s
+└── throughput avg: 2924 certs/s
+
+Migrated strict-BR
+├── total measured avg: 29.139s
+├── target/module load avg: 28.224s
+├── certificate checking avg: 28.591s
+├── cached cert checks, summed worker time avg: 45.348s
+└── throughput avg: 3269 certs/s
+
+Full check, --jobs 4
+====================
+
+Old baseline
+├── total measured: 42.992s
+├── target/module load: 36.511s
+├── certificate checking: 42.371s
+├── cached cert checks, summed worker time: 28.960s
+└── throughput: 2206 certs/s
+
+Migrated strict-BR
+├── total measured: 43.332s
+├── target/module load: 42.477s
+├── certificate checking: 42.784s
+├── cached cert checks, summed worker time: 41.906s
+└── throughput: 2184 certs/s
+```
+
+### 2026-06-30 exact-BR sample before/after profile
+
+- Date: 2026-06-30
+- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local strict-BR/exact-BR migration diff
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF, 20 logical CPUs, 31 GiB RAM
+- Scope: 10-target sample, not a full-library run. Baseline used `/tmp/acorn-default-fp --lib /home/lacker/acornlib`; exact-BR used `/tmp/acorn-strict-fp --lib /tmp/acornlib-exact-br-full`. The temp exact-BR library has 57 changed cert files from the sample migration.
+- Targets: `affine_map`, `continuous_preimage`, `group_action_bijection`, `multiset`, `ring_ideal_hom_image`, `crypto.rsa`, `nat.base_b_extra`, `order_set.function_order_on`, `finite_group.base`, `top100.theorem_071_order_of_a_subgroup`.
+- Timing commands: frame-pointer `fastdev` binaries, one `check --timing` per target.
+- Perf commands:
+  - `perf record -g --call-graph fp -o /tmp/acorn-before-exactbr-sample.perf.data bash -lc '<10-target baseline loop>'`
+  - `perf record -g --call-graph fp -o /tmp/acorn-after-exactbr-sample.perf.data bash -lc '<10-target exact-BR loop>'`
+- Timing:
+  - Baseline sample: `8,081` certs, `28.186s` total measured, `21.746s` target/module load, `6.831s` certificate checking, `2.693s` summed cached cert checks, `4.710s` other verification.
+  - Exact-BR sample: `8,081` certs, `24.109s` total measured, `21.391s` target/module load, `2.996s` certificate checking, `3.980s` summed cached cert checks, `0.521s` other verification.
+  - Net: total measured improved `1.17x` (`14.5%` less wall time); certificate-checking wall time improved `2.28x`; other verification dropped `9.0x`; summed cached trace replay got `1.48x` slower.
+- Perf sample:
+  - Baseline: `30.207s` sampled duration, `128,193` samples, `0` lost.
+  - Exact-BR: `26.034s` sampled duration, `95,990` samples, `0` lost.
+  - Intel hybrid CPU split reports into `cpu_core` and `cpu_atom`; `cpu_core` had most samples (`122K` before, `93K` after).
+- Summary: exact-BR removes the old eager boolean-reduction closure from the hot checker path. In the sample, `insert_boolean_reductions_with_reason` falls from a major branch (`~25%` of dominant `cpu_core` samples, `~68%` in the worker-heavy `cpu_atom` section) to about `0.04%`. The wall-time win is capped because this sample repeatedly loads/elaborates dependencies for ten separate target commands, so target/module load remains about `21s` both before and after. The new checker cost is explicit trace replay, especially parsing claim strings and accepting/inserting resulting clauses.
+- Breakdown:
+
+```text
+Timing Breakdown
+================
+
+Before exact-BR, 10-target sample
+├── total measured: 28.186s
+├── target/module load: 21.746s
+├── certificate checking: 6.831s
+│   ├── cached cert checks, summed worker time: 2.693s
+│   └── other verification: 4.710s
+└── perf hot checker path:
+    └── Processor::with_imports_for_checking
+        └── Checker::insert_clause_internal
+            └── insert_boolean_reductions_with_reason
+                └── Clause::find_boolean_reductions_with_locations_with_options
+
+After exact-BR, 10-target sample
+├── total measured: 24.109s
+├── target/module load: 21.391s
+├── certificate checking: 2.996s
+│   ├── cached cert checks, summed worker time: 3.980s
+│   └── other verification: 0.521s
+└── perf hot checker path:
+    └── Processor::check_cert_with_usage
+        └── ProofTrace::check_with_usage
+            └── TraceChecker::check_step
+                ├── parse_required_claim_with_generic
+                │   └── Certificate::parse_code_line
+                └── accept_clause_with_aliases
+```
+
+### 2026-06-30 strict-br migrated cert timing sanity check
+
+- Date: 2026-06-30
+- Git hash: `5e035ace2a39fcf1a65304404d6edb54f05a70bb` plus local strict-br rollout diff
+- Command:
+  - Strict-br: `cargo run --profile release --features strict-br -- --lib /home/lacker/acornlib check --timing`
+  - Current migrated certs on default checker: `/usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" target/release/acorn --lib /home/lacker/acornlib check --timing`
+  - Baseline: `/usr/bin/time -f "elapsed=%e user=%U system=%S cpu=%P maxrss=%M" /tmp/acorn-check-baseline-target/release/acorn --lib /tmp/acorn-check-baseline/acornlib check --timing`
+- Machine: `freedom`; Linux `6.8.0-111-generic`; Intel Core i7-12700KF (20 logical CPUs); 31 GiB RAM
+- Timing:
+  - Strict-br with fully migrated certs: `29.113s` measured; `93,462/93,462` cached certs OK; `0` searches; throughput `3,272 certs/s`.
+  - Current migrated certs on default checker: `31.132s`, `31.159s` measured; `31.58s`, `31.60s` wall; `93,462/93,462` cached certs OK; `0` searches; throughput about `3,052 certs/s`.
+  - Old tracked code/certs baseline: `32.132s`, `32.096s` measured; `32.58s`, `32.53s` wall; `93,462/93,462` cached certs OK; `0` searches; throughput about `2,958 certs/s`.
+- Summary: The fully migrated strict-br certs pass check and improve full `acorn check` by about `3.0s` versus the old tracked code/certs baseline, roughly `9.3%` by Acorn's measured time. An earlier failed strict-br run was caused by an incomplete rollout copy that only updated top-level `src/certs/*.jsonl` and left nested package certs such as `src/pair/certs/base.jsonl` in the old format. Once all `*/certs/*.jsonl` files were copied from the migrated temp tree, strict-br check succeeded.
+- Breakdown:
+
+```text
+Timing-only comparison, not a perf sample:
+
+Strict-br with fully migrated certs
+├── total measured: 29.113s
+├── target/module load: 28.200s
+├── certificate checking: 28.564s
+├── cached cert checks, summed worker time: 46.888s
+└── throughput: 3272 certs/s
+
+Current migrated certs on default checker
+├── total measured: 31.132s, 31.159s
+├── target/module load: 28.942s, 28.980s
+├── certificate checking: 30.603s, 30.634s
+├── cached cert checks, summed worker time: 34.193s, 33.610s
+└── throughput: 3054 certs/s, 3051 certs/s
+
+Old tracked code/certs baseline
+├── total measured: 32.132s, 32.096s
+├── target/module load: 29.958s, 29.935s
+├── certificate checking: 31.604s, 31.585s
+├── cached cert checks, summed worker time: 33.778s, 34.246s
+└── throughput: 2957 certs/s, 2959 certs/s
+```
+
+Post-strict-br perf sample:
+
+```text
+Perf command:
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin acorn --profile=fastdev --features strict-br
+perf record -g --call-graph fp -o /tmp/acorn-strict-br-check-perf.data \
+    /home/lacker/acorn/target/fastdev/acorn --lib /home/lacker/acornlib check --timing
+
+Result:
+├── 93,462/93,462 certificates OK, 0 searches
+├── total measured: 29.962s
+├── target/module load: 29.009s
+├── certificate checking: 29.413s
+├── cached cert checks: 51.013s summed worker time
+├── perf data: 482,590 samples, 0 lost
+└── report note: Intel hybrid CPU produced cpu_core and cpu_atom sections;
+    this summary uses the dominant cpu_core section, with 441K samples.
+
+Top-down shape:
+├── 77.9%  worker threads
+│   ├── 50.6%  Builder::build_module_on_worker
+│   │   └── 50.5%  Builder::verify_lowered_module
+│   │       ├── 41.0%  Builder::verify_lowered_items
+│   │       │   ├── 35.6%  Processor::check_cert_with_usage
+│   │       │   │   └── 32.8%  ProofTrace::check_with_usage
+│   │       │   │       └── 32.0%  TraceChecker::check_step
+│   │       │   │           ├── 15.1%  TraceChecker::parse_required_claim_with_generic
+│   │       │   │           │   └── 12.8%  Certificate::parse_code_line
+│   │       │   │           ├──  9.5%  TraceChecker::accept_clause_with_aliases
+│   │       │   │           │   └──  5.1%  Checker::insert_clause_for_trace
+│   │       │   │           └──  1.1%  Clause::find_boolean_reductions_with_locations_with_options
+│   │       │   └──  8.9%  Processor::with_imports_for_checking
+│   │       │       └──  8.7%  Processor::add_exported_fact
+│   │       │           └──  8.4%  Checker::insert_clause_internal
+│   │       └── other local lowered item work
+│   └── 25.9%  module_loader::elaborate_and_lower_module
+└── remaining time: main-thread project/target walking, scheduling, filesystem metadata, and runtime overhead
+
+Hot self-time:
+├── 5.3%  _mi_page_malloc
+├── 5.2%  __memmove_avx_unaligned_erms
+├── 5.0%  mi_free
+├── 3.1%  TermRef::split_application_multi
+├── 2.6%  mi_heap_malloc_aligned_at
+├── 2.3%  TermRef::decompose
+├── 2.0%  SipHasher::write
+├── 1.9%  filesystem/AppArmor stat path
+├── 1.9%  AcornType::clone
+└── 1.6%  split_symbol_application
+
+Interpretation:
+Strict-br removes the old import-time eager boolean-reduction closure from the hot path:
+`insert_boolean_reductions_with_reason` is no longer a large visible branch, and explicit
+boolean-reduction discovery/checking is around 1% of sampled CPU in this run. The dominant
+post-strict-br checker cost is instead explicit trace replay, especially repeatedly parsing
+claim strings from JSON and accepting/inserting the resulting clauses. This explains the tradeoff:
+wall time improves because import/setup closure is gone, but summed certificate worker time rises
+because the larger explicit trace format creates much more parse/replay work.
+```
 
 ### 2026-06-17 certificate trace Full Check Profile
 

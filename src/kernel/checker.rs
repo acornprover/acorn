@@ -12,10 +12,12 @@ use crate::kernel::clause::BooleanReductionKind;
 use crate::kernel::clause::{Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
 use crate::kernel::kernel_context::KernelContext;
+use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::Rule;
 use crate::kernel::term::Term;
 use crate::kernel::term_normalization::normalize_clause_subterms;
+use crate::kernel::variable_map::VariableMap;
 use crate::kernel::{EqualityGraph, StepId};
 use tracing::trace;
 
@@ -24,6 +26,9 @@ use tracing::trace;
 pub enum StepReason {
     /// Proven by the term graph (concrete reasoning via congruence closure and propositional logic).
     EqualityGraph,
+
+    /// Proven by simplifying a variable clause against current concrete equality-graph facts.
+    VariableSimplification(Vec<usize>),
 
     /// An assumption based on normalizing a statement elsewhere in the code.
     /// The source points to the location of the assumption.
@@ -64,6 +69,7 @@ impl StepReason {
     pub fn description(&self) -> String {
         match self {
             StepReason::EqualityGraph => "simplification".to_string(),
+            StepReason::VariableSimplification(_) => "simplification".to_string(),
             StepReason::Assumption(source) | StepReason::Skolemization(source) => {
                 source.description()
             }
@@ -80,13 +86,18 @@ impl StepReason {
     }
 
     pub fn dependency(&self) -> Option<usize> {
+        self.dependencies().into_iter().next()
+    }
+
+    pub fn dependencies(&self) -> Vec<usize> {
         match self {
             StepReason::EqualityResolution(step_id)
             | StepReason::Extensionality(step_id)
             | StepReason::EqualityFactoring(step_id)
             | StepReason::Injectivity(step_id)
-            | StepReason::BooleanReduction(step_id) => Some(*step_id),
-            _ => None,
+            | StepReason::BooleanReduction(step_id) => vec![*step_id],
+            StepReason::VariableSimplification(step_ids) => step_ids.clone(),
+            _ => vec![],
         }
     }
 }
@@ -134,6 +145,9 @@ pub struct Checker {
     /// Whether a contradiction was directly inserted into the checker.
     direct_contradiction: bool,
 
+    /// Dependencies for a direct contradiction, when it was produced by a traceable step.
+    direct_contradiction_dependencies: Option<Vec<usize>>,
+
     /// The concrete-fact generation at which each variable clause was last expanded.
     variable_clause_generations: ImHashMap<Clause, u64>,
 
@@ -163,6 +177,7 @@ impl Checker {
             term_graph: EqualityGraph::new(),
             exact_clauses: ImHashMap::new(),
             direct_contradiction: false,
+            direct_contradiction_dependencies: None,
             variable_clause_generations: ImHashMap::new(),
             concrete_generation: 0,
             past_boolean_reductions: ImHashSet::new(),
@@ -180,6 +195,11 @@ impl Checker {
     pub(crate) fn enable_eager_boolean_reductions(&mut self, kernel_context: &KernelContext) {
         self.eager_boolean_reductions = true;
         self.reprocess_boolean_reductions(kernel_context);
+    }
+
+    fn dependencies_for_reason(reason: &StepReason) -> Option<Vec<usize>> {
+        let dependencies = reason.dependencies();
+        (!dependencies.is_empty()).then_some(dependencies)
     }
 
     fn inhabited_type_key(var_type: &Term, context: &LocalContext) -> (Term, LocalContext) {
@@ -462,6 +482,7 @@ impl Checker {
 
         if clause.is_impossible() {
             self.direct_contradiction = true;
+            self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             return;
         }
 
@@ -493,12 +514,14 @@ impl Checker {
         if let Some(key) = Self::negated_exists_true_type_from_clause(clause) {
             if self.proven_inhabited.contains(&key) {
                 self.direct_contradiction = true;
+                self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             }
         }
 
         if let Some(key) = self.mark_inhabited_from_clause(clause, kernel_context) {
             if self.has_negated_exists_true_for(&key) {
                 self.direct_contradiction = true;
+                self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             }
             if should_reprocess_for_inhabitedness && self.eager_boolean_reductions {
                 self.reprocess_boolean_reductions(kernel_context);
@@ -506,12 +529,18 @@ impl Checker {
         }
 
         if has_any_variable {
-            if let Some(reduced_clause) =
-                self.simplify_variable_clause_with_concrete_facts(clause, kernel_context)
+            if let Some((reduced_clause, mut dependencies)) = self
+                .simplify_variable_clause_with_concrete_facts_and_dependencies(
+                    clause,
+                    kernel_context,
+                )
             {
+                dependencies.push(step_id);
+                dependencies.sort_unstable();
+                dependencies.dedup();
                 self.insert_clause_internal(
                     &reduced_clause,
-                    StepReason::EqualityGraph,
+                    StepReason::VariableSimplification(dependencies),
                     kernel_context,
                 );
             }
@@ -616,6 +645,7 @@ impl Checker {
 
         if clause.is_impossible() {
             self.direct_contradiction = true;
+            self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             return;
         }
 
@@ -635,18 +665,20 @@ impl Checker {
         }
 
         let step_id = self.reasons.len();
-        self.reasons.push_back(reason);
+        self.reasons.push_back(reason.clone());
         self.inserted_clauses.push_back(clause.clone());
         self.exact_clauses.entry(clause.clone()).or_insert(step_id);
 
         if let Some(key) = Self::negated_exists_true_type_from_clause(clause) {
             if self.proven_inhabited.contains(&key) {
                 self.direct_contradiction = true;
+                self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             }
         }
         if let Some(key) = self.mark_inhabited_from_clause(clause, kernel_context) {
             if self.has_negated_exists_true_for(&key) {
                 self.direct_contradiction = true;
+                self.direct_contradiction_dependencies = Self::dependencies_for_reason(&reason);
             }
         }
 
@@ -726,6 +758,27 @@ impl Checker {
             .is_some()
     }
 
+    pub(crate) fn boolean_reduction_closes_for_trace(
+        &self,
+        source: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let source = normalize_clause_subterms(source).normalized();
+        if source.is_impossible() {
+            return true;
+        }
+
+        let mut local = self.clone();
+        local.set_eager_boolean_reductions(false);
+        local.insert_clause_for_trace(&source, StepReason::PreviousClaim, kernel_context);
+        let Some(step_id) = local.exact_clause_id(&source) else {
+            return false;
+        };
+        local.eager_boolean_reductions = true;
+        local.insert_boolean_reductions_with_reason(&source, step_id, kernel_context);
+        local.has_contradiction()
+    }
+
     pub(crate) fn boolean_reduction_set_contains_for_trace(
         &self,
         source: &Clause,
@@ -738,12 +791,32 @@ impl Checker {
             .any(|candidate| candidate == *result)
     }
 
-    pub(crate) fn boolean_reduction_sets_for_trace(
+    pub(crate) fn boolean_reduction_detail_for_trace(
         &self,
         source: &Clause,
+        result: &Clause,
         kernel_context: &KernelContext,
-    ) -> Vec<Vec<Clause>> {
-        self.checker_boolean_reduction_sets(source, kernel_context)
+    ) -> Option<(BooleanReductionKind, usize)> {
+        source
+            .find_boolean_reduction_kinds_with_locations_with_options(kernel_context, true)
+            .into_iter()
+            .find_map(|(kind, literal_index, trace)| {
+                self.normalize_checker_trace(&trace, kernel_context)
+                    .filter(|candidate| candidate == result)
+                    .map(|_| (kind, literal_index))
+            })
+    }
+
+    pub(crate) fn apply_boolean_reduction_for_trace(
+        &self,
+        source: &Clause,
+        kind: BooleanReductionKind,
+        literal_index: usize,
+        kernel_context: &KernelContext,
+    ) -> Option<Clause> {
+        let trace =
+            source.boolean_reduction_at_with_options(kind, literal_index, kernel_context, true)?;
+        self.normalize_checker_trace(&trace, kernel_context)
     }
 
     pub(crate) fn equality_resolution_results_for_trace(
@@ -821,14 +894,176 @@ impl Checker {
         kernel_context: &KernelContext,
     ) -> bool {
         if self
+            .simplify_variable_clause_with_concrete_facts(source, kernel_context)
+            .as_ref()
+            == Some(result)
+        {
+            return true;
+        }
+        if self
             .check_clause_direct_for_trace(result, kernel_context)
             .is_some()
         {
             return true;
         }
-        self.simplify_variable_clause_with_concrete_facts(source, kernel_context)
-            .as_ref()
-            == Some(result)
+        false
+    }
+
+    pub(crate) fn clause_specializes_for_trace(
+        source: &Clause,
+        result: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        let source = normalize_clause_subterms(source).normalized();
+        let result = normalize_clause_subterms(result).normalized();
+        if source == result {
+            return true;
+        }
+        Self::clause_matches_with_var_map(&source, &result, kernel_context)
+    }
+
+    fn literals_match_with_var_map(
+        general: &Literal,
+        special: &Literal,
+        var_map: &mut VariableMap,
+        general_context: &LocalContext,
+        special_context: &LocalContext,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if general.positive != special.positive {
+            return false;
+        }
+
+        let mut direct = var_map.clone();
+        if direct.match_terms(
+            general.left.as_ref(),
+            special.left.as_ref(),
+            general_context,
+            special_context,
+            kernel_context,
+        ) && direct.match_terms(
+            general.right.as_ref(),
+            special.right.as_ref(),
+            general_context,
+            special_context,
+            kernel_context,
+        ) {
+            *var_map = direct;
+            return true;
+        }
+
+        let mut flipped = var_map.clone();
+        if flipped.match_terms(
+            general.left.as_ref(),
+            special.right.as_ref(),
+            general_context,
+            special_context,
+            kernel_context,
+        ) && flipped.match_terms(
+            general.right.as_ref(),
+            special.left.as_ref(),
+            general_context,
+            special_context,
+            kernel_context,
+        ) {
+            *var_map = flipped;
+            return true;
+        }
+
+        false
+    }
+
+    fn clause_matches_with_var_map(
+        general: &Clause,
+        special: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if general.len() != special.len() {
+            return false;
+        }
+
+        fn match_from(
+            general: &Clause,
+            special: &Clause,
+            kernel_context: &KernelContext,
+            general_index: usize,
+            used_special: &mut [bool],
+            var_map: VariableMap,
+        ) -> bool {
+            if general_index == general.len() {
+                return true;
+            }
+
+            let general_literal = &general.literals[general_index];
+            for special_index in 0..special.len() {
+                if used_special[special_index] {
+                    continue;
+                }
+                let mut candidate_map = var_map.clone();
+                if !Checker::literals_match_with_var_map(
+                    general_literal,
+                    &special.literals[special_index],
+                    &mut candidate_map,
+                    general.get_local_context(),
+                    special.get_local_context(),
+                    kernel_context,
+                ) {
+                    continue;
+                }
+                used_special[special_index] = true;
+                if match_from(
+                    general,
+                    special,
+                    kernel_context,
+                    general_index + 1,
+                    used_special,
+                    candidate_map,
+                ) {
+                    return true;
+                }
+                used_special[special_index] = false;
+            }
+            false
+        }
+
+        let mut used_special = vec![false; special.len()];
+        match_from(
+            general,
+            special,
+            kernel_context,
+            0,
+            &mut used_special,
+            VariableMap::new(),
+        )
+    }
+
+    pub(crate) fn clauses_contradict_for_trace(
+        left: &Clause,
+        right: &Clause,
+        kernel_context: &KernelContext,
+    ) -> bool {
+        if left.is_impossible() || right.is_impossible() {
+            return true;
+        }
+
+        if let ([left_literal], [right_literal]) =
+            (left.literals.as_slice(), right.literals.as_slice())
+        {
+            let negated_left = Clause::new(vec![left_literal.negate()], left.get_local_context());
+            let negated_right =
+                Clause::new(vec![right_literal.negate()], right.get_local_context());
+            return Self::clause_specializes_for_trace(left, &negated_right, kernel_context)
+                || Self::clause_specializes_for_trace(right, &negated_left, kernel_context);
+        }
+
+        if left.has_any_variable() || right.has_any_variable() {
+            return false;
+        }
+
+        let mut local = Checker::new();
+        local.insert_clause_for_trace(left, StepReason::PreviousClaim, kernel_context);
+        local.insert_clause_for_trace(right, StepReason::PreviousClaim, kernel_context);
+        local.has_contradiction()
     }
 
     fn check_clause_via_boolean_reductions(
@@ -907,6 +1142,51 @@ impl Checker {
         })
     }
 
+    pub(crate) fn contradiction_dependencies_for_trace(&self) -> Option<Vec<usize>> {
+        if self.direct_contradiction {
+            return self.direct_contradiction_dependencies.clone();
+        }
+        let contradiction = self.term_graph.get_contradiction_trace()?;
+        let mut dependencies = vec![contradiction.inequality_id];
+        for step in contradiction.rewrite_chain {
+            dependencies.push(step.source.pattern_id.get());
+            if let Some(inspiration_id) = step.source.inspiration_id {
+                dependencies.push(inspiration_id.get());
+            }
+        }
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Some(dependencies)
+    }
+
+    pub(crate) fn equality_graph_dependencies_for_clause_for_trace(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<Vec<usize>> {
+        let clause = normalize_clause_subterms(clause).normalized();
+        if clause.literals.len() != 1 {
+            return None;
+        }
+        let mut local = self.clone();
+        if !local.term_graph.check_clause(&clause, kernel_context) {
+            return None;
+        }
+        let before = local.inserted_len();
+        let negated = Clause::new(
+            vec![clause.literals[0].negate()],
+            clause.get_local_context(),
+        );
+        local.insert_clause(&negated, StepReason::Testing, kernel_context);
+        let mut dependencies = local.contradiction_dependencies_for_trace()?;
+        dependencies.retain(|dependency| *dependency < before);
+        if dependencies.is_empty() {
+            None
+        } else {
+            Some(dependencies)
+        }
+    }
+
     pub fn exact_clause_id(&self, clause: &Clause) -> Option<usize> {
         self.exact_clauses.get(clause).copied()
     }
@@ -916,19 +1196,40 @@ impl Checker {
         clause: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<Clause> {
+        self.simplify_variable_clause_with_concrete_facts_and_dependencies(clause, kernel_context)
+            .map(|(clause, _dependencies)| clause)
+    }
+
+    fn simplify_variable_clause_with_concrete_facts_and_dependencies(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<(Clause, Vec<usize>)> {
         let mut changed = false;
+        let mut dependencies = vec![];
         let mut reduced_literals = Vec::with_capacity(clause.literals.len());
         for literal in &clause.literals {
-            match self.term_graph.evaluate_literal(literal, kernel_context) {
-                Some(true) => return None,
-                Some(false) => changed = true,
+            match self
+                .term_graph
+                .evaluate_literal_with_dependencies(literal, kernel_context)
+            {
+                Some((true, _)) => return None,
+                Some((false, mut literal_dependencies)) => {
+                    changed = true;
+                    dependencies.append(&mut literal_dependencies);
+                }
                 None => reduced_literals.push(literal.clone()),
             }
         }
         if !changed {
             return None;
         }
-        Some(Clause::new(reduced_literals, clause.get_local_context()))
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Some((
+            Clause::new(reduced_literals, clause.get_local_context()),
+            dependencies,
+        ))
     }
 
     /// Returns true if the checker has encountered a contradiction.
@@ -1010,6 +1311,25 @@ impl Checker {
         cert_steps: &[CertificateStep],
         code_lines: Option<&[String]>,
         kernel_context: &KernelContext,
+    ) -> Result<(Vec<CheckedStep>, usize), Error> {
+        self.check_cert_steps_internal(cert_steps, code_lines, kernel_context, true)
+    }
+
+    pub(crate) fn check_cert_steps_partial(
+        &mut self,
+        cert_steps: &[CertificateStep],
+        code_lines: Option<&[String]>,
+        kernel_context: &KernelContext,
+    ) -> Result<(Vec<CheckedStep>, usize), Error> {
+        self.check_cert_steps_internal(cert_steps, code_lines, kernel_context, false)
+    }
+
+    fn check_cert_steps_internal(
+        &mut self,
+        cert_steps: &[CertificateStep],
+        code_lines: Option<&[String]>,
+        kernel_context: &KernelContext,
+        require_contradiction: bool,
     ) -> Result<(Vec<CheckedStep>, usize), Error> {
         let mut checked_steps = Vec::new();
         let mut seen_claims = HashSet::new();
@@ -1180,6 +1500,8 @@ impl Checker {
 
         if self.has_contradiction() {
             trace!("has_contradiction (end of proof)");
+            Ok((checked_steps, cert_steps.len()))
+        } else if !require_contradiction {
             Ok((checked_steps, cert_steps.len()))
         } else {
             Err(Error::GeneratedBadCode(

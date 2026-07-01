@@ -413,7 +413,7 @@ impl EqualityGraph {
     pub fn get_contradiction_trace(&self) -> Option<EqualityGraphContradiction> {
         let (term1, term2, inequality_id) = self.contradiction_info?;
         let mut rewrite_chain = vec![];
-        self.expand_steps(term1, term2, &mut rewrite_chain);
+        self.expand_steps(term1, term2, &mut rewrite_chain)?;
         Some(EqualityGraphContradiction {
             inequality_id: inequality_id.get(),
             rewrite_chain,
@@ -1168,10 +1168,15 @@ impl EqualityGraph {
         }
     }
 
+    #[cfg(test)]
     fn as_application(&self, term: TermId) -> (TermId, TermId) {
+        self.as_application_opt(term).expect("not an application")
+    }
+
+    fn as_application_opt(&self, term: TermId) -> Option<(TermId, TermId)> {
         match &self.terms[term.get() as usize].decomp {
-            Decomposition::Application(func, arg) => (*func, *arg),
-            _ => panic!("not an application"),
+            Decomposition::Application(func, arg) => Some((*func, *arg)),
+            _ => None,
         }
     }
 
@@ -1201,6 +1206,92 @@ impl EqualityGraph {
         let left_info = self.get_group_info(left_group);
         if left_info.inequalities.contains_key(&right_group) {
             return Some(!literal.positive);
+        }
+
+        None
+    }
+
+    fn collect_rewrite_dependencies_between(
+        &self,
+        term1: TermId,
+        term2: TermId,
+        dependencies: &mut Vec<usize>,
+    ) -> Option<()> {
+        for (_from, _to, source) in self.get_path(term1, term2)? {
+            let Some(source) = source else {
+                continue;
+            };
+            dependencies.push(source.pattern_id.get());
+            if let Some(inspiration_id) = source.inspiration_id {
+                dependencies.push(inspiration_id.get());
+            }
+        }
+        Some(())
+    }
+
+    fn collect_inequality_dependencies(
+        &self,
+        left_id: TermId,
+        right_id: TermId,
+        stored_left: TermId,
+        stored_right: TermId,
+        step: StepId,
+    ) -> Option<Vec<usize>> {
+        let mut dependencies = vec![step.get()];
+        if self
+            .collect_rewrite_dependencies_between(left_id, stored_left, &mut dependencies)
+            .is_some()
+            && self
+                .collect_rewrite_dependencies_between(right_id, stored_right, &mut dependencies)
+                .is_some()
+        {
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            return Some(dependencies);
+        }
+
+        let mut dependencies = vec![step.get()];
+        self.collect_rewrite_dependencies_between(left_id, stored_right, &mut dependencies)?;
+        self.collect_rewrite_dependencies_between(right_id, stored_left, &mut dependencies)?;
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Some(dependencies)
+    }
+
+    /// Returns this literal's truth value and the step ids needed to replay that evaluation.
+    pub fn evaluate_literal_with_dependencies(
+        &mut self,
+        literal: &Literal,
+        kernel_context: &KernelContext,
+    ) -> Option<(bool, Vec<usize>)> {
+        if literal.left.has_any_variable() || literal.right.has_any_variable() {
+            return None;
+        }
+
+        let left_id = self.insert_term(&literal.left, kernel_context);
+        let right_id = self.insert_term(&literal.right, kernel_context);
+
+        let left_group = self.get_group_id(left_id);
+        let right_group = self.get_group_id(right_id);
+
+        if left_group == right_group {
+            let mut dependencies = vec![];
+            self.collect_rewrite_dependencies_between(left_id, right_id, &mut dependencies)?;
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            return Some((literal.positive, dependencies));
+        }
+
+        let left_info = self.get_group_info(left_group);
+        if let Some((stored_left, stored_right, step)) = left_info.inequalities.get(&right_group) {
+            let dependencies = self.collect_inequality_dependencies(
+                left_id,
+                right_id,
+                *stored_left,
+                *stored_right,
+                *step,
+            )?;
+            return Some((!literal.positive, dependencies));
         }
 
         None
@@ -1271,14 +1362,13 @@ impl EqualityGraph {
 
     // Gets a step of edges that demonstrate that term1 and term2 are equal.
     // The step is None if the edge is composite.
-    // Panics if there is no path.
     fn get_path(
         &self,
         term1: TermId,
         term2: TermId,
-    ) -> Vec<(TermId, TermId, Option<RewriteSource>)> {
+    ) -> Option<Vec<(TermId, TermId, Option<RewriteSource>)>> {
         if term1 == term2 {
-            return vec![];
+            return Some(vec![]);
         }
 
         // Find paths that lead to term2 from everywhere.
@@ -1289,7 +1379,7 @@ impl EqualityGraph {
 
         let mut queue = vec![term2];
         'outer: loop {
-            let term_b = queue.pop().expect("no path between terms");
+            let term_b = queue.pop()?;
             for (term_a, source) in &self.terms[term_b.get() as usize].adjacent {
                 if next_edge.contains_key(term_a) {
                     // We already have a way to get from term_a to term2
@@ -1310,7 +1400,7 @@ impl EqualityGraph {
             answer.push((term_a, *term_b, source.clone()));
             term_a = *term_b;
         }
-        answer
+        Some(answer)
     }
 
     // For every step from term1 to term2, show the rewritten subterms, as well as the
@@ -1319,18 +1409,23 @@ impl EqualityGraph {
     // the rewrites for the subterms.
     // The application rewrites have a step id of None.
     // The rewritten subterms have a step id with the rule that they are based on.
-    fn expand_steps(&self, term1: TermId, term2: TermId, output: &mut Vec<RewriteStep>) {
+    fn expand_steps(
+        &self,
+        term1: TermId,
+        term2: TermId,
+        output: &mut Vec<RewriteStep>,
+    ) -> Option<()> {
         if term1 == term2 {
-            return;
+            return Some(());
         }
-        let path = self.get_path(term1, term2);
+        let path = self.get_path(term1, term2)?;
         for (a_id, b_id, source) in path {
             if source.is_none() {
                 // We have an application relationship between a_id and b_id
-                let (func_a, arg_a) = self.as_application(a_id);
-                let (func_b, arg_b) = self.as_application(b_id);
-                self.expand_steps(func_a, func_b, output);
-                self.expand_steps(arg_a, arg_b, output);
+                let (func_a, arg_a) = self.as_application_opt(a_id)?;
+                let (func_b, arg_b) = self.as_application_opt(b_id)?;
+                self.expand_steps(func_a, func_b, output)?;
+                self.expand_steps(arg_a, arg_b, output)?;
             }
 
             let term_a = self.get_term(a_id);
@@ -1353,6 +1448,7 @@ impl EqualityGraph {
                 output.push(step);
             }
         }
+        Some(())
     }
 
     #[cfg(test)]
@@ -1360,7 +1456,9 @@ impl EqualityGraph {
         if term1 == term2 {
             return;
         }
-        let path = self.get_path(term1, term2);
+        let path = self
+            .get_path(term1, term2)
+            .expect("expected equality graph path");
         for (term_a, term_b, source) in path {
             match source {
                 Some(source) => {

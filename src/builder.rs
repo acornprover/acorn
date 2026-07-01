@@ -30,6 +30,7 @@ static NEXT_BUILD_ID: AtomicU32 = AtomicU32::new(1);
 const MAX_CHECK_CERT_ERROR_CHARS: usize = 600;
 const CHECK_CERT_ERROR_PREFIX_CHARS: usize = 320;
 const CHECK_CERT_ERROR_SUFFIX_CHARS: usize = 140;
+const MIGRATION_WORKER_STACK_SIZE: usize = 512 * 1024 * 1024;
 
 fn truncate_middle(
     text: &str,
@@ -250,6 +251,9 @@ pub struct Builder<'a> {
     /// Force proof search instead of using cached certificates.
     pub force_search: bool,
 
+    /// Rebuild cached certificates into the current explicit trace format without proof search.
+    pub migrate_certs: bool,
+
     /// Only search goals that have a nonempty cached proof, for prover evaluation.
     pub eval_mode: bool,
 
@@ -409,6 +413,7 @@ struct ModuleWorkerConfig {
     strict: bool,
     exit_on_warning: bool,
     force_search: bool,
+    migrate_certs: bool,
     eval_mode: bool,
     eval_skip_modes: Vec<usize>,
     eval_bucket_filter: Option<GoalBucketFilter>,
@@ -428,6 +433,7 @@ impl ModuleWorkerConfig {
             strict: builder.strict,
             exit_on_warning: builder.exit_on_warning,
             force_search: builder.force_search,
+            migrate_certs: builder.migrate_certs,
             eval_mode: builder.eval_mode,
             eval_skip_modes: builder.eval_skip_modes.clone(),
             eval_bucket_filter: builder.eval_bucket_filter.clone(),
@@ -446,6 +452,7 @@ impl ModuleWorkerConfig {
         builder.strict = self.strict;
         builder.exit_on_warning = self.exit_on_warning;
         builder.force_search = self.force_search;
+        builder.migrate_certs = self.migrate_certs;
         builder.eval_mode = self.eval_mode;
         builder.eval_skip_modes = self.eval_skip_modes.clone();
         builder.eval_bucket_filter = self.eval_bucket_filter.clone();
@@ -1280,6 +1287,7 @@ impl<'a> Builder<'a> {
             strict: false,
             exit_on_warning: false,
             force_search: false,
+            migrate_certs: false,
             eval_mode: false,
             eval_skip_modes: vec![0, 1],
             eval_bucket_filter: None,
@@ -1427,36 +1435,44 @@ impl<'a> Builder<'a> {
                 let result_tx = result_tx.clone();
                 let token = cancellation_token.clone();
                 let config = worker_config.clone();
-                handles.push(scope.spawn(move || loop {
-                    let module = {
-                        let (lock, cvar) = &*queue;
-                        let mut state = lock.lock().expect("pipeline work queue poisoned");
-                        loop {
-                            if let Some(module) = state.modules.pop() {
-                                cvar.notify_all();
-                                break Some(module);
+                let mut thread_builder = std::thread::Builder::new();
+                if worker_config.migrate_certs {
+                    thread_builder = thread_builder.stack_size(MIGRATION_WORKER_STACK_SIZE);
+                }
+                handles.push(
+                    thread_builder
+                        .spawn_scoped(scope, move || loop {
+                            let module = {
+                                let (lock, cvar) = &*queue;
+                                let mut state = lock.lock().expect("pipeline work queue poisoned");
+                                loop {
+                                    if let Some(module) = state.modules.pop() {
+                                        cvar.notify_all();
+                                        break Some(module);
+                                    }
+                                    if state.closed {
+                                        break None;
+                                    }
+                                    state = cvar.wait(state).expect("pipeline work queue poisoned");
+                                }
+                            };
+                            let Some(module) = module else {
+                                break;
+                            };
+                            let result = Self::build_module_on_worker(
+                                module.project,
+                                token.clone(),
+                                module.index,
+                                module.target,
+                                &module.lowered,
+                                &config,
+                            );
+                            if result_tx.send(result).is_err() {
+                                break;
                             }
-                            if state.closed {
-                                break None;
-                            }
-                            state = cvar.wait(state).expect("pipeline work queue poisoned");
-                        }
-                    };
-                    let Some(module) = module else {
-                        break;
-                    };
-                    let result = Self::build_module_on_worker(
-                        module.project,
-                        token.clone(),
-                        module.index,
-                        module.target,
-                        &module.lowered,
-                        &config,
-                    );
-                    if result_tx.send(result).is_err() {
-                        break;
-                    }
-                }));
+                        })
+                        .expect("failed to spawn module worker"),
+                );
             }
             drop(result_tx);
 
@@ -2294,12 +2310,46 @@ impl<'a> Builder<'a> {
         if !self.print_found_proof && !self.force_search {
             // Check for a cached cert
             let indexes = worklist.get_indexes(&goal.name);
+            let mut migration_errors = Vec::new();
             for i in indexes {
-                let cert = worklist.get_cert(*i).unwrap().clone();
-
                 let normalized_goal =
                     lowered_goal.ok_or_else(|| BuildError::goal(goal, "missing lowered goal"))?;
                 let goal_kernel_context = &normalized_goal.kernel_context;
+
+                if self.migrate_certs {
+                    let check_start = std::time::Instant::now();
+                    let cert = worklist.get_cert(*i).unwrap();
+                    let migration_result = processor.migrate_cert_to_explicit_trace(
+                        cert,
+                        Some(normalized_goal),
+                        goal_kernel_context,
+                        self.project(),
+                        bindings,
+                    );
+                    let check_elapsed = check_start.elapsed();
+                    let check_succeeded = migration_result.is_ok();
+                    self.record_cert_check(check_elapsed, check_succeeded);
+
+                    match migration_result {
+                        Ok(migrated) => {
+                            self.metrics.certs_cached += 1;
+                            self.metrics.certs_created += 1;
+                            self.metrics.goals_done += 1;
+                            self.metrics.goals_success += 1;
+                            self.log_verified(goal.first_line, goal.last_line);
+                            new_certs.push(migrated);
+                            worklist.remove(&goal.name, *i);
+
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            migration_errors.push(e.to_string());
+                            continue;
+                        }
+                    }
+                }
+
+                let cert = worklist.get_cert(*i).unwrap().clone();
                 let check_start = std::time::Instant::now();
                 let result = processor.check_cert_with_usage(
                     &cert,
@@ -2308,9 +2358,6 @@ impl<'a> Builder<'a> {
                     self.project(),
                     bindings,
                 );
-                let check_elapsed = check_start.elapsed();
-                let check_succeeded = result.is_ok();
-                self.record_cert_check(check_elapsed, check_succeeded);
                 let (cert_to_use, check_result) = match result {
                     Ok(checked_cert) => {
                         let cert_to_use =
@@ -2319,6 +2366,9 @@ impl<'a> Builder<'a> {
                     }
                     Err(e) => (cert, Err(e)),
                 };
+                let check_elapsed = check_start.elapsed();
+                let check_succeeded = check_result.is_ok();
+                self.record_cert_check(check_elapsed, check_succeeded);
 
                 match check_result {
                     Ok(_steps) => {
@@ -2326,13 +2376,13 @@ impl<'a> Builder<'a> {
                         self.metrics.goals_done += 1;
                         self.metrics.goals_success += 1;
                         self.log_verified(goal.first_line, goal.last_line);
-                        new_certs.push(cert_to_use.clone());
+                        new_certs.push(cert_to_use);
                         worklist.remove(&goal.name, *i);
 
                         return Ok(());
                     }
-                    Err(e) if self.check_mode => {
-                        // In check mode, a bad cert is an error
+                    Err(e) if self.check_mode || self.migrate_certs => {
+                        // In check/migration mode, a bad cert is an error.
                         if false {
                             // Print a command to reproduce this failure
                             let module_name = self
@@ -2347,9 +2397,14 @@ impl<'a> Builder<'a> {
                                 module_name, external_line, cert_json
                             ));
                         }
+                        let action = if self.migrate_certs {
+                            "migrate"
+                        } else {
+                            "verify"
+                        };
                         return Err(BuildError::goal(
                             goal,
-                            format!("certificate failed to verify: {}", e),
+                            format!("certificate failed to {}: {}", action, e),
                         ));
                     }
                     Err(_) => {
@@ -2358,10 +2413,24 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
+            if self.migrate_certs && !migration_errors.is_empty() {
+                let first_error = migration_errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown migration error".to_string());
+                return Err(BuildError::goal(
+                    goal,
+                    format!(
+                        "no cached certificate could migrate ({} attempted); first error: {}",
+                        migration_errors.len(),
+                        first_error
+                    ),
+                ));
+            }
         }
 
-        // In check mode, we should never reach the search phase
-        if self.check_mode {
+        // In check/migration mode, we should never reach the search phase.
+        if self.check_mode || self.migrate_certs {
             return Err(BuildError::goal(goal, "no certificate found"));
         }
 
@@ -2866,7 +2935,13 @@ impl<'a> Builder<'a> {
 
         if !lowered.is_empty() {
             self.module_proving_started(target.clone());
-            let processor = if self.check_mode {
+            let processor = if self.migrate_certs {
+                Processor::with_imports_for_cert_migration(
+                    Some(self.cancellation_token.clone()),
+                    &lowered.initial_bindings,
+                    self.project(),
+                )?
+            } else if self.check_mode {
                 Processor::with_imports_for_checking(
                     Some(self.cancellation_token.clone()),
                     &lowered.initial_bindings,
@@ -2939,6 +3014,10 @@ impl<'a> Builder<'a> {
             &dependency_hashes,
         );
 
+        if self.migrate_certs {
+            worklist.leak();
+        }
+
         Ok(())
     }
 
@@ -2946,8 +3025,11 @@ impl<'a> Builder<'a> {
         let config = self.project().config();
         let can_parallelize_read_only_mode = self.check_mode || self.eval_mode;
         let can_parallelize_verify_mode = !self.check_mode && !self.eval_mode && !self.force_search;
+        let can_parallelize_migration_mode = self.migrate_certs;
 
-        (can_parallelize_read_only_mode || can_parallelize_verify_mode)
+        (can_parallelize_read_only_mode
+            || can_parallelize_verify_mode
+            || can_parallelize_migration_mode)
             && self.check_jobs > 1
             && target_count > 1
             && self.goal_filter.is_none()
@@ -2956,7 +3038,9 @@ impl<'a> Builder<'a> {
             && !self.print_found_proof
             && !self.exit_on_warning
             && config.read_cache
-            && (can_parallelize_verify_mode || !config.write_cache)
+            && (can_parallelize_verify_mode
+                || can_parallelize_migration_mode
+                || !config.write_cache)
     }
 
     fn eval_module_search_estimate(&self, target: &ModuleDescriptor) -> usize {
@@ -3091,6 +3175,7 @@ impl<'a> Builder<'a> {
             if builder.goal_filter.is_none()
                 && !builder.project().config().read_cache
                 && !builder.check_mode
+                && !builder.migrate_certs
             {
                 builder.log_global(format!("force-searching: {}", target));
             }
@@ -3159,24 +3244,32 @@ impl<'a> Builder<'a> {
                 let modules = &modules;
                 let next_module = &next_module;
                 let project = project.clone();
-                handles.push(scope.spawn(move || {
-                    let mut worker_results = Vec::new();
-                    loop {
-                        let module_index = next_module.fetch_add(1, Ordering::Relaxed);
-                        let Some(module) = modules.get(module_index) else {
-                            break;
-                        };
-                        worker_results.push(Self::build_module_on_worker(
-                            project.clone(),
-                            token.clone(),
-                            module.index,
-                            module.target.clone(),
-                            module.lowered,
-                            &config,
-                        ));
-                    }
-                    worker_results
-                }));
+                let mut thread_builder = std::thread::Builder::new();
+                if worker_config.migrate_certs {
+                    thread_builder = thread_builder.stack_size(MIGRATION_WORKER_STACK_SIZE);
+                }
+                handles.push(
+                    thread_builder
+                        .spawn_scoped(scope, move || {
+                            let mut worker_results = Vec::new();
+                            loop {
+                                let module_index = next_module.fetch_add(1, Ordering::Relaxed);
+                                let Some(module) = modules.get(module_index) else {
+                                    break;
+                                };
+                                worker_results.push(Self::build_module_on_worker(
+                                    project.clone(),
+                                    token.clone(),
+                                    module.index,
+                                    module.target.clone(),
+                                    module.lowered,
+                                    &config,
+                                ));
+                            }
+                            worker_results
+                        })
+                        .expect("failed to spawn module worker"),
+                );
             }
 
             for handle in handles {
@@ -3227,27 +3320,36 @@ impl<'a> Builder<'a> {
                 let config = worker_config.clone();
                 let work_queue = &work_queue;
                 let project = project.clone();
-                handles.push(scope.spawn(move || {
-                    let mut worker_results = Vec::new();
-                    loop {
-                        let module = {
-                            let mut queue = work_queue.lock().expect("module work queue poisoned");
-                            queue.pop_front()
-                        };
-                        let Some(module) = module else {
-                            break;
-                        };
-                        worker_results.push(Self::build_module_on_worker(
-                            project.clone(),
-                            token.clone(),
-                            module.index,
-                            module.target,
-                            &module.lowered,
-                            &config,
-                        ));
-                    }
-                    worker_results
-                }));
+                let mut thread_builder = std::thread::Builder::new();
+                if worker_config.migrate_certs {
+                    thread_builder = thread_builder.stack_size(MIGRATION_WORKER_STACK_SIZE);
+                }
+                handles.push(
+                    thread_builder
+                        .spawn_scoped(scope, move || {
+                            let mut worker_results = Vec::new();
+                            loop {
+                                let module = {
+                                    let mut queue =
+                                        work_queue.lock().expect("module work queue poisoned");
+                                    queue.pop_front()
+                                };
+                                let Some(module) = module else {
+                                    break;
+                                };
+                                worker_results.push(Self::build_module_on_worker(
+                                    project.clone(),
+                                    token.clone(),
+                                    module.index,
+                                    module.target,
+                                    &module.lowered,
+                                    &config,
+                                ));
+                            }
+                            worker_results
+                        })
+                        .expect("failed to spawn module worker"),
+                );
             }
 
             for handle in handles {
@@ -3388,9 +3490,16 @@ impl<'a> Builder<'a> {
                 continue;
             }
 
-            if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode
+            if self.goal_filter.is_none()
+                && !self.project().config().read_cache
+                && !self.check_mode
+                && !self.migrate_certs
             {
                 self.log_global(format!("force-searching: {}", target));
+            }
+
+            if self.migrate_certs {
+                println!("migrating: {}", target);
             }
 
             let module_metrics_before = self.metrics.clone();
@@ -3469,6 +3578,10 @@ impl<'a> Builder<'a> {
 
         if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode {
             self.log_global(format!("force-searching: {}", target));
+        }
+
+        if self.migrate_certs {
+            println!("migrating: {}", target);
         }
 
         let module_metrics_before = self.metrics.clone();
@@ -3635,6 +3748,10 @@ impl<'a> Builder<'a> {
             if self.goal_filter.is_none() && !self.project().config().read_cache && !self.check_mode
             {
                 self.log_global(format!("force-searching: {}", target));
+            }
+
+            if self.migrate_certs {
+                println!("migrating: {}", target);
             }
 
             let module_metrics_before = self.metrics.clone();
