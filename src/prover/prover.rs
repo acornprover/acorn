@@ -607,31 +607,6 @@ impl Prover {
         )
     }
 
-    #[cfg(test)]
-    pub fn certificate_source_lines_for_test(
-        &self,
-        bindings: &BindingMap,
-        kernel_context: &KernelContext,
-        print: bool,
-    ) -> Result<Vec<String>, Error> {
-        let cert_bindings = self.bindings_with_goal_type_params(bindings);
-        let effective_kernel_context = self.kernel_context.as_ref().unwrap_or(kernel_context);
-        let proof = self
-            .get_proof(effective_kernel_context, false)
-            .ok_or_else(|| Error::internal("No proof found"))?;
-
-        if print {
-            self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
-        }
-
-        let concrete_steps = proof.collect_concrete_steps()?;
-        crate::certificate::Certificate::serialized_lines_from_concrete_steps_for_test(
-            &concrete_steps,
-            effective_kernel_context,
-            cert_bindings.as_ref(),
-        )
-    }
-
     fn report_equality_graph_contradiction(
         &mut self,
         contradiction: EqualityGraphContradiction,

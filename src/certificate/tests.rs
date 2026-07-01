@@ -15,6 +15,21 @@ fn expect_claim(step: CertificateStep) -> Claim {
     claim
 }
 
+fn trace_input_codes_from_concrete_steps(
+    concrete_steps: &[ConcreteStep],
+    kernel_context: &KernelContext,
+    bindings: &BindingMap,
+) -> Result<Vec<String>, CodeGenError> {
+    Ok(Certificate::trace_inputs_from_concrete_steps_for_test(
+        concrete_steps,
+        kernel_context,
+        bindings,
+    )?
+    .into_iter()
+    .map(|input| input.code().to_string())
+    .collect())
+}
+
 #[test]
 fn test_check_typed_boolean_reduction_step() {
     use crate::kernel::checker::{Checker, StepReason};
@@ -74,18 +89,10 @@ fn test_check_typed_boolean_reduction_step() {
 
     let mut checker = Checker::new();
     checker.insert_clause(&source, StepReason::Testing, kernel_context_cow.as_ref());
-    let err = checker
-        .check_cert_steps(
-            &[step],
-            Some(&["p".to_string()]),
-            kernel_context_cow.as_ref(),
-        )
-        .expect_err("accepted boolean reduction should only fail the final contradiction check");
-    assert!(
-        err.to_string()
-            .contains("proof does not result in a contradiction"),
-        "unexpected checker error: {err}"
-    );
+    let checked = checker
+        .check_cert_step_for_trace(&step, "p", kernel_context_cow.as_ref())
+        .expect("typed boolean reduction step should check");
+    assert_eq!(checked.len(), 1);
 }
 
 #[test]
@@ -671,13 +678,14 @@ fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
         StepReason::Testing,
         &kernel_context,
     );
-    let err = checker
-        .check_cert_steps(&emitted, None, &kernel_context)
-        .expect_err("the synthetic proof should stop at the normal non-contradiction error");
+    for step in &emitted {
+        checker
+            .check_cert_step_for_trace(step, "", &kernel_context)
+            .expect("synthetic witness step should check");
+    }
     assert!(
-        err.to_string()
-            .contains("proof does not result in a contradiction"),
-        "unexpected checker error: {err}"
+        !checker.has_contradiction(),
+        "synthetic witness setup should not close a proof by itself"
     );
 }
 
@@ -1127,9 +1135,18 @@ fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
         StepReason::Testing,
         &updated_kernel_context,
     );
-    checker
-        .check_cert_steps(&emitted, None, &updated_kernel_context)
-        .expect("nested synthetic witnesses should expose the contradiction");
+    for step in &emitted {
+        checker
+            .check_cert_step_for_trace(step, "", &updated_kernel_context)
+            .expect("nested synthetic witness step should check");
+        if checker.has_contradiction() {
+            break;
+        }
+    }
+    assert!(
+        checker.has_contradiction(),
+        "nested synthetic witnesses should expose the contradiction"
+    );
 }
 
 #[test]
@@ -1226,9 +1243,18 @@ fn test_synthetic_witness_preserves_unused_binder_contradiction() {
         StepReason::Testing,
         &updated_kernel_context,
     );
-    checker
-        .check_cert_steps(&emitted, None, &updated_kernel_context)
-        .expect("synthetic witness should preserve the contradiction when the existential binder is unused");
+    for step in &emitted {
+        checker
+            .check_cert_step_for_trace(step, "", &updated_kernel_context)
+            .expect("synthetic witness step should check");
+        if checker.has_contradiction() {
+            break;
+        }
+    }
+    assert!(
+        checker.has_contradiction(),
+        "synthetic witness should preserve the contradiction when the existential binder is unused"
+    );
 }
 
 #[test]
@@ -1863,16 +1889,6 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
     );
     assert_eq!(outcome, Outcome::Success);
 
-    let proof = processor
-        .prover()
-        .certificate_source_lines_for_test(&bindings, &normalized_goal.kernel_context, false)
-        .expect("lambda-valued cert source lines should be generated");
-    assert!(
-        proof
-            .iter()
-            .any(|line| line.contains("is_transitive") && line.contains("}[Nat](rel)")),
-        "expected a proof step to normalize the lambda-valued claim argument: {proof:?}"
-    );
     let cert = processor
         .make_cert(
             &bindings,
@@ -1882,6 +1898,20 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
             false,
         )
         .expect("lambda-valued cert should be finalized");
+    let proof = cert
+        .proof
+        .as_ref()
+        .expect("certificate should include a proof trace")
+        .steps
+        .iter()
+        .filter_map(|step| step.claim.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        proof
+            .iter()
+            .any(|line| line.contains("is_transitive") && line.contains("}[Nat](rel)")),
+        "expected a proof step to normalize the lambda-valued claim argument: {proof:?}"
+    );
 
     processor
         .check_cert(
@@ -1952,12 +1982,8 @@ fn test_from_concrete_steps_uses_claim_with_args_serialization() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function(x0: Bool) { x0 }(false)");
 }
@@ -1980,12 +2006,8 @@ fn test_from_concrete_steps_preserves_open_identity_step() {
         preserve_open: true,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("forall(x0: Bool)"),
@@ -2032,12 +2054,8 @@ fn test_from_concrete_steps_serializes_plain_claim_when_no_local_context() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "false = true");
 }
@@ -2071,12 +2089,8 @@ fn test_from_concrete_steps_wraps_plain_claims_that_parse_as_statements() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].starts_with('('),
@@ -2118,12 +2132,8 @@ fn test_from_concrete_steps_rejects_out_of_scope_claim_map() {
         preserve_open: false,
     }];
 
-    let err = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect_err("out-of-scope var maps should fail certificate generation");
+    let err = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect_err("out-of-scope var maps should fail certificate generation");
     assert!(
         err.to_string().contains("out-of-scope term"),
         "unexpected error: {}",
@@ -2153,12 +2163,8 @@ fn test_from_concrete_steps_infers_type_arg_from_value_mapping() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert_eq!(proof[0], "function[T0](x0: T0) { x0 = x0 }[Bool](true)");
 }
@@ -2226,7 +2232,7 @@ fn test_from_concrete_steps_preserves_surviving_replacement_type_local_kind() {
         &kernel_context,
     );
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
+    let proof = trace_input_codes_from_concrete_steps(
         &[ConcreteStep {
             rationale: ConcreteRationale::Direct,
             generic,
@@ -2290,12 +2296,8 @@ fn test_from_concrete_steps_serializes_partial_logical_builtin_in_claim_map() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(
         proof,
         vec![
@@ -2341,12 +2343,8 @@ fn test_from_concrete_steps_roundtrips_partial_builtin_used_as_value() {
         preserve_open: false,
     }];
 
-    let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-        &concrete_steps,
-        &kernel_context,
-        &bindings,
-    )
-    .expect("certificate source lines should be generated");
+    let proof = trace_input_codes_from_concrete_steps(&concrete_steps, &kernel_context, &bindings)
+        .expect("certificate source lines should be generated");
     assert_eq!(proof.len(), 1);
     assert!(
         proof[0].contains("(=)"),

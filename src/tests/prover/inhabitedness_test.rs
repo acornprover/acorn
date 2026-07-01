@@ -407,10 +407,6 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
     let outcome = processor.search(crate::prover::ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let proof = processor
-        .prover()
-        .certificate_source_lines_for_test(bindings, goal_kernel_context, false)
-        .expect("certificate source lines should be generated");
     let cert = processor
         .make_cert(
             bindings,
@@ -420,6 +416,14 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
             false,
         )
         .expect("make_cert failed");
+    let proof = cert
+        .proof
+        .as_ref()
+        .expect("certificate should include a proof trace")
+        .steps
+        .iter()
+        .filter_map(|step| step.claim.as_ref())
+        .collect::<Vec<_>>();
     processor
         .check_cert(
             &cert,

@@ -92,15 +92,6 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> TestC
 
     assert_eq!(outcome, Outcome::Success);
 
-    let proof = match processor.prover().certificate_source_lines_for_test(
-        bindings,
-        goal_kernel_context,
-        true,
-    ) {
-        Ok(lines) => lines,
-        Err(e) => panic!("certificate_source_lines_for_test failed: {}", e),
-    };
-
     let cert = match processor.make_cert(
         bindings,
         goal_kernel_context,
@@ -122,6 +113,17 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> TestC
         Ok(lines) => lines,
         Err(e) => panic!("check_cert failed: {}", e),
     };
+    let proof = cert
+        .proof
+        .as_ref()
+        .map(|trace| {
+            trace
+                .steps
+                .iter()
+                .filter_map(|step| step.claim.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     TestCertificate { proof: Some(proof) }
 }
 

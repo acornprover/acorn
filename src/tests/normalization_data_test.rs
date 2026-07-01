@@ -1326,11 +1326,17 @@ fn serialize_claim_line(
             )],
             preserve_open: false,
         }];
-        let mut proof = Certificate::serialized_lines_from_concrete_steps_for_test(
+        let mut proof = Certificate::trace_inputs_from_concrete_steps_for_test(
             &concrete_steps,
             kernel_context,
             bindings,
         )
+        .map(|inputs| {
+            inputs
+                .into_iter()
+                .map(|input| input.code().to_string())
+                .collect::<Vec<_>>()
+        })
         .expect("claim should serialize through concrete-step generation");
         assert_eq!(proof.len(), 1, "expected one serialized proof line");
         return proof.pop().unwrap();

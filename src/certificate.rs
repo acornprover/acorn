@@ -978,32 +978,6 @@ impl Certificate {
         None
     }
 
-    /// Convert concrete proof steps to a certificate.
-    ///
-    /// This is the serialization boundary where resolved IDs are converted back to names.
-    /// Requires the kernel_context (to quote clauses)
-    /// and the bindings (to generate readable names).
-    pub fn from_concrete_steps(
-        goal: String,
-        concrete_steps: &[ConcreteStep],
-        kernel_context: &KernelContext,
-        bindings: &BindingMap,
-        checker: Checker,
-        project: &dyn ProjectLookup,
-        trace_bindings: Cow<BindingMap>,
-    ) -> Result<Certificate, CodeGenError> {
-        Self::from_concrete_steps_with_witnesses(
-            goal,
-            concrete_steps,
-            kernel_context,
-            bindings,
-            None,
-            checker,
-            project,
-            trace_bindings,
-        )
-    }
-
     /// Build a certificate proof while optionally emitting prover-generated named witnesses.
     pub fn from_concrete_steps_with_witnesses(
         goal: String,
@@ -1123,21 +1097,18 @@ impl Certificate {
     }
 
     #[cfg(test)]
-    pub(crate) fn serialized_lines_from_concrete_steps_for_test(
+    pub(crate) fn trace_inputs_from_concrete_steps_for_test(
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<Vec<String>, CodeGenError> {
+    ) -> Result<Vec<GeneratedTraceInput>, CodeGenError> {
         let (inputs, _) = Self::generated_trace_inputs_from_concrete_steps_with_witnesses(
             concrete_steps,
             kernel_context,
             bindings,
             None,
         )?;
-        Ok(inputs
-            .into_iter()
-            .map(|input| input.code().to_string())
-            .collect())
+        Ok(inputs)
     }
 
     fn reorder_late_claim_supports(
@@ -1184,24 +1155,6 @@ impl Certificate {
         for (new_index, old_index) in ordered_indices.into_iter().enumerate() {
             steps[new_index] = original[old_index].clone();
         }
-    }
-
-    /// Parse all certificate proof lines into kernel-level certificate steps.
-    ///
-    /// Parsing may update bindings/kernel_context (for let...satisfy declarations), so callers
-    /// should pass mutable views and then use the updated state for subsequent checking.
-    pub fn parse_cert_steps(
-        proof: &[String],
-        project: &dyn ProjectLookup,
-        bindings: &mut Cow<BindingMap>,
-        kernel_context: &mut Cow<KernelContext>,
-    ) -> Result<Vec<CertificateStep>, CodeGenError> {
-        let mut steps = Vec::with_capacity(proof.len());
-        for code in proof {
-            let step = Self::parse_code_line(code, project, bindings, kernel_context)?;
-            steps.push(step);
-        }
-        Ok(steps)
     }
 
     /// Replace eligible proof claims with named-witness steps and emit assumption-backed

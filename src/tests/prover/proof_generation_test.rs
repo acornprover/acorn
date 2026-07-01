@@ -43,10 +43,6 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
     let outcome = processor.search(ProverMode::Test, goal_kernel_context);
     assert_eq!(outcome, Outcome::Success);
 
-    let proof = processor
-        .prover()
-        .certificate_source_lines_for_test(bindings, goal_kernel_context, true)
-        .expect("certificate source lines should be generated");
     let cert = processor
         .make_cert(
             bindings,
@@ -56,6 +52,14 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
             true,
         )
         .expect("make_cert should succeed");
+    let proof = cert
+        .proof
+        .as_ref()
+        .expect("certificate should include a proof trace")
+        .steps
+        .iter()
+        .filter_map(|step| step.claim.as_ref())
+        .collect::<Vec<_>>();
     assert!(
         !proof.is_empty(),
         "expected a non-empty generated cert proof: {proof:?}"

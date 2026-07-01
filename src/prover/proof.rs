@@ -933,6 +933,21 @@ mod tests {
         }
     }
 
+    fn trace_input_codes_from_concrete_steps(
+        concrete_steps: &[ConcreteStep],
+        kernel_context: &KernelContext,
+        bindings: &BindingMap,
+    ) -> Result<Vec<String>, crate::code_generator::Error> {
+        Ok(Certificate::trace_inputs_from_concrete_steps_for_test(
+            concrete_steps,
+            kernel_context,
+            bindings,
+        )?
+        .into_iter()
+        .map(|input| input.code().to_string())
+        .collect())
+    }
+
     #[test]
     fn passive_contradiction_var_map_instantiates_dependent_typeclass_values() {
         let mut kctx = KernelContext::new();
@@ -1658,12 +1673,8 @@ mod tests {
         let concrete_steps = proof
             .collect_concrete_steps()
             .expect("proof reconstruction should succeed");
-        Certificate::serialized_lines_from_concrete_steps_for_test(
-            &concrete_steps,
-            &kctx,
-            &bindings,
-        )
-        .expect("certificate source lines should be generated");
+        trace_input_codes_from_concrete_steps(&concrete_steps, &kctx, &bindings)
+            .expect("certificate source lines should be generated");
     }
 
     /// Test that resolution with polymorphic simplification works correctly.
@@ -1876,12 +1887,8 @@ mod tests {
         let concrete_steps = proof
             .collect_concrete_steps()
             .expect("proof reconstruction should succeed");
-        let lines = Certificate::serialized_lines_from_concrete_steps_for_test(
-            &concrete_steps,
-            &kctx,
-            &bindings,
-        )
-        .expect("certificate source lines should be generated");
+        let lines = trace_input_codes_from_concrete_steps(&concrete_steps, &kctx, &bindings)
+            .expect("certificate source lines should be generated");
         assert!(
             !lines.is_empty(),
             "expected at least one generated certificate line"
@@ -1912,24 +1919,25 @@ mod tests {
         }];
 
         let bindings = BindingMap::new(ModuleId::default());
-        let lines = Certificate::serialized_lines_from_concrete_steps_for_test(
-            &concrete_steps,
-            &kctx,
-            &bindings,
-        )
-        .expect("certificate source lines should be generated");
+        let lines = trace_input_codes_from_concrete_steps(&concrete_steps, &kctx, &bindings)
+            .expect("certificate source lines should be generated");
 
         // Regression assertion: the generated cert round-trips through the parser.
         let project = Project::new_mock();
         let mut bindings_cow = Cow::Borrowed(&bindings);
         let mut kernel_context_cow = Cow::Borrowed(&kctx);
-        let steps = Certificate::parse_cert_steps(
-            &lines,
-            &project,
-            &mut bindings_cow,
-            &mut kernel_context_cow,
-        )
-        .expect("constant-lambda claim argument should parse");
+        let steps = lines
+            .iter()
+            .map(|line| {
+                Certificate::parse_code_line(
+                    line,
+                    &project,
+                    &mut bindings_cow,
+                    &mut kernel_context_cow,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("constant-lambda claim argument should parse");
         assert_eq!(steps.len(), 1, "expected one claim step");
     }
 
@@ -1992,12 +2000,8 @@ mod tests {
         );
 
         let bindings = BindingMap::new(ModuleId::default());
-        let proof = Certificate::serialized_lines_from_concrete_steps_for_test(
-            &steps_in_order,
-            &kctx,
-            &bindings,
-        )
-        .expect("live-local inline original should serialize");
+        let proof = trace_input_codes_from_concrete_steps(&steps_in_order, &kctx, &bindings)
+            .expect("live-local inline original should serialize");
         assert_eq!(proof, vec!["function(x0: Bool) { x0 != false }(true)"]);
     }
 
