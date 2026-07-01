@@ -9,7 +9,6 @@ import torch
 import zstandard
 
 from acorn_training.data import (
-    LEGACY_FEATURE_NAMES,
     TRACE_SCHEMA,
     DatasetSplit,
     load_shard_dataset,
@@ -27,7 +26,19 @@ from acorn_training.train import (
     train_model,
 )
 
-TEST_FEATURE_NAMES = LEGACY_FEATURE_NAMES + ["literal_count", "rule_is_resolution"]
+TEST_FEATURE_NAMES = [
+    "is_contradiction",
+    "atom_count",
+    "is_counterfactual",
+    "is_hypothetical",
+    "is_factual",
+    "is_assumption",
+    "is_negated_goal",
+    "proof_size",
+    "depth",
+    "literal_count",
+    "rule_is_resolution",
+]
 
 
 def _record(goal: str, index: int, label: bool, goal_bucket: int | None = None) -> dict:
@@ -106,10 +117,6 @@ class TrainingDataTest(unittest.TestCase):
                 4,
             )
 
-            legacy_dataset = load_trace_dataset([path], feature_names=LEGACY_FEATURE_NAMES)
-            self.assertEqual(legacy_dataset.features.shape[1], len(LEGACY_FEATURE_NAMES))
-            self.assertEqual(legacy_dataset.feature_names, LEGACY_FEATURE_NAMES)
-
     def test_reservoir_sample_scans_all_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             first = Path(tmp) / "first.jsonl.zst"
@@ -175,6 +182,15 @@ class TrainingDataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "trace.jsonl"
             with self.assertRaisesRegex(ValueError, "must end in .jsonl.zst"):
+                load_trace_dataset([path])
+
+    def test_requires_trace_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl.zst"
+            with zstandard.open(path, "wt") as f:
+                f.write(json.dumps(_record("a", 0, True)) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "metadata file is required"):
                 load_trace_dataset([path])
 
     def test_builds_training_shards(self) -> None:

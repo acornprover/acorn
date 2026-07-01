@@ -117,7 +117,7 @@ pub fn prove(project: &mut Project, module_name: &str, goal_name: &str) -> TestC
         .proof
         .steps
         .iter()
-        .filter_map(|step| step.claim.clone())
+        .map(|step| step.claim.clone())
         .collect();
     TestCertificate { proof: Some(proof) }
 }

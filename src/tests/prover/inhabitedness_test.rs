@@ -420,7 +420,7 @@ fn test_subgroup_identity_existence_cert_keeps_outer_type_args_in_claim_with_arg
         .proof
         .steps
         .iter()
-        .filter_map(|step| step.claim.as_ref())
+        .map(|step| &step.claim)
         .collect::<Vec<_>>();
     processor
         .check_cert(

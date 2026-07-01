@@ -2431,7 +2431,7 @@ impl<'a> Builder<'a> {
                         #[cfg(feature = "validate")]
                         {
                             // Validate the cert immediately after generation.
-                            match processor.check_generated_cert(
+                            match processor.check_cert(
                                 &cert,
                                 Some(normalized_goal),
                                 goal_kernel_context,

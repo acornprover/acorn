@@ -306,10 +306,10 @@ tensor shards from traces and train from either raw traces or shard directories.
   `*.features.json` file that records the exact input feature names/order
 
 The Python loader reads trace feature names from the sidecar `*.meta.json` file. By default it
-uses all catalog features; `--features legacy` selects the old nine-feature contract, and repeated
-`--feature NAME` arguments can choose an explicit subset. The embedded production model in
-`src/prover/scoring_model.rs` is `model-20260611-e50-h512-l3`; new ONNX files can still be
-evaluated without embedding them by running `acorn eval --policy model --model PATH`.
+uses all catalog features; repeated `--feature NAME` arguments can choose an explicit subset. The
+embedded production model in `src/prover/scoring_model.rs` is `model-20260611-e50-h512-l3`; new
+ONNX files can still be evaluated without embedding them by running
+`acorn eval --policy model --model PATH`.
 
 This setup is useful historical context, but it should not drive the next iteration by itself.
 The training objective is weakly connected to the actual metric we care about: proving more eval

@@ -4,7 +4,6 @@ import argparse
 import os
 from pathlib import Path
 
-from .data import LEGACY_FEATURE_NAMES
 from .shards import ShardBuildConfig, build_shards
 
 
@@ -56,16 +55,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Parallel workers for positive-preserving sharding. Use 0 for auto. Default: 0.",
     )
     parser.add_argument(
-        "--features",
-        choices=["all", "legacy"],
-        default="all",
-        help="Feature set to convert. Default: all trace catalog features.",
-    )
-    parser.add_argument(
         "--feature",
         action="append",
         default=None,
-        help="Use this feature name. Can be repeated and overrides --features.",
+        help="Use this feature name. Can be repeated to choose an explicit subset.",
     )
     parser.add_argument(
         "--overwrite",
@@ -83,11 +76,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    feature_names = None
-    if args.feature is not None:
-        feature_names = args.feature
-    elif args.features == "legacy":
-        feature_names = LEGACY_FEATURE_NAMES
     workers = args.workers
     if workers == 0:
         workers = min(os.cpu_count() or 1, len(args.trace))
@@ -96,7 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         ShardBuildConfig(
             trace_paths=args.trace,
             out_dir=args.out,
-            feature_names=feature_names,
+            feature_names=args.feature,
             shard_rows=args.shard_rows,
             sample_records=args.sample_records,
             max_negative_records=args.max_negatives,

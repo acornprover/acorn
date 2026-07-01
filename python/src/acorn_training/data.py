@@ -13,17 +13,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 TRACE_SCHEMA = "acorn-activated-step-trace-v2"
 SHARD_SCHEMA = "acorn-training-shards-v1"
-LEGACY_FEATURE_NAMES = [
-    "is_contradiction",
-    "atom_count",
-    "is_counterfactual",
-    "is_hypothetical",
-    "is_factual",
-    "is_assumption",
-    "is_negated_goal",
-    "proof_size",
-    "depth",
-]
 
 
 @dataclass(frozen=True)
@@ -135,7 +124,7 @@ def _load_feature_names(path: Path) -> list[str]:
             raise ValueError(f"{metadata_path}: expected string feature_vector names")
         return feature_names
 
-    return LEGACY_FEATURE_NAMES.copy()
+    raise ValueError(f"{metadata_path}: trace metadata file is required")
 
 
 def _selected_indices(

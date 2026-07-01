@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .data import LEGACY_FEATURE_NAMES, load_shard_dataset, load_trace_dataset, split_by_search
+from .data import load_shard_dataset, load_trace_dataset, split_by_search
 from .train import EpochMetrics, TrainConfig, export_onnx, train_model
 
 
@@ -37,16 +37,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--features",
-        choices=["all", "legacy"],
-        default="all",
-        help="Feature set to train on when reading raw traces. Default: all trace catalog features.",
-    )
-    parser.add_argument(
         "--feature",
         action="append",
         default=None,
-        help="Use this feature name. Can be repeated and overrides --features.",
+        help="Use this feature name. Can be repeated to choose an explicit subset.",
     )
     parser.add_argument(
         "--device",
@@ -142,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("do not mix shard directories and raw trace files in one training run")
 
     if shard_dirs:
-        if args.feature is not None or args.features != "all":
+        if args.feature is not None:
             raise ValueError("feature selection is fixed by shard manifests")
         if args.sample_records is not None:
             raise ValueError("use acorn-build-scorer-shards --sample-records before training")
@@ -151,15 +145,9 @@ def main(argv: list[str] | None = None) -> None:
             max_records=args.max_records,
         )
     else:
-        feature_names = None
-        if args.feature is not None:
-            feature_names = args.feature
-        elif args.features == "legacy":
-            feature_names = LEGACY_FEATURE_NAMES
-
         dataset = load_trace_dataset(
             trace_paths,
-            feature_names=feature_names,
+            feature_names=args.feature,
             max_records=args.max_records,
             sample_records=args.sample_records,
             seed=args.seed,

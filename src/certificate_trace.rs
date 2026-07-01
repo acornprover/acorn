@@ -31,8 +31,8 @@ pub struct TraceStep {
     #[serde(rename = "r", default, skip_serializing_if = "TraceRule::is_claim")]
     pub rule: TraceRule,
 
-    #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
-    pub claim: Option<String>,
+    #[serde(rename = "c")]
+    pub claim: String,
 
     #[serde(rename = "f", default, skip_serializing_if = "Vec::is_empty")]
     pub premises: Vec<usize>,
@@ -148,7 +148,7 @@ impl TraceStep {
     pub fn claim(claim: String) -> Self {
         Self {
             rule: TraceRule::Claim,
-            claim: Some(claim),
+            claim,
             premises: vec![],
             generic: false,
             br_kind: None,
@@ -159,7 +159,7 @@ impl TraceStep {
     fn with_rule(rule: TraceRule, claim: String, premises: Vec<usize>, generic: bool) -> Self {
         Self {
             rule,
-            claim: Some(claim),
+            claim,
             premises,
             generic,
             br_kind: None,
@@ -210,10 +210,7 @@ impl ProofTrace {
             let serialized_generic_artifact = matches!(step.rule, TraceRule::Claim)
                 && step.premises.is_empty()
                 && step.generic
-                && step
-                    .claim
-                    .as_deref()
-                    .is_some_and(is_serialized_generic_artifact);
+                && is_serialized_generic_artifact(&step.claim);
             let auxiliary = step.generic || serialized_generic_artifact;
             if auxiliary && !referenced[old_index] {
                 continue;
@@ -3603,7 +3600,7 @@ impl<'a> TraceChecker<'a> {
                 self.check_witness_step(index, step)?;
             }
             TraceRule::Contra => {
-                let code = step.claim.clone().unwrap_or_else(|| "false".to_string());
+                let code = step.claim.clone();
                 if step.premises.is_empty() {
                     if !self.checker.has_contradiction() {
                         return Err(CodeGenError::GeneratedBadCode(format!(
@@ -3672,12 +3669,7 @@ impl<'a> TraceChecker<'a> {
     }
 
     fn check_witness_step(&mut self, index: usize, step: &TraceStep) -> Result<(), CodeGenError> {
-        let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!(
-                "certificate trace wit step {} is missing declaration text",
-                index + 1
-            ))
-        })?;
+        let code = &step.claim;
         let parsed = Certificate::parse_code_line(
             code,
             self.project,
@@ -3735,15 +3727,10 @@ impl<'a> TraceChecker<'a> {
 
     fn parse_required_claim(
         &mut self,
-        index: usize,
+        _index: usize,
         step: &TraceStep,
     ) -> Result<(Clause, String), CodeGenError> {
-        let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!(
-                "certificate trace step {} is missing claim text",
-                index + 1
-            ))
-        })?;
+        let code = &step.claim;
         let parsed = Certificate::parse_code_line(
             code,
             self.project,
@@ -3772,15 +3759,10 @@ impl<'a> TraceChecker<'a> {
 
     fn parse_required_claim_with_generic(
         &mut self,
-        index: usize,
+        _index: usize,
         step: &TraceStep,
     ) -> Result<(Clause, Clause, String), CodeGenError> {
-        let code = step.claim.as_ref().ok_or_else(|| {
-            CodeGenError::GeneratedBadCode(format!(
-                "certificate trace step {} is missing claim text",
-                index + 1
-            ))
-        })?;
+        let code = &step.claim;
         let parsed = Certificate::parse_code_line(
             code,
             self.project,

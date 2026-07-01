@@ -10,12 +10,12 @@ proof trace under `p`:
 Top-level fields:
 
 - `goal`: the normalized goal text.
-- `p`: the proof trace. This field is omitted only for placeholder records.
+- `p`: the proof trace.
 
 Each proof trace step has:
 
 - `r`: the checker rule. Omitted means `claim`.
-- `c`: the Acorn-readable claim or witness declaration, when the rule needs one.
+- `c`: the Acorn-readable claim or witness declaration.
 - `f`: premise step indexes, when the rule needs explicit premises.
 - `g`: when present on a step, the step targets the generic clause parsed from
   `c`; otherwise it targets the specialized clause.

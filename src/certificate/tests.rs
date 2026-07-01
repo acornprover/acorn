@@ -720,7 +720,6 @@ fn test_named_function_witness_can_match_implying_claim() {
     )
     .expect("witness emitter should build");
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
-    assert_eq!(emitter.replacement_indices.get(&local_id), None);
 }
 
 #[test]
@@ -747,7 +746,6 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
     .expect("duplicate matching claims should still anchor successfully");
 
     assert_eq!(emitter.anchor_indices.get(&local_id), Some(&0));
-    assert_eq!(emitter.replacement_indices.get(&local_id), None);
 }
 
 #[test]
@@ -1899,7 +1897,7 @@ fn test_check_cert_accepts_lambda_valued_claim_argument() {
         .proof
         .steps
         .iter()
-        .filter_map(|step| step.claim.as_ref())
+        .map(|step| &step.claim)
         .collect::<Vec<_>>();
     assert!(
         proof

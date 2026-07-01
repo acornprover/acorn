@@ -13,8 +13,8 @@ The current training signal is one row per activated proof step:
 
 Rows from failed searches are kept with their real `outcome` and `used_in_final_proof=false`.
 
-By default the trainer uses all trace catalog features. Use `--features legacy` to train on the
-old nine-feature ONNX contract, or repeat `--feature NAME` to train on an explicit subset.
+By default the trainer uses all trace catalog features. Repeat `--feature NAME` to train on an
+explicit subset.
 
 The CLI trains a small PyTorch model and exports an ONNX model plus `*.features.json` sidecar:
 
@@ -37,7 +37,7 @@ For quick inspection without training from raw traces:
 
 ```bash
 cd python
-uv run acorn-train-scorer ../traces/legacy.jsonl.zst --inspect-only
+uv run acorn-train-scorer ../traces/latest.jsonl.zst --inspect-only
 ```
 
 ## Normal Training Workflow
@@ -124,7 +124,7 @@ Each shard should store:
 - `features`: `float32` tensor with shape `[rows, features]`
 - `labels`: `bool` or `uint8` tensor for `used_in_final_proof`
 - `group_ids`: integer tensor for `(module, goal)` split groups
-- `goal_buckets`: `int16` tensor for the stable eval/training partition, or `-1` for legacy rows
+- `goal_buckets`: `int16` tensor for the stable eval/training partition, or `-1` for unstamped rows
 - `policy_ids`: small integer tensor for policy source
 - optional cheap analysis fields such as `activation_index`
 

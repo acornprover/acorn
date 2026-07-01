@@ -2299,11 +2299,6 @@ impl CertificateWorklist {
         }
     }
 
-    /// Remove all certificates for a goal from the worklist.
-    pub fn remove_goal(&mut self, goal: &str) {
-        self.indexes_for_goal.remove(goal);
-    }
-
     /// Get the number of unused certificates remaining in the worklist
     pub fn unused(&self) -> usize {
         self.indexes_for_goal.values().map(|v| v.len()).sum()
@@ -2336,8 +2331,6 @@ struct WitnessEmitter<'a> {
     witness_registry: &'a WitnessRegistry,
     ignored_witnesses: HashSet<Symbol>,
     witness_steps: HashMap<Symbol, SatisfyStep>,
-    claim_replacements: HashMap<usize, Symbol>,
-    replacement_indices: HashMap<Symbol, usize>,
     claim_anchors: HashMap<usize, Vec<Symbol>>,
     anchor_indices: HashMap<Symbol, usize>,
     declared: HashSet<Symbol>,
@@ -2353,8 +2346,6 @@ struct WitnessEmitter<'a> {
 enum WitnessPlacement {
     Standalone,
     Anchor(usize),
-    #[allow(dead_code)]
-    Replace(usize),
 }
 
 impl<'a> WitnessEmitter<'a> {
@@ -2365,7 +2356,7 @@ impl<'a> WitnessEmitter<'a> {
         }
     }
 
-    /// Precompute the witness steps and the claim positions they should replace.
+    /// Precompute the witness steps and the claim positions they should anchor to.
     fn new(
         ordered_steps: Vec<PreparedCertificateStep>,
         witness_registry: &'a WitnessRegistry,
@@ -2406,8 +2397,6 @@ impl<'a> WitnessEmitter<'a> {
             witness_registry,
             ignored_witnesses: ignored_witnesses.clone(),
             witness_steps: HashMap::new(),
-            claim_replacements: HashMap::new(),
-            replacement_indices: HashMap::new(),
             claim_anchors: HashMap::new(),
             anchor_indices: HashMap::new(),
             declared: HashSet::new(),
@@ -2504,10 +2493,7 @@ impl<'a> WitnessEmitter<'a> {
     }
 
     fn declaration_index(&self, symbol: Symbol) -> Option<usize> {
-        self.replacement_indices
-            .get(&symbol)
-            .copied()
-            .or_else(|| self.anchor_indices.get(&symbol).copied())
+        self.anchor_indices.get(&symbol).copied()
     }
 
     /// Delay any step whose first witness use depends on a later replacement claim.
@@ -2560,15 +2546,7 @@ impl<'a> WitnessEmitter<'a> {
             )));
         }
 
-        let result = if let Some(symbol) = self.claim_replacements.get(&index).copied() {
-            match self.emit_witness(symbol) {
-                Ok(()) => {
-                    self.emitted[index] = true;
-                    self.emit_anchors_for_step(index)
-                }
-                Err(err) => Err(err),
-            }
-        } else if self.step_needs_future_witness(index, current_index) {
+        let result = if self.step_needs_future_witness(index, current_index) {
             self.buffered.push(index);
             Ok(())
         } else {
@@ -2670,23 +2648,11 @@ impl<'a> WitnessEmitter<'a> {
             WitnessPlacement::Anchor(index) => Self::step_result_claim(&self.ordered_steps[index])
                 .expect("claim_clauses only records claim-producing steps")
                 .clone(),
-            WitnessPlacement::Standalone | WitnessPlacement::Replace(_) => {
-                Claim::new(general_clause.clone(), VariableMap::new())
-                    .map_err(CodeGenError::GeneratedBadCode)?
-            }
+            WitnessPlacement::Standalone => Claim::new(general_clause.clone(), VariableMap::new())
+                .map_err(CodeGenError::GeneratedBadCode)?,
         };
         match placement {
             WitnessPlacement::Standalone => {}
-            WitnessPlacement::Replace(index) => {
-                if let Some(existing) = self.claim_replacements.get(&index).copied() {
-                    self.claim_anchors.entry(index).or_default().push(symbol);
-                    self.anchor_indices.insert(symbol, index);
-                    debug_assert_ne!(existing, symbol);
-                } else {
-                    self.claim_replacements.insert(index, symbol);
-                    self.replacement_indices.insert(symbol, index);
-                }
-            }
             WitnessPlacement::Anchor(index) => {
                 self.claim_anchors.entry(index).or_default().push(symbol);
                 self.anchor_indices.insert(symbol, index);
@@ -3138,9 +3104,6 @@ impl<'a> WitnessEmitter<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, clause)| {
-                if self.claim_replacements.contains_key(&index) {
-                    return None;
-                }
                 if self.referenced_symbols[index].contains(&symbol) {
                     return None;
                 }

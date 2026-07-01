@@ -56,7 +56,7 @@ fn test_cert_generation_replays_source_let_satisfy_inside_forall() {
         .proof
         .steps
         .iter()
-        .filter_map(|step| step.claim.as_ref())
+        .map(|step| &step.claim)
         .collect::<Vec<_>>();
     assert!(
         !proof.is_empty(),
