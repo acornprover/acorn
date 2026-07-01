@@ -288,6 +288,7 @@ struct TraceBuilder<'a> {
     available: HashMap<Clause, usize>,
     inserted_to_trace: HashMap<usize, usize>,
     emitting_inserted_ids: HashSet<usize>,
+    emitting_local_inserted_ids: HashSet<usize>,
     deferred_claims: Vec<DeferredClaim>,
     variable_support_depth: usize,
 }
@@ -304,6 +305,7 @@ struct TraceBuilderCheckpoint {
     step_clauses: Vec<StepClauses>,
     available: HashMap<Clause, usize>,
     inserted_to_trace: HashMap<usize, usize>,
+    emitting_local_inserted_ids: HashSet<usize>,
     shadow_checker: Checker,
     variable_support_depth: usize,
 }
@@ -330,6 +332,7 @@ impl<'a> TraceBuilder<'a> {
             available: HashMap::new(),
             inserted_to_trace: HashMap::new(),
             emitting_inserted_ids: HashSet::new(),
+            emitting_local_inserted_ids: HashSet::new(),
             deferred_claims: vec![],
             variable_support_depth: 0,
         }
@@ -341,6 +344,7 @@ impl<'a> TraceBuilder<'a> {
             step_clauses: self.step_clauses.clone(),
             available: self.available.clone(),
             inserted_to_trace: self.inserted_to_trace.clone(),
+            emitting_local_inserted_ids: self.emitting_local_inserted_ids.clone(),
             shadow_checker: self.shadow_checker.clone(),
             variable_support_depth: self.variable_support_depth,
         }
@@ -351,6 +355,7 @@ impl<'a> TraceBuilder<'a> {
         self.step_clauses = checkpoint.step_clauses;
         self.available = checkpoint.available;
         self.inserted_to_trace = checkpoint.inserted_to_trace;
+        self.emitting_local_inserted_ids = checkpoint.emitting_local_inserted_ids;
         self.shadow_checker = checkpoint.shadow_checker;
         self.variable_support_depth = checkpoint.variable_support_depth;
     }
@@ -2332,6 +2337,9 @@ impl<'a> TraceBuilder<'a> {
         generic: bool,
         premises: &[usize],
     ) -> Result<Option<usize>, CodeGenError> {
+        if !self.emitting_local_inserted_ids.is_empty() {
+            return Ok(None);
+        }
         let mut local = self.base_checker.clone();
         local.set_eager_boolean_reductions(false);
         for &premise in premises {
@@ -2376,18 +2384,19 @@ impl<'a> TraceBuilder<'a> {
         Ok(None)
     }
 
+    fn local_eager_cycle_error(local_id: usize) -> CodeGenError {
+        CodeGenError::GeneratedBadCode(format!(
+            "cycle while emitting local eager clause {}",
+            local_id
+        ))
+    }
+
     fn emit_local_inserted_clause(
         &mut self,
         local: &Checker,
         local_id: usize,
         seen: &mut HashSet<usize>,
     ) -> Result<usize, CodeGenError> {
-        if !seen.insert(local_id) {
-            return Err(CodeGenError::GeneratedBadCode(format!(
-                "cycle while emitting local eager clause {}",
-                local_id
-            )));
-        }
         let inserted = local.inserted_clause(local_id).ok_or_else(|| {
             CodeGenError::GeneratedBadCode(format!(
                 "missing local eager inserted clause {}",
@@ -2397,81 +2406,97 @@ impl<'a> TraceBuilder<'a> {
         if let Some(index) = self.available.get(&inserted.clause) {
             return Ok(*index);
         }
+        if !seen.insert(local_id) {
+            return Err(Self::local_eager_cycle_error(local_id));
+        }
+        if !self.emitting_local_inserted_ids.insert(local_id) {
+            return Err(Self::local_eager_cycle_error(local_id));
+        }
 
-        if let Some(source_id) = inserted.reason.dependency() {
-            let source_index = self.emit_local_inserted_clause(local, source_id, seen)?;
-            let source_candidates: Vec<Clause> =
-                self.step_clauses[source_index].all().cloned().collect();
-            let (code, generic) = self.serialize_clause_step(&inserted.clause)?;
-            let rule = source_candidates
-                .iter()
-                .find_map(|source| match inserted.reason {
-                    StepReason::EqualityResolution(_)
-                        if self.shadow_checker.equality_resolution_derives_for_trace(
-                            source,
-                            &inserted.clause,
-                            &self.kernel_context,
-                        ) =>
-                    {
-                        Some(TraceRule::Er)
-                    }
-                    StepReason::EqualityFactoring(_)
-                        if self.shadow_checker.equality_factoring_derives_for_trace(
-                            source,
-                            &inserted.clause,
-                            &self.kernel_context,
-                        ) =>
-                    {
-                        Some(TraceRule::Ef)
-                    }
-                    StepReason::Extensionality(_)
-                        if self.shadow_checker.extensionality_derives_for_trace(
-                            source,
-                            &inserted.clause,
-                            &self.kernel_context,
-                        ) =>
-                    {
-                        Some(TraceRule::Ext)
-                    }
-                    StepReason::Injectivity(_)
-                        if self.shadow_checker.injectivity_derives_for_trace(
-                            source,
-                            &inserted.clause,
-                            &self.kernel_context,
-                        ) =>
-                    {
-                        Some(TraceRule::Inj)
-                    }
-                    StepReason::BooleanReduction(_)
-                        if self
-                            .shadow_checker
-                            .boolean_reduction_detail_for_trace(
+        let result = (|| {
+            if let Some(source_id) = inserted.reason.dependency() {
+                let source_index = self.emit_local_inserted_clause(local, source_id, seen)?;
+                let source_candidates: Vec<Clause> =
+                    self.step_clauses[source_index].all().cloned().collect();
+                let (code, generic) = self.serialize_clause_step(&inserted.clause)?;
+                let rule = source_candidates
+                    .iter()
+                    .find_map(|source| match inserted.reason {
+                        StepReason::EqualityResolution(_)
+                            if self.shadow_checker.equality_resolution_derives_for_trace(
                                 source,
                                 &inserted.clause,
                                 &self.kernel_context,
-                            )
-                            .is_some() =>
-                    {
-                        Some(TraceRule::Br)
+                            ) =>
+                        {
+                            Some(TraceRule::Er)
+                        }
+                        StepReason::EqualityFactoring(_)
+                            if self.shadow_checker.equality_factoring_derives_for_trace(
+                                source,
+                                &inserted.clause,
+                                &self.kernel_context,
+                            ) =>
+                        {
+                            Some(TraceRule::Ef)
+                        }
+                        StepReason::Extensionality(_)
+                            if self.shadow_checker.extensionality_derives_for_trace(
+                                source,
+                                &inserted.clause,
+                                &self.kernel_context,
+                            ) =>
+                        {
+                            Some(TraceRule::Ext)
+                        }
+                        StepReason::Injectivity(_)
+                            if self.shadow_checker.injectivity_derives_for_trace(
+                                source,
+                                &inserted.clause,
+                                &self.kernel_context,
+                            ) =>
+                        {
+                            Some(TraceRule::Inj)
+                        }
+                        StepReason::BooleanReduction(_)
+                            if self
+                                .shadow_checker
+                                .boolean_reduction_detail_for_trace(
+                                    source,
+                                    &inserted.clause,
+                                    &self.kernel_context,
+                                )
+                                .is_some() =>
+                        {
+                            Some(TraceRule::Br)
+                        }
+                        _ => None,
+                    });
+                if let Some(rule) = rule {
+                    if matches!(rule, TraceRule::Br) {
+                        return self.push_br_step(
+                            code,
+                            source_index,
+                            inserted.clause,
+                            generic,
+                            vec![],
+                        );
                     }
-                    _ => None,
-                });
-            if let Some(rule) = rule {
-                if matches!(rule, TraceRule::Br) {
-                    return self.push_br_step(code, source_index, inserted.clause, generic, vec![]);
+                    return self.push_step(
+                        rule,
+                        code,
+                        vec![source_index],
+                        inserted.clause,
+                        generic,
+                        vec![],
+                    );
                 }
-                return self.push_step(
-                    rule,
-                    code,
-                    vec![source_index],
-                    inserted.clause,
-                    generic,
-                    vec![],
-                );
             }
-        }
 
-        self.emit_clause(inserted.clause, StepReason::PreviousClaim)
+            self.emit_clause(inserted.clause, StepReason::PreviousClaim)
+        })();
+        self.emitting_local_inserted_ids.remove(&local_id);
+        result
     }
 
     fn eq_step_replays(&self, premises: &[usize], clause: &Clause) -> bool {
