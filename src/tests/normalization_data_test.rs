@@ -1331,12 +1331,6 @@ fn serialize_claim_line(
             kernel_context,
             bindings,
         )
-        .map(|inputs| {
-            inputs
-                .into_iter()
-                .map(|input| input.code().to_string())
-                .collect::<Vec<_>>()
-        })
         .expect("claim should serialize through concrete-step generation");
         assert_eq!(proof.len(), 1, "expected one serialized proof line");
         return proof.pop().unwrap();

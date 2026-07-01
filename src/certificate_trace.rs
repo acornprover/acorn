@@ -7,7 +7,7 @@ use crate::certificate::{Certificate, CertificateLine, CheckedCertificate};
 use crate::code_generator::Error as CodeGenError;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::Atom;
-use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep};
+use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::{BooleanReductionKind, Clause};
 use crate::kernel::kernel_context::KernelContext;
@@ -15,25 +15,6 @@ use crate::kernel::literal::Literal;
 use crate::kernel::symbol::Symbol;
 use crate::kernel::term::Decomposition;
 use crate::project::ProjectLookup;
-
-#[derive(Debug, Clone)]
-pub(crate) enum GeneratedTraceInput {
-    SourceLine(String),
-    BooleanReduction {
-        code: String,
-        step: BooleanReductionStep,
-    },
-}
-
-#[cfg(test)]
-impl GeneratedTraceInput {
-    pub(crate) fn code(&self) -> &str {
-        match self {
-            Self::SourceLine(code) => code,
-            Self::BooleanReduction { code, .. } => code,
-        }
-    }
-}
 
 /// Standard certificate proof payload.
 ///
@@ -196,8 +177,8 @@ impl TraceStep {
 }
 
 impl ProofTrace {
-    pub(crate) fn from_generated_inputs_checked(
-        inputs: &[GeneratedTraceInput],
+    pub(crate) fn from_certificate_steps_checked(
+        inputs: &[(CertificateStep, String, Option<Clause>)],
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
@@ -339,7 +320,10 @@ impl<'a> TraceWriter<'a> {
         self.variable_support_depth = checkpoint.variable_support_depth;
     }
 
-    fn write(mut self, inputs: &[GeneratedTraceInput]) -> Result<ProofTrace, CodeGenError> {
+    fn write(
+        mut self,
+        inputs: &[(CertificateStep, String, Option<Clause>)],
+    ) -> Result<ProofTrace, CodeGenError> {
         for (line_index, input) in inputs.iter().enumerate() {
             if self.derivation_checker.has_contradiction()
                 || self.shadow_checker.has_contradiction()
@@ -369,35 +353,38 @@ impl<'a> TraceWriter<'a> {
     fn write_step(
         &mut self,
         line_index: usize,
-        input: &GeneratedTraceInput,
+        input: &(CertificateStep, String, Option<Clause>),
     ) -> Result<(), CodeGenError> {
-        let (parsed, code) = match input {
-            GeneratedTraceInput::SourceLine(code) => (
-                Certificate::parse_code_line(
-                    code,
-                    self.project,
-                    &mut self.bindings,
-                    &mut self.kernel_context,
-                )?,
-                code.as_str(),
-            ),
-            GeneratedTraceInput::BooleanReduction { code, step } => (
-                CertificateStep::BooleanReduction(step.clone()),
-                code.as_str(),
-            ),
+        let (step, code, boolean_reduction_source) = input;
+        let parsed = match step {
+            CertificateStep::Satisfy(_) => Certificate::parse_code_line(
+                code,
+                self.project,
+                &mut self.bindings,
+                &mut self.kernel_context,
+            )?,
+            CertificateStep::Claim(_) => step.clone(),
         };
+        let code = code.as_str();
 
         let mut deferred_claim_error = None;
         let claim_index = match &parsed {
-            CertificateStep::Claim(claim) => match self.emit_claim_step(code.to_string(), claim) {
-                Ok(index) => Some(index),
-                Err(err) => {
-                    deferred_claim_error = Some(err);
-                    None
+            CertificateStep::Claim(claim) => {
+                if let Some(source) = boolean_reduction_source {
+                    Some(self.emit_boolean_reduction_claim_step(
+                        code.to_string(),
+                        source.clone(),
+                        claim,
+                    )?)
+                } else {
+                    match self.emit_claim_step(code.to_string(), claim) {
+                        Ok(index) => Some(index),
+                        Err(err) => {
+                            deferred_claim_error = Some(err);
+                            None
+                        }
+                    }
                 }
-            },
-            CertificateStep::BooleanReduction(reduction) => {
-                Some(self.emit_boolean_reduction_step(code.to_string(), reduction)?)
             }
             CertificateStep::Satisfy(satisfy) => {
                 let justification = satisfy
@@ -416,14 +403,14 @@ impl<'a> TraceWriter<'a> {
         let before = self.derivation_checker.inserted_len();
         let mut checked_steps = Vec::new();
         let mut reprocess_derivation = false;
-        match self
-            .derivation_checker
-            .check_cert_step_for_trace(&parsed, code, &self.kernel_context)
-        {
+        match self.apply_step_to_derivation_checker(
+            &parsed,
+            code,
+            boolean_reduction_source.as_ref(),
+        ) {
             Ok(checked) => {
                 checked_steps = checked;
             }
-            Err(err) if err.to_string().contains("proof does not result") => {}
             Err(err)
                 if claim_index.is_some() && err.to_string().contains("is not obviously true") =>
             {
@@ -507,13 +494,11 @@ impl<'a> TraceWriter<'a> {
                 )));
             }
         }
-        for checked_step in checked_steps {
-            if self.available.contains_key(&checked_step.clause) {
+        for (clause, reason) in checked_steps {
+            if self.available.contains_key(&clause) {
                 continue;
             }
-            if let Err(err) =
-                self.emit_clause(checked_step.clause.clone(), checked_step.reason.clone())
-            {
+            if let Err(err) = self.emit_clause(clause.clone(), reason.clone()) {
                 if deferred_claim_error.is_some() {
                     self.deferred_claims.push(DeferredClaim {
                         line_index,
@@ -529,7 +514,7 @@ impl<'a> TraceWriter<'a> {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "failed to emit checked proof step {} while writing certificate trace: {} ({})",
                     line_index + 1,
-                    checked_step.code_line.as_deref().unwrap_or(code),
+                    code,
                     err
                 )));
             }
@@ -562,6 +547,144 @@ impl<'a> TraceWriter<'a> {
                 .enable_eager_boolean_reductions(&self.kernel_context);
         }
         Ok(())
+    }
+
+    fn apply_step_to_derivation_checker(
+        &mut self,
+        step: &CertificateStep,
+        code: &str,
+        boolean_reduction_source: Option<&Clause>,
+    ) -> Result<Vec<(Clause, StepReason)>, CodeGenError> {
+        let cert_line_context = format!("; certificate line: {:?}", code);
+
+        #[cfg(feature = "validate")]
+        step.validate_normalized_shape(&self.kernel_context)
+            .map_err(CodeGenError::GeneratedBadCode)?;
+
+        match step {
+            CertificateStep::Claim(claim) => {
+                claim
+                    .validate_checker_payload(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+
+                let generic_clause = claim.normalized_generic_clause();
+                let clause = claim
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+
+                if let Some(source) = boolean_reduction_source {
+                    let source_reason = self
+                        .derivation_checker
+                        .check_clause_direct_for_trace(source, &self.kernel_context);
+                    if source_reason.is_none() {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "Boolean reduction has unknown source{} (source debug: {:?})",
+                            cert_line_context, source,
+                        )));
+                    }
+                    if self
+                        .derivation_checker
+                        .boolean_reduction_detail_for_trace(source, &clause, &self.kernel_context)
+                        .is_none()
+                    {
+                        return Err(CodeGenError::GeneratedBadCode(format!(
+                            "Boolean reduction does not reduce source to result{} (source debug: {:?}; result debug: {:?})",
+                            cert_line_context,
+                            source,
+                            clause,
+                        )));
+                    }
+                    self.derivation_checker.insert_clause(
+                        &clause,
+                        StepReason::PreviousClaim,
+                        &self.kernel_context,
+                    );
+                    return Ok(vec![(clause, source_reason.unwrap())]);
+                }
+
+                let reason = self
+                    .derivation_checker
+                    .check_clause(&generic_clause, &self.kernel_context)
+                    .or_else(|| {
+                        self.derivation_checker
+                            .check_clause(&clause, &self.kernel_context)
+                    });
+
+                let Some(reason) = reason else {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "Claim is not obviously true{} (generic debug: {:?}; specialized debug: {:?})",
+                        cert_line_context,
+                        claim.clause(),
+                        clause,
+                    )));
+                };
+
+                self.derivation_checker.insert_clause(
+                    &generic_clause,
+                    StepReason::PreviousClaim,
+                    &self.kernel_context,
+                );
+                self.derivation_checker.insert_clause(
+                    &clause,
+                    StepReason::PreviousClaim,
+                    &self.kernel_context,
+                );
+                Ok(vec![(clause, reason)])
+            }
+            CertificateStep::Satisfy(step) => {
+                let mut witness_validation_context = self.kernel_context.as_ref().clone();
+                step.validate_checker_payload(&mut witness_validation_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+
+                let generic_clause = step.justification.normalized_generic_clause();
+                let justification_clause = step
+                    .justification
+                    .normalized_specialized_clause(&self.kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?;
+                let justification_ok = self
+                    .derivation_checker
+                    .check_clause(&generic_clause, &self.kernel_context)
+                    .or_else(|| {
+                        self.derivation_checker
+                            .check_clause(&justification_clause, &self.kernel_context)
+                    })
+                    .is_some();
+                if !justification_ok {
+                    return Err(CodeGenError::GeneratedBadCode(format!(
+                        "Witness declaration is not obviously true{} (missing implicit existential {:?})",
+                        cert_line_context,
+                        justification_clause,
+                    )));
+                }
+
+                self.derivation_checker.insert_clause(
+                    &generic_clause,
+                    StepReason::WitnessDeclaration,
+                    &self.kernel_context,
+                );
+                self.derivation_checker.insert_clause(
+                    &justification_clause,
+                    StepReason::WitnessDeclaration,
+                    &self.kernel_context,
+                );
+                if let Some(specialized_clause) = &step.specialized_clause {
+                    self.derivation_checker.insert_clause(
+                        specialized_clause,
+                        StepReason::WitnessDeclaration,
+                        &self.kernel_context,
+                    );
+                }
+                for clause in &step.witness_clauses {
+                    self.derivation_checker.insert_clause(
+                        clause,
+                        StepReason::WitnessDeclaration,
+                        &self.kernel_context,
+                    );
+                }
+
+                Ok(vec![(justification_clause, StepReason::WitnessDeclaration)])
+            }
+        }
     }
 
     fn deferred_claim_context(&self) -> String {
@@ -897,17 +1020,13 @@ impl<'a> TraceWriter<'a> {
                 || (literal.left.is_true() && literal.right.as_ref().is_forall()))
     }
 
-    fn emit_boolean_reduction_step(
+    fn emit_boolean_reduction_claim_step(
         &mut self,
         code: String,
-        reduction: &BooleanReductionStep,
+        source: Clause,
+        result: &crate::kernel::certificate_step::Claim,
     ) -> Result<usize, CodeGenError> {
-        let source = reduction
-            .source
-            .normalized_specialized_clause(&self.kernel_context)
-            .map_err(CodeGenError::GeneratedBadCode)?;
-        let result = reduction
-            .result
+        let result = result
             .normalized_specialized_clause(&self.kernel_context)
             .map_err(CodeGenError::GeneratedBadCode)?;
         let source_index = match self.emit_clause(source, StepReason::PreviousClaim) {
@@ -2610,10 +2729,6 @@ impl<'a> TraceWriter<'a> {
                         .map_err(CodeGenError::GeneratedBadCode)
                 }
             }
-            CertificateStep::BooleanReduction(_) => Err(CodeGenError::GeneratedBadCode(
-                "serialized trace clause unexpectedly parsed as a typed boolean reduction"
-                    .to_string(),
-            )),
             CertificateStep::Satisfy(satisfy) => satisfy
                 .justification
                 .normalized_specialized_clause(&kernel_context)
@@ -3642,12 +3757,6 @@ impl<'a> TraceChecker<'a> {
                         .map_err(CodeGenError::GeneratedBadCode)?
                 }
             }
-            CertificateStep::BooleanReduction(_) => {
-                return Err(CodeGenError::GeneratedBadCode(format!(
-                    "certificate trace claim position cannot contain typed boolean reduction: {}",
-                    code
-                )));
-            }
             CertificateStep::Satisfy(_) => {
                 return Err(CodeGenError::GeneratedBadCode(format!(
                     "certificate trace claim position cannot contain witness declaration: {}",
@@ -3686,10 +3795,6 @@ impl<'a> TraceChecker<'a> {
                     .map_err(CodeGenError::GeneratedBadCode)?;
                 Ok((generic, specialized, code.clone()))
             }
-            CertificateStep::BooleanReduction(_) => Err(CodeGenError::GeneratedBadCode(format!(
-                "certificate trace claim position cannot contain typed boolean reduction: {}",
-                code
-            ))),
             CertificateStep::Satisfy(_) => Err(CodeGenError::GeneratedBadCode(format!(
                 "certificate trace claim position cannot contain witness declaration: {}",
                 code

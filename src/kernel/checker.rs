@@ -7,7 +7,6 @@ use im::Vector as ImVector;
 use crate::code_generator::Error;
 use crate::elaborator::source::Source;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::CertificateStep;
 use crate::kernel::clause::BooleanReductionKind;
 use crate::kernel::clause::{Clause, NormalizedClauseTrace};
 use crate::kernel::inference;
@@ -100,22 +99,6 @@ impl StepReason {
             _ => vec![],
         }
     }
-}
-
-/// A checked certificate claim in kernel terms.
-#[derive(Debug, Clone)]
-pub struct CheckedStep {
-    /// The claim clause as checked by the kernel.
-    pub clause: Clause,
-
-    /// The reason this step was accepted.
-    pub reason: StepReason,
-
-    /// The original certificate code line for this step, when available.
-    pub code_line: Option<String>,
-
-    /// Prefer the original code line over reconstructed code for display.
-    pub prefer_code_line: bool,
 }
 
 /// A clause inserted into the checker, together with the reason used for dependency IDs.
@@ -333,29 +316,6 @@ impl Checker {
                 }
             })
             .collect()
-    }
-
-    fn explicit_boolean_reductions(
-        &self,
-        clause: &Clause,
-        kernel_context: &KernelContext,
-    ) -> Vec<Clause> {
-        clause
-            .find_boolean_reduction_kinds_with_options(kernel_context, true)
-            .into_iter()
-            .filter_map(|(_kind, trace)| self.normalize_checker_trace(&trace, kernel_context))
-            .collect()
-    }
-
-    fn boolean_reduces_to(
-        &self,
-        source: &Clause,
-        result: &Clause,
-        kernel_context: &KernelContext,
-    ) -> bool {
-        self.explicit_boolean_reductions(source, kernel_context)
-            .into_iter()
-            .any(|candidate| candidate == *result)
     }
 
     fn checker_boolean_reduction_sets(
@@ -1304,156 +1264,6 @@ impl Checker {
         }
         Ok(())
     }
-
-    pub(crate) fn check_cert_step_for_trace(
-        &mut self,
-        cert_step: &CertificateStep,
-        code_line: &str,
-        kernel_context: &KernelContext,
-    ) -> Result<Vec<CheckedStep>, Error> {
-        let mut checked_steps = Vec::new();
-        let mut witness_validation_context = kernel_context.clone();
-        let cert_line_context = format!("; certificate line: {:?}", code_line);
-
-        if self.has_contradiction() {
-            trace!("has_contradiction (early exit)");
-            return Ok(checked_steps);
-        }
-
-        #[cfg(feature = "validate")]
-        cert_step
-            .validate_normalized_shape(kernel_context)
-            .map_err(Error::GeneratedBadCode)?;
-
-        match cert_step {
-            CertificateStep::Claim(claim) => {
-                claim
-                    .validate_checker_payload(kernel_context)
-                    .map_err(Error::GeneratedBadCode)?;
-
-                let generic_clause = claim.normalized_generic_clause();
-                let clause = Self::instantiate_claim_clause(claim, kernel_context)?;
-
-                let reason = self
-                    .check_clause(&generic_clause, kernel_context)
-                    .or_else(|| self.check_clause(&clause, kernel_context));
-
-                let Some(reason) = reason else {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "Claim is not obviously true{} (generic debug: {:?}; specialized debug: {:?})",
-                        cert_line_context,
-                        claim.clause(),
-                        clause,
-                    )));
-                };
-
-                checked_steps.push(CheckedStep {
-                    clause: clause.clone(),
-                    reason,
-                    code_line: Some(code_line.to_string()),
-                    prefer_code_line: false,
-                });
-
-                self.insert_clause(&generic_clause, StepReason::PreviousClaim, kernel_context);
-                self.insert_clause(&clause, StepReason::PreviousClaim, kernel_context);
-            }
-            CertificateStep::BooleanReduction(step) => {
-                step.validate_checker_payload(kernel_context)
-                    .map_err(Error::GeneratedBadCode)?;
-
-                let source_generic = step.source.normalized_generic_clause();
-                let source_clause = Self::instantiate_claim_clause(&step.source, kernel_context)?;
-                let result_clause = Self::instantiate_claim_clause(&step.result, kernel_context)?;
-
-                let source_reason = self
-                    .check_clause_direct(&source_generic, kernel_context)
-                    .or_else(|| self.check_clause_direct(&source_clause, kernel_context));
-
-                if source_reason.is_none() {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "Boolean reduction has unknown source{} (source debug: {:?})",
-                        cert_line_context, source_clause,
-                    )));
-                }
-
-                if !self.boolean_reduces_to(&source_clause, &result_clause, kernel_context) {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "Boolean reduction does not reduce source to result{} (source debug: {:?}; result debug: {:?})",
-                        cert_line_context,
-                        source_clause,
-                        result_clause,
-                    )));
-                }
-
-                checked_steps.push(CheckedStep {
-                    clause: result_clause.clone(),
-                    reason: source_reason.unwrap_or(StepReason::PreviousClaim),
-                    code_line: Some(code_line.to_string()),
-                    prefer_code_line: true,
-                });
-
-                self.insert_clause(&result_clause, StepReason::PreviousClaim, kernel_context);
-            }
-            CertificateStep::Satisfy(step) => {
-                step.validate_checker_payload(&mut witness_validation_context)
-                    .map_err(Error::GeneratedBadCode)?;
-
-                let generic_clause = step.justification.normalized_generic_clause();
-                let justification_clause =
-                    Self::instantiate_claim_clause(&step.justification, kernel_context)?;
-                let justification_ok = self
-                    .check_clause(&generic_clause, kernel_context)
-                    .or_else(|| self.check_clause(&justification_clause, kernel_context))
-                    .is_some();
-                if !justification_ok {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "Witness declaration is not obviously true{} (missing implicit existential {:?})",
-                        cert_line_context,
-                        justification_clause,
-                    )));
-                }
-
-                self.insert_clause(
-                    &generic_clause,
-                    StepReason::WitnessDeclaration,
-                    kernel_context,
-                );
-                self.insert_clause(
-                    &justification_clause,
-                    StepReason::WitnessDeclaration,
-                    kernel_context,
-                );
-                if let Some(specialized_clause) = &step.specialized_clause {
-                    self.insert_clause(
-                        specialized_clause,
-                        StepReason::WitnessDeclaration,
-                        kernel_context,
-                    );
-                }
-                for clause in &step.witness_clauses {
-                    self.insert_clause(clause, StepReason::WitnessDeclaration, kernel_context);
-                }
-
-                checked_steps.push(CheckedStep {
-                    clause: justification_clause,
-                    reason: StepReason::WitnessDeclaration,
-                    code_line: Some(code_line.to_string()),
-                    prefer_code_line: true,
-                });
-            }
-        }
-
-        Ok(checked_steps)
-    }
-
-    fn instantiate_claim_clause(
-        claim: &crate::kernel::certificate_step::Claim,
-        kernel_context: &KernelContext,
-    ) -> Result<Clause, Error> {
-        claim
-            .normalized_specialized_clause(kernel_context)
-            .map_err(Error::GeneratedBadCode)
-    }
 }
 
 /// A test wrapper that combines a Checker with a KernelContext.
@@ -2201,150 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_cert_step_rejects_tampered_witness_clauses() {
-        use crate::certificate::Certificate;
-        use crate::kernel::certificate_step::CertificateStep;
-        use crate::processor::Processor;
-        use crate::project::Project;
-        use std::borrow::Cow;
-
-        let (_processor, bindings, normalized_goal) = Processor::test_goal(
-            r#"
-            theorem goal { true }
-            "#,
-        );
-
-        let project = Project::new_mock();
-        let mut bindings_cow = Cow::Borrowed(&bindings);
-        let mut kernel_context_cow = Cow::Owned(normalized_goal.kernel_context.clone());
-
-        let mut satisfy_step = match Certificate::parse_code_line(
-            "let w: Bool satisfy { true }",
-            &project,
-            &mut bindings_cow,
-            &mut kernel_context_cow,
-        )
-        .expect("valid satisfy step should parse")
-        {
-            CertificateStep::Satisfy(step) => step,
-            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => {
-                panic!("expected satisfy step")
-            }
-        };
-
-        let kernel_context = kernel_context_cow.as_ref();
-        let mut checker = Checker::new();
-        checker.insert_clause(
-            &satisfy_step.justification.normalized_generic_clause(),
-            StepReason::Testing,
-            kernel_context,
-        );
-
-        satisfy_step.witness_clauses = vec![Clause::impossible()];
-        let err = checker
-            .check_cert_step_for_trace(
-                &CertificateStep::Satisfy(satisfy_step),
-                "let w: Bool satisfy { true }",
-                kernel_context,
-            )
-            .expect_err("tampered witness clauses should be rejected");
-        assert!(
-            err.to_string().contains("witness clauses mismatch"),
-            "unexpected checker error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_check_cert_step_rejects_tampered_witness_specialized_clause() {
-        use crate::certificate::Certificate;
-        use crate::kernel::certificate_step::CertificateStep;
-        use crate::processor::Processor;
-        use crate::project::Project;
-        use std::borrow::Cow;
-
-        let (_processor, bindings, normalized_goal) = Processor::test_goal(
-            r#"
-            theorem goal { true }
-            "#,
-        );
-
-        let project = Project::new_mock();
-        let mut bindings_cow = Cow::Borrowed(&bindings);
-        let mut kernel_context_cow = Cow::Owned(normalized_goal.kernel_context.clone());
-
-        let mut satisfy_step = match Certificate::parse_code_line(
-            "let w: Bool satisfy { true }",
-            &project,
-            &mut bindings_cow,
-            &mut kernel_context_cow,
-        )
-        .expect("valid satisfy step should parse")
-        {
-            CertificateStep::Satisfy(step) => step,
-            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => {
-                panic!("expected satisfy step")
-            }
-        };
-
-        let kernel_context = kernel_context_cow.as_ref();
-        let mut checker = Checker::new();
-        checker.insert_clause(
-            &satisfy_step.justification.normalized_generic_clause(),
-            StepReason::Testing,
-            kernel_context,
-        );
-
-        assert_ne!(satisfy_step.specialized_clause, Some(Clause::impossible()));
-        satisfy_step.specialized_clause = Some(Clause::impossible());
-        let err = checker
-            .check_cert_step_for_trace(
-                &CertificateStep::Satisfy(satisfy_step),
-                "let w: Bool satisfy { true }",
-                kernel_context,
-            )
-            .expect_err("tampered specialized clause should be rejected");
-        assert!(
-            err.to_string()
-                .contains("witness specialized clause mismatch"),
-            "unexpected checker error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_check_cert_step_rejects_ill_typed_claim_specialization_that_proves_false() {
-        use crate::kernel::certificate_step::{CertificateStep, Claim};
-        use crate::kernel::literal::Literal;
-        use crate::kernel::variable_map::VariableMap;
-
-        let mut context = KernelContext::new();
-        context.parse_type_constructor("Empty", 0);
-        let generic = Clause::new(
-            vec![Literal::new(
-                false,
-                Term::new_variable(0),
-                Term::new_variable(0),
-            )],
-            &LocalContext::from_types(vec![context.parse_type("Empty")]),
-        );
-
-        let mut checker = Checker::new();
-        checker.insert_clause(&generic, StepReason::Testing, &context);
-
-        let mut var_map = VariableMap::new();
-        var_map.set(0, Term::new_true());
-        let claim = Claim::new(generic, var_map).expect("old constructor only checks scope");
-
-        let err = checker
-            .check_cert_step_for_trace(&CertificateStep::Claim(claim), "bad claim", &context)
-            .expect_err("ill-typed claim specialization should be rejected");
-        assert!(
-            err.to_string().contains("claim specialization"),
-            "unexpected checker error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_instantiate_claim_clause_normalizes_lambda_valued_arguments() {
+    fn test_claim_specialization_normalizes_lambda_valued_arguments() {
         use crate::kernel::atom::Atom;
         use crate::kernel::certificate_step::Claim;
         use crate::kernel::clause::Clause;
@@ -2369,7 +2036,8 @@ mod tests {
         })
         .expect("claim should normalize");
 
-        let instantiated = Checker::instantiate_claim_clause(&claim, &context)
+        let instantiated = claim
+            .normalized_specialized_clause(&context)
             .expect("claim instantiation should succeed");
 
         assert_eq!(
@@ -2379,50 +2047,6 @@ mod tests {
                 &LocalContext::empty(),
             )
         );
-    }
-
-    #[test]
-    fn test_check_cert_step_records_normalized_claim_clause() {
-        use crate::kernel::atom::Atom;
-        use crate::kernel::certificate_step::{CertificateStep, Claim};
-        use crate::kernel::literal::Literal;
-        use crate::kernel::local_context::LocalContext;
-        use crate::kernel::term::Term;
-        use crate::kernel::variable_map::VariableMap;
-
-        let mut context = KernelContext::new();
-        context.parse_constant("c0", "Bool");
-
-        let known = Clause::from_literals_unnormalized(
-            vec![Literal::positive(Term::parse("c0"))],
-            &LocalContext::empty(),
-        );
-        let generic = context.parse_clause("x0(c0)", &["Bool -> Bool"]);
-        let negated = context.parse_clause("not c0", &[]);
-
-        let mut checker = Checker::new();
-        checker.insert_clause(&generic, StepReason::Testing, &context);
-        checker.insert_clause(&negated, StepReason::Testing, &context);
-
-        let claim = Claim::new(context.parse_clause("x0(c0)", &["Bool -> Bool"]), {
-            let mut var_map = VariableMap::new();
-            var_map.set(
-                0,
-                Term::lambda(
-                    Term::bool_type(),
-                    Term::not(Term::not(Term::atom(Atom::BoundVariable(0)))),
-                ),
-            );
-            var_map
-        })
-        .expect("claim should normalize");
-
-        let checked_steps = checker
-            .check_cert_step_for_trace(&CertificateStep::Claim(claim), "x0(c0)", &context)
-            .expect("claim should check");
-
-        assert_eq!(checked_steps.len(), 1);
-        assert_eq!(checked_steps[0].clause, known);
     }
 
     #[test]

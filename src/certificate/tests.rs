@@ -20,79 +20,86 @@ fn trace_input_codes_from_concrete_steps(
     kernel_context: &KernelContext,
     bindings: &BindingMap,
 ) -> Result<Vec<String>, CodeGenError> {
-    Ok(Certificate::trace_inputs_from_concrete_steps_for_test(
-        concrete_steps,
-        kernel_context,
-        bindings,
-    )?
-    .into_iter()
-    .map(|input| input.code().to_string())
-    .collect())
+    Certificate::trace_inputs_from_concrete_steps_for_test(concrete_steps, kernel_context, bindings)
 }
 
-#[test]
-fn test_check_typed_boolean_reduction_step() {
-    use crate::kernel::checker::{Checker, StepReason};
+fn replay_certificate_step_for_test(
+    checker: &mut crate::kernel::checker::Checker,
+    step: &CertificateStep,
+    kernel_context: &KernelContext,
+) -> Result<(), CodeGenError> {
+    use crate::kernel::checker::StepReason;
 
-    let mut project = Project::new_mock();
-    project.mock(
-        "/mock/main.ac",
-        r#"
-        let p: Bool = axiom
-        let q: Bool = axiom
-
-        theorem goal {
-            true
+    match step {
+        CertificateStep::Claim(claim) => {
+            claim
+                .validate_checker_payload(kernel_context)
+                .map_err(CodeGenError::GeneratedBadCode)?;
+            let generic_clause = claim.normalized_generic_clause();
+            let clause = claim
+                .normalized_specialized_clause(kernel_context)
+                .map_err(CodeGenError::GeneratedBadCode)?;
+            checker
+                .check_clause(&generic_clause, kernel_context)
+                .or_else(|| checker.check_clause(&clause, kernel_context))
+                .ok_or_else(|| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "claim is not obviously true in test replay: {}",
+                        clause
+                    ))
+                })?;
+            checker.insert_clause(&generic_clause, StepReason::PreviousClaim, kernel_context);
+            checker.insert_clause(&clause, StepReason::PreviousClaim, kernel_context);
         }
-        "#,
-    );
-    let module_id = project.load_module_by_name("main").expect("load failed");
-    let lowered = project
-        .get_lowered_module(module_id)
-        .expect("lowered module should be available");
-    let (_goal_id, entry) = lowered
-        .goal_by_name("goal")
-        .expect("lowered goal should be available");
-    let bindings = entry.bindings.clone();
-    let kernel_context = entry.lowered_goal.kernel_context.clone();
+        CertificateStep::Satisfy(step) => {
+            let mut validation_context = kernel_context.clone();
+            step.validate_checker_payload(&mut validation_context)
+                .map_err(CodeGenError::GeneratedBadCode)?;
+            let generic_clause = step.justification.normalized_generic_clause();
+            let justification_clause = step
+                .justification
+                .normalized_specialized_clause(kernel_context)
+                .map_err(CodeGenError::GeneratedBadCode)?;
+            checker
+                .check_clause(&generic_clause, kernel_context)
+                .or_else(|| checker.check_clause(&justification_clause, kernel_context))
+                .ok_or_else(|| {
+                    CodeGenError::GeneratedBadCode(format!(
+                        "witness declaration is not obviously true in test replay: {}",
+                        justification_clause
+                    ))
+                })?;
+            checker.insert_clause(
+                &generic_clause,
+                StepReason::WitnessDeclaration,
+                kernel_context,
+            );
+            checker.insert_clause(
+                &justification_clause,
+                StepReason::WitnessDeclaration,
+                kernel_context,
+            );
+            if let Some(specialized_clause) = &step.specialized_clause {
+                checker.insert_clause(
+                    specialized_clause,
+                    StepReason::WitnessDeclaration,
+                    kernel_context,
+                );
+            }
+            for clause in &step.witness_clauses {
+                checker.insert_clause(clause, StepReason::WitnessDeclaration, kernel_context);
+            }
+        }
+    }
+    Ok(())
+}
 
-    let mut bindings_cow = Cow::Borrowed(&bindings);
-    let mut kernel_context_cow = Cow::Borrowed(&kernel_context);
-    let source = expect_claim(
-        Certificate::parse_code_line(
-            "p and q",
-            &project,
-            &mut bindings_cow,
-            &mut kernel_context_cow,
-        )
-        .expect("source claim should parse"),
-    )
-    .normalized_specialized_clause(kernel_context_cow.as_ref())
-    .expect("source claim should specialize");
-    let source_claim = expect_claim(
-        Certificate::parse_code_line(
-            "p and q",
-            &project,
-            &mut bindings_cow,
-            &mut kernel_context_cow,
-        )
-        .expect("source claim should parse"),
-    );
-    let result_claim = expect_claim(
-        Certificate::parse_code_line("p", &project, &mut bindings_cow, &mut kernel_context_cow)
-            .expect("result claim should parse"),
-    );
-    let step = CertificateStep::BooleanReduction(BooleanReductionStep {
-        source: source_claim,
-        result: result_claim,
-    });
+fn prepared_step_for_test(step: CertificateStep) -> PreparedCertificateStep {
+    PreparedCertificateStep::new(step)
+}
 
-    let mut checker = Checker::new();
-    checker.insert_clause(&source, StepReason::Testing, kernel_context_cow.as_ref());
-    let checked = checker
-        .check_cert_step_for_trace(&step, "p", kernel_context_cow.as_ref())
-        .expect("typed boolean reduction step should check");
-    assert_eq!(checked.len(), 1);
+fn prepared_steps_for_test(steps: Vec<CertificateStep>) -> Vec<PreparedCertificateStep> {
+    steps.into_iter().map(prepared_step_for_test).collect()
 }
 
 #[test]
@@ -679,8 +686,7 @@ fn test_emit_named_function_witness_does_not_synthesize_justification_claim() {
         &kernel_context,
     );
     for step in &emitted {
-        checker
-            .check_cert_step_for_trace(step, "", &kernel_context)
+        replay_certificate_step_for_test(&mut checker, step, &kernel_context)
             .expect("synthetic witness step should check");
     }
     assert!(
@@ -715,7 +721,7 @@ fn test_named_function_witness_can_match_implying_claim() {
     );
 
     let emitter = super::WitnessEmitter::new(
-        vec![CertificateStep::Claim(candidate_claim)],
+        prepared_steps_for_test(vec![CertificateStep::Claim(candidate_claim)]),
         &witness_registry,
         kernel_context.clone(),
         ModuleId::default(),
@@ -738,10 +744,10 @@ fn test_named_function_witness_can_anchor_to_first_of_duplicate_claims() {
     let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
 
     let emitter = super::WitnessEmitter::new(
-        vec![
+        prepared_steps_for_test(vec![
             CertificateStep::Claim(candidate_claim.clone()),
             CertificateStep::Claim(candidate_claim),
-        ],
+        ]),
         &witness_registry,
         kernel_context,
         ModuleId::default(),
@@ -887,10 +893,10 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
         .expect("specialized witness clause should normalize");
 
     let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
-        vec![
+        prepared_steps_for_test(vec![
             CertificateStep::Claim(candidate_claim),
             CertificateStep::Claim(specialized_claim),
-        ],
+        ]),
         &witness_registry,
         kernel_context,
         module_id,
@@ -903,7 +909,7 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
         .iter()
         .map(|step| {
             Certificate::serialize_certificate_step(
-                step,
+                &step.step,
                 &mut generator,
                 &updated_kernel_context,
                 &bindings,
@@ -920,7 +926,9 @@ fn test_emitted_witness_names_are_compact_even_if_internal_ids_are_sparse() {
         "w0"
     );
     assert!(
-        matches!(emitted.first(), Some(CertificateStep::Claim(_))),
+        emitted
+            .first()
+            .is_some_and(|step| matches!(step.step, CertificateStep::Claim(_))),
         "expected the implying claim to justify anchored witness declarations"
     );
     let first_witness_index = proof
@@ -998,7 +1006,7 @@ fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step
     let (_candidate_clause, candidate_claim) = implying_claim_for_equating_bool_witness();
 
     let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
-        vec![CertificateStep::Claim(candidate_claim)],
+        prepared_steps_for_test(vec![CertificateStep::Claim(candidate_claim)]),
         &witness_registry,
         post_kernel_context,
         bindings.module_id(),
@@ -1009,7 +1017,7 @@ fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step
     assert_eq!(
         emitted
             .iter()
-            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .filter(|step| matches!(step.step, CertificateStep::Satisfy(_)))
             .count(),
         1,
         "expected exactly one witness declaration after compaction"
@@ -1020,7 +1028,7 @@ fn test_named_function_witness_certificate_roundtrips_without_extra_satisfy_step
         .iter()
         .map(|step| {
             Certificate::serialize_certificate_step(
-                step,
+                &step.step,
                 &mut generator,
                 &updated_kernel_context,
                 &bindings,
@@ -1112,7 +1120,7 @@ fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
         .expect("source claim should normalize");
 
     let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
-        vec![CertificateStep::Claim(claim)],
+        prepared_steps_for_test(vec![CertificateStep::Claim(claim)]),
         &witness_registry,
         kernel_context,
         ModuleId::default(),
@@ -1123,7 +1131,7 @@ fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
     assert_eq!(
         emitted
             .iter()
-            .filter(|step| matches!(step, CertificateStep::Satisfy(_)))
+            .filter(|step| matches!(step.step, CertificateStep::Satisfy(_)))
             .count(),
         2,
         "nested positive exists should emit one witness per binder"
@@ -1136,8 +1144,7 @@ fn test_emit_named_witnesses_opens_nested_positive_exists_claims() {
         &updated_kernel_context,
     );
     for step in &emitted {
-        checker
-            .check_cert_step_for_trace(step, "", &updated_kernel_context)
+        replay_certificate_step_for_test(&mut checker, &step.step, &updated_kernel_context)
             .expect("nested synthetic witness step should check");
         if checker.has_contradiction() {
             break;
@@ -1162,7 +1169,7 @@ fn test_specialized_positive_exists_step_uses_emitter_module_id() {
     let witness_registry = WitnessRegistry::new();
 
     let mut emitter = super::WitnessEmitter::new(
-        vec![CertificateStep::Claim(claim.clone())],
+        prepared_steps_for_test(vec![CertificateStep::Claim(claim.clone())]),
         &witness_registry,
         kernel_context,
         module_id,
@@ -1221,10 +1228,10 @@ fn test_synthetic_witness_preserves_unused_binder_contradiction() {
     let exists_claim = claim_specializing_local_to_scoped_constant(&exists_clause, parent_local_id);
 
     let (emitted, updated_kernel_context) = Certificate::emit_named_witnesses_with_context(
-        vec![
+        prepared_steps_for_test(vec![
             CertificateStep::Claim(negated_claim),
             CertificateStep::Claim(exists_claim),
-        ],
+        ]),
         &WitnessRegistry::new(),
         kernel_context,
         ModuleId::default(),
@@ -1244,8 +1251,7 @@ fn test_synthetic_witness_preserves_unused_binder_contradiction() {
         &updated_kernel_context,
     );
     for step in &emitted {
-        checker
-            .check_cert_step_for_trace(step, "", &updated_kernel_context)
+        replay_certificate_step_for_test(&mut checker, &step.step, &updated_kernel_context)
             .expect("synthetic witness step should check");
         if checker.has_contradiction() {
             break;

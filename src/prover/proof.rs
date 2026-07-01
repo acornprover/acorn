@@ -938,14 +938,11 @@ mod tests {
         kernel_context: &KernelContext,
         bindings: &BindingMap,
     ) -> Result<Vec<String>, crate::code_generator::Error> {
-        Ok(Certificate::trace_inputs_from_concrete_steps_for_test(
+        Certificate::trace_inputs_from_concrete_steps_for_test(
             concrete_steps,
             kernel_context,
             bindings,
-        )?
-        .into_iter()
-        .map(|input| input.code().to_string())
-        .collect())
+        )
     }
 
     #[test]

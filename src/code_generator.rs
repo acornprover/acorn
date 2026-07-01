@@ -10,8 +10,7 @@ use crate::elaborator::binding_map::BindingMap;
 use crate::elaborator::names::ConstantName;
 use crate::elaborator::type_unifier::TypeclassRegistry;
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep, Claim};
-use crate::kernel::checker::Checker;
+use crate::kernel::certificate_step::{CertificateStep, Claim};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -20,7 +19,6 @@ use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition, Term, TermRef};
 use crate::kernel::variable_map::{apply_to_term, VariableMap};
 use crate::module::ModuleId;
-use crate::prover::proof::{ConcreteRationale, ConcreteStep};
 use crate::syntax::expression::{Declaration, Expression, TypeParamExpr};
 use crate::syntax::token::TokenType;
 
@@ -952,7 +950,7 @@ impl CodeGenerator<'_> {
     /// Convert one specialization to certificate steps.
     /// The replacement_context is the context that the var_map's replacement terms reference.
     /// This is needed to look up variable types when specializing.
-    fn specialization_to_certificate_steps(
+    pub(crate) fn specialization_to_certificate_steps(
         &mut self,
         generic: &Clause,
         var_map: &VariableMap,
@@ -1316,69 +1314,7 @@ impl CodeGenerator<'_> {
                 self.value_to_code(&value)
             }
             CertificateStep::Satisfy(step) => self.satisfy_step_to_code(step),
-            CertificateStep::BooleanReduction(_) => Err(Error::GeneratedBadCode(
-                "boolean-reduction certificate steps require certificate serialization".to_string(),
-            )),
         }
-    }
-
-    /// Converts a ConcreteStep to certificate steps.
-    pub fn concrete_step_to_certificate_steps(
-        &mut self,
-        step: &ConcreteStep,
-        kernel_context: &mut KernelContext,
-    ) -> Result<Vec<CertificateStep>> {
-        if let ConcreteRationale::BooleanReduction { source, .. } = &step.rationale {
-            let mut steps = vec![];
-            for (var_map, replacement_context) in &step.var_maps {
-                let mut result_steps = vec![];
-                self.specialization_to_certificate_steps(
-                    &step.generic,
-                    var_map,
-                    replacement_context,
-                    step.preserve_open,
-                    kernel_context,
-                    &mut result_steps,
-                )?;
-                let [CertificateStep::Claim(result)] = result_steps.as_slice() else {
-                    return Err(Error::GeneratedBadCode(format!(
-                        "boolean reduction generated unexpected result steps: {:?}",
-                        result_steps
-                    )));
-                };
-                let result_clause = result
-                    .normalized_specialized_clause(kernel_context)
-                    .map_err(Error::GeneratedBadCode)?;
-                if Checker::new().boolean_reduction_set_contains_for_trace(
-                    source,
-                    &result_clause,
-                    kernel_context,
-                ) {
-                    let source = Claim::new(source.clone(), VariableMap::new())
-                        .map_err(Error::GeneratedBadCode)?;
-                    steps.push(CertificateStep::BooleanReduction(BooleanReductionStep {
-                        source,
-                        result: result.clone(),
-                    }));
-                } else {
-                    steps.extend(result_steps);
-                }
-            }
-            return Ok(steps);
-        }
-
-        let mut steps = vec![];
-        for (var_map, replacement_context) in &step.var_maps {
-            self.specialization_to_certificate_steps(
-                &step.generic,
-                var_map,
-                replacement_context,
-                step.preserve_open,
-                kernel_context,
-                &mut steps,
-            )?;
-        }
-        Ok(steps)
     }
 
     fn type_to_code(&self, acorn_type: &AcornType) -> Result<String> {

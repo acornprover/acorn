@@ -7,7 +7,7 @@ use std::path::Path;
 
 use std::borrow::Cow;
 
-use crate::certificate_trace::{GeneratedTraceInput, ProofTrace};
+use crate::certificate_trace::ProofTrace;
 use crate::claim_codec::ClaimCodec;
 use crate::code_generator::{CodeGenerator, Error as CodeGenError};
 use crate::elaborator::acorn_type::TypeParam;
@@ -23,7 +23,7 @@ use crate::elaborator::source::Source;
 use crate::elaborator::stack::Stack;
 use crate::elaborator::to_term::{build_type_var_map, lower_type_to_term};
 use crate::kernel::atom::{Atom, AtomId};
-use crate::kernel::certificate_step::{BooleanReductionStep, CertificateStep, Claim, SatisfyStep};
+use crate::kernel::certificate_step::{CertificateStep, Claim, SatisfyStep};
 use crate::kernel::checker::{Checker, StepReason};
 use crate::kernel::clause::Clause;
 use crate::kernel::kernel_context::KernelContext;
@@ -62,6 +62,21 @@ pub struct CertificateLine {
 pub struct CheckedCertificate {
     pub lines: Vec<CertificateLine>,
     pub consumed_proof_steps: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PreparedCertificateStep {
+    step: CertificateStep,
+    boolean_reduction_source: Option<Clause>,
+}
+
+impl PreparedCertificateStep {
+    fn new(step: CertificateStep) -> Self {
+        Self {
+            step,
+            boolean_reduction_source: None,
+        }
+    }
 }
 
 /// A proof certificate containing a compact checker trace.
@@ -989,16 +1004,15 @@ impl Certificate {
         project: &dyn ProjectLookup,
         trace_bindings: Cow<BindingMap>,
     ) -> Result<Certificate, CodeGenError> {
-        let (inputs, kernel_context) =
-            Self::generated_trace_inputs_from_concrete_steps_with_witnesses(
-                concrete_steps,
-                kernel_context,
-                bindings,
-                witness_registry,
-            )?;
-        Self::from_generated_inputs(
+        let (steps, kernel_context) = Self::prepared_steps_from_concrete_steps_with_witnesses(
+            concrete_steps,
+            kernel_context,
+            bindings,
+            witness_registry,
+        )?;
+        Self::from_prepared_steps(
             goal,
-            inputs,
+            steps,
             kernel_context,
             checker,
             project,
@@ -1006,16 +1020,16 @@ impl Certificate {
         )
     }
 
-    fn from_generated_inputs(
+    fn from_prepared_steps(
         goal: String,
-        inputs: Vec<GeneratedTraceInput>,
+        steps: Vec<(CertificateStep, String, Option<Clause>)>,
         kernel_context: KernelContext,
         checker: Checker,
         project: &dyn ProjectLookup,
         bindings: Cow<BindingMap>,
     ) -> Result<Certificate, CodeGenError> {
-        let trace = ProofTrace::from_generated_inputs_checked(
-            &inputs,
+        let trace = ProofTrace::from_certificate_steps_checked(
+            &steps,
             checker.clone(),
             project,
             bindings.clone(),
@@ -1043,28 +1057,67 @@ impl Certificate {
         })
     }
 
-    fn generated_trace_inputs_from_concrete_steps_with_witnesses(
+    fn prepared_steps_from_concrete_steps_with_witnesses(
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
         witness_registry: Option<&WitnessRegistry>,
-    ) -> Result<(Vec<GeneratedTraceInput>, KernelContext), CodeGenError> {
+    ) -> Result<
+        (
+            Vec<(CertificateStep, String, Option<Clause>)>,
+            KernelContext,
+        ),
+        CodeGenError,
+    > {
         let mut generator = CodeGenerator::new_for_certificate(bindings);
         let mut generation_kernel_context = kernel_context.clone();
-        let mut ordered_steps: Vec<CertificateStep> = Vec::new();
+        let mut ordered_steps: Vec<PreparedCertificateStep> = Vec::new();
 
         for step in concrete_steps {
-            let cert_steps = generator
-                .concrete_step_to_certificate_steps(step, &mut generation_kernel_context)
-                .map_err(|err| {
-                    CodeGenError::GeneratedBadCode(format!(
-                        "{} [while converting concrete clause {}]",
-                        err, step.generic
-                    ))
-                })?;
-            for cert_step in cert_steps {
-                if !ordered_steps.contains(&cert_step) {
-                    ordered_steps.push(cert_step);
+            for (var_map, replacement_context) in &step.var_maps {
+                let mut cert_steps = Vec::new();
+                generator
+                    .specialization_to_certificate_steps(
+                        &step.generic,
+                        var_map,
+                        replacement_context,
+                        step.preserve_open,
+                        &mut generation_kernel_context,
+                        &mut cert_steps,
+                    )
+                    .map_err(|err| {
+                        CodeGenError::GeneratedBadCode(format!(
+                            "{} [while converting concrete clause {}]",
+                            err, step.generic
+                        ))
+                    })?;
+
+                for cert_step in cert_steps {
+                    let boolean_reduction_source = match (&step.rationale, &cert_step) {
+                        (
+                            crate::prover::proof::ConcreteRationale::BooleanReduction { source },
+                            CertificateStep::Claim(result),
+                        ) => {
+                            let result_clause = result
+                                .normalized_specialized_clause(&generation_kernel_context)
+                                .map_err(CodeGenError::GeneratedBadCode)?;
+                            Checker::new()
+                                .boolean_reduction_set_contains_for_trace(
+                                    source,
+                                    &result_clause,
+                                    &generation_kernel_context,
+                                )
+                                .then_some(source.clone())
+                        }
+                        _ => None,
+                    };
+                    let prepared = PreparedCertificateStep {
+                        step: cert_step,
+                        boolean_reduction_source,
+                    };
+                    if !ordered_steps.contains(&prepared) {
+                        ordered_steps.push(prepared);
+                    }
                 }
             }
         }
@@ -1085,7 +1138,7 @@ impl Certificate {
 
         let mut inputs = Vec::new();
         for step in &ordered_steps {
-            let input = Self::serialize_generated_trace_input(
+            let input = Self::serialize_prepared_certificate_step(
                 step,
                 &mut generator,
                 &generation_kernel_context,
@@ -1101,30 +1154,30 @@ impl Certificate {
         concrete_steps: &[ConcreteStep],
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<Vec<GeneratedTraceInput>, CodeGenError> {
-        let (inputs, _) = Self::generated_trace_inputs_from_concrete_steps_with_witnesses(
+    ) -> Result<Vec<String>, CodeGenError> {
+        let (inputs, _) = Self::prepared_steps_from_concrete_steps_with_witnesses(
             concrete_steps,
             kernel_context,
             bindings,
             None,
         )?;
-        Ok(inputs)
+        Ok(inputs.into_iter().map(|(_, code, _)| code).collect())
     }
 
     fn reorder_late_claim_supports(
-        ordered_steps: &mut Vec<CertificateStep>,
+        ordered_steps: &mut Vec<PreparedCertificateStep>,
         kernel_context: &KernelContext,
     ) {
         let mut start = 0;
         while start < ordered_steps.len() {
             while start < ordered_steps.len()
-                && !matches!(ordered_steps[start], CertificateStep::Claim(_))
+                && !matches!(ordered_steps[start].step, CertificateStep::Claim(_))
             {
                 start += 1;
             }
             let mut end = start;
             while end < ordered_steps.len()
-                && matches!(ordered_steps[end], CertificateStep::Claim(_))
+                && matches!(ordered_steps[end].step, CertificateStep::Claim(_))
             {
                 end += 1;
             }
@@ -1135,10 +1188,10 @@ impl Certificate {
         }
     }
 
-    fn reorder_claim_block(steps: &mut [CertificateStep], kernel_context: &KernelContext) {
+    fn reorder_claim_block(steps: &mut [PreparedCertificateStep], kernel_context: &KernelContext) {
         let mut clauses = Vec::with_capacity(steps.len());
         for step in steps.iter() {
-            let CertificateStep::Claim(claim) = step else {
+            let CertificateStep::Claim(claim) = &step.step else {
                 return;
             };
             let Ok(clause) = claim.normalized_specialized_clause(kernel_context) else {
@@ -1166,6 +1219,10 @@ impl Certificate {
         kernel_context: &KernelContext,
     ) -> Result<Vec<CertificateStep>, CodeGenError> {
         let ignored_witnesses = HashSet::new();
+        let ordered_steps = ordered_steps
+            .into_iter()
+            .map(PreparedCertificateStep::new)
+            .collect();
         Ok(Self::emit_named_witnesses_with_context(
             ordered_steps,
             witness_registry,
@@ -1173,7 +1230,10 @@ impl Certificate {
             ModuleId::default(),
             &ignored_witnesses,
         )?
-        .0)
+        .0
+        .into_iter()
+        .map(|step| step.step)
+        .collect())
     }
 
     /// Witness metadata can include scoped constants that are already source-bound in the
@@ -1204,12 +1264,12 @@ impl Certificate {
     /// Synthetic witness steps may introduce fresh scoped constants, so callers must serialize
     /// later steps against the returned context rather than the original prover context.
     fn emit_named_witnesses_with_context(
-        ordered_steps: Vec<CertificateStep>,
+        ordered_steps: Vec<PreparedCertificateStep>,
         witness_registry: &WitnessRegistry,
         kernel_context: KernelContext,
         module_id: ModuleId,
         ignored_witnesses: &HashSet<Symbol>,
-    ) -> Result<(Vec<CertificateStep>, KernelContext), CodeGenError> {
+    ) -> Result<(Vec<PreparedCertificateStep>, KernelContext), CodeGenError> {
         WitnessEmitter::new(
             ordered_steps,
             witness_registry,
@@ -1341,25 +1401,22 @@ impl Certificate {
 
     /// Normalize a certificate claim to the single clause used for witness matching.
     fn claim_clause(
-        step: &CertificateStep,
+        step: &PreparedCertificateStep,
         kernel_context: &KernelContext,
     ) -> Result<Option<Clause>, CodeGenError> {
-        match step {
-            CertificateStep::Claim(claim)
-            | CertificateStep::BooleanReduction(BooleanReductionStep { result: claim, .. }) => {
-                Ok(Some(
-                    claim
-                        .normalized_specialized_clause(kernel_context)
-                        .map_err(CodeGenError::GeneratedBadCode)?,
-                ))
-            }
+        match &step.step {
+            CertificateStep::Claim(claim) => Ok(Some(
+                claim
+                    .normalized_specialized_clause(kernel_context)
+                    .map_err(CodeGenError::GeneratedBadCode)?,
+            )),
             CertificateStep::Satisfy(_) => Ok(None),
         }
     }
 
     /// Collect named witness symbols referenced by a displayed claim step.
     fn collect_claim_witness_symbols(
-        step: &CertificateStep,
+        step: &PreparedCertificateStep,
         kernel_context: &KernelContext,
     ) -> Result<Vec<Symbol>, CodeGenError> {
         let mut symbols = vec![];
@@ -1375,11 +1432,8 @@ impl Certificate {
             }
             _ => {}
         };
-        let claims: Vec<&Claim> = match step {
+        let claims: Vec<&Claim> = match &step.step {
             CertificateStep::Claim(claim) => vec![claim],
-            CertificateStep::BooleanReduction(BooleanReductionStep { source, result }) => {
-                vec![source, result]
-            }
             CertificateStep::Satisfy(_) => vec![],
         };
         for claim in claims {
@@ -1399,37 +1453,32 @@ impl Certificate {
                 }
             }
         }
+        if let Some(source) = &step.boolean_reduction_source {
+            for atom in source.iter_atoms() {
+                if let Atom::Symbol(symbol) = atom {
+                    collect_symbol(*symbol);
+                }
+            }
+        }
         symbols.sort();
         symbols.dedup();
         Ok(symbols)
     }
 
     /// Convert a generated proof step into the input form consumed by the trace writer.
-    fn serialize_generated_trace_input(
-        step: &CertificateStep,
+    fn serialize_prepared_certificate_step(
+        step: &PreparedCertificateStep,
         generator: &mut CodeGenerator,
         kernel_context: &KernelContext,
         bindings: &BindingMap,
-    ) -> Result<GeneratedTraceInput, CodeGenError> {
-        match step {
-            CertificateStep::BooleanReduction(step) => {
-                let code = Self::serialize_certificate_step(
-                    &CertificateStep::Claim(step.result.clone()),
-                    generator,
-                    kernel_context,
-                    bindings,
-                )?;
-                Ok(GeneratedTraceInput::BooleanReduction {
-                    code,
-                    step: step.clone(),
-                })
-            }
-            CertificateStep::Claim(_) | CertificateStep::Satisfy(_) => {
-                let code =
-                    Self::serialize_certificate_step(step, generator, kernel_context, bindings)?;
-                Ok(GeneratedTraceInput::SourceLine(code))
-            }
-        }
+    ) -> Result<(CertificateStep, String, Option<Clause>), CodeGenError> {
+        let code =
+            Self::serialize_certificate_step(&step.step, generator, kernel_context, bindings)?;
+        Ok((
+            step.step.clone(),
+            code,
+            step.boolean_reduction_source.clone(),
+        ))
     }
 
     /// Convert one parsed certificate step back into source code.
@@ -1440,11 +1489,6 @@ impl Certificate {
         bindings: &BindingMap,
     ) -> Result<String, CodeGenError> {
         let line = match step {
-            CertificateStep::BooleanReduction(_) => {
-                return Err(CodeGenError::GeneratedBadCode(
-                    "boolean reductions are typed trace inputs, not source lines".to_string(),
-                ));
-            }
             CertificateStep::Claim(claim)
                 if !claim.clause().get_local_context().is_empty()
                     && claim.var_map().len() == 0
@@ -1525,7 +1569,6 @@ impl Certificate {
                     ))
                 })
             }
-            CertificateStep::BooleanReduction(_) => unreachable!(),
             CertificateStep::Satisfy(_) => Ok(line),
         }
     }
@@ -2329,7 +2372,7 @@ impl CertificateWorklist {
 /// 3. When a specialized claim still has a top-level positive `exists`, open a certificate-local
 ///    witness for it and replay any unary witness clauses at the fresh witness.
 struct WitnessEmitter<'a> {
-    ordered_steps: Vec<CertificateStep>,
+    ordered_steps: Vec<PreparedCertificateStep>,
     claim_generic_clauses: Vec<Option<Clause>>,
     claim_clauses: Vec<Option<Clause>>,
     referenced_symbols: Vec<Vec<Symbol>>,
@@ -2349,7 +2392,7 @@ struct WitnessEmitter<'a> {
     steps_in_progress: HashSet<usize>,
     in_progress: HashSet<Symbol>,
     emitted_witnesses: Vec<Symbol>,
-    output: Vec<CertificateStep>,
+    output: Vec<PreparedCertificateStep>,
 }
 
 #[derive(Clone, Copy)]
@@ -2361,17 +2404,16 @@ enum WitnessPlacement {
 }
 
 impl<'a> WitnessEmitter<'a> {
-    fn step_result_claim(step: &CertificateStep) -> Option<&Claim> {
-        match step {
+    fn step_result_claim(step: &PreparedCertificateStep) -> Option<&Claim> {
+        match &step.step {
             CertificateStep::Claim(claim) => Some(claim),
-            CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => Some(result),
             CertificateStep::Satisfy(_) => None,
         }
     }
 
     /// Precompute the witness steps and the claim positions they should replace.
     fn new(
-        ordered_steps: Vec<CertificateStep>,
+        ordered_steps: Vec<PreparedCertificateStep>,
         witness_registry: &'a WitnessRegistry,
         kernel_context: KernelContext,
         module_id: ModuleId,
@@ -2380,11 +2422,8 @@ impl<'a> WitnessEmitter<'a> {
         let num_steps = ordered_steps.len();
         let claim_generic_clauses: Vec<Option<Clause>> = ordered_steps
             .iter()
-            .map(|step| match step {
+            .map(|step| match &step.step {
                 CertificateStep::Claim(claim) => Some(claim.normalized_generic_clause()),
-                CertificateStep::BooleanReduction(BooleanReductionStep { result, .. }) => {
-                    Some(result.normalized_generic_clause())
-                }
                 CertificateStep::Satisfy(_) => None,
             })
             .collect();
@@ -2501,7 +2540,7 @@ impl<'a> WitnessEmitter<'a> {
     }
 
     /// Emit the final certificate steps with named witnesses substituted in.
-    fn emit(mut self) -> Result<(Vec<CertificateStep>, KernelContext), CodeGenError> {
+    fn emit(mut self) -> Result<(Vec<PreparedCertificateStep>, KernelContext), CodeGenError> {
         for index in 0..self.ordered_steps.len() {
             self.schedule_step(index, index)?;
             self.flush_buffered(index)?;
@@ -2604,7 +2643,7 @@ impl<'a> WitnessEmitter<'a> {
         for symbol in self.referenced_symbols[index].clone() {
             self.ensure_declared(symbol, current_index)?;
         }
-        if let CertificateStep::Claim(claim) = &step {
+        if let CertificateStep::Claim(claim) = &step.step {
             if let Some((symbol, parent_symbol, rewritten_step)) =
                 self.specialized_positive_exists_step(claim)?
             {
@@ -2612,7 +2651,7 @@ impl<'a> WitnessEmitter<'a> {
                 self.push_output_step(step.clone())?;
                 self.emit_witness_step(
                     symbol,
-                    CertificateStep::Satisfy(rewritten_step),
+                    PreparedCertificateStep::new(CertificateStep::Satisfy(rewritten_step)),
                     Some(parent_symbol),
                 )?;
                 self.emitted[index] = true;
@@ -2759,7 +2798,11 @@ impl<'a> WitnessEmitter<'a> {
             .get(&symbol)
             .expect("prepared witness step should exist")
             .clone();
-        self.emit_witness_step(symbol, CertificateStep::Satisfy(step), None)?;
+        self.emit_witness_step(
+            symbol,
+            PreparedCertificateStep::new(CertificateStep::Satisfy(step)),
+            None,
+        )?;
         self.in_progress.remove(&symbol);
         Ok(())
     }
@@ -2768,13 +2811,13 @@ impl<'a> WitnessEmitter<'a> {
     fn emit_witness_step(
         &mut self,
         symbol: Symbol,
-        step: CertificateStep,
+        step: PreparedCertificateStep,
         _parent_symbol: Option<Symbol>,
     ) -> Result<(), CodeGenError> {
-        assert!(matches!(step, CertificateStep::Satisfy(_)));
-        let follow_on_clause = match &step {
+        assert!(matches!(step.step, CertificateStep::Satisfy(_)));
+        let follow_on_clause = match &step.step {
             CertificateStep::Satisfy(satisfy_step) => satisfy_step.specialized_clause.clone(),
-            CertificateStep::Claim(_) | CertificateStep::BooleanReduction(_) => unreachable!(),
+            CertificateStep::Claim(_) => unreachable!(),
         };
         self.push_output_step(step)?;
         self.declared.insert(symbol);
@@ -2821,7 +2864,7 @@ impl<'a> WitnessEmitter<'a> {
         )?;
         self.emit_witness_step(
             synthetic_symbol,
-            CertificateStep::Satisfy(step),
+            PreparedCertificateStep::new(CertificateStep::Satisfy(step)),
             Some(parent_symbol),
         )
     }
@@ -2978,7 +3021,7 @@ impl<'a> WitnessEmitter<'a> {
 
         let mut emitted_iter = self.emitted_witnesses.iter().copied();
         for step in &mut self.output {
-            let CertificateStep::Satisfy(satisfy_step) = step else {
+            let CertificateStep::Satisfy(satisfy_step) = &mut step.step else {
                 continue;
             };
             let symbol = emitted_iter
@@ -3037,7 +3080,7 @@ impl<'a> WitnessEmitter<'a> {
             .unwrap_or(self.module_id)
     }
 
-    fn push_output_step(&mut self, step: CertificateStep) -> Result<(), CodeGenError> {
+    fn push_output_step(&mut self, step: PreparedCertificateStep) -> Result<(), CodeGenError> {
         self.output.push(step);
         Ok(())
     }
