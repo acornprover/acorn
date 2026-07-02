@@ -1677,11 +1677,23 @@ impl Certificate {
             };
 
         match statement.statement {
-            StatementInfo::VariableSatisfy(vss) => {
-                Self::parse_variable_satisfy_step(code, project, vss, bindings, kernel_context)
+            StatementInfo::VariableSatisfy(variable_satisfy_statement) => {
+                Self::parse_variable_satisfy_step(
+                    code,
+                    project,
+                    variable_satisfy_statement,
+                    bindings,
+                    kernel_context,
+                )
             }
-            StatementInfo::FunctionSatisfy(fss) => {
-                Self::parse_function_satisfy_step(code, project, fss, bindings, kernel_context)
+            StatementInfo::FunctionSatisfy(function_satisfy_statement) => {
+                Self::parse_function_satisfy_step(
+                    code,
+                    project,
+                    function_satisfy_statement,
+                    bindings,
+                    kernel_context,
+                )
             }
             StatementInfo::Claim(claim) => claim_step_from_expr(&claim.claim),
             _ => Err(CodeGenError::GeneratedBadCode(format!(
@@ -1943,11 +1955,11 @@ impl Certificate {
     fn parse_variable_satisfy_step(
         code: &str,
         project: &dyn ProjectLookup,
-        vss: crate::syntax::statement::VariableSatisfyStatement,
+        variable_satisfy_statement: crate::syntax::statement::VariableSatisfyStatement,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
-        if vss.declarations.len() != 1 {
+        if variable_satisfy_statement.declarations.len() != 1 {
             return Err(CodeGenError::GeneratedBadCode(
                 "certificate let-satisfy only supports a single declaration".to_string(),
             ));
@@ -1956,7 +1968,8 @@ impl Certificate {
         let bindings = bindings.to_mut();
         let kernel_context = kernel_context.to_mut();
         let mut evaluator = Evaluator::new_internal(project, bindings);
-        let type_params = evaluator.evaluate_type_params(&vss.type_params)?;
+        let type_params =
+            evaluator.evaluate_type_params(&variable_satisfy_statement.type_params)?;
         for param in &type_params {
             bindings.add_arbitrary_type(param.clone());
             kernel_context.register_arbitrary_type(param);
@@ -1964,8 +1977,11 @@ impl Certificate {
 
         let mut stack = Stack::new();
         let mut general_evaluator = Evaluator::new_internal(project, bindings);
-        let (quant_names, quant_types) =
-            general_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
+        let (quant_names, quant_types) = general_evaluator.bind_args_may_shadow(
+            &mut stack,
+            &variable_satisfy_statement.declarations,
+            None,
+        )?;
         let Some(return_type) = quant_types.first().cloned() else {
             return Err(CodeGenError::GeneratedBadCode(
                 "certificate let-satisfy is missing a declaration".to_string(),
@@ -1973,7 +1989,7 @@ impl Certificate {
         };
         let general_condition = general_evaluator.evaluate_value_with_stack(
             &mut stack,
-            &vss.condition,
+            &variable_satisfy_statement.condition,
             Some(&AcornType::Bool),
         )?;
         Self::reject_certificate_local_obligations(
@@ -1999,8 +2015,10 @@ impl Certificate {
         )?;
 
         let mut specific_evaluator = Evaluator::new_internal(project, bindings);
-        let specific_condition =
-            specific_evaluator.evaluate_value(&vss.condition, Some(&AcornType::Bool))?;
+        let specific_condition = specific_evaluator.evaluate_value(
+            &variable_satisfy_statement.condition,
+            Some(&AcornType::Bool),
+        )?;
         Self::reject_certificate_local_obligations(
             specific_evaluator.take_local_obligations().len(),
         )?;
@@ -2040,11 +2058,11 @@ impl Certificate {
     fn parse_function_satisfy_step(
         code: &str,
         project: &dyn ProjectLookup,
-        fss: crate::syntax::statement::FunctionSatisfyStatement,
+        function_satisfy_statement: crate::syntax::statement::FunctionSatisfyStatement,
         bindings: &mut Cow<BindingMap>,
         kernel_context: &mut Cow<KernelContext>,
     ) -> Result<CertificateStep, CodeGenError> {
-        if fss.body.is_some() {
+        if function_satisfy_statement.body.is_some() {
             return Err(CodeGenError::GeneratedBadCode(
                 "certificate function-satisfy declarations cannot include a proof block"
                     .to_string(),
@@ -2054,10 +2072,10 @@ impl Certificate {
         let bindings = bindings.to_mut();
         let kernel_context = kernel_context.to_mut();
         let scoped_value = bindings.evaluate_scoped_value(
-            &fss.type_params,
-            &fss.declarations,
+            &function_satisfy_statement.type_params,
+            &function_satisfy_statement.declarations,
             None,
-            &fss.condition,
+            &function_satisfy_statement.condition,
             None,
             None,
             None,
@@ -2089,7 +2107,7 @@ impl Certificate {
             ));
         };
         let function_type = AcornType::functional(arg_types.clone(), return_type.clone());
-        let name = fss.name_token.text().to_string();
+        let name = function_satisfy_statement.name_token.text().to_string();
         let general_claim = AcornValue::ForAll(
             arg_types.clone(),
             Box::new(AcornValue::Exists(

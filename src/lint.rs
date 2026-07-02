@@ -210,12 +210,12 @@ fn collect_cached_certificate_usage(
 
     for (_, entry) in lowered.goals() {
         let goal = &entry.lowered_goal.goal;
-        let mut matching = cert_store
+        let mut matching_certs = cert_store
             .certs
             .iter()
             .filter(|cert| cert.goal == goal.name)
             .peekable();
-        if matching.peek().is_none() {
+        if matching_certs.peek().is_none() {
             return Err(format!(
                 "cannot lint {}: no cached certificate found for goal '{}' at line {}; run `acorn check` or `acorn verify {}` first",
                 project.display_path(descriptor),
@@ -225,7 +225,7 @@ fn collect_cached_certificate_usage(
             ));
         }
 
-        for cert in matching {
+        for cert in matching_certs {
             if cert.proof.steps.is_empty()
                 || collect_certificate_trace_usage(
                     cert,
@@ -270,10 +270,14 @@ fn collect_certificate_trace_usage(
     Ok(())
 }
 
-fn collect_trace_claim_text_usage(code: &str, imports: &[&ImportBindingInfo], usage: &mut Usage) {
+fn collect_trace_claim_text_usage(
+    claim_text: &str,
+    imports: &[&ImportBindingInfo],
+    usage: &mut Usage,
+) {
     for import in imports {
         let module_ref = format!("lib({})", import.module_name);
-        if code.contains(&import.import_name) || code.contains(&module_ref) {
+        if claim_text.contains(&import.import_name) || claim_text.contains(&module_ref) {
             usage.exact_entities.insert(entity_key(&import.entity));
             usage.conservative_modules.insert(import.module_id);
         }

@@ -239,14 +239,14 @@ impl LoweredModule {
     }
 
     pub fn visible_facts_for_goal(&self, goal: LoweredGoalId) -> Option<Vec<&LoweredFact>> {
-        let mut visible = Vec::new();
-        let fact_ids = self.visible_fact_ids_for_goal(goal, &self.items, &mut visible)?;
+        let mut visible_fact_ids = Vec::new();
+        let fact_ids = self.visible_fact_ids_for_goal(goal, &self.items, &mut visible_fact_ids)?;
         Some(fact_ids.into_iter().map(|id| self.fact(id)).collect())
     }
 
     pub fn visible_fact_ids_for(&self, goal: LoweredGoalId) -> Option<Vec<LoweredFactId>> {
-        let mut visible = Vec::new();
-        self.visible_fact_ids_for_goal(goal, &self.items, &mut visible)
+        let mut visible_fact_ids = Vec::new();
+        self.visible_fact_ids_for_goal(goal, &self.items, &mut visible_fact_ids)
     }
 
     pub fn fact_for_source_range(&self, range: Range) -> Option<&LoweredFact> {
@@ -285,12 +285,12 @@ impl LoweredModule {
         &self,
         goal: LoweredGoalId,
         items: &[LoweredItem],
-        visible: &mut Vec<LoweredFactId>,
+        visible_fact_ids: &mut Vec<LoweredFactId>,
     ) -> Option<Vec<LoweredFactId>> {
         for item in items {
             match item {
                 LoweredItem::Fact { fact, .. } => {
-                    visible.push(*fact);
+                    visible_fact_ids.push(*fact);
                 }
                 LoweredItem::Claim {
                     goal: item_goal,
@@ -298,23 +298,23 @@ impl LoweredModule {
                     ..
                 } => {
                     if *item_goal == goal {
-                        return Some(visible.clone());
+                        return Some(visible_fact_ids.clone());
                     }
-                    visible.push(*post_fact);
+                    visible_fact_ids.push(*post_fact);
                 }
                 LoweredItem::Block {
                     items,
                     external_fact,
                     ..
                 } => {
-                    let mut child_visible = visible.clone();
+                    let mut child_visible_fact_ids = visible_fact_ids.clone();
                     if let Some(facts) =
-                        self.visible_fact_ids_for_goal(goal, items, &mut child_visible)
+                        self.visible_fact_ids_for_goal(goal, items, &mut child_visible_fact_ids)
                     {
                         return Some(facts);
                     }
                     if let Some(fact) = external_fact {
-                        visible.push(*fact);
+                        visible_fact_ids.push(*fact);
                     }
                 }
             }

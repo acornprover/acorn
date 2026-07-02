@@ -29,29 +29,29 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ts: &TypeStatement,
+        type_statement: &TypeStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
         self.bindings
-            .check_typename_available(ts.name_token.text(), statement)?;
+            .check_typename_available(type_statement.name_token.text(), statement)?;
         let family_params = self
             .evaluator(project)
-            .evaluate_family_params(&ts.type_params)?;
-        if ts.type_expr.is_axiom() {
+            .evaluate_family_params(&type_statement.type_params)?;
+        if type_statement.type_expr.is_axiom() {
             let doc_comments = self.take_doc_comments();
             let definition_string = Some(statement.to_string());
             self.bindings.add_potential_type_with_family_params(
-                &ts.name_token,
+                &type_statement.name_token,
                 family_params.canonical_kinds(),
                 doc_comments,
-                Some(ts.name_token.range()),
+                Some(type_statement.name_token.range()),
                 definition_string,
             );
         } else {
             let family_param_kinds = family_params.canonical_kinds();
             let type_params = family_params.type_params().to_vec();
             if type_params.len() != family_params.len() {
-                return Err(ts.name_token.error(
+                return Err(type_statement.name_token.error(
                     "parameterized type aliases with value parameters are not supported yet",
                 ));
             }
@@ -61,7 +61,7 @@ impl Environment {
             }
             let potential = self
                 .evaluator(project)
-                .evaluate_potential_type(&ts.type_expr);
+                .evaluate_potential_type(&type_statement.type_expr);
             for param in &type_params {
                 self.bindings.remove_type(&param.name);
             }
@@ -70,7 +70,7 @@ impl Environment {
                 (true, potential) => potential,
                 (false, PotentialType::Resolved(template)) => {
                     PotentialType::Unresolved(UnresolvedType {
-                        name: ts.name_token.text().to_string(),
+                        name: type_statement.name_token.text().to_string(),
                         params: family_param_kinds.clone(),
                         template: Self::canonicalize_alias_template(
                             &template,
@@ -84,17 +84,17 @@ impl Environment {
                 }
                 (false, PotentialType::Unresolved(ut)) => {
                     if ut.has_value_params() {
-                        return Err(ts.type_expr.error(
+                        return Err(type_statement.type_expr.error(
                             "parameterized type aliases can only target type-only families",
                         ));
                     }
                     if ut.params.len() != type_params.len() {
-                        return Err(ts.type_expr.error(
+                        return Err(type_statement.type_expr.error(
                             "parameterized type aliases must explicitly apply their target type parameters",
                         ));
                     }
                     PotentialType::Unresolved(UnresolvedType {
-                        name: ts.name_token.text().to_string(),
+                        name: type_statement.name_token.text().to_string(),
                         params: family_param_kinds.clone(),
                         template: Self::canonicalize_alias_template(
                             &ut.template,
@@ -106,8 +106,11 @@ impl Environment {
                     })
                 }
             };
-            self.bindings
-                .add_type_alias(ts.name_token.text(), potential, &ts.name_token)?;
+            self.bindings.add_type_alias(
+                type_statement.name_token.text(),
+                potential,
+                &type_statement.name_token,
+            )?;
         };
         Ok(())
     }
@@ -117,20 +120,24 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ds: &NumeralsStatement,
+        numerals_statement: &NumeralsStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
-        let acorn_type = self.evaluator(project).evaluate_type(&ds.type_expr)?;
+        let acorn_type = self
+            .evaluator(project)
+            .evaluate_type(&numerals_statement.type_expr)?;
         if let AcornType::Data(datatype, params) = acorn_type {
             if !params.is_empty() {
-                return Err(ds
+                return Err(numerals_statement
                     .type_expr
                     .error("numerals type cannot have type parameters"));
             }
             self.bindings.set_numerals(datatype);
             Ok(())
         } else {
-            Err(ds.type_expr.error("numerals type must be a data type"))
+            Err(numerals_statement
+                .type_expr
+                .error("numerals type must be a data type"))
         }
     }
 }

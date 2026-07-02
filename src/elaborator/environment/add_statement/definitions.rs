@@ -175,7 +175,7 @@ impl Environment {
         project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: &DefinedName,
-        ls: &LetStatement,
+        let_statement: &LetStatement,
         range: Range,
         datatype_params: Option<&DatatypeFamilyScope>,
         local_family_params: &LocalFamilyParams,
@@ -194,7 +194,7 @@ impl Environment {
             &self,
             vec![],
             block_args,
-            BlockParams::variable_satisfy(general_claim, ls.value.range()),
+            BlockParams::variable_satisfy(general_claim, let_statement.value.range()),
             &statement.first_token,
             &statement.last_token,
             None,
@@ -236,15 +236,15 @@ impl Environment {
         project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: DefinedName,
-        ls: &LetStatement,
+        let_statement: &LetStatement,
         range: Range,
         datatype_params: Option<&DatatypeFamilyScope>,
         local_family_params: &LocalFamilyParams,
         local_type_params: &[TypeParam],
         target_type: AcornType,
     ) -> error::Result<()> {
-        if ls.value.is_axiom() {
-            return Err(ls
+        if let_statement.value.is_axiom() {
+            return Err(let_statement
                 .value
                 .first_token()
                 .error("axiom constants require direct definitions"));
@@ -252,7 +252,7 @@ impl Environment {
         let definition_type_params = match datatype_params {
             Some(p) => {
                 if !local_type_params.is_empty() {
-                    return Err(ls
+                    return Err(let_statement
                         .name_token
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
@@ -279,7 +279,7 @@ impl Environment {
             };
             let spec = evaluator.evaluate_result_spec_with_stack(
                 &mut stack,
-                &ls.value,
+                &let_statement.value,
                 target,
                 &target_type,
             )?;
@@ -294,7 +294,7 @@ impl Environment {
                 project,
                 statement,
                 &defined_name,
-                ls,
+                let_statement,
                 range,
                 datatype_params,
                 local_family_params,
@@ -318,7 +318,7 @@ impl Environment {
         project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: DefinedName,
-        ls: &LetStatement,
+        let_statement: &LetStatement,
         range: Range,
         datatype_params: Option<&DatatypeFamilyScope>,
         local_family_params: &LocalFamilyParams,
@@ -327,8 +327,8 @@ impl Environment {
         source_expr: &Expression,
         transport_token: &Token,
     ) -> error::Result<()> {
-        if ls.name_token.token_type == TokenType::Numeral {
-            return Err(ls
+        if let_statement.name_token.token_type == TokenType::Numeral {
+            return Err(let_statement
                 .name_token
                 .error("transport cannot define numeric datatype members"));
         }
@@ -336,7 +336,7 @@ impl Environment {
         let definition_type_params = match datatype_params {
             Some(p) => {
                 if !local_type_params.is_empty() {
-                    return Err(ls
+                    return Err(let_statement
                         .name_token
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
@@ -400,7 +400,7 @@ impl Environment {
                         &self,
                         vec![],
                         block_args.clone(),
-                        BlockParams::variable_satisfy(claim, ls.value.range()),
+                        BlockParams::variable_satisfy(claim, let_statement.value.range()),
                         &statement.first_token,
                         &statement.last_token,
                         None,
@@ -449,7 +449,7 @@ impl Environment {
             project,
             statement,
             &defined_name,
-            ls,
+            let_statement,
             range,
             datatype_params,
             local_family_params,
@@ -496,36 +496,36 @@ impl Environment {
         project: &dyn ProjectLookup,
         statement: &Statement,
         defined_name: DefinedName,
-        ls: &LetStatement,
+        let_statement: &LetStatement,
         range: Range,
         datatype_params: Option<&DatatypeFamilyScope>,
     ) -> error::Result<()> {
-        ls.name_token.check_not_reserved()?;
+        let_statement.name_token.check_not_reserved()?;
 
         if self.bindings.constant_name_in_use(&defined_name) {
-            return Err(ls.name_token.error(&format!(
+            return Err(let_statement.name_token.error(&format!(
                 "constant name '{}' already defined in this scope",
                 &defined_name
             )));
         }
 
-        if self.depth > 0 && !ls.type_params.is_empty() {
-            return Err(ls
+        if self.depth > 0 && !let_statement.type_params.is_empty() {
+            return Err(let_statement
                 .name_token
                 .error("parameterized constants may only be defined at the top level"));
         }
 
         let local_family_params = if datatype_params.is_some() {
             LocalFamilyParams {
-                type_param_exprs: ls.type_params.clone(),
+                type_param_exprs: let_statement.type_params.clone(),
                 type_params: self
                     .evaluator(project)
-                    .evaluate_type_params(&ls.type_params)?,
+                    .evaluate_type_params(&let_statement.type_params)?,
                 value_params: vec![],
                 value_declarations: vec![],
             }
         } else {
-            self.evaluate_local_family_params(project, &ls.type_params)?
+            self.evaluate_local_family_params(project, &let_statement.type_params)?
         };
         let local_type_params = local_family_params.type_params.clone();
         for param in &local_type_params {
@@ -540,7 +540,7 @@ impl Environment {
             Added(error::Result<()>),
         }
         let evaluation: error::Result<LetEvaluation> = (|| {
-            Ok(match &ls.type_expr {
+            Ok(match &let_statement.type_expr {
                 Some(type_expr) => {
                     let mut stack = Stack::new();
                     bind_explicit_value_params(&mut stack, &local_family_params.value_params);
@@ -548,7 +548,7 @@ impl Environment {
                     let acorn_type = self
                         .evaluator(project)
                         .evaluate_type_with_stack(&mut stack, type_expr)?;
-                    if ls.name_token.token_type == TokenType::Numeral {
+                    if let_statement.name_token.token_type == TokenType::Numeral {
                         match &defined_name {
                             DefinedName::Constant(constant_name) => {
                                 let (datatype_module_id, datatype_name) =
@@ -557,7 +557,7 @@ impl Environment {
                                             (datatype_module_id, datatype_name.to_string())
                                         }
                                         _ => {
-                                            return Err(ls.name_token.error(
+                                            return Err(let_statement.name_token.error(
                                                 "numeric literals must be datatype members",
                                             ))
                                         }
@@ -585,12 +585,14 @@ impl Environment {
                             }
                         }
                     }
-                    if let Some((transport_token, source_expr)) = ls.value.transport_operand() {
+                    if let Some((transport_token, source_expr)) =
+                        let_statement.value.transport_operand()
+                    {
                         return Ok(LetEvaluation::Added(self.add_transport_let_statement(
                             project,
                             statement,
                             defined_name.clone(),
-                            ls,
+                            let_statement,
                             range,
                             datatype_params,
                             &local_family_params,
@@ -600,7 +602,7 @@ impl Environment {
                             transport_token,
                         )));
                     }
-                    let (value, local_obligations) = if ls.value.is_axiom() {
+                    let (value, local_obligations) = if let_statement.value.is_axiom() {
                         (None, vec![])
                     } else {
                         let mut stack = Stack::new();
@@ -619,7 +621,7 @@ impl Environment {
                         };
                         let value = evaluator.evaluate_value_with_stack(
                             &mut stack,
-                            &ls.value,
+                            &let_statement.value,
                             Some(&acorn_type),
                         )?;
                         let local_obligations = evaluator.take_local_obligations();
@@ -628,13 +630,13 @@ impl Environment {
                     LetEvaluation::Regular(acorn_type, value, local_obligations)
                 }
                 None => {
-                    if let Some((transport_token, _)) = ls.value.transport_operand() {
+                    if let Some((transport_token, _)) = let_statement.value.transport_operand() {
                         return Err(
                             transport_token.error("transport requires an explicit type annotation")
                         );
                     }
-                    if ls.value.is_axiom() {
-                        return Err(ls
+                    if let_statement.value.is_axiom() {
+                        return Err(let_statement
                             .value
                             .first_token()
                             .error("axiom constants require explicit type annotation"));
@@ -652,7 +654,11 @@ impl Environment {
                     } else {
                         self.evaluator(project)
                     };
-                    let value = evaluator.evaluate_value_with_stack(&mut stack, &ls.value, None)?;
+                    let value = evaluator.evaluate_value_with_stack(
+                        &mut stack,
+                        &let_statement.value,
+                        None,
+                    )?;
                     let local_obligations = evaluator.take_local_obligations();
                     let acorn_type = value.get_type();
                     LetEvaluation::Regular(acorn_type, Some(value), local_obligations)
@@ -677,7 +683,7 @@ impl Environment {
                 project,
                 statement,
                 defined_name,
-                ls,
+                let_statement,
                 range,
                 datatype_params,
                 &local_family_params,
@@ -703,7 +709,7 @@ impl Environment {
         let type_params = match datatype_params {
             Some(p) => {
                 if !local_type_params.is_empty() {
-                    return Err(ls
+                    return Err(let_statement
                         .name_token
                         .error("datatype parameters and let parameters cannot be used together"));
                 }
@@ -758,7 +764,7 @@ impl Environment {
         statement: &Statement,
         defined_name: DefinedName,
         datatype_params: Option<&DatatypeFamilyScope>,
-        ds: &DefineStatement,
+        define_statement: &DefineStatement,
         range: Range,
         explicit_value_param_types: Vec<AcornType>,
         fn_type_params: Vec<TypeParam>,
@@ -783,7 +789,11 @@ impl Environment {
             &self,
             fn_type_params.clone(),
             block_args,
-            BlockParams::FunctionSatisfy(spec.clone(), value_type.clone(), ds.return_value.range()),
+            BlockParams::FunctionSatisfy(
+                spec.clone(),
+                value_type.clone(),
+                define_statement.return_value.range(),
+            ),
             &statement.first_token,
             &statement.last_token,
             None,
@@ -886,17 +896,17 @@ impl Environment {
         defined_name: DefinedName,
         self_type: Option<&AcornType>,
         datatype_params: Option<&DatatypeFamilyScope>,
-        ds: &DefineStatement,
+        define_statement: &DefineStatement,
         range: Range,
     ) -> error::Result<()> {
-        ds.name_token.check_not_reserved()?;
-        if self.depth > 0 && !ds.type_params.is_empty() {
-            return Err(ds
+        define_statement.name_token.check_not_reserved()?;
+        if self.depth > 0 && !define_statement.type_params.is_empty() {
+            return Err(define_statement
                 .name_token
                 .error("parameterized functions may only be defined at the top level"));
         }
         if self.bindings.constant_name_in_use(&defined_name) {
-            return Err(ds.name_token.error(&format!(
+            return Err(define_statement.name_token.error(&format!(
                 "function name '{}' already defined in this scope",
                 defined_name
             )));
@@ -904,12 +914,16 @@ impl Environment {
 
         let recursion_name = defined_name.recursion_name();
         let (type_param_exprs, args, explicit_value_param_types) = if datatype_params.is_some() {
-            (ds.type_params.clone(), ds.args.clone(), vec![])
+            (
+                define_statement.type_params.clone(),
+                define_statement.args.clone(),
+                vec![],
+            )
         } else {
             let local_family_params =
-                self.evaluate_local_family_params(project, &ds.type_params)?;
+                self.evaluate_local_family_params(project, &define_statement.type_params)?;
             let mut args = local_family_params.value_declarations;
-            args.extend(ds.args.clone());
+            args.extend(define_statement.args.clone());
             (
                 local_family_params.type_param_exprs,
                 args,
@@ -920,8 +934,8 @@ impl Environment {
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
                 &args,
-                Some(&ds.return_type),
-                &ds.return_value,
+                Some(&define_statement.return_type),
+                &define_statement.return_value,
                 self_type,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
@@ -934,15 +948,17 @@ impl Environment {
 
         if let Some(datatype_type) = self_type {
             if &arg_types[0] != datatype_type {
-                return Err(ds.args[0].token().error("self must be the datatype type"));
+                return Err(define_statement.args[0]
+                    .token()
+                    .error("self must be the datatype type"));
             }
 
-            if ds.name_token.text() == "read"
+            if define_statement.name_token.text() == "read"
                 && (arg_types.len() != 2
                     || &arg_types[1] != datatype_type
                     || &value_type != datatype_type)
             {
-                return Err(ds.name_token.error(&format!(
+                return Err(define_statement.name_token.error(&format!(
                     "{}.read should be type ({}, {}) -> {}",
                     datatype_type, datatype_type, datatype_type, datatype_type
                 )));
@@ -961,8 +977,8 @@ impl Environment {
             ) = self.bindings.evaluate_scoped_result_spec(
                 &type_param_exprs,
                 &args,
-                &ds.return_type,
-                &ds.return_value,
+                &define_statement.return_type,
+                &define_statement.return_value,
                 self_type,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
@@ -976,7 +992,7 @@ impl Environment {
                 statement,
                 defined_name,
                 datatype_params,
-                ds,
+                define_statement,
                 range,
                 explicit_value_param_types,
                 rel_fn_type_params,
@@ -1079,27 +1095,28 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ts: &TheoremStatement,
+        theorem_statement: &TheoremStatement,
     ) -> error::Result<()> {
         let range = Range {
             start: statement.first_token.start_pos(),
-            end: ts.claim_right_brace.end_pos(),
+            end: theorem_statement.claim_right_brace.end_pos(),
         };
 
-        if let Some(name_token) = &ts.name_token {
+        if let Some(name_token) = &theorem_statement.name_token {
             self.bindings
                 .check_unqualified_name_available(name_token.text(), &statement.first_token)?;
         }
 
-        let local_family_params = self.evaluate_local_family_params(project, &ts.type_params)?;
+        let local_family_params =
+            self.evaluate_local_family_params(project, &theorem_statement.type_params)?;
         let mut args = local_family_params.value_declarations;
-        args.extend(ts.args.clone());
+        args.extend(theorem_statement.args.clone());
         let (mut type_params, mut arg_names, mut arg_types, value, _, mut local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &local_family_params.type_param_exprs,
                 &args,
                 None,
-                &ts.claim,
+                &theorem_statement.claim,
                 None,
                 None,
                 None,
@@ -1109,14 +1126,15 @@ impl Environment {
                 Some(&mut self.token_map),
             )?;
 
-        let mut unbound_claim = value.ok_or_else(|| ts.claim.error("theorems must have values"))?;
-        unbound_claim.check_type(Some(&AcornType::Bool), &ts.claim)?;
+        let mut unbound_claim =
+            value.ok_or_else(|| theorem_statement.claim.error("theorems must have values"))?;
+        unbound_claim.check_type(Some(&AcornType::Bool), &theorem_statement.claim)?;
 
         if local_obligations_need_result_spec_export(&local_obligations) {
             let scoped_spec = self.bindings.evaluate_scoped_bool_result_spec(
                 &local_family_params.type_param_exprs,
                 &args,
-                &ts.claim,
+                &theorem_statement.claim,
                 None,
                 None,
                 None,
@@ -1141,7 +1159,7 @@ impl Environment {
         } else {
             None
         };
-        if is_citation && ts.body.is_some() {
+        if is_citation && theorem_statement.body.is_some() {
             return Err(statement.error("citations do not need proof blocks"));
         }
 
@@ -1153,18 +1171,18 @@ impl Environment {
         let arg_count = arg_types.len();
         let external_claim = AcornValue::forall(arg_types.clone(), unbound_claim.clone());
         if let Err(message) = external_claim.validate() {
-            return Err(ts.claim.error(&message));
+            return Err(theorem_statement.claim.error(&message));
         }
         if let Err(message) = external_claim.validate_constants(&self.bindings) {
-            return Err(ts.claim.error(&message));
+            return Err(theorem_statement.claim.error(&message));
         }
         self.add_local_obligations(project, &type_params, local_obligations)?;
 
         let (premise, goal) = match &unbound_claim {
             AcornValue::Binary(BinaryOp::Implies, left, right) => {
-                let premise_range = match ts.claim.premise() {
+                let premise_range = match theorem_statement.claim.premise() {
                     Some(p) => p.range(),
-                    None => ts.claim.range(),
+                    None => theorem_statement.claim.range(),
                 };
                 (
                     Some(BlockPremise::new(left.to_arbitrary(), premise_range)),
@@ -1176,7 +1194,7 @@ impl Environment {
 
         let lambda_claim = AcornValue::lambda(arg_types, unbound_claim);
         let theorem_type = lambda_claim.get_type();
-        if let Some(name_token) = &ts.name_token {
+        if let Some(name_token) = &theorem_statement.name_token {
             let doc_comments = self.take_doc_comments();
             let name_range = name_token.range();
             self.bindings.add_unqualified_constant(
@@ -1188,17 +1206,21 @@ impl Environment {
                 None,
                 doc_comments,
                 Some(name_range),
-                ts.statement_string(),
+                theorem_statement.statement_string(),
             );
         }
 
-        let already_proven = ts.axiomatic || ts.trusted || is_citation;
-        let source_name = ts.name_token.as_ref().map(|t| t.text().to_string());
-        let source = if ts.lemma {
+        let already_proven =
+            theorem_statement.axiomatic || theorem_statement.trusted || is_citation;
+        let source_name = theorem_statement
+            .name_token
+            .as_ref()
+            .map(|t| t.text().to_string());
+        let source = if theorem_statement.lemma {
             Source::lemma(self.module_id, range, self.depth, source_name)
         } else {
             Source::theorem(
-                ts.axiomatic,
+                theorem_statement.axiomatic,
                 self.module_id,
                 range,
                 true,
@@ -1218,15 +1240,15 @@ impl Environment {
                 type_params,
                 block_args,
                 BlockParams::Theorem(
-                    ts.name_token.as_ref().map(|t| t.text()),
+                    theorem_statement.name_token.as_ref().map(|t| t.text()),
                     range,
                     premise,
                     goal,
-                    ts.lemma,
+                    theorem_statement.lemma,
                 ),
                 &statement.first_token,
                 &statement.last_token,
-                ts.body.as_ref(),
+                theorem_statement.body.as_ref(),
             )?;
             Node::block(project, self, block, Some(prop))
         };
@@ -1236,10 +1258,10 @@ impl Environment {
         if is_citation {
             self.record_citation_statement(statement, cited_name, index);
         }
-        if let Some(name_token) = &ts.name_token {
+        if let Some(name_token) = &theorem_statement.name_token {
             let name = ConstantName::unqualified(self.module_id, name_token.text());
             self.bindings.mark_as_theorem(&name);
-            if ts.lemma {
+            if theorem_statement.lemma {
                 self.hide_unqualified_name_from_export(name_token.text());
             }
         }
@@ -1251,42 +1273,46 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        vss: &VariableSatisfyStatement,
+        variable_satisfy_statement: &VariableSatisfyStatement,
     ) -> error::Result<()> {
         let module_id = self.module_id;
-        self.add_variable_satisfy_statement_named(project, statement, vss, None, move |name| {
-            DefinedName::unqualified(module_id, name)
-        })
+        self.add_variable_satisfy_statement_named(
+            project,
+            statement,
+            variable_satisfy_statement,
+            None,
+            move |name| DefinedName::unqualified(module_id, name),
+        )
     }
 
     pub(super) fn add_variable_satisfy_statement_named<F>(
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        vss: &VariableSatisfyStatement,
+        variable_satisfy_statement: &VariableSatisfyStatement,
         datatype_params: Option<&DatatypeFamilyScope>,
         mut defined_name_for: F,
     ) -> error::Result<()>
     where
         F: FnMut(&str) -> DefinedName,
     {
-        if self.depth > 0 && !vss.type_params.is_empty() {
-            return Err(vss.declarations[0]
+        if self.depth > 0 && !variable_satisfy_statement.type_params.is_empty() {
+            return Err(variable_satisfy_statement.declarations[0]
                 .token()
                 .error("parameterized constants may only be defined at the top level"));
         }
 
         let local_family_params = if datatype_params.is_some() {
             LocalFamilyParams {
-                type_param_exprs: vss.type_params.clone(),
+                type_param_exprs: variable_satisfy_statement.type_params.clone(),
                 type_params: self
                     .evaluator(project)
-                    .evaluate_type_params(&vss.type_params)?,
+                    .evaluate_type_params(&variable_satisfy_statement.type_params)?,
                 value_params: vec![],
                 value_declarations: vec![],
             }
         } else {
-            self.evaluate_local_family_params(project, &vss.type_params)?
+            self.evaluate_local_family_params(project, &variable_satisfy_statement.type_params)?
         };
         let local_type_params = local_family_params.type_params.clone();
         for param in &local_type_params {
@@ -1300,7 +1326,7 @@ impl Environment {
         let explicit_value_param_types =
             explicit_value_param_types(&local_family_params.value_params);
         let result = (|| {
-            for declaration in &vss.declarations {
+            for declaration in &variable_satisfy_statement.declarations {
                 if let Declaration::Typed(_, type_expr) = declaration {
                     let mut stack = Stack::new();
                     bind_explicit_value_params(&mut stack, &local_family_params.value_params);
@@ -1314,11 +1340,14 @@ impl Environment {
             bind_explicit_value_params(&mut stack, &local_family_params.value_params);
             bind_datatype_value_params(&mut stack, datatype_params);
             let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
-            let (quant_names, quant_types) =
-                no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
+            let (quant_names, quant_types) = no_token_evaluator.bind_args_may_shadow(
+                &mut stack,
+                &variable_satisfy_statement.declarations,
+                None,
+            )?;
             let mut general_claim_value = no_token_evaluator.evaluate_value_with_stack(
                 &mut stack,
-                &vss.condition,
+                &variable_satisfy_statement.condition,
                 Some(&AcornType::Bool),
             )?;
             let mut local_obligations = no_token_evaluator.take_local_obligations();
@@ -1327,10 +1356,14 @@ impl Environment {
                 bind_explicit_value_params(&mut stack, &local_family_params.value_params);
                 bind_datatype_value_params(&mut stack, datatype_params);
                 let mut no_token_evaluator = Evaluator::new(project, &self.bindings, None);
-                no_token_evaluator.bind_args_may_shadow(&mut stack, &vss.declarations, None)?;
+                no_token_evaluator.bind_args_may_shadow(
+                    &mut stack,
+                    &variable_satisfy_statement.declarations,
+                    None,
+                )?;
                 general_claim_value = no_token_evaluator.evaluate_result_spec_with_stack(
                     &mut stack,
-                    &vss.condition,
+                    &variable_satisfy_statement.condition,
                     AcornValue::Bool(true),
                     &AcornType::Bool,
                 )?;
@@ -1341,7 +1374,7 @@ impl Environment {
             let definition_type_params = match datatype_params {
                 Some(p) => {
                     if !local_type_params.is_empty() {
-                        return Err(vss.declarations[0].token().error(
+                        return Err(variable_satisfy_statement.declarations[0].token().error(
                             "datatype parameters and let parameters cannot be used together",
                         ));
                     }
@@ -1361,14 +1394,17 @@ impl Environment {
                 &self,
                 vec![],
                 block_args,
-                BlockParams::variable_satisfy(general_claim, vss.condition.range()),
+                BlockParams::variable_satisfy(
+                    general_claim,
+                    variable_satisfy_statement.condition.range(),
+                ),
                 &statement.first_token,
                 &statement.last_token,
                 None,
             )?;
 
             let mut constant_values = Vec::new();
-            for ((declaration, quant_name), quant_type) in vss
+            for ((declaration, quant_name), quant_type) in variable_satisfy_statement
                 .declarations
                 .iter()
                 .zip(quant_names.iter())
@@ -1436,23 +1472,30 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        fss: &FunctionSatisfyStatement,
+        function_satisfy_statement: &FunctionSatisfyStatement,
     ) -> error::Result<()> {
-        let defined_name = DefinedName::unqualified(self.module_id, fss.name_token.text());
-        self.add_function_satisfy_statement_named(project, statement, fss, defined_name, None)
+        let defined_name =
+            DefinedName::unqualified(self.module_id, function_satisfy_statement.name_token.text());
+        self.add_function_satisfy_statement_named(
+            project,
+            statement,
+            function_satisfy_statement,
+            defined_name,
+            None,
+        )
     }
 
     pub(super) fn add_function_satisfy_statement_named(
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        fss: &FunctionSatisfyStatement,
+        function_satisfy_statement: &FunctionSatisfyStatement,
         defined_name: DefinedName,
         datatype_params: Option<&DatatypeFamilyScope>,
     ) -> error::Result<()> {
-        fss.name_token.check_not_reserved()?;
+        function_satisfy_statement.name_token.check_not_reserved()?;
         if self.bindings.constant_name_in_use(&defined_name) {
-            return Err(fss.name_token.error(&format!(
+            return Err(function_satisfy_statement.name_token.error(&format!(
                 "function name '{}' already defined in this scope",
                 defined_name
             )));
@@ -1460,11 +1503,11 @@ impl Environment {
 
         let definition_range = Range {
             start: statement.first_token.start_pos(),
-            end: fss.satisfy_token.end_pos(),
+            end: function_satisfy_statement.satisfy_token.end_pos(),
         };
 
-        if self.depth > 0 && !fss.type_params.is_empty() {
-            return Err(fss
+        if self.depth > 0 && !function_satisfy_statement.type_params.is_empty() {
+            return Err(function_satisfy_statement
                 .name_token
                 .error("parameterized functions may only be defined at the top level"));
         }
@@ -1472,25 +1515,25 @@ impl Environment {
         let recursion_name = defined_name.recursion_name();
         let local_family_params = if datatype_params.is_some() {
             LocalFamilyParams {
-                type_param_exprs: fss.type_params.clone(),
+                type_param_exprs: function_satisfy_statement.type_params.clone(),
                 type_params: self
                     .evaluator(project)
-                    .evaluate_type_params(&fss.type_params)?,
+                    .evaluate_type_params(&function_satisfy_statement.type_params)?,
                 value_params: vec![],
                 value_declarations: vec![],
             }
         } else {
-            self.evaluate_local_family_params(project, &fss.type_params)?
+            self.evaluate_local_family_params(project, &function_satisfy_statement.type_params)?
         };
         let mut declarations = local_family_params.value_declarations.clone();
-        declarations.extend(fss.declarations.clone());
+        declarations.extend(function_satisfy_statement.declarations.clone());
         let type_param_exprs = local_family_params.type_param_exprs.clone();
         let (mut fn_type_params, mut arg_names, mut arg_types, condition, _, mut local_obligations) =
             self.bindings.evaluate_scoped_value(
                 &type_param_exprs,
                 &declarations,
                 None,
-                &fss.condition,
+                &function_satisfy_statement.condition,
                 None,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
@@ -1509,13 +1552,15 @@ impl Environment {
         let mut unbound_condition =
             condition.ok_or_else(|| statement.error("missing condition"))?;
         if unbound_condition.get_type() != AcornType::Bool {
-            return Err(fss.condition.error("condition must be a boolean"));
+            return Err(function_satisfy_statement
+                .condition
+                .error("condition must be a boolean"));
         }
         if local_obligations_need_result_spec_export(&local_obligations) {
             let scoped_spec = self.bindings.evaluate_scoped_bool_result_spec(
                 &type_param_exprs,
                 &declarations,
-                &fss.condition,
+                &function_satisfy_statement.condition,
                 None,
                 recursion_name.as_ref(),
                 defined_name.as_instance(),
@@ -1550,11 +1595,11 @@ impl Environment {
             BlockParams::FunctionSatisfy(
                 unbound_condition.clone(),
                 return_type.clone(),
-                fss.condition.range(),
+                function_satisfy_statement.condition.range(),
             ),
             &statement.first_token,
             &statement.last_token,
-            fss.body.as_ref(),
+            function_satisfy_statement.body.as_ref(),
         )?;
 
         let function_type = AcornType::functional_from_scoped_context(
@@ -1576,7 +1621,7 @@ impl Environment {
             None,
             None,
             doc_comments,
-            Some(fss.name_token.range()),
+            Some(function_satisfy_statement.name_token.range()),
             Some(statement.to_string()),
         );
         let const_name = defined_name
@@ -1609,8 +1654,8 @@ impl Environment {
                     AcornValue::Variable(i as AtomId, value_param.value_type.clone())
                 })
                 .collect::<Vec<_>>();
-            function_constant =
-                function_constant.bind_value_params(&family_value_args, &fss.name_token)?;
+            function_constant = function_constant
+                .bind_value_params(&family_value_args, &function_satisfy_statement.name_token)?;
         }
         let function_term = AcornValue::apply(
             function_constant.clone(),
@@ -1701,12 +1746,12 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ds: &DestructuringStatement,
+        destructuring_statement: &DestructuringStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
 
         let mut arg_names = vec![];
-        for arg_token in &ds.args {
+        for arg_token in &destructuring_statement.args {
             let arg_name = arg_token.text().to_string();
             if arg_names.contains(&arg_name) {
                 return Err(arg_token.error(&format!(
@@ -1721,21 +1766,21 @@ impl Environment {
         }
 
         let mut value_evaluator = self.evaluator(project);
-        let value = value_evaluator.evaluate_value(&ds.value, None)?;
+        let value = value_evaluator.evaluate_value(&destructuring_statement.value, None)?;
         let mut value_local_obligations = value_evaluator.take_local_obligations();
         let value_type = value.get_type();
 
         let mut empty_stack = Stack::new();
         let mut function_evaluator = self.evaluator(project);
-        let mut function =
-            function_evaluator.evaluate_as_generic_value(&mut empty_stack, &ds.function)?;
+        let mut function = function_evaluator
+            .evaluate_as_generic_value(&mut empty_stack, &destructuring_statement.function)?;
         let function_local_obligations = function_evaluator.take_local_obligations();
 
         let function_type_before = function.get_type();
         let function_ftype_before = match &function_type_before {
             AcornType::Function(ft) => ft,
             _ => {
-                return Err(ds.function.error(&format!(
+                return Err(destructuring_statement.function.error(&format!(
                     "expected a function type, but got {}",
                     function_type_before
                 )));
@@ -1748,7 +1793,7 @@ impl Environment {
                 function,
                 &value_type,
                 "destructuring function return type",
-                &ds.value,
+                &destructuring_statement.value,
             )?;
         }
 
@@ -1756,30 +1801,30 @@ impl Environment {
         let (arg_types, return_type) = match &function_type {
             AcornType::Function(ft) => (ft.arg_types.clone(), ft.return_type.as_ref().clone()),
             _ => {
-                return Err(ds.function.error(&format!(
+                return Err(destructuring_statement.function.error(&format!(
                     "expected a function type, but got {}",
                     function_type
                 )));
             }
         };
 
-        if arg_types.len() != ds.args.len() {
+        if arg_types.len() != destructuring_statement.args.len() {
             return Err(statement.error(&format!(
                 "function expects {} arguments, but {} were provided in the pattern",
                 arg_types.len(),
-                ds.args.len()
+                destructuring_statement.args.len()
             )));
         }
 
         if return_type != value_type {
-            return Err(ds.value.error(&format!(
+            return Err(destructuring_statement.value.error(&format!(
                 "type mismatch: function returns {} but value has type {}",
                 return_type, value_type
             )));
         }
 
         if arg_types.iter().any(|t| t.has_generic()) {
-            return Err(ds
+            return Err(destructuring_statement
                 .function
                 .error("could not infer all argument types for destructuring pattern"));
         }
@@ -1806,7 +1851,7 @@ impl Environment {
             let mut spec_evaluator = Evaluator::new(project, &self.bindings, None);
             general_condition = spec_evaluator.evaluate_result_spec_with_stack(
                 &mut stack,
-                &ds.value,
+                &destructuring_statement.value,
                 general_applied,
                 &return_type,
             )?;
@@ -1819,13 +1864,13 @@ impl Environment {
         let general_claim = AcornValue::Exists(quant_types.clone(), Box::new(general_condition));
         let source = Source::anonymous(self.module_id, statement.range(), self.depth);
         let general_prop = Proposition::new(general_claim.clone(), vec![], source);
-        let node = if let Some(body) = &ds.body {
+        let node = if let Some(body) = &destructuring_statement.body {
             let block = Block::new(
                 project,
                 self,
                 vec![],
                 vec![],
-                BlockParams::variable_satisfy(general_claim, ds.value.range()),
+                BlockParams::variable_satisfy(general_claim, destructuring_statement.value.range()),
                 &statement.first_token,
                 &statement.last_token,
                 Some(body),
@@ -1837,7 +1882,7 @@ impl Environment {
         let index = self.add_node(node);
         self.add_node_lines(index, &statement.range());
 
-        for (arg_token, arg_type) in ds.args.iter().zip(&arg_types) {
+        for (arg_token, arg_type) in destructuring_statement.args.iter().zip(&arg_types) {
             let arg_name = arg_token.text();
             self.bindings.add_unqualified_constant(
                 arg_name,
@@ -1852,7 +1897,7 @@ impl Environment {
             );
         }
 
-        let arg_values: Vec<_> = ds
+        let arg_values: Vec<_> = destructuring_statement
             .args
             .iter()
             .zip(&arg_types)

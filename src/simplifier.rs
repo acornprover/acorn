@@ -101,8 +101,8 @@ pub fn simplify_file(
         };
         considered += 1;
 
-        let affected_goals = affected_goals(&loaded.lowered, candidate.post_fact);
-        if can_remove_candidate(&loaded, candidate, &affected_goals, &options)? {
+        let affected_goal_ids = collect_affected_goals(&loaded.lowered, candidate.post_fact);
+        if can_remove_candidate(&loaded, candidate, &affected_goal_ids, &options)? {
             let edited =
                 remove_line_range(&loaded.source, candidate.first_line, candidate.last_line)
                     .ok_or_else(|| {
@@ -141,7 +141,7 @@ pub fn simplify_file(
             removed.push(SimplifyRemoval {
                 first_line: candidate.first_line,
                 last_line: candidate.last_line,
-                affected_goals: affected_goals.len(),
+                affected_goals: affected_goal_ids.len(),
             });
             cursor_line = candidate.first_line;
         } else {
@@ -397,12 +397,15 @@ fn fact_is_anonymous(fact: &LoweredFact) -> bool {
         })
 }
 
-fn affected_goals(lowered: &LoweredModule, excluded_fact: LoweredFactId) -> Vec<LoweredGoalId> {
+fn collect_affected_goals(
+    lowered: &LoweredModule,
+    excluded_fact: LoweredFactId,
+) -> Vec<LoweredGoalId> {
     lowered
         .goals()
         .filter_map(|(goal_id, _)| {
-            let visible = lowered.visible_fact_ids_for(goal_id)?;
-            visible.contains(&excluded_fact).then_some(goal_id)
+            let visible_fact_ids = lowered.visible_fact_ids_for(goal_id)?;
+            visible_fact_ids.contains(&excluded_fact).then_some(goal_id)
         })
         .collect()
 }
@@ -410,10 +413,10 @@ fn affected_goals(lowered: &LoweredModule, excluded_fact: LoweredFactId) -> Vec<
 fn can_remove_candidate(
     loaded: &LoadedTarget,
     candidate: Candidate,
-    affected_goals: &[LoweredGoalId],
+    affected_goal_ids: &[LoweredGoalId],
     options: &SimplifyOptions,
 ) -> Result<bool, String> {
-    for goal_id in affected_goals {
+    for goal_id in affected_goal_ids {
         if !prove_without_fact(loaded, *goal_id, candidate.post_fact, options)? {
             return Ok(false);
         }
@@ -428,7 +431,7 @@ fn prove_without_fact(
     options: &SimplifyOptions,
 ) -> Result<bool, String> {
     let entry = loaded.lowered.goal(goal_id);
-    let visible = loaded
+    let visible_fact_ids = loaded
         .lowered
         .visible_fact_ids_for(goal_id)
         .ok_or_else(|| {
@@ -445,7 +448,7 @@ fn prove_without_fact(
         ScoringConfig::default(),
     )
     .map_err(|e| e.message)?;
-    for fact_id in visible {
+    for fact_id in visible_fact_ids {
         if fact_id != excluded_fact {
             processor
                 .add_lowered_fact(loaded.lowered.fact(fact_id))

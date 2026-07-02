@@ -4,19 +4,19 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ss: &StructureStatement,
+        structure_statement: &StructureStatement,
     ) -> error::Result<()> {
         self.add_line_types(
             LineType::Other,
             statement.first_line(),
-            ss.first_right_brace.line_number,
+            structure_statement.first_right_brace.line_number,
         );
         self.bindings
-            .check_typename_available(ss.name_token.text(), statement)?;
+            .check_typename_available(structure_statement.name_token.text(), statement)?;
 
         let family_params = self
             .evaluator(project)
-            .evaluate_family_params(&ss.type_params)?;
+            .evaluate_family_params(&structure_statement.type_params)?;
         let type_params = family_params.type_params().to_vec();
         let value_params = family_params.value_params().to_vec();
         let value_param_types: Vec<_> = value_params
@@ -25,7 +25,7 @@ impl Environment {
             .collect();
         let value_param_count = value_params.len() as AtomId;
 
-        for (expr, family_param) in ss.type_params.iter().zip(&family_params) {
+        for (expr, family_param) in structure_statement.type_params.iter().zip(&family_params) {
             if let Some(type_param) = family_param.as_type_param() {
                 self.bindings
                     .check_typename_available(&type_param.name, &expr.name)?;
@@ -37,7 +37,7 @@ impl Environment {
             .map(|param| param.name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         let mut field_names = std::collections::BTreeSet::new();
-        for (field_name_token, _, _) in &ss.fields {
+        for (field_name_token, _, _) in &structure_statement.fields {
             field_name_token.check_not_reserved()?;
             if TokenType::is_magic_method_name(field_name_token.text())
                 && field_name_token.text() != "contains"
@@ -76,7 +76,7 @@ impl Environment {
         let mut member_fn_names = vec![];
         let mut field_types = vec![];
         let mut field_doc_comments = vec![];
-        for (field_name_token, field_type_expr, doc_comments) in &ss.fields {
+        for (field_name_token, field_type_expr, doc_comments) in &structure_statement.fields {
             let field_type = self
                 .evaluator(project)
                 .evaluate_type_with_stack(&mut family_stack, field_type_expr)?;
@@ -100,12 +100,12 @@ impl Environment {
             })
             .collect::<Vec<_>>();
 
-        let unbound_constraint = if let Some(constraint) = &ss.constraint {
+        let unbound_constraint = if let Some(constraint) = &structure_statement.constraint {
             let mut stack = Stack::new();
             for value_param in &value_params {
                 stack.insert(value_param.name.clone(), value_param.value_type.clone());
             }
-            for ((name_token, _, _), t) in ss.fields.iter().zip(&field_types) {
+            for ((name_token, _, _), t) in structure_statement.fields.iter().zip(&field_types) {
                 stack.insert(name_token.to_string(), t.clone());
             }
             let mut evaluator = self.evaluator(project);
@@ -120,7 +120,7 @@ impl Environment {
             // parsed for source compatibility but does not elaborate into a block.
             self.add_line_types(
                 LineType::Other,
-                ss.first_right_brace.line_number + 1,
+                structure_statement.first_right_brace.line_number + 1,
                 statement.last_line(),
             );
             Some(unbound)
@@ -130,26 +130,28 @@ impl Environment {
 
         let datatype = Datatype {
             module_id: self.module_id,
-            name: ss.name_token.text().to_string(),
+            name: structure_statement.name_token.text().to_string(),
         };
         let doc_comments = self.take_doc_comments();
         let definition_string = Some(statement.to_string());
         let potential_type = self.bindings.add_potential_type_with_family_params(
-            &ss.name_token,
+            &structure_statement.name_token,
             family_params.canonical_kinds(),
             doc_comments,
-            Some(ss.name_token.range()),
+            Some(structure_statement.name_token.range()),
             definition_string,
         );
         self.bindings.set_datatype_structure_fields(
             &datatype,
-            ss.fields
+            structure_statement
+                .fields
                 .iter()
                 .map(|(field_name, _, _)| field_name.text().to_string())
                 .collect(),
         );
         self.bindings.set_datatype_variances(&datatype, variances);
-        let struct_type = potential_type.resolve_args(family_args, &ss.name_token)?;
+        let struct_type =
+            potential_type.resolve_args(family_args, &structure_statement.name_token)?;
         let quantify_over_value_params = |value: AcornValue| -> AcornValue {
             if value_param_types.is_empty() {
                 value
@@ -174,7 +176,7 @@ impl Environment {
                 .into_iter()
                 .zip(&field_types)
                 .zip(&field_doc_comments)
-                .zip(&ss.fields)
+                .zip(&structure_statement.fields)
         {
             let member_fn_type = AcornType::functional_from_flat_context(
                 vec![struct_type.clone()],
@@ -182,7 +184,7 @@ impl Environment {
             );
             let def_str = format!(
                 "{}.{}: {}",
-                ss.name_token.text(),
+                structure_statement.name_token.text(),
                 member_fn_name,
                 member_fn_type
             );
@@ -209,7 +211,11 @@ impl Environment {
                 index: 0,
                 total: 1,
             };
-            let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
+            let def_str = format!(
+                "{}.new: {}",
+                structure_statement.name_token.text(),
+                new_fn_type
+            );
             Some(self.bindings.add_datatype_attribute(
                 &datatype,
                 "new",
@@ -221,7 +227,7 @@ impl Environment {
                 vec![],
                 def_str,
             ))
-            .map(|potential| specialize_attr(&potential, &ss.name_token))
+            .map(|potential| specialize_attr(&potential, &structure_statement.name_token))
             .transpose()?
         } else {
             None
@@ -233,13 +239,13 @@ impl Environment {
                 member_fn.clone(),
                 vec![object_var.clone()],
                 None,
-                &ss.fields[i].0,
+                &structure_statement.fields[i].0,
             )?;
             member_args.push(member_arg);
         }
         let range = Range {
             start: statement.first_token.start_pos(),
-            end: ss.name_token.end_pos(),
+            end: structure_statement.name_token.end_pos(),
         };
 
         let constraint_fn = if let Some(unbound_constraint) = &unbound_constraint {
@@ -247,7 +253,7 @@ impl Environment {
                 AcornType::functional_from_flat_context(field_types.clone(), AcornType::Bool);
             let def_str = format!(
                 "{}.constraint: {}",
-                ss.name_token.text(),
+                structure_statement.name_token.text(),
                 constraint_fn_type
             );
             let constraint_fn = self.bindings.add_datatype_attribute(
@@ -261,9 +267,9 @@ impl Environment {
                 vec![],
                 def_str,
             );
-            let constraint_fn = specialize_attr(&constraint_fn, &ss.name_token)?;
+            let constraint_fn = specialize_attr(&constraint_fn, &structure_statement.name_token)?;
 
-            let constraint_args = (0..ss.fields.len())
+            let constraint_args = (0..structure_statement.fields.len())
                 .map(|i| {
                     AcornValue::Variable(value_param_count + i as AtomId, field_types[i].clone())
                 })
@@ -272,7 +278,7 @@ impl Environment {
                 constraint_fn.clone(),
                 constraint_args,
                 Some(&AcornType::Bool),
-                &ss.name_token,
+                &structure_statement.name_token,
             )?;
             let constraint_eq =
                 AcornValue::equals(constraint_application, unbound_constraint.clone());
@@ -285,7 +291,7 @@ impl Environment {
                 self.module_id,
                 range,
                 self.depth,
-                ss.name_token.text().to_string(),
+                structure_statement.name_token.text().to_string(),
                 "constraint".to_string(),
             );
             let prop = Proposition::new(constraint_eq_claim, type_params.clone(), source);
@@ -310,7 +316,7 @@ impl Environment {
                 self.module_id,
                 range,
                 self.depth,
-                ss.name_token.text().to_string(),
+                structure_statement.name_token.text().to_string(),
                 "constraint".to_string(),
             );
             let prop = Proposition::new(constraint_claim, type_params.clone(), source);
@@ -322,7 +328,7 @@ impl Environment {
                 new_fn.clone(),
                 member_args.clone(),
                 None,
-                &ss.name_token,
+                &structure_statement.name_token,
             )?;
             let new_eq = AcornValue::Binary(
                 BinaryOp::Equals,
@@ -338,14 +344,14 @@ impl Environment {
                 self.module_id,
                 range,
                 self.depth,
-                ss.name_token.text().to_string(),
+                structure_statement.name_token.text().to_string(),
                 "new".to_string(),
             );
             let prop = Proposition::new(new_claim, type_params.clone(), source);
             self.add_node(Node::structural(project, self, prop));
         }
 
-        let var_args = (0..ss.fields.len())
+        let var_args = (0..structure_statement.fields.len())
             .map(|i| AcornValue::Variable(value_param_count + i as AtomId, field_types[i].clone()))
             .collect::<Vec<_>>();
         let new_application = match &new_fn {
@@ -353,7 +359,7 @@ impl Environment {
                 new_fn.clone(),
                 var_args.clone(),
                 None,
-                &ss.name_token,
+                &structure_statement.name_token,
             )?),
             None => None,
         };
@@ -362,7 +368,7 @@ impl Environment {
                 constraint_fn.clone(),
                 var_args.clone(),
                 Some(&AcornType::Bool),
-                &ss.name_token,
+                &structure_statement.name_token,
             )?)
         } else {
             None
@@ -371,37 +377,42 @@ impl Environment {
         if let Some(constraint) = &constraint_for_args {
             if let Some(option_type) = self.bindings.get_type_for_typename("Option").cloned() {
                 let option_datatype = option_type.as_base_datatype().cloned().ok_or_else(|| {
-                    ss.name_token
+                    structure_statement
+                        .name_token
                         .error("Option must be a datatype to auto-generate constrained new")
                 })?;
-                let option_struct_type =
-                    option_type.resolve(vec![struct_type.clone()], &ss.name_token)?;
+                let option_struct_type = option_type
+                    .resolve(vec![struct_type.clone()], &structure_statement.name_token)?;
 
                 let (some_module_id, some_name) = self
                     .bindings
                     .resolve_datatype_attr(&option_datatype, "some")
-                    .map_err(|e| ss.name_token.error(&e))?;
+                    .map_err(|e| structure_statement.name_token.error(&e))?;
                 let option_some = self
                     .bindings
                     .get_bindings(some_module_id, project)
                     .get_constant_value(&DefinedName::Constant(some_name))
-                    .map_err(|e| ss.name_token.error(&e))?;
+                    .map_err(|e| structure_statement.name_token.error(&e))?;
 
                 let (none_module_id, none_name) = self
                     .bindings
                     .resolve_datatype_attr(&option_datatype, "none")
-                    .map_err(|e| ss.name_token.error(&e))?;
+                    .map_err(|e| structure_statement.name_token.error(&e))?;
                 let option_none = self
                     .bindings
                     .get_bindings(none_module_id, project)
                     .get_constant_value(&DefinedName::Constant(none_name))
-                    .map_err(|e| ss.name_token.error(&e))?;
+                    .map_err(|e| structure_statement.name_token.error(&e))?;
 
                 let new_fn_type = AcornType::functional_from_flat_context(
                     field_types.clone(),
                     option_struct_type.clone(),
                 );
-                let def_str = format!("{}.new: {}", ss.name_token.text(), new_fn_type);
+                let def_str = format!(
+                    "{}.new: {}",
+                    structure_statement.name_token.text(),
+                    new_fn_type
+                );
                 let new_fn = self.bindings.add_datatype_attribute(
                     &datatype,
                     "new",
@@ -413,19 +424,19 @@ impl Environment {
                     vec![],
                     def_str,
                 );
-                let new_fn = specialize_attr(&new_fn, &ss.name_token)?;
+                let new_fn = specialize_attr(&new_fn, &structure_statement.name_token)?;
 
                 let new_application = self.bindings.apply_potential(
                     new_fn.clone(),
                     var_args.clone(),
                     Some(&option_struct_type),
-                    &ss.name_token,
+                    &structure_statement.name_token,
                 )?;
                 let none_value = self.bindings.apply_potential(
                     option_none,
                     vec![],
                     Some(&option_struct_type),
-                    &ss.name_token,
+                    &structure_statement.name_token,
                 )?;
 
                 let witness = AcornValue::Variable(
@@ -436,7 +447,7 @@ impl Environment {
                     option_some.clone(),
                     vec![witness.clone()],
                     Some(&option_struct_type),
-                    &ss.name_token,
+                    &structure_statement.name_token,
                 )?;
                 let witness_match =
                     AcornValue::equals(new_application.clone(), some_witness.clone());
@@ -451,18 +462,18 @@ impl Environment {
                     self.module_id,
                     range,
                     self.depth,
-                    ss.name_token.text().to_string(),
+                    structure_statement.name_token.text().to_string(),
                     "new".to_string(),
                 );
                 let prop = Proposition::new(some_claim, type_params.clone(), source);
                 self.add_node(Node::structural(project, self, prop));
 
-                for i in 0..ss.fields.len() {
+                for i in 0..structure_statement.fields.len() {
                     let witness_member = self.bindings.apply_potential(
                         member_fns[i].clone(),
                         vec![witness.clone()],
                         None,
-                        &ss.fields[i].0,
+                        &structure_statement.fields[i].0,
                     )?;
                     let field_eq = AcornValue::equals(
                         witness_member,
@@ -480,7 +491,7 @@ impl Environment {
                         self.module_id,
                         range,
                         self.depth,
-                        ss.name_token.text().to_string(),
+                        structure_statement.name_token.text().to_string(),
                         "new".to_string(),
                     );
                     let prop = Proposition::new(projection_claim, type_params.clone(), source);
@@ -497,7 +508,7 @@ impl Environment {
                     self.module_id,
                     range,
                     self.depth,
-                    ss.name_token.text().to_string(),
+                    structure_statement.name_token.text().to_string(),
                     "new".to_string(),
                 );
                 let prop = Proposition::new(none_claim, type_params.clone(), source);
@@ -507,13 +518,13 @@ impl Environment {
                     new_fn.clone(),
                     member_args.clone(),
                     Some(&option_struct_type),
-                    &ss.name_token,
+                    &structure_statement.name_token,
                 )?;
                 let some_object = self.bindings.apply_potential(
                     option_some.clone(),
                     vec![object_var.clone()],
                     Some(&option_struct_type),
-                    &ss.name_token,
+                    &structure_statement.name_token,
                 )?;
                 let round_trip_eq = AcornValue::equals(round_trip_application, some_object);
                 let round_trip_claim = quantify_over_value_params(AcornValue::ForAll(
@@ -525,7 +536,7 @@ impl Environment {
                     self.module_id,
                     range,
                     self.depth,
-                    ss.name_token.text().to_string(),
+                    structure_statement.name_token.text().to_string(),
                     "new".to_string(),
                 );
                 let prop = Proposition::new(round_trip_claim, type_params.clone(), source);
@@ -534,8 +545,8 @@ impl Environment {
         }
 
         if let Some(new_application) = new_application {
-            for i in 0..ss.fields.len() {
-                let (field_name_token, field_type_expr, _) = &ss.fields[i];
+            for i in 0..structure_statement.fields.len() {
+                let (field_name_token, field_type_expr, _) = &structure_statement.fields[i];
                 let member_fn = &member_fns[i];
                 let applied = self.bindings.apply_potential(
                     member_fn.clone(),
@@ -569,7 +580,7 @@ impl Environment {
                     self.module_id,
                     range,
                     self.depth,
-                    ss.name_token.text().to_string(),
+                    structure_statement.name_token.text().to_string(),
                     field_name_token.text().to_string(),
                 );
                 let prop = Proposition::new(member_claim, type_params.clone(), source);
@@ -587,18 +598,18 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        is: &InductiveStatement,
+        inductive_statement: &InductiveStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
         self.bindings
-            .check_typename_available(is.name_token.text(), statement)?;
+            .check_typename_available(inductive_statement.name_token.text(), statement)?;
         let range = Range {
             start: statement.first_token.start_pos(),
-            end: is.name_token.end_pos(),
+            end: inductive_statement.name_token.end_pos(),
         };
 
         let mut constructor_names = std::collections::BTreeSet::new();
-        for (name_token, _, _) in &is.constructors {
+        for (name_token, _, _) in &inductive_statement.constructors {
             name_token.check_not_reserved()?;
             if !constructor_names.insert(name_token.text()) {
                 return Err(name_token.error(&format!(
@@ -610,7 +621,7 @@ impl Environment {
         let mut arbitrary_params = vec![];
         let type_params = self
             .evaluator(project)
-            .evaluate_type_params(&is.type_params)?;
+            .evaluate_type_params(&inductive_statement.type_params)?;
         for type_param in &type_params {
             arbitrary_params.push(self.bindings.add_arbitrary_type(type_param.clone()));
         }
@@ -618,18 +629,18 @@ impl Environment {
         let doc_comments = self.take_doc_comments();
         let definition_string = Some(statement.to_string());
         let potential_type = self.bindings.add_potential_type(
-            &is.name_token,
+            &inductive_statement.name_token,
             typeclasses,
             doc_comments,
-            Some(is.name_token.range()),
+            Some(inductive_statement.name_token.range()),
             definition_string,
         );
         let arb_inductive_type =
-            potential_type.resolve(arbitrary_params.clone(), &is.name_token)?;
+            potential_type.resolve(arbitrary_params.clone(), &inductive_statement.name_token)?;
 
         let mut constructors = vec![];
         let mut has_base = false;
-        for (name_token, type_list_expr, doc_comments) in &is.constructors {
+        for (name_token, type_list_expr, doc_comments) in &inductive_statement.constructors {
             let type_list = match type_list_expr {
                 Some(expr) => {
                     let mut type_list = vec![];
@@ -667,7 +678,7 @@ impl Environment {
 
         let datatype_for_variance = Datatype {
             module_id: self.module_id,
-            name: is.name_token.text().to_string(),
+            name: inductive_statement.name_token.text().to_string(),
         };
         self.bindings
             .set_datatype_variances(&datatype_for_variance, variances);
@@ -680,7 +691,7 @@ impl Environment {
                     arg_type,
                     &arb_inductive_type,
                     &arbitrary_params,
-                    &is.name_token,
+                    &inductive_statement.name_token,
                 )
                 .map_err(|e| {
                     statement.error(&format!(
@@ -693,7 +704,7 @@ impl Environment {
 
         let datatype = Datatype {
             module_id: self.module_id,
-            name: is.name_token.text().to_string(),
+            name: inductive_statement.name_token.text().to_string(),
         };
         let mut constructor_fns = vec![];
         let total = constructors.len();
@@ -708,7 +719,7 @@ impl Environment {
             };
             let def_str = format!(
                 "{}.{}: {}",
-                is.name_token.text(),
+                inductive_statement.name_token.text(),
                 constructor_name,
                 arb_constructor_type
             );
@@ -723,8 +734,8 @@ impl Environment {
                 doc_comments.clone(),
                 def_str,
             );
-            let arb_constructor_fn =
-                gen_constructor_fn.resolve_constant(&arbitrary_params, &is.name_token)?;
+            let arb_constructor_fn = gen_constructor_fn
+                .resolve_constant(&arbitrary_params, &inductive_statement.name_token)?;
 
             constructor_fns.push(arb_constructor_fn);
         }
@@ -754,7 +765,11 @@ impl Environment {
         let mut match_type_params = type_params.clone();
         match_type_params.push(match_result_param);
         let gen_match_type = arb_match_type.genericize(&match_type_params);
-        let match_def_str = format!("{}.match: {}", is.name_token.text(), gen_match_type);
+        let match_def_str = format!(
+            "{}.match: {}",
+            inductive_statement.name_token.text(),
+            gen_match_type
+        );
         self.bindings.add_datatype_attribute(
             &datatype,
             "match",
@@ -795,7 +810,7 @@ impl Environment {
                     self.module_id,
                     range,
                     self.depth,
-                    is.name_token.text().to_string(),
+                    inductive_statement.name_token.text().to_string(),
                     member_name.to_string(),
                 );
                 let gen_claim = arb_claim.genericize(&type_params);
@@ -824,7 +839,7 @@ impl Environment {
             self.module_id,
             range,
             self.depth,
-            is.name_token.text().to_string(),
+            inductive_statement.name_token.text().to_string(),
             "new".to_string(),
         );
         let gen_claim = arb_claim.genericize(&type_params);
@@ -867,7 +882,7 @@ impl Environment {
                 self.module_id,
                 range,
                 self.depth,
-                is.name_token.text().to_string(),
+                inductive_statement.name_token.text().to_string(),
                 member_name.to_string(),
             );
             let gen_claim = arb_claim.genericize(&type_params);
@@ -923,7 +938,7 @@ impl Environment {
         let gen_lambda_claim = arb_lambda_claim.genericize(&type_params);
         let def_str = format!(
             "{}.induction: {}",
-            is.name_token.text(),
+            inductive_statement.name_token.text(),
             gen_lambda_claim.get_type()
         );
         self.bindings.add_datatype_attribute(
@@ -951,7 +966,7 @@ impl Environment {
         let prop = Proposition::new(gen_forall_claim, type_params, source);
         self.add_node(Node::structural(project, self, prop));
 
-        for type_param in &is.type_params {
+        for type_param in &inductive_statement.type_params {
             self.bindings.remove_type(type_param.name.text());
         }
         Ok(())

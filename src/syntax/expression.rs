@@ -622,8 +622,12 @@ impl Expression {
     ) -> Expression {
         assert_ne!(exprs.len(), 0);
         let mut answer = exprs.remove(0);
-        for e in exprs {
-            answer = Expression::Binary(Box::new(answer), TokenType::Comma.generate(), Box::new(e));
+        for expr in exprs {
+            answer = Expression::Binary(
+                Box::new(answer),
+                TokenType::Comma.generate(),
+                Box::new(expr),
+            );
         }
         Expression::Grouping(left.generate(), Box::new(answer), right.generate())
     }

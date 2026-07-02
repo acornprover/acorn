@@ -8,19 +8,23 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        is: &ImportStatement,
+        import_statement: &ImportStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
 
-        if is.names.is_empty() {
+        if import_statement.names.is_empty() {
             return Err(statement.error(
                 "import statement must specify names to import. use 'from foo import bar' syntax",
             ));
         }
 
-        let full_name_vec: Vec<_> = is.components.iter().map(|t| t.text().to_string()).collect();
-        let full_name = full_name_vec.join(".");
-        let module_id = match project.get_loaded_module_id_by_name(&full_name) {
+        let module_path: Vec<_> = import_statement
+            .components
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect();
+        let module_name = module_path.join(".");
+        let module_id = match project.get_loaded_module_id_by_name(&module_name) {
             Ok(module_id) => module_id,
             Err(ImportError::NotFound(message)) => {
                 return Err(statement.error(&message));
@@ -30,7 +34,7 @@ impl Environment {
                     module_id,
                     &statement.first_token,
                     &statement.last_token,
-                    &format!("circular import of '{}' module", full_name),
+                    &format!("circular import of '{}' module", module_name),
                 ));
             }
         };
@@ -39,7 +43,7 @@ impl Environment {
                 return Err(Error::indirect(
                     &statement.first_token,
                     &statement.last_token,
-                    &format!("error in '{}' module", full_name),
+                    &format!("error in '{}' module", module_name),
                 ));
             }
             Some(bindings) => bindings,
@@ -49,14 +53,14 @@ impl Environment {
         }
 
         self.bindings
-            .import_module(full_name_vec, &bindings, &statement.first_token)?;
+            .import_module(module_path, &bindings, &statement.first_token)?;
 
-        if let Some(last_component) = is.components.last() {
+        if let Some(last_component) = import_statement.components.last() {
             self.token_map
                 .track_token(last_component, &NamedEntity::Module(module_id));
         }
 
-        for name in &is.names {
+        for name in &import_statement.names {
             let entity = self.bindings.import_name(project, module_id, name)?;
             self.token_map.track_token(name, &entity);
             self.import_bindings.push(ImportBindingInfo {
@@ -64,7 +68,7 @@ impl Environment {
                 line: name.line_number + 1,
                 column: name.start + 1,
                 import_name: name.text().to_string(),
-                module_name: full_name.clone(),
+                module_name: module_name.clone(),
                 module_id,
                 entity,
             });

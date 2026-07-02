@@ -2,10 +2,16 @@ use super::*;
 
 fn attribute_name_tokens(statement: &Statement) -> Vec<&Token> {
     match &statement.statement {
-        StatementInfo::Let(ls) => vec![&ls.name_token],
-        StatementInfo::VariableSatisfy(vss) => vss.declarations.iter().map(|d| d.token()).collect(),
-        StatementInfo::FunctionSatisfy(fss) => vec![&fss.name_token],
-        StatementInfo::Define(ds) => vec![&ds.name_token],
+        StatementInfo::Let(let_statement) => vec![&let_statement.name_token],
+        StatementInfo::VariableSatisfy(variable_satisfy_statement) => variable_satisfy_statement
+            .declarations
+            .iter()
+            .map(|declaration| declaration.token())
+            .collect(),
+        StatementInfo::FunctionSatisfy(function_satisfy_statement) => {
+            vec![&function_satisfy_statement.name_token]
+        }
+        StatementInfo::Define(define_statement) => vec![&define_statement.name_token],
         _ => vec![],
     }
 }
@@ -75,19 +81,24 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ats: &AttributesStatement,
+        attributes_statement: &AttributesStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
 
-        if let Some(potential) = self.bindings.get_type_for_typename(ats.name_token.text()) {
-            self.add_type_attributes(project, ats, potential.clone())
-        } else if let Some(typeclass) = self.bindings.get_typeclass_for_name(ats.name_token.text())
+        if let Some(potential) = self
+            .bindings
+            .get_type_for_typename(attributes_statement.name_token.text())
         {
-            self.add_typeclass_attributes(project, ats, typeclass.clone())
+            self.add_type_attributes(project, attributes_statement, potential.clone())
+        } else if let Some(typeclass) = self
+            .bindings
+            .get_typeclass_for_name(attributes_statement.name_token.text())
+        {
+            self.add_typeclass_attributes(project, attributes_statement, typeclass.clone())
         } else {
-            Err(ats.name_token.error(&format!(
+            Err(attributes_statement.name_token.error(&format!(
                 "undefined type or typeclass name '{}'",
-                ats.name_token.text()
+                attributes_statement.name_token.text()
             )))
         }
     }
@@ -95,13 +106,13 @@ impl Environment {
     fn add_type_attributes(
         &mut self,
         project: &dyn ProjectLookup,
-        ats: &AttributesStatement,
+        attributes_statement: &AttributesStatement,
         potential: crate::elaborator::acorn_type::PotentialType,
     ) -> error::Result<()> {
         let defining_module = self.module_id;
         let type_args = self
             .evaluator(project)
-            .evaluate_attributes_type_args(&ats.type_params)?;
+            .evaluate_attributes_type_args(&attributes_statement.type_params)?;
 
         match type_args {
             AttributesTypeArgs::Generic(family_params) => {
@@ -112,21 +123,22 @@ impl Environment {
                     }
                 };
                 if family_params.len() != expected_param_kinds.len() {
-                    return Err(ats.name_token.error(&format!(
+                    return Err(attributes_statement.name_token.error(&format!(
                         "type {} expects {} parameters, but got {}",
-                        ats.name_token.text(),
+                        attributes_statement.name_token.text(),
                         expected_param_kinds.len(),
                         family_params.len()
                     )));
                 }
 
                 let family_param_kinds = family_params.canonical_kinds();
-                for (((expr, family_param), family_param_kind), expected_kind) in ats
-                    .type_params
-                    .iter()
-                    .zip(&family_params)
-                    .zip(&family_param_kinds)
-                    .zip(&expected_param_kinds)
+                for (((expr, family_param), family_param_kind), expected_kind) in
+                    attributes_statement
+                        .type_params
+                        .iter()
+                        .zip(&family_params)
+                        .zip(&family_param_kinds)
+                        .zip(&expected_param_kinds)
                 {
                     match (family_param, family_param_kind, expected_kind) {
                         (
@@ -172,7 +184,9 @@ impl Environment {
                         _ => unreachable!("family parameter kind should match the parameter"),
                     }
                 }
-                for (expr, family_param) in ats.type_params.iter().zip(&family_params) {
+                for (expr, family_param) in
+                    attributes_statement.type_params.iter().zip(&family_params)
+                {
                     if let Some(type_param) = family_param.as_type_param() {
                         self.bindings
                             .check_typename_available(&type_param.name, &expr.name)?;
@@ -186,35 +200,36 @@ impl Environment {
                 }
                 let (family_args, _) =
                     family_params.family_args_for_type_args(&arbitrary_type_args);
-                let instance_type = potential.resolve_args(family_args, &ats.name_token)?;
+                let instance_type =
+                    potential.resolve_args(family_args, &attributes_statement.name_token)?;
                 let datatype = self
-                    .check_can_add_attributes(&ats.name_token, &instance_type)?
+                    .check_can_add_attributes(&attributes_statement.name_token, &instance_type)?
                     .clone();
-                self.check_type_attribute_names_available(&datatype, &ats.body)?;
+                self.check_type_attribute_names_available(&datatype, &attributes_statement.body)?;
 
                 let result = (|| {
-                    for substatement in &ats.body.statements {
+                    for substatement in &attributes_statement.body.statements {
                         match &substatement.statement {
-                            StatementInfo::Let(ls) => {
+                            StatementInfo::Let(let_statement) => {
                                 self.add_let_statement(
                                     project,
                                     substatement,
                                     DefinedName::datatype_attr_defined(
                                         defining_module,
                                         &datatype,
-                                        ls.name_token.text(),
+                                        let_statement.name_token.text(),
                                     ),
-                                    ls,
-                                    ls.name_token.range(),
+                                    let_statement,
+                                    let_statement.name_token.range(),
                                     Some(&family_scope),
                                 )?;
                             }
-                            StatementInfo::VariableSatisfy(vss) => {
+                            StatementInfo::VariableSatisfy(variable_satisfy_statement) => {
                                 let datatype = datatype.clone();
                                 self.add_variable_satisfy_statement_named(
                                     project,
                                     substatement,
-                                    vss,
+                                    variable_satisfy_statement,
                                     Some(&family_scope),
                                     move |name| {
                                         DefinedName::datatype_attr_defined(
@@ -225,32 +240,32 @@ impl Environment {
                                     },
                                 )?;
                             }
-                            StatementInfo::FunctionSatisfy(fss) => {
+                            StatementInfo::FunctionSatisfy(function_satisfy_statement) => {
                                 self.add_function_satisfy_statement_named(
                                     project,
                                     substatement,
-                                    fss,
+                                    function_satisfy_statement,
                                     DefinedName::datatype_attr_defined(
                                         defining_module,
                                         &datatype,
-                                        fss.name_token.text(),
+                                        function_satisfy_statement.name_token.text(),
                                     ),
                                     Some(&family_scope),
                                 )?;
                             }
-                            StatementInfo::Define(ds) => {
+                            StatementInfo::Define(define_statement) => {
                                 self.add_define_statement(
                                     project,
                                     substatement,
                                     DefinedName::datatype_attr_defined(
                                         defining_module,
                                         &datatype,
-                                        ds.name_token.text(),
+                                        define_statement.name_token.text(),
                                     ),
                                     Some(&instance_type),
                                     Some(&family_scope),
-                                    ds,
-                                    ds.name_token.range(),
+                                    define_statement,
+                                    define_statement.name_token.range(),
                                 )?;
                             }
                             StatementInfo::DocComment(s) => {
@@ -270,16 +285,17 @@ impl Environment {
                 result
             }
             AttributesTypeArgs::Concrete(concrete_types) => {
-                let instance_type = potential.resolve(concrete_types.clone(), &ats.name_token)?;
+                let instance_type =
+                    potential.resolve(concrete_types.clone(), &attributes_statement.name_token)?;
                 let datatype = self
-                    .check_can_add_attributes(&ats.name_token, &instance_type)?
+                    .check_can_add_attributes(&attributes_statement.name_token, &instance_type)?
                     .clone();
 
-                self.check_type_attribute_names_available(&datatype, &ats.body)?;
+                self.check_type_attribute_names_available(&datatype, &attributes_statement.body)?;
 
-                for substatement in &ats.body.statements {
+                for substatement in &attributes_statement.body.statements {
                     match &substatement.statement {
-                        StatementInfo::Let(ls) => {
+                        StatementInfo::Let(let_statement) => {
                             self.add_let_statement(
                                 project,
                                 substatement,
@@ -287,20 +303,20 @@ impl Environment {
                                     defining_module,
                                     datatype.clone(),
                                     &concrete_types,
-                                    ls.name_token.text(),
+                                    let_statement.name_token.text(),
                                 ),
-                                ls,
-                                ls.name_token.range(),
+                                let_statement,
+                                let_statement.name_token.range(),
                                 None,
                             )?;
                         }
-                        StatementInfo::VariableSatisfy(vss) => {
+                        StatementInfo::VariableSatisfy(variable_satisfy_statement) => {
                             let datatype = datatype.clone();
                             let concrete_types = concrete_types.clone();
                             self.add_variable_satisfy_statement_named(
                                 project,
                                 substatement,
-                                vss,
+                                variable_satisfy_statement,
                                 None,
                                 move |name| {
                                     DefinedName::datatype_specific_attr_defined(
@@ -312,21 +328,21 @@ impl Environment {
                                 },
                             )?;
                         }
-                        StatementInfo::FunctionSatisfy(fss) => {
+                        StatementInfo::FunctionSatisfy(function_satisfy_statement) => {
                             self.add_function_satisfy_statement_named(
                                 project,
                                 substatement,
-                                fss,
+                                function_satisfy_statement,
                                 DefinedName::datatype_specific_attr_defined(
                                     defining_module,
                                     datatype.clone(),
                                     &concrete_types,
-                                    fss.name_token.text(),
+                                    function_satisfy_statement.name_token.text(),
                                 ),
                                 None,
                             )?;
                         }
-                        StatementInfo::Define(ds) => {
+                        StatementInfo::Define(define_statement) => {
                             self.add_define_statement(
                                 project,
                                 substatement,
@@ -334,12 +350,12 @@ impl Environment {
                                     defining_module,
                                     datatype.clone(),
                                     &concrete_types,
-                                    ds.name_token.text(),
+                                    define_statement.name_token.text(),
                                 ),
                                 Some(&instance_type),
                                 None,
-                                ds,
-                                ds.name_token.range(),
+                                define_statement,
+                                define_statement.name_token.range(),
                             )?;
                         }
                         StatementInfo::DocComment(s) => {
@@ -359,18 +375,18 @@ impl Environment {
     fn add_typeclass_attributes(
         &mut self,
         project: &dyn ProjectLookup,
-        ats: &AttributesStatement,
+        attributes_statement: &AttributesStatement,
         typeclass: crate::elaborator::acorn_type::Typeclass,
     ) -> error::Result<()> {
         let defining_module = self.module_id;
-        if !ats.type_params.is_empty() {
-            return Err(ats.type_params[0]
+        if !attributes_statement.type_params.is_empty() {
+            return Err(attributes_statement.type_params[0]
                 .name
                 .error("typeclass attributes do not support type parameters"));
         }
 
-        let instance_name_token = ats.instance_name.as_ref().ok_or_else(|| {
-            ats.name_token.error(
+        let instance_name_token = attributes_statement.instance_name.as_ref().ok_or_else(|| {
+            attributes_statement.name_token.error(
                 "typeclass attributes require an instance name (e.g., 'attributes M: Magma')",
             )
         })?;
@@ -385,29 +401,29 @@ impl Environment {
             DatatypeFamilyScope::new(Telescope::new(vec![FamilyParam::Type(type_param)]));
 
         let result = (|| {
-            self.check_typeclass_attribute_names_available(&typeclass, &ats.body)?;
-            for substatement in &ats.body.statements {
+            self.check_typeclass_attribute_names_available(&typeclass, &attributes_statement.body)?;
+            for substatement in &attributes_statement.body.statements {
                 match &substatement.statement {
-                    StatementInfo::Let(ls) => {
+                    StatementInfo::Let(let_statement) => {
                         self.add_let_statement(
                             project,
                             substatement,
                             DefinedName::typeclass_attr_defined(
                                 defining_module,
                                 &typeclass,
-                                ls.name_token.text(),
+                                let_statement.name_token.text(),
                             ),
-                            ls,
-                            ls.name_token.range(),
+                            let_statement,
+                            let_statement.name_token.range(),
                             Some(&family_scope),
                         )?;
                     }
-                    StatementInfo::VariableSatisfy(vss) => {
+                    StatementInfo::VariableSatisfy(variable_satisfy_statement) => {
                         let typeclass = typeclass.clone();
                         self.add_variable_satisfy_statement_named(
                             project,
                             substatement,
-                            vss,
+                            variable_satisfy_statement,
                             Some(&family_scope),
                             move |name| {
                                 DefinedName::typeclass_attr_defined(
@@ -418,32 +434,32 @@ impl Environment {
                             },
                         )?;
                     }
-                    StatementInfo::FunctionSatisfy(fss) => {
+                    StatementInfo::FunctionSatisfy(function_satisfy_statement) => {
                         self.add_function_satisfy_statement_named(
                             project,
                             substatement,
-                            fss,
+                            function_satisfy_statement,
                             DefinedName::typeclass_attr_defined(
                                 defining_module,
                                 &typeclass,
-                                fss.name_token.text(),
+                                function_satisfy_statement.name_token.text(),
                             ),
                             Some(&family_scope),
                         )?;
                     }
-                    StatementInfo::Define(ds) => {
+                    StatementInfo::Define(define_statement) => {
                         self.add_define_statement(
                             project,
                             substatement,
                             DefinedName::typeclass_attr_defined(
                                 defining_module,
                                 &typeclass,
-                                ds.name_token.text(),
+                                define_statement.name_token.text(),
                             ),
                             Some(&instance_type),
                             Some(&family_scope),
-                            ds,
-                            ds.name_token.range(),
+                            define_statement,
+                            define_statement.name_token.range(),
                         )?;
                     }
                     StatementInfo::DocComment(s) => {

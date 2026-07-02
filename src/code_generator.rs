@@ -2025,8 +2025,8 @@ impl CodeGenerator<'_> {
                 if let AcornValue::Binary(BinaryOp::Equals, left, right) = x.as_ref() {
                     return self.value_to_binary_expr(BinaryOp::NotEquals, left, right);
                 }
-                let x = self.value_to_expr(x, false)?;
-                Ok(Expression::generate_unary(TokenType::Not, x))
+                let operand_expr = self.value_to_expr(x, false)?;
+                Ok(Expression::generate_unary(TokenType::Not, operand_expr))
             }
             AcornValue::Grouping(value) => Ok(Expression::Grouping(
                 TokenType::LeftParen.generate(),
@@ -2034,8 +2034,11 @@ impl CodeGenerator<'_> {
                 TokenType::RightParen.generate(),
             )),
             AcornValue::Try(x, _) => {
-                let x = self.value_to_expr(x, false)?;
-                Ok(Expression::generate_unary(TokenType::QuestionMark, x))
+                let operand_expr = self.value_to_expr(x, false)?;
+                Ok(Expression::generate_unary(
+                    TokenType::QuestionMark,
+                    operand_expr,
+                ))
             }
             AcornValue::ForAll(quants, value) => {
                 self.generate_quantifier_expr(TokenType::ForAll, quants, value, true)

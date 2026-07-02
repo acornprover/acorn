@@ -6,13 +6,13 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        fas: &ForAllStatement,
+        forall_statement: &ForAllStatement,
     ) -> error::Result<()> {
-        if fas.body.statements.is_empty() {
+        if forall_statement.body.statements.is_empty() {
             return Ok(());
         }
         let mut args = vec![];
-        for quantifier in &fas.quantifiers {
+        for quantifier in &forall_statement.quantifiers {
             if let Declaration::Typed(name_token, _) = quantifier {
                 self.bindings
                     .check_unqualified_name_available(&name_token.to_string(), name_token)?;
@@ -29,10 +29,11 @@ impl Environment {
             BlockParams::ForAll,
             &statement.first_token,
             &statement.last_token,
-            Some(&fas.body),
+            Some(&forall_statement.body),
         )?;
 
-        let (outer_claim, range) = block.externalize_last_claim(self, &fas.body.right_brace)?;
+        let (outer_claim, range) =
+            block.externalize_last_claim(self, &forall_statement.body.right_brace)?;
         let source = Source::anonymous(self.module_id, range, self.depth);
         let prop = Proposition::new(outer_claim, vec![], source);
         let index = self.add_node(Node::block(project, self, block, Some(prop)));
@@ -45,23 +46,24 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        is: &IfStatement,
+        if_statement: &IfStatement,
     ) -> error::Result<()> {
         let mut evaluator = self.evaluator(project);
-        let condition = evaluator.evaluate_value(&is.condition, Some(&AcornType::Bool))?;
+        let condition =
+            evaluator.evaluate_value(&if_statement.condition, Some(&AcornType::Bool))?;
         let local_obligations = evaluator.take_local_obligations();
         self.add_local_obligations(project, &[], local_obligations)?;
-        let range = is.condition.range();
+        let range = if_statement.condition.range();
         let if_claim = self.add_conditional(
             project,
             condition.clone(),
             range,
             &statement.first_token,
             &statement.last_token,
-            &is.body,
+            &if_statement.body,
             None,
         )?;
-        if let Some(else_body) = &is.else_body {
+        if let Some(else_body) = &if_statement.else_body {
             self.add_conditional(
                 project,
                 condition.negate(),
@@ -80,16 +82,16 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ms: &MatchStatement,
+        match_statement: &MatchStatement,
     ) -> error::Result<()> {
         let mut evaluator = self.evaluator(project);
-        let scrutinee = evaluator.evaluate_value(&ms.scrutinee, None)?;
+        let scrutinee = evaluator.evaluate_value(&match_statement.scrutinee, None)?;
         let local_obligations = evaluator.take_local_obligations();
         self.add_local_obligations(project, &[], local_obligations)?;
         let scrutinee_type = scrutinee.get_type();
         let mut indices = vec![];
         let mut disjuncts = vec![];
-        for (pattern, body) in &ms.cases {
+        for (pattern, body) in &match_statement.cases {
             let (constructor, args, i, total) = self
                 .evaluator(project)
                 .evaluate_pattern(&scrutinee_type, pattern)?;
@@ -116,7 +118,7 @@ impl Environment {
             disjuncts.push(disjunct);
 
             if total == indices.len() {
-                if ms.cases.len() > total {
+                if match_statement.cases.len() > total {
                     continue;
                 }
 
@@ -131,7 +133,7 @@ impl Environment {
             let index = self.add_node(Node::block(project, self, block, None));
             self.add_node_lines(index, &body.range());
         }
-        Err(ms
+        Err(match_statement
             .scrutinee
             .error("not all cases are covered in match statement"))
     }

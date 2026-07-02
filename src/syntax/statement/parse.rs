@@ -111,7 +111,7 @@ fn parse_theorem_statement(
 
     let (body, last_token) = parse_by_block(claim_right_brace.clone(), tokens)?;
 
-    let ts = TheoremStatement {
+    let theorem_statement = TheoremStatement {
         axiomatic,
         trusted: false,
         lemma,
@@ -125,7 +125,7 @@ fn parse_theorem_statement(
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Theorem(ts),
+        statement: StatementInfo::Theorem(theorem_statement),
     })
 }
 
@@ -244,7 +244,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
 
                     let (body, last_token) = parse_by_block(value_end_token, tokens)?;
 
-                    let ds = DestructuringStatement {
+                    let destructuring_statement = DestructuringStatement {
                         function: function_expr,
                         args,
                         value,
@@ -254,7 +254,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                     return Ok(Statement {
                         first_token: keyword,
                         last_token,
-                        statement: StatementInfo::Destructuring(ds),
+                        statement: StatementInfo::Destructuring(destructuring_statement),
                     });
                 }
                 Some(TokenType::RightArrow) => {
@@ -271,7 +271,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                     let (condition, right_brace) =
                         Expression::parse_value(tokens, Terminator::Is(TokenType::RightBrace))?;
                     let (body, last_token) = parse_by_block(right_brace, tokens)?;
-                    let fss = FunctionSatisfyStatement {
+                    let function_satisfy_statement = FunctionSatisfyStatement {
                         name_token: first_name_token.clone(),
                         type_params: early_type_params,
                         declarations,
@@ -282,7 +282,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
                     return Ok(Statement {
                         first_token: keyword,
                         last_token,
-                        statement: StatementInfo::FunctionSatisfy(fss),
+                        statement: StatementInfo::FunctionSatisfy(function_satisfy_statement),
                     });
                 }
                 _ => {
@@ -345,7 +345,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
             .first_token()
             .error("axiom keyword is not allowed in strict mode"));
     }
-    let ls = LetStatement {
+    let let_statement = LetStatement {
         name_token: first_name_token,
         type_params,
         type_expr,
@@ -354,7 +354,7 @@ fn parse_let_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) -> 
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Let(ls),
+        statement: StatementInfo::Let(let_statement),
     })
 }
 
@@ -368,7 +368,7 @@ fn parse_define_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
     }
     let (return_type, _) = Expression::parse_type(tokens, Terminator::Is(TokenType::LeftBrace))?;
     let (return_value, last_token) = Expression::parse_value_block(tokens)?;
-    let ds = DefineStatement {
+    let define_statement = DefineStatement {
         name_token,
         type_params,
         args,
@@ -378,7 +378,7 @@ fn parse_define_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Define(ds),
+        statement: StatementInfo::Define(define_statement),
     })
 }
 
@@ -406,7 +406,7 @@ fn parse_type_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) ->
             .error("axiom keyword is not allowed in strict mode"));
     }
     let last_token = type_expr.last_token().clone();
-    let ts = TypeStatement {
+    let type_statement = TypeStatement {
         name_token: name_token.clone(),
         type_params,
         type_expr,
@@ -414,7 +414,7 @@ fn parse_type_statement(keyword: Token, tokens: &mut TokenIter, strict: bool) ->
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Type(ts),
+        statement: StatementInfo::Type(type_statement),
     })
 }
 
@@ -427,11 +427,11 @@ fn parse_forall_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Stat
         statements,
         right_brace: right_brace.clone(),
     };
-    let fas = ForAllStatement { quantifiers, body };
+    let forall_statement = ForAllStatement { quantifiers, body };
     Ok(Statement {
         first_token: keyword,
         last_token: right_brace,
-        statement: StatementInfo::ForAll(fas),
+        statement: StatementInfo::ForAll(forall_statement),
     })
 }
 
@@ -474,7 +474,7 @@ fn parse_if_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statemen
         right_brace: right_brace.clone(),
     };
     let else_body = parse_else_body(tokens)?;
-    let is = IfStatement {
+    let if_statement = IfStatement {
         condition,
         body,
         else_body,
@@ -483,7 +483,7 @@ fn parse_if_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statemen
     Ok(Statement {
         first_token: keyword,
         last_token: right_brace,
-        statement: StatementInfo::If(is),
+        statement: StatementInfo::If(if_statement),
     })
 }
 
@@ -672,11 +672,11 @@ fn parse_from_statement(keyword: Token, tokens: &mut TokenIter) -> Result<Statem
             }
         }
     };
-    let is = ImportStatement { components, names };
+    let import_statement = ImportStatement { components, names };
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Import(is),
+        statement: StatementInfo::Import(import_statement),
     })
 }
 
@@ -705,7 +705,7 @@ fn parse_attributes_statement(keyword: Token, tokens: &mut TokenIter) -> Result<
         statements,
         right_brace: right_brace.clone(),
     };
-    let ats = AttributesStatement {
+    let attributes_statement = AttributesStatement {
         name_token,
         type_params,
         instance_name,
@@ -714,7 +714,7 @@ fn parse_attributes_statement(keyword: Token, tokens: &mut TokenIter) -> Result<
     Ok(Statement {
         first_token: keyword,
         last_token: right_brace,
-        statement: StatementInfo::Attributes(ats),
+        statement: StatementInfo::Attributes(attributes_statement),
     })
 }
 
@@ -749,11 +749,11 @@ fn parse_match_statement(keyword: Token, tokens: &mut TokenIter) -> Result<State
         Some((_, body)) => body.right_brace.clone(),
         None => return Err(keyword.error("match must have cases")),
     };
-    let ms = MatchStatement { scrutinee, cases };
+    let match_statement = MatchStatement { scrutinee, cases };
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Match(ms),
+        statement: StatementInfo::Match(match_statement),
     })
 }
 
@@ -970,7 +970,7 @@ fn parse_instance_statement(keyword: Token, tokens: &mut TokenIter) -> Result<St
         }
     };
 
-    let is = InstanceStatement {
+    let instance_statement = InstanceStatement {
         type_name,
         type_params,
         typeclass,
@@ -980,7 +980,7 @@ fn parse_instance_statement(keyword: Token, tokens: &mut TokenIter) -> Result<St
     Ok(Statement {
         first_token: keyword,
         last_token,
-        statement: StatementInfo::Instance(is),
+        statement: StatementInfo::Instance(instance_statement),
     })
 }
 
@@ -1080,11 +1080,11 @@ impl Statement {
                         let keyword = tokens.next().unwrap();
                         let (type_expr, last_token) =
                             Expression::parse_type(tokens, Terminator::Is(TokenType::NewLine))?;
-                        let ds = NumeralsStatement { type_expr };
+                        let numerals_statement = NumeralsStatement { type_expr };
                         let s = Statement {
                             first_token: keyword,
                             last_token,
-                            statement: StatementInfo::Numerals(ds),
+                            statement: StatementInfo::Numerals(numerals_statement),
                         };
                         return Ok((Some(s), None));
                     }

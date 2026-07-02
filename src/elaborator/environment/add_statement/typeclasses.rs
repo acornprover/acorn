@@ -5,17 +5,17 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        ts: &TypeclassStatement,
+        typeclass_statement: &TypeclassStatement,
     ) -> error::Result<()> {
         self.add_other_lines(statement);
 
         let mut extends = vec![];
-        for extend in &ts.extends {
+        for extend in &typeclass_statement.extends {
             let typeclass = self.evaluator(project).evaluate_typeclass(extend)?;
             extends.push(typeclass);
         }
 
-        let typeclass_name = ts.typeclass_name.text();
+        let typeclass_name = typeclass_statement.typeclass_name.text();
         self.bindings
             .check_typename_available(typeclass_name, statement)?;
         let typeclass = Typeclass {
@@ -28,13 +28,13 @@ impl Environment {
             typeclass_name,
             extends,
             doc_comments,
-            Some(ts.typeclass_name.range()),
+            Some(typeclass_statement.typeclass_name.range()),
             definition_string,
             project,
-            &ts.typeclass_name,
+            &typeclass_statement.typeclass_name,
         )?;
 
-        let type_params = if let Some(instance_name_token) = &ts.instance_name {
+        let type_params = if let Some(instance_name_token) = &typeclass_statement.instance_name {
             let instance_name = instance_name_token.text();
             self.bindings
                 .check_typename_available(instance_name, statement)?;
@@ -51,7 +51,7 @@ impl Environment {
         let mut inhabitant_provider = None;
         if !type_params.is_empty() {
             let type_param = &type_params[0];
-            for (attr_name, type_expr, doc_comments) in &ts.constants {
+            for (attr_name, type_expr, doc_comments) in &typeclass_statement.constants {
                 if let Some(existing_tc) = self
                     .bindings
                     .cached_typeclass_attr_lookup(&typeclass, attr_name.text())
@@ -112,7 +112,7 @@ impl Environment {
 
         if !type_params.is_empty() {
             let type_param = &type_params[0];
-            for condition in &ts.conditions {
+            for condition in &typeclass_statement.conditions {
                 let range = Range {
                     start: condition.name_token.start_pos(),
                     end: condition.claim.last_token().end_pos(),
@@ -205,7 +205,7 @@ impl Environment {
             }
         }
 
-        if let Some(instance_name_token) = &ts.instance_name {
+        if let Some(instance_name_token) = &typeclass_statement.instance_name {
             self.bindings.remove_type(instance_name_token.text());
         }
         Ok(())
@@ -215,16 +215,18 @@ impl Environment {
         &mut self,
         project: &dyn ProjectLookup,
         statement: &Statement,
-        is: &InstanceStatement,
+        instance_statement: &InstanceStatement,
     ) -> error::Result<()> {
-        let typeclass = self.evaluator(project).evaluate_typeclass(&is.typeclass)?;
+        let typeclass = self
+            .evaluator(project)
+            .evaluate_typeclass(&instance_statement.typeclass)?;
 
         let (instance_type, instance_datatype, family_scope, family_value_args) =
-            if is.type_params.is_empty() {
-                let type_expr = Expression::Singleton(is.type_name.clone());
+            if instance_statement.type_params.is_empty() {
+                let type_expr = Expression::Singleton(instance_statement.type_name.clone());
                 let instance_type = self.evaluator(project).evaluate_type(&type_expr)?;
                 let instance_datatype = self
-                    .check_can_add_attributes(&is.type_name, &instance_type)?
+                    .check_can_add_attributes(&instance_statement.type_name, &instance_type)?
                     .clone();
                 (
                     instance_type,
@@ -235,16 +237,16 @@ impl Environment {
             } else {
                 let potential = self
                     .bindings
-                    .get_type_for_typename(is.type_name.text())
+                    .get_type_for_typename(instance_statement.type_name.text())
                     .cloned()
-                    .ok_or_else(|| is.type_name.error("expected type name"))?;
+                    .ok_or_else(|| instance_statement.type_name.error("expected type name"))?;
                 let Some(unresolved) = potential.as_unresolved() else {
-                    return Err(is
+                    return Err(instance_statement
                         .type_name
                         .error("instance parameters require a parameterized datatype"));
                 };
                 let Some(datatype) = unresolved.base_datatype().cloned() else {
-                    return Err(is
+                    return Err(instance_statement
                         .type_name
                         .error("instance parameters require a datatype family"));
                 };
@@ -255,22 +257,24 @@ impl Environment {
                     .to_vec();
                 let family_params = self
                     .evaluator(project)
-                    .evaluate_family_params(&is.type_params)?;
+                    .evaluate_family_params(&instance_statement.type_params)?;
                 if family_params.len() != expected_kinds.len() {
-                    return Err(is.type_name.error(&format!(
+                    return Err(instance_statement.type_name.error(&format!(
                         "type {} expects {} parameters, but got {}",
-                        is.type_name.text(),
+                        instance_statement.type_name.text(),
                         expected_kinds.len(),
                         family_params.len()
                     )));
                 }
                 let family_param_kinds = family_params.canonical_kinds();
-                for (expr, ((param, param_kind), expected_kind)) in is.type_params.iter().zip(
-                    family_params
-                        .iter()
-                        .zip(&family_param_kinds)
-                        .zip(expected_kinds.iter()),
-                ) {
+                for (expr, ((param, param_kind), expected_kind)) in
+                    instance_statement.type_params.iter().zip(
+                        family_params
+                            .iter()
+                            .zip(&family_param_kinds)
+                            .zip(expected_kinds.iter()),
+                    )
+                {
                     match (param, param_kind, expected_kind) {
                         (
                             FamilyParam::Type(type_param),
@@ -309,7 +313,9 @@ impl Environment {
                         }
                     }
                 }
-                for (expr, family_param) in is.type_params.iter().zip(&family_params) {
+                for (expr, family_param) in
+                    instance_statement.type_params.iter().zip(&family_params)
+                {
                     if let Some(type_param) = family_param.as_type_param() {
                         self.bindings
                             .check_typename_available(&type_param.name, &expr.name)?;
@@ -323,9 +329,10 @@ impl Environment {
                 }
                 let (family_args, family_value_args) =
                     family_params.family_args_for_type_args(&arbitrary_type_args);
-                let instance_type = potential.resolve_args(family_args, &is.type_name)?;
+                let instance_type =
+                    potential.resolve_args(family_args, &instance_statement.type_name)?;
                 let instance_datatype = self
-                    .check_can_add_attributes(&is.type_name, &instance_type)?
+                    .check_can_add_attributes(&instance_statement.type_name, &instance_type)?
                     .clone();
                 (
                     instance_type,
@@ -348,7 +355,7 @@ impl Environment {
             {
                 return Err(statement.error(&format!(
                     "'{}' must be an instance of '{}' in order to be an instance of '{}'",
-                    is.type_name, base_typeclass.name, typeclass.name
+                    instance_statement.type_name, base_typeclass.name, typeclass.name
                 )));
             }
         }
@@ -374,11 +381,11 @@ impl Environment {
                 )
             };
 
-        if let Some(definitions) = &is.definitions {
+        if let Some(definitions) = &instance_statement.definitions {
             for substatement in &definitions.statements {
                 match &substatement.statement {
-                    StatementInfo::Let(ls) => {
-                        let attr_name = ls.name_token.text().to_string();
+                    StatementInfo::Let(let_statement) => {
+                        let attr_name = let_statement.name_token.text().to_string();
                         self.add_let_statement(
                             project,
                             substatement,
@@ -387,9 +394,9 @@ impl Environment {
                                 &attr_name,
                                 instance_datatype.clone(),
                             ),
-                            ls,
-                            ls.name_token.range(),
-                            if is.type_params.is_empty() {
+                            let_statement,
+                            let_statement.name_token.range(),
+                            if instance_statement.type_params.is_empty() {
                                 None
                             } else {
                                 Some(&family_scope)
@@ -409,11 +416,11 @@ impl Environment {
                             public_definition_for_instance(&self.bindings, &attr_name);
                         pairs.push((public_attr, instance_impl, public_definition));
                     }
-                    StatementInfo::Define(ds) => {
-                        if !ds.type_params.is_empty() {
+                    StatementInfo::Define(define_statement) => {
+                        if !define_statement.type_params.is_empty() {
                             return Err(substatement.error("type parameters are not allowed here"));
                         }
-                        let attr_name = ds.name_token.text().to_string();
+                        let attr_name = define_statement.name_token.text().to_string();
                         self.add_define_statement(
                             project,
                             substatement,
@@ -423,13 +430,13 @@ impl Environment {
                                 instance_datatype.clone(),
                             ),
                             Some(&instance_type),
-                            if is.type_params.is_empty() {
+                            if instance_statement.type_params.is_empty() {
                                 None
                             } else {
                                 Some(&family_scope)
                             },
-                            ds,
-                            ds.name_token.range(),
+                            define_statement,
+                            define_statement.name_token.range(),
                         )?;
 
                         let (public_attr, instance_impl) = self.bindings.check_instance_attribute(
@@ -611,7 +618,7 @@ impl Environment {
             self.module_id,
             statement.range(),
             self.depth,
-            is.type_name.text(),
+            instance_statement.type_name.text(),
             &typeclass.name,
         );
         let typeclass_instance = TypeclassInstance {
@@ -624,7 +631,7 @@ impl Environment {
 
         let range = Range {
             start: statement.first_token.start_pos(),
-            end: if let Some(definitions) = &is.definitions {
+            end: if let Some(definitions) = &instance_statement.definitions {
                 definitions.right_brace.end_pos()
             } else {
                 statement.last_token.end_pos()
@@ -637,7 +644,7 @@ impl Environment {
             family_scope.value_block_args(),
             conditions,
             range,
-            is.body.as_ref(),
+            instance_statement.body.as_ref(),
             instance_fact,
         )?;
 
