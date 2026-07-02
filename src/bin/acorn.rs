@@ -1719,7 +1719,7 @@ async fn main() {
                 ProjectConfig {
                     usage_mode: UsageMode::Ide,
                     use_filesystem: true,
-                    read_cache: false,
+                    read_cache: true,
                     write_cache: false,
                     update_version: false,
                 },

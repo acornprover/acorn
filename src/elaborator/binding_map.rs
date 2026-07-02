@@ -474,6 +474,40 @@ impl BindingMap {
             || self.is_module(name)
     }
 
+    pub fn exported_entity_matches(&self, name: &str, entity: &NamedEntity) -> bool {
+        if !self.has_exported_name(name) {
+            return false;
+        }
+        match entity {
+            NamedEntity::Value(value) => {
+                let defined_name = DefinedName::unqualified(self.module_id, name);
+                matches!(
+                    self.get_constant_value(&defined_name),
+                    Ok(PotentialValue::Resolved(exported)) if &exported == value
+                )
+            }
+            NamedEntity::Type(acorn_type) => matches!(
+                self.get_type_for_typename(name),
+                Some(PotentialType::Resolved(exported)) if exported == acorn_type
+            ),
+            NamedEntity::Module(module_id) => self.get_module_id_for_name(name) == Some(*module_id),
+            NamedEntity::Typeclass(typeclass) => {
+                self.get_typeclass_for_name(name) == Some(typeclass)
+            }
+            NamedEntity::UnresolvedValue(unresolved) => {
+                let defined_name = DefinedName::unqualified(self.module_id, name);
+                matches!(
+                    self.get_constant_value(&defined_name),
+                    Ok(PotentialValue::Unresolved(exported)) if &exported == unresolved
+                )
+            }
+            NamedEntity::UnresolvedType(unresolved) => matches!(
+                self.get_type_for_typename(name),
+                Some(PotentialType::Unresolved(exported)) if exported == unresolved
+            ),
+        }
+    }
+
     pub fn hide_unqualified_constant_name(&mut self, name: &str) {
         self.unqualified.remove(name);
     }

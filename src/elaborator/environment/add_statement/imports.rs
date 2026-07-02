@@ -1,4 +1,6 @@
 use super::*;
+use crate::elaborator::environment::ImportBindingInfo;
+use crate::syntax::token_map::TokenKey;
 
 impl Environment {
     /// Adds an import statement to the environment.
@@ -57,6 +59,15 @@ impl Environment {
         for name in &is.names {
             let entity = self.bindings.import_name(project, module_id, name)?;
             self.token_map.track_token(name, &entity);
+            self.import_bindings.push(ImportBindingInfo {
+                key: TokenKey::new(name.line_number, name.start, name.len),
+                line: name.line_number + 1,
+                column: name.start + 1,
+                import_name: name.text().to_string(),
+                module_name: full_name.clone(),
+                module_id,
+                entity,
+            });
         }
 
         Ok(())

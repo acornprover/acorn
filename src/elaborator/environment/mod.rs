@@ -14,6 +14,7 @@ use crate::elaborator::evaluator::Evaluator;
 use crate::elaborator::fact::Fact;
 use crate::elaborator::lowered_module::{LoweredItem, LoweredModule, LoweringResult};
 use crate::elaborator::lowering::{lower_fact, lower_goal};
+use crate::elaborator::named_entity::NamedEntity;
 use crate::elaborator::names::{ConstantName, DefinedName};
 use crate::elaborator::node::{Node, NodeCursor};
 use crate::elaborator::proposition::Proposition;
@@ -35,6 +36,17 @@ pub struct CitationStatement {
     /// The name of the cited theorem, preserving module information.
     /// This is extracted before expand_citation inlines the theorem body.
     pub cited_name: Option<ConstantName>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportBindingInfo {
+    pub key: TokenKey,
+    pub line: u32,
+    pub column: u32,
+    pub import_name: String,
+    pub module_name: String,
+    pub module_id: ModuleId,
+    pub entity: NamedEntity,
 }
 
 /// The Environment takes Statements as input and processes them.
@@ -82,6 +94,9 @@ pub struct Environment {
     /// This is not copied for child environments.
     pub token_map: TokenMap,
 
+    /// Resolved import names introduced directly in this environment.
+    pub import_bindings: Vec<ImportBindingInfo>,
+
     /// Used during statement parsing. Cleared whenever they are attached to something.
     /// Each line is one entry.
     pub doc_comments: Vec<String>,
@@ -115,6 +130,7 @@ impl Environment {
             line_types: Vec::new(),
             depth: 0,
             token_map: TokenMap::new(),
+            import_bindings: Vec::new(),
             doc_comments: Vec::new(),
             module_doc_comments: Vec::new(),
             at_module_beginning: true,
@@ -137,6 +153,7 @@ impl Environment {
             line_types: Vec::new(),
             depth: self.depth + 1,
             token_map: TokenMap::new(),
+            import_bindings: Vec::new(),
             doc_comments: Vec::new(),
             module_doc_comments: Vec::new(), // Child environments don't inherit module doc comments
             at_module_beginning: false,      // Child environments are never at module beginning
