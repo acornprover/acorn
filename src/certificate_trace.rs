@@ -236,7 +236,17 @@ impl ProofTrace {
         bindings: Cow<BindingMap>,
         kernel_context: Cow<KernelContext>,
     ) -> Result<CheckedCertificate, CodeGenError> {
-        TraceChecker::new(checker, project, bindings, kernel_context).check(self)
+        TraceChecker::new(checker, project, bindings, kernel_context, true).check(self)
+    }
+
+    pub fn check_usage_only(
+        &self,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<CheckedCertificate, CodeGenError> {
+        TraceChecker::new(checker, project, bindings, kernel_context, false).check(self)
     }
 }
 
@@ -3172,7 +3182,7 @@ struct TraceChecker<'a> {
     bindings: Cow<'a, BindingMap>,
     kernel_context: Cow<'a, KernelContext>,
     clauses: Vec<StepClauses>,
-    lines: Vec<CertificateLine>,
+    lines: Option<Vec<CertificateLine>>,
 }
 
 impl<'a> TraceChecker<'a> {
@@ -3181,6 +3191,7 @@ impl<'a> TraceChecker<'a> {
         project: &'a dyn ProjectLookup,
         bindings: Cow<'a, BindingMap>,
         kernel_context: Cow<'a, KernelContext>,
+        collect_lines: bool,
     ) -> Self {
         Self {
             checker,
@@ -3188,23 +3199,24 @@ impl<'a> TraceChecker<'a> {
             bindings,
             kernel_context,
             clauses: vec![],
-            lines: vec![],
+            lines: collect_lines.then(Vec::new),
+        }
+    }
+
+    fn into_checked(self, consumed_proof_steps: usize) -> CheckedCertificate {
+        CheckedCertificate {
+            lines: self.lines.unwrap_or_default(),
+            consumed_proof_steps,
         }
     }
 
     fn check(mut self, proof: &ProofTrace) -> Result<CheckedCertificate, CodeGenError> {
         if self.checker.has_contradiction() {
-            return Ok(CheckedCertificate {
-                lines: self.lines,
-                consumed_proof_steps: 0,
-            });
+            return Ok(self.into_checked(0));
         }
         for (index, step) in proof.steps.iter().enumerate() {
             if self.checker.has_contradiction() {
-                return Ok(CheckedCertificate {
-                    lines: self.lines,
-                    consumed_proof_steps: index,
-                });
+                return Ok(self.into_checked(index));
             }
             self.check_step(index, step)?;
         }
@@ -3213,11 +3225,7 @@ impl<'a> TraceChecker<'a> {
                 "certificate trace proof does not result in a contradiction".to_string(),
             ));
         }
-        let consumed = proof.steps.len();
-        Ok(CheckedCertificate {
-            lines: self.lines,
-            consumed_proof_steps: consumed,
-        })
+        Ok(self.into_checked(proof.steps.len()))
     }
 
     fn check_step(&mut self, index: usize, step: &TraceStep) -> Result<(), CodeGenError> {
@@ -3811,15 +3819,17 @@ impl<'a> TraceChecker<'a> {
     }
 
     fn record_clause(&mut self, clauses: StepClauses, reason: StepReason, code: String) {
-        let value = self
-            .kernel_context
-            .quote_clause(&clauses.primary, None, None, false);
+        if let Some(lines) = &mut self.lines {
+            let value = self
+                .kernel_context
+                .quote_clause(&clauses.primary, None, None, false);
+            lines.push(CertificateLine {
+                value,
+                statement: code,
+                reason,
+            });
+        }
         self.clauses.push(clauses);
-        self.lines.push(CertificateLine {
-            value,
-            statement: code,
-            reason,
-        });
     }
 }
 

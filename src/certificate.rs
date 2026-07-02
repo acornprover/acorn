@@ -2201,6 +2201,27 @@ impl Certificate {
         self.proof
             .check_with_usage(checker, project, bindings, kernel_context)
     }
+
+    /// Check this certificate without materializing display lines.
+    ///
+    /// This is the hot path for cached certificate replay. It still reports how many serialized
+    /// proof steps were consumed so callers can trim stale trailing steps.
+    pub fn check_usage_only(
+        &self,
+        checker: Checker,
+        project: &dyn ProjectLookup,
+        bindings: Cow<BindingMap>,
+        kernel_context: Cow<KernelContext>,
+    ) -> Result<CheckedCertificate, CodeGenError> {
+        if checker.has_contradiction() {
+            return Ok(CheckedCertificate {
+                lines: Vec::new(),
+                consumed_proof_steps: 0,
+            });
+        }
+        self.proof
+            .check_usage_only(checker, project, bindings, kernel_context)
+    }
 }
 
 /// A collection of certificates that can be saved to a file

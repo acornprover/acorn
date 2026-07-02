@@ -358,11 +358,20 @@ impl Processor {
         bindings: &BindingMap,
     ) -> Result<Vec<CertificateLine>, Error> {
         Ok(self
-            .check_cert_with_usage(cert, normalized_goal, kernel_context, project, bindings)?
+            .check_cert_with_usage_internal(
+                cert,
+                normalized_goal,
+                kernel_context,
+                project,
+                bindings,
+                true,
+            )?
             .lines)
     }
 
-    /// Checks a certificate and reports how many proof lines were consumed.
+    /// Checks a certificate and reports how many proof steps were consumed.
+    ///
+    /// This hot path does not materialize display-oriented `CertificateLine`s.
     pub fn check_cert_with_usage(
         &self,
         cert: &Certificate,
@@ -377,6 +386,7 @@ impl Processor {
             kernel_context,
             project,
             bindings,
+            false,
         )
     }
 
@@ -387,6 +397,7 @@ impl Processor {
         kernel_context: &KernelContext,
         project: impl Into<ProjectView>,
         bindings: &BindingMap,
+        collect_lines: bool,
     ) -> Result<CheckedCertificate, Error> {
         let project = project.into();
         let mut checker = self.checker.clone();
@@ -410,7 +421,11 @@ impl Processor {
         }
 
         let kernel_context = Cow::Owned(effective_kernel_context.clone());
-        cert.check_with_usage(checker, &project, cert_bindings, kernel_context)
+        if collect_lines {
+            cert.check_with_usage(checker, &project, cert_bindings, kernel_context)
+        } else {
+            cert.check_usage_only(checker, &project, cert_bindings, kernel_context)
+        }
     }
 
     /// Creates a test Processor from code containing a theorem named "goal".

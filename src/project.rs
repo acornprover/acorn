@@ -847,7 +847,7 @@ impl ParallelProjectLoader {
     pub fn next_loaded_modules(
         &mut self,
         project: &mut Project,
-        targets: &[ModuleDescriptor],
+        target_set: &HashSet<ModuleDescriptor>,
     ) -> Result<Option<Vec<(ModuleDescriptor, LoweredModule)>>, ImportError> {
         loop {
             if self.completed_jobs >= self.jobs.len() {
@@ -905,7 +905,7 @@ impl ParallelProjectLoader {
             }
             self.enqueue_available(project);
 
-            let work = project.take_lowered_modules_for_targets(targets);
+            let work = project.take_lowered_modules_for_target_set(target_set);
             if !work.is_empty() {
                 return Ok(Some(work));
             }
@@ -1989,7 +1989,7 @@ impl Project {
         let loader_jobs = (jobs / 2).max(1);
         let mut loader =
             ParallelProjectLoader::new(self, &load_target_list, &load_order, loader_jobs)?;
-        let no_build_targets = Vec::new();
+        let no_build_targets = HashSet::new();
         while loader
             .next_loaded_modules(self, &no_build_targets)?
             .is_some()
@@ -2617,6 +2617,13 @@ impl Project {
         for target in targets {
             target_set.extend(self.build_descriptors_for_target(target));
         }
+        self.take_lowered_modules_for_target_set(&target_set)
+    }
+
+    pub fn take_lowered_modules_for_target_set(
+        &mut self,
+        target_set: &HashSet<ModuleDescriptor>,
+    ) -> Vec<(ModuleDescriptor, LoweredModule)> {
         let mut lowered = Vec::new();
         for module in &mut self.modules {
             if !target_set.contains(&module.descriptor) {

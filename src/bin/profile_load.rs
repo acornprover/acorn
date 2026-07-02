@@ -6,7 +6,7 @@
 //   cargo build --bin=profile_load --profile=fastdev
 //   samply record target/fastdev/profile_load
 
-use acorn::project::{Project, ProjectConfig};
+use acorn::project::{Project, ProjectConfig, UsageMode};
 use mimalloc::MiMalloc;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -31,8 +31,11 @@ fn main() {
     let total_start = Instant::now();
 
     let project_start = Instant::now();
-    let mut project = Project::new_local(&current_dir, ProjectConfig::default())
-        .expect("failed to create project");
+    let config = ProjectConfig {
+        usage_mode: UsageMode::Check,
+        ..ProjectConfig::default()
+    };
+    let mut project = Project::new_local(&current_dir, config).expect("failed to create project");
     let project_time = project_start.elapsed();
 
     let target_start = Instant::now();

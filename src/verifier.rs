@@ -553,6 +553,7 @@ impl Verifier {
 
     fn load_and_build_streaming(&mut self) -> Result<Duration, String> {
         let (targets, load_order) = self.prepare_targets()?;
+        let target_set = targets.iter().cloned().collect::<HashSet<_>>();
         let batch_limit = self.builder.check_jobs.max(1);
         let propagate_load_errors = !matches!(self.target_spec, TargetSpec::All);
 
@@ -574,7 +575,7 @@ impl Verifier {
                     self.builder.process_module_work_pipeline(|| {
                         let load_start = std::time::Instant::now();
                         let project = unsafe { &mut *project_ptr };
-                        match loader.next_loaded_modules(project, &targets) {
+                        match loader.next_loaded_modules(project, &target_set) {
                             Ok(Some(work)) => {
                                 let project_view = ProjectView::new_without_lowered(project);
                                 Ok(Some(LoadedModuleWorkBatch {
@@ -614,7 +615,7 @@ impl Verifier {
                 }
 
                 let work =
-                    unsafe { (&mut *project_ptr).take_lowered_modules_for_targets(&targets) };
+                    unsafe { (&mut *project_ptr).take_lowered_modules_for_target_set(&target_set) };
                 let project = if work.is_empty() {
                     None
                 } else {
@@ -650,8 +651,9 @@ impl Verifier {
                 }
             }
 
-            let work =
-                unsafe { (&mut *self.project_ptr).take_lowered_modules_for_targets(&targets) };
+            let work = unsafe {
+                (&mut *self.project_ptr).take_lowered_modules_for_target_set(&target_set)
+            };
             if !work.is_empty() {
                 let project_view = unsafe { ProjectView::new_without_lowered(&*self.project_ptr) };
                 self.builder.set_project_view(project_view);
