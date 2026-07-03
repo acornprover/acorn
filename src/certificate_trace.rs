@@ -3287,7 +3287,19 @@ impl<'a> TraceChecker<'a> {
                     .collect();
                 let (generic, specialized, code) =
                     self.parse_required_claim_with_generic(index, step)?;
-                if !sources.iter().any(|source| *source == generic) {
+                let canonical_generic = self
+                    .checker
+                    .canonical_clause_for_trace(&generic, &self.kernel_context);
+                let matches_generic = sources.iter().any(|source| {
+                    *source == generic
+                        || canonical_generic.as_ref().is_some_and(|canonical| {
+                            self.checker
+                                .canonical_clause_for_trace(source, &self.kernel_context)
+                                .as_ref()
+                                == Some(canonical)
+                        })
+                });
+                if !matches_generic {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "certificate trace inst step {} generic clause does not match premise {}: {}",
                         index + 1,
@@ -3327,6 +3339,13 @@ impl<'a> TraceChecker<'a> {
                 };
                 match (step.br_kind, step.br_literal_index) {
                     (Some(kind), Some(literal_index)) => {
+                        let canonical_targets: Vec<Clause> = [&result, &generic, &specialized]
+                            .iter()
+                            .filter_map(|target| {
+                                self.checker
+                                    .canonical_clause_for_trace(target, &self.kernel_context)
+                            })
+                            .collect();
                         let reduced = sources.iter().any(|source| {
                             self.checker
                                 .apply_boolean_reduction_for_trace(
@@ -3339,6 +3358,7 @@ impl<'a> TraceChecker<'a> {
                                     candidate == result
                                         || candidate == generic
                                         || candidate == specialized
+                                        || canonical_targets.contains(&candidate)
                                 })
                         });
                         if !reduced {

@@ -706,6 +706,7 @@ impl Checker {
             return Some(StepReason::EqualityGraph);
         }
         self.check_clause_direct(&clause, kernel_context)
+            .or_else(|| self.check_clause_via_concrete_simplification(&clause, kernel_context))
     }
 
     pub(crate) fn boolean_reduction_proves_for_trace(
@@ -739,16 +740,46 @@ impl Checker {
         local.has_contradiction()
     }
 
+    /// Canonicalizes a clause the same way trace reduction candidates are normalized.
+    ///
+    /// Clauses that describe the same logical step can reach the trace machinery with
+    /// different variable numberings, depending on whether they were produced by the
+    /// kernel's normalization or parsed back from generated claim code. Comparing
+    /// canonical forms makes those alpha-equivalent clauses compare equal.
+    pub(crate) fn canonical_clause_for_trace(
+        &self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<Clause> {
+        let context = clause.get_local_context().clone();
+        let trace = Clause::normalize_with_trace(clause.literals.clone(), &context);
+        self.normalize_checker_trace(&trace, kernel_context)
+    }
+
+    /// Whether a canonical trace candidate matches the given target clause, either
+    /// exactly or after canonicalizing the target.
+    fn trace_candidate_matches(
+        &self,
+        candidate: &Clause,
+        target: &Clause,
+        canonical_target: Option<&Clause>,
+    ) -> bool {
+        candidate == target || canonical_target.is_some_and(|canonical| candidate == canonical)
+    }
+
     pub(crate) fn boolean_reduction_set_contains_for_trace(
         &self,
         source: &Clause,
         result: &Clause,
         kernel_context: &KernelContext,
     ) -> bool {
+        let canonical_result = self.canonical_clause_for_trace(result, kernel_context);
         self.checker_boolean_reduction_sets(source, kernel_context)
             .into_iter()
             .flatten()
-            .any(|candidate| candidate == *result)
+            .any(|candidate| {
+                self.trace_candidate_matches(&candidate, result, canonical_result.as_ref())
+            })
     }
 
     pub(crate) fn boolean_reduction_detail_for_trace(
@@ -757,12 +788,15 @@ impl Checker {
         result: &Clause,
         kernel_context: &KernelContext,
     ) -> Option<(BooleanReductionKind, usize)> {
+        let canonical_result = self.canonical_clause_for_trace(result, kernel_context);
         source
             .find_boolean_reduction_kinds_with_locations_with_options(kernel_context, true)
             .into_iter()
             .find_map(|(kind, literal_index, trace)| {
                 self.normalize_checker_trace(&trace, kernel_context)
-                    .filter(|candidate| candidate == result)
+                    .filter(|candidate| {
+                        self.trace_candidate_matches(candidate, result, canonical_result.as_ref())
+                    })
                     .map(|_| (kind, literal_index))
             })
     }
@@ -1089,6 +1123,7 @@ impl Checker {
         let clause = normalize_clause_subterms(clause).normalized();
         self.check_clause_direct(&clause, kernel_context)
             .or_else(|| self.check_clause_via_boolean_reductions(&clause, kernel_context))
+            .or_else(|| self.check_clause_via_concrete_simplification(&clause, kernel_context))
     }
 
     pub fn inserted_len(&self) -> usize {
@@ -1149,6 +1184,40 @@ impl Checker {
 
     pub fn exact_clause_id(&self, clause: &Clause) -> Option<usize> {
         self.exact_clauses.get(clause).copied()
+    }
+
+    /// Checks whether a clause follows from known facts after evaluating its literals
+    /// against the concrete term graph.
+    ///
+    /// If some literal is concretely true, the disjunction holds outright. Otherwise,
+    /// dropping concretely-false literals preserves equivalence, so if the reduced clause
+    /// is directly known, the original clause is entailed. This covers certificate claims
+    /// that are weaker than an eagerly-simplified known clause: insertion simplifies a
+    /// known clause past the intermediate form the proof recorded (for example, a unit
+    /// resolution whose remaining negative literal is also refuted by a known fact), and
+    /// the intermediate claim then has no exact match.
+    fn check_clause_via_concrete_simplification(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<StepReason> {
+        let mut changed = false;
+        let mut reduced_literals = Vec::with_capacity(clause.literals.len());
+        for literal in &clause.literals {
+            match self
+                .term_graph
+                .evaluate_literal_with_dependencies(literal, kernel_context)
+            {
+                Some((true, _)) => return Some(StepReason::EqualityGraph),
+                Some((false, _)) => changed = true,
+                None => reduced_literals.push(literal.clone()),
+            }
+        }
+        if !changed || reduced_literals.is_empty() {
+            return None;
+        }
+        let reduced = Clause::new(reduced_literals, clause.get_local_context());
+        self.check_clause_direct(&reduced, kernel_context)
     }
 
     fn simplify_variable_clause_with_concrete_facts(
@@ -2149,5 +2218,297 @@ mod tests {
             checker.check_clause(&canonical_reduction, &context).is_some(),
             "checker should prove the canonical boolean-reduction clause after inserting the assumption",
         );
+    }
+}
+
+#[cfg(test)]
+mod alpha_regression_tests {
+    use super::*;
+    use crate::kernel::kernel_context::KernelContext;
+
+    // Regression test for the certificate failures found by `reprove relation_basic` on
+    // 2026-07-02 ("certificate trace br step N does not apply ..." and "inst step N generic
+    // clause does not match premise ..."). Clauses reconstructed from generated claim code
+    // keep the claim's variable ordering, while trace reduction candidates are renumbered by
+    // first occurrence. The trace machinery compares such alpha-equivalent clauses through
+    // canonical_clause_for_trace, which must map both numberings to the same clause.
+    #[test]
+    fn test_canonical_clause_for_trace_equates_alpha_variants() {
+        use crate::kernel::clause::Clause;
+
+        let mut context = KernelContext::new();
+        context.parse_constant("g0", "(Type, Bool) -> Bool");
+
+        // The canonical numbering orders variables by first occurrence.
+        let canonical = context.parse_clause("g0(x0, x1)", &["Type", "Bool"]);
+
+        // Build the same clause with permuted variable numbering, bypassing the
+        // normalization that Clause::new applies.
+        let permuted_context = context.parse_local(&["Bool", "Type"]);
+        let permuted_literal = context.parse_literal("g0(x1, x0)");
+        let permuted =
+            Clause::from_literals_unnormalized(vec![permuted_literal], &permuted_context);
+
+        // The permuted clause must actually differ syntactically, or this test is vacuous.
+        assert_ne!(canonical, permuted);
+
+        let checker = Checker::new();
+        let canonical_form = checker.canonical_clause_for_trace(&canonical, &context);
+        let permuted_form = checker.canonical_clause_for_trace(&permuted, &context);
+        assert!(canonical_form.is_some());
+        assert_eq!(canonical_form, permuted_form);
+    }
+}
+
+#[cfg(test)]
+mod concrete_simplification_check_tests {
+    use super::*;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::term::Term;
+
+    // Regression test for the "generated proof steps did not close" certificate failures
+    // (compact_union.ac:55, order_bounds.ac:1542, 2026-07-02). Induction-style proofs record
+    // an intermediate unit resolution:
+    //   [1] forall(b0) { g0(b0) } = true            (step case, concrete boolean term)
+    //   [2] not forall(b0){g0(b0)} or not g1(c0) or g1(x0)   (induction instance, generic)
+    //   [3] not g1(c0) or g1(x0)                    (unit resolution of [2] with [1])
+    // When the base case g1(c0) is also known, inserting [2] eagerly simplifies straight to
+    // g1(x0), skipping past [3], so [3] has no exact match and claim emission failed. The
+    // checker must accept a claim whose concretely-false literals reduce it to a known clause.
+    #[test]
+    fn test_check_clause_accepts_claim_weaker_than_simplified_fact() {
+        let mut context = KernelContext::new();
+        context.parse_constant("g0", "Bool -> Bool");
+        context.parse_constant("g1", "Bool -> Bool");
+        context.parse_constants(&["c0", "c1"], "Bool");
+
+        let bound = Term::atom(Atom::BoundVariable(0));
+        let forall_term = Term::forall(Term::bool_type(), context.parse_term("g0").apply(&[bound]));
+
+        let step1 = Clause::new(
+            vec![Literal::positive(forall_term.clone())],
+            LocalContext::empty_ref(),
+        );
+
+        let x0 = Term::new_variable(0);
+        let local = LocalContext::from_types(vec![Term::bool_type()]);
+        let step2 = Clause::new(
+            vec![
+                Literal::negative(forall_term.clone()),
+                Literal::negative(context.parse_term("g1").apply(&[context.parse_term("c0")])),
+                Literal::positive(context.parse_term("g1").apply(&[x0.clone()])),
+            ],
+            &local,
+        );
+
+        let step3 = Clause::new(
+            vec![
+                Literal::negative(context.parse_term("g1").apply(&[context.parse_term("c0")])),
+                Literal::positive(context.parse_term("g1").apply(&[x0])),
+            ],
+            &local,
+        );
+
+        let mut checker = Checker::new();
+        // The base case g1(c0) is already proven in the surrounding context,
+        // like p(List.nil) in the real proof.
+        let base_case = Clause::new(
+            vec![Literal::positive(
+                context.parse_term("g1").apply(&[context.parse_term("c0")]),
+            )],
+            LocalContext::empty_ref(),
+        );
+        checker.insert_clause(&base_case, StepReason::Testing, &context);
+        checker.insert_clause(&step1, StepReason::Testing, &context);
+        checker.insert_clause(&step2, StepReason::Testing, &context);
+
+        assert!(
+            checker.check_clause(&step3, &context).is_some(),
+            "intermediate unit resolution should check via concrete simplification"
+        );
+        // The concrete instance of the claim behaves the same way.
+        let step3_concrete = Clause::new(
+            vec![
+                Literal::negative(context.parse_term("g1").apply(&[context.parse_term("c0")])),
+                Literal::positive(context.parse_term("g1").apply(&[context.parse_term("c1")])),
+            ],
+            LocalContext::empty_ref(),
+        );
+        checker.insert_clause(
+            &context.parse_clause("g1(c1)", &[]),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(
+            checker.check_clause(&step3_concrete, &context).is_some(),
+            "concrete claim with a refuted literal should also check"
+        );
+    }
+}
+
+#[cfg(test)]
+mod embedded_eq_symmetry_tests {
+    use super::*;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::symbol::Symbol;
+    use crate::kernel::term::Term;
+
+    // Regression tests for the embedded-equality symmetry gap found via order_bounds.ac:1542
+    // (2026-07-02). Term normalization orients embedded eq terms before insertion, but
+    // congruence after later merges can produce the orientation normalization would have
+    // swapped. Without eq-symmetry in the graph, that orientation is stranded and the
+    // contradiction goes undetected ("generated proof steps did not close").
+    //
+    // Replicates order_bounds.ac:1542 in miniature:
+    //   a, x, b : Bool-ish constants (use Bool to keep types simple)
+    //   idf : Bool -> Bool  (identity_fn)
+    //   sing : (Bool, Bool) -> Bool  (is_singleton)
+    //   pins : (Bool, Bool) -> Bool  (pred_insert applied to its function arg is too
+    //          higher-order for the mini version; collapse to a binary op)
+    // Steps:
+    //   [1] idf(x) = x
+    //   [2] sing(b, x) = eq(b, x)          (embedded eq term)
+    //   [4] or(eq(a,x), eq(b,x)) != pins(a, x)
+    //   [6] or(eq(a, idf(x)), sing(b, idf(x))) = pins(a, idf(x))
+    // Expect: contradiction via concrete congruence.
+    #[test]
+    fn test_contradiction_through_identity_rewrite_and_embedded_eq() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1", "c2"], "Bool");
+        context.parse_constant("g0", "Bool -> Bool");
+        context.parse_constant("g1", "(Bool, Bool) -> Bool");
+        context.parse_constant("g2", "(Bool, Bool) -> Bool");
+
+        let a = context.parse_term("c0");
+        let x = context.parse_term("c1");
+        let b = context.parse_term("c2");
+        let idf = context.parse_term("g0");
+        let sing = context.parse_term("g1");
+        let pins = context.parse_term("g2");
+        let or = Term::atom(Atom::Symbol(Symbol::Or));
+        let bool_ty = Term::bool_type();
+
+        let idf_x = idf.apply(&[x.clone()]);
+
+        let step1 = Clause::new(
+            vec![Literal::equals(idf_x.clone(), x.clone())],
+            LocalContext::empty_ref(),
+        );
+        let step2 = Clause::new(
+            vec![Literal::equals(
+                sing.apply(&[b.clone(), x.clone()]),
+                Term::eq(bool_ty.clone(), b.clone(), x.clone()),
+            )],
+            LocalContext::empty_ref(),
+        );
+        let lhs4 = or.apply(&[
+            Term::eq(bool_ty.clone(), a.clone(), x.clone()),
+            Term::eq(bool_ty.clone(), b.clone(), x.clone()),
+        ]);
+        let step4 = Clause::new(
+            vec![Literal::not_equals(
+                lhs4,
+                pins.apply(&[a.clone(), x.clone()]),
+            )],
+            LocalContext::empty_ref(),
+        );
+        let lhs6 = or.apply(&[
+            Term::eq(bool_ty.clone(), a.clone(), idf_x.clone()),
+            sing.apply(&[b.clone(), idf_x.clone()]),
+        ]);
+        let step6 = Clause::new(
+            vec![Literal::equals(
+                lhs6,
+                pins.apply(&[a.clone(), idf_x.clone()]),
+            )],
+            LocalContext::empty_ref(),
+        );
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&step1, StepReason::Testing, &context);
+        checker.insert_clause(&step2, StepReason::Testing, &context);
+        checker.insert_clause(&step4, StepReason::Testing, &context);
+        assert!(!checker.has_contradiction());
+        checker.insert_clause(&step6, StepReason::Testing, &context);
+        assert!(checker.has_contradiction());
+    }
+}
+
+#[cfg(test)]
+mod double_rewrite_congruence_tests {
+    use super::*;
+    use crate::kernel::atom::Atom;
+    use crate::kernel::kernel_context::KernelContext;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::local_context::LocalContext;
+    use crate::kernel::symbol::Symbol;
+    use crate::kernel::term::Term;
+
+    // Minimal shape of the order_bounds.ac:1542 failure: both or-arguments differ between
+    // the two sides and each needs one rewrite, one of them inside an embedded eq term:
+    //   or(eq(c0, g0(c1)), g1(c2, g0(c1)))  vs  or(eq(c0, c1), eq(c2, c1))
+    // Closing requires eq-symmetry in the equality graph, because normalization orients
+    // eq(c0, g0(c1)) opposite to eq(c0, c1) and congruence preserves orientation.
+    #[test]
+    fn test_double_rewrite_inside_or_closes() {
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1", "c2"], "Bool");
+        context.parse_constant("g0", "Bool -> Bool");
+        context.parse_constant("g1", "(Bool, Bool) -> Bool");
+        context.parse_constant("g2", "(Bool, Bool) -> Bool");
+        let c0 = context.parse_term("c0");
+        let c1 = context.parse_term("c1");
+        let c2 = context.parse_term("c2");
+        let g0 = context.parse_term("g0");
+        let g1 = context.parse_term("g1");
+        let g2 = context.parse_term("g2");
+        let or = Term::atom(Atom::Symbol(Symbol::Or));
+        let bool_ty = Term::bool_type();
+        let g0_c1 = g0.apply(&[c1.clone()]);
+        let concrete = |literals: Vec<Literal>| Clause::new(literals, LocalContext::empty_ref());
+
+        let mut checker = Checker::new();
+        checker.insert_clause(
+            &concrete(vec![Literal::equals(g0_c1.clone(), c1.clone())]),
+            StepReason::Testing,
+            &context,
+        );
+        checker.insert_clause(
+            &concrete(vec![Literal::equals(
+                g1.apply(&[c2.clone(), c1.clone()]),
+                Term::eq(bool_ty.clone(), c2.clone(), c1.clone()),
+            )]),
+            StepReason::Testing,
+            &context,
+        );
+        checker.insert_clause(
+            &concrete(vec![Literal::not_equals(
+                or.apply(&[
+                    Term::eq(bool_ty.clone(), c0.clone(), c1.clone()),
+                    Term::eq(bool_ty.clone(), c2.clone(), c1.clone()),
+                ]),
+                g2.apply(&[c0.clone(), c1.clone()]),
+            )]),
+            StepReason::Testing,
+            &context,
+        );
+        checker.insert_clause(
+            &concrete(vec![Literal::equals(
+                or.apply(&[
+                    Term::eq(bool_ty.clone(), c0.clone(), g0_c1.clone()),
+                    g1.apply(&[c2.clone(), g0_c1.clone()]),
+                ]),
+                g2.apply(&[c0.clone(), g0_c1.clone()]),
+            )]),
+            StepReason::Testing,
+            &context,
+        );
+        assert!(checker.has_contradiction());
     }
 }

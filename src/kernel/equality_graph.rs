@@ -9,6 +9,7 @@ use crate::kernel::clause_set::{ClauseId, ClauseSet, GroupId, LiteralId, Normali
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
+use crate::kernel::symbol::Symbol;
 use crate::kernel::term::{Decomposition as TermDecomposition, Term};
 use crate::kernel::variable_map::VariableMap;
 
@@ -463,7 +464,12 @@ impl EqualityGraph {
     // Inserts a binary application relationship.
     // If it's already in the graph, return the existing term id.
     // Otherwise, make a new term and group.
-    fn insert_application(&mut self, func: TermId, arg: TermId) -> TermId {
+    fn insert_application(
+        &mut self,
+        func: TermId,
+        arg: TermId,
+        kernel_context: &KernelContext,
+    ) -> TermId {
         let key = Decomposition::Application(func, arg);
         if let Some(&id) = self.decompositions.get(&key) {
             return id;
@@ -478,7 +484,7 @@ impl EqualityGraph {
         let term_id = TermId(self.terms.len() as u32);
         let group_id = GroupId(self.groups.len() as u32);
         let term_info = TermInfo {
-            term: combined_term,
+            term: combined_term.clone(),
             group: group_id,
             decomp: key.clone(),
             adjacent: vec![],
@@ -496,6 +502,22 @@ impl EqualityGraph {
         let func_group = self.get_group_id(func);
         let arg_group = self.get_group_id(arg);
         self.insert_group_application(func_group, arg_group, term_id);
+
+        // Equality is symmetric, so a fully applied embedded eq term belongs in the same
+        // group as its swapped orientation. Term normalization orients embedded eq terms
+        // before insertion, but congruence after later merges can produce the orientation
+        // that normalization would have swapped; without this link, one orientation can
+        // get stranded and a contradiction goes undetected.
+        if let Some((head, args)) = combined_term.as_ref().split_application_multi() {
+            if args.len() == 3 && matches!(head.get_head_atom(), Atom::Symbol(Symbol::Eq)) {
+                let swapped = Term::eq(args[0].clone(), args[2].clone(), args[1].clone());
+                if swapped != combined_term {
+                    let swapped_id = self.insert_term(&swapped, kernel_context);
+                    self.pending
+                        .push(SemanticOperation::TermEquality(term_id, swapped_id));
+                }
+            }
+        }
 
         term_id
     }
@@ -594,7 +616,7 @@ impl EqualityGraph {
                 }
                 let func_id = self.insert_term(&func_term, kernel_context);
                 let arg_id = self.insert_term(&arg_term, kernel_context);
-                self.insert_application(func_id, arg_id)
+                self.insert_application(func_id, arg_id, kernel_context)
             }
             TermDecomposition::Pi(_, _) => {
                 // Pi types are treated as opaque atoms
