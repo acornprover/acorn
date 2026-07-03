@@ -551,6 +551,10 @@ pub struct BuildMetrics {
     /// Number of current source goals skipped by the eval bucket sample.
     pub eval_goals_skipped_sample: i32,
 
+    /// Number of eval searches that succeeded but failed certificate generation.
+    /// These count as search successes; the cert failure is reported as a warning.
+    pub eval_cert_failures: i32,
+
     /// Per-skip proof search metrics for eval runs.
     pub eval_skip_metrics: Vec<EvalSkipMetrics>,
 
@@ -915,6 +919,7 @@ impl BuildMetrics {
         self.eval_corpus_unmatched += result.eval_corpus_unmatched;
         self.eval_goals_skipped_uncertified += result.eval_goals_skipped_uncertified;
         self.eval_goals_skipped_sample += result.eval_goals_skipped_sample;
+        self.eval_cert_failures += result.eval_cert_failures;
         for skip_metrics in &result.eval_skip_metrics {
             self.eval_skip_metrics_mut(skip_metrics.skip)
                 .add(skip_metrics);
@@ -957,6 +962,12 @@ impl BuildMetrics {
                 lines.push(format!(
                     "{} current goals skipped by eval sample",
                     self.eval_goals_skipped_sample
+                ));
+            }
+            if self.eval_cert_failures > 0 {
+                lines.push(format!(
+                    "cert generation failures: {}",
+                    self.eval_cert_failures
                 ));
             }
         }
@@ -2523,10 +2534,30 @@ impl<'a> Builder<'a> {
                         }
 
                         #[cfg(not(feature = "validate"))]
-                        return Err(BuildError::goal(
-                            goal,
-                            format!("full prover failed to create certificate: {}", e),
-                        ));
+                        {
+                            if self.eval_mode {
+                                // A cert failure is a real bug worth reporting, but it should
+                                // not halt a benchmark run. The search still counts by its
+                                // prover outcome, so every policy keeps the same search universe.
+                                self.metrics.eval_cert_failures += 1;
+                                let skip_phrase = match eval_skip {
+                                    Some(skip) => format!(" with skip={}", skip),
+                                    None => String::new(),
+                                };
+                                self.log_warning(
+                                    goal,
+                                    &format!(
+                                        "search succeeded but failed to create certificate{}: {}",
+                                        skip_phrase, e
+                                    ),
+                                );
+                            } else {
+                                return Err(BuildError::goal(
+                                    goal,
+                                    format!("full prover failed to create certificate: {}", e),
+                                ));
+                            }
+                        }
                     }
                 },
             }
