@@ -2907,7 +2907,9 @@ impl<'a> Builder<'a> {
                     Some(self.cancellation_token.clone()),
                     &lowered.initial_bindings,
                     self.project(),
-                    self.scoring_config.clone(),
+                    self.scoring_config
+                        .clone()
+                        .with_store_scored_features(self.trace_writer.is_some()),
                 )?
             };
             let mut processor = Rc::new(processor);

@@ -37,6 +37,10 @@ pub struct PassiveEntry {
     pub id: usize,
     pub step: ProofStep,
     pub score: Score,
+    /// The catalog feature vector this entry was scored with, kept only when
+    /// feature storage is enabled for tracing. Trace rows must record exactly
+    /// what the scorer saw, or training data diverges from proving behavior.
+    pub features: Option<Vec<f32>>,
 }
 
 // The PassiveSet stores a bunch of clauses.
@@ -87,6 +91,12 @@ pub struct PassiveSet {
 
     /// Pops made so far; interleaving policies take a depth-first pop every N pops.
     pop_count: usize,
+
+    /// Whether to keep each entry's scored feature vector for trace export.
+    store_features: bool,
+
+    /// Scored catalog feature vectors by clause id, kept when store_features is set.
+    feature_store: HashMap<usize, Vec<f32>>,
 }
 
 // Returns the specialization map when (left1, right1) can be mapped to
@@ -252,12 +262,56 @@ impl PassiveSet {
             scoring_policy,
             goal_symbols: GoalSymbols::default(),
             pop_count: 0,
+            store_features: scoring_config.store_scored_features(),
+            feature_store: HashMap::new(),
         }
     }
 
     /// The negated-goal symbol context accumulated from pushed steps.
     pub fn goal_symbols(&self) -> &GoalSymbols {
         &self.goal_symbols
+    }
+
+    /// Keep each entry's scored feature vector so trace export can record exactly
+    /// what the scorer saw.
+    pub fn set_store_features(&mut self, store: bool) {
+        self.store_features = store;
+    }
+
+    /// Rescores every queued entry with the current goal context. Called once when
+    /// the negated goal arrives, for scorers that read goal-relative features:
+    /// entries scored earlier saw empty goal features.
+    fn rescore_all(&mut self) {
+        let ids: Vec<usize> = (0..self.clauses.len())
+            .filter(|&id| self.clauses[id].is_some())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let features: Vec<Features> = ids
+            .iter()
+            .map(|&id| {
+                let (step, _) = self.clauses[id].as_ref().unwrap();
+                Features::new_with_goal(step, Some(&self.goal_symbols))
+            })
+            .collect();
+        let scores = Score::batch(self.scoring_policy, self.scorer.as_ref(), &features);
+        for ((&id, new_score), step_features) in
+            ids.iter().zip(scores.into_iter()).zip(features.iter())
+        {
+            let old_score = self.clauses[id].as_ref().unwrap().1;
+            self.queue.remove(&(old_score, id));
+            if let Some(df_queue) = &mut self.df_queue {
+                df_queue.remove(&Self::df_key(&old_score, id));
+                df_queue.insert(Self::df_key(&new_score, id));
+            }
+            self.queue.insert((new_score, id));
+            self.clauses[id].as_mut().unwrap().1 = new_score;
+            if self.store_features {
+                self.feature_store
+                    .insert(id, step_features.to_catalog_floats());
+            }
+        }
     }
 
     // Adding many new steps at once.
@@ -271,10 +325,20 @@ impl PassiveSet {
         }
         let pushed_steps = steps.len();
         let scoring_start = Instant::now();
+        let known_before = self.goal_symbols.known();
+        let mut harvested = false;
         for step in &steps {
             if step.rule.is_underlying_negated_goal() {
                 self.goal_symbols.harvest(step);
+                harvested = true;
             }
+        }
+        // Steps scored before the goal existed saw empty goal features. Once the
+        // goal arrives, rescore them if the scorer actually reads those features,
+        // so proving-time scores (and the stored vectors that become training
+        // data) reflect the goal-aware values.
+        if harvested && !known_before && self.scorer.uses_goal_features() {
+            self.rescore_all();
         }
         let features = steps
             .iter()
@@ -284,8 +348,15 @@ impl PassiveSet {
         let scoring_time_secs = scoring_start.elapsed().as_secs_f64();
 
         let indexing_start = Instant::now();
-        for (step, score) in steps.into_iter().zip(scores.into_iter()) {
-            self.push_with_score(step, score, kernel_context);
+        for ((step, score), step_features) in steps
+            .into_iter()
+            .zip(scores.into_iter())
+            .zip(features.iter())
+        {
+            let stored = self
+                .store_features
+                .then(|| step_features.to_catalog_floats());
+            self.push_with_score_and_features(step, score, stored, kernel_context);
         }
         let indexing_time_secs = indexing_start.elapsed().as_secs_f64();
 
@@ -296,8 +367,25 @@ impl PassiveSet {
         }
     }
 
-    // Adding a new step when we have already scored it.
-    fn push_with_score(&mut self, step: ProofStep, score: Score, kernel_context: &KernelContext) {
+    fn push_with_score_and_features(
+        &mut self,
+        step: ProofStep,
+        score: Score,
+        features: Option<Vec<f32>>,
+        kernel_context: &KernelContext,
+    ) {
+        if let Some(features) = features {
+            self.feature_store.insert(self.clauses.len(), features);
+        }
+        self.push_with_score_inner(step, score, kernel_context);
+    }
+
+    fn push_with_score_inner(
+        &mut self,
+        step: ProofStep,
+        score: Score,
+        kernel_context: &KernelContext,
+    ) {
         let id = self.clauses.len();
         let local_context = step.clause.get_local_context();
 
@@ -381,8 +469,14 @@ impl PassiveSet {
     }
 
     fn take_entry(&mut self, id: usize) -> PassiveEntry {
+        let features = self.feature_store.remove(&id);
         match self.clauses[id].take() {
-            Some((step, score)) => PassiveEntry { id, step, score },
+            Some((step, score)) => PassiveEntry {
+                id,
+                step,
+                score,
+                features,
+            },
             None => panic!("Queue and clauses are out of sync"),
         }
     }
@@ -512,6 +606,7 @@ impl PassiveSet {
             if let Some(df_queue) = &mut self.df_queue {
                 df_queue.remove(&Self::df_key(&score, clause_id));
             }
+            self.feature_store.remove(&clause_id);
 
             if positive == literal_positive {
                 // The whole passive clause is implied by the activated clause.

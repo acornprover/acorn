@@ -191,6 +191,12 @@ impl Prover {
 
     pub fn set_trace_enabled(&mut self, enabled: bool) {
         self.trace_enabled = enabled;
+        if enabled {
+            // Steps pushed from here on keep their scored vectors for trace
+            // export. Steps already pushed only have stored vectors if the
+            // ScoringConfig enabled storage at construction.
+            self.passive_set.set_store_features(true);
+        }
     }
 
     pub fn trace_records(
@@ -795,6 +801,7 @@ impl Prover {
                 (!selected_finishes_proof).then_some(selected_active_id),
                 &entry.score,
                 &entry.step,
+                entry.features.clone(),
                 self.passive_set.goal_symbols(),
             );
         }

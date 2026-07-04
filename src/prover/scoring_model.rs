@@ -124,6 +124,14 @@ impl ScoringModel {
     }
 }
 
+impl ScoringModel {
+    fn contract_uses_goal_features(&self) -> bool {
+        self.feature_names
+            .iter()
+            .any(|name| name.starts_with("goal_"))
+    }
+}
+
 impl Scorer for ScoringModel {
     // This assumes that the model is calculating a probability of the positive class,
     // where the positive class is a step that was actually taken in a proof.
@@ -141,6 +149,10 @@ impl Scorer for ScoringModel {
         } else {
             Err("No score at [0, 0]. Maybe the model is the wrong shape?".into())
         }
+    }
+
+    fn uses_goal_features(&self) -> bool {
+        self.contract_uses_goal_features()
     }
 
     fn score_batch(&self, features: &[Features]) -> Result<Vec<f32>, Box<dyn Error>> {

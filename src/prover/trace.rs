@@ -40,9 +40,15 @@ impl TraceActivatedStep {
         active_id: Option<usize>,
         score: &Score,
         step: &ProofStep,
+        scored_features: Option<Vec<f32>>,
         goal_symbols: &GoalSymbols,
     ) -> Self {
-        let features = Features::new_with_goal(step, Some(goal_symbols));
+        // Training rows must contain exactly the vector the scorer saw when this
+        // step was scored. Recomputing here can differ (the goal context may not
+        // have existed at scoring time), which poisons training.
+        let feature_vector = scored_features.unwrap_or_else(|| {
+            Features::new_with_goal(step, Some(goal_symbols)).to_catalog_floats()
+        });
         Self {
             activation_index,
             passive_id,
@@ -53,7 +59,7 @@ impl TraceActivatedStep {
             queue_is_shallow: score.is_shallow(),
             rule: step.rule.name().to_string(),
             truthiness: truthiness_name(step.truthiness).to_string(),
-            feature_vector: features.to_catalog_floats(),
+            feature_vector,
         }
     }
 }
@@ -74,6 +80,7 @@ impl SearchTrace {
         active_id: Option<usize>,
         score: &Score,
         step: &ProofStep,
+        scored_features: Option<Vec<f32>>,
         goal_symbols: &GoalSymbols,
     ) {
         self.activated_steps.push(TraceActivatedStep::new(
@@ -82,6 +89,7 @@ impl SearchTrace {
             active_id,
             score,
             step,
+            scored_features,
             goal_symbols,
         ));
     }

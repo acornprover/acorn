@@ -12,6 +12,12 @@ pub trait Scorer {
     fn score_batch(&self, features: &[Features]) -> Result<Vec<f32>, Box<dyn Error>> {
         Ok(features.iter().map(|f| self.score(f).unwrap()).collect())
     }
+
+    /// Whether this scorer reads the goal-relative features. When it does, steps
+    /// scored before the goal was known must be rescored once the goal arrives.
+    fn uses_goal_features(&self) -> bool {
+        false
+    }
 }
 
 pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
@@ -119,6 +125,7 @@ pub struct ScoringConfig {
     policy: ScoringPolicy,
     model_path: Option<PathBuf>,
     trace_label: Option<String>,
+    store_scored_features: bool,
 }
 
 impl Default for ScoringConfig {
@@ -133,6 +140,7 @@ impl ScoringConfig {
             policy,
             model_path: None,
             trace_label: None,
+            store_scored_features: false,
         }
     }
 
@@ -144,6 +152,18 @@ impl ScoringConfig {
     pub fn with_trace_label(mut self, trace_label: String) -> Self {
         self.trace_label = Some(trace_label);
         self
+    }
+
+    /// Keep each passive entry's scored feature vector so trace export records
+    /// exactly what the scorer saw. Must be set at construction: entries pushed
+    /// before the flag is enabled have no stored vector.
+    pub fn with_store_scored_features(mut self, store: bool) -> Self {
+        self.store_scored_features = store;
+        self
+    }
+
+    pub fn store_scored_features(&self) -> bool {
+        self.store_scored_features
     }
 
     pub fn policy(&self) -> ScoringPolicy {
