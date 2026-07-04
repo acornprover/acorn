@@ -686,7 +686,7 @@ enum Command {
         #[clap(
             long,
             default_value = "model-20260611-e50-h512-l3",
-            help = "Activation queue policy. Options: model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow.",
+            help = "Activation queue policy. Options: model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow, model-df-1to1, model-df-3to1, model-jitter.",
             value_name = "POLICY"
         )]
         policy: String,

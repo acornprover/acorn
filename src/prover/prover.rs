@@ -795,6 +795,7 @@ impl Prover {
                 (!selected_finishes_proof).then_some(selected_active_id),
                 &entry.score,
                 &entry.step,
+                self.passive_set.goal_symbols(),
             );
         }
         let step = entry.step;

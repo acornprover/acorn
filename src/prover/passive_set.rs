@@ -1,5 +1,5 @@
 use super::active_set::ActiveSet;
-use super::features::Features;
+use super::features::{Features, GoalSymbols};
 use super::score::Score;
 use super::scorer::{Scorer, ScoringConfig, ScoringPolicy};
 use crate::kernel::atom::AtomId;
@@ -9,7 +9,7 @@ use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
 use crate::kernel::local_context::LocalContext;
 use crate::kernel::proof_step::{
-    PremiseMap, ProofStep, SimplificationDetails, SimplificationRemovalInfo,
+    PremiseMap, ProofStep, ShallowStatus, SimplificationDetails, SimplificationRemovalInfo,
 };
 use crate::kernel::term::Term;
 use crate::kernel::variable_map::VariableMap;
@@ -77,6 +77,16 @@ pub struct PassiveSet {
     scorer: Arc<dyn Scorer + Send + Sync>,
 
     scoring_policy: ScoringPolicy,
+
+    /// Constant symbols from the negated-goal steps pushed so far.
+    goal_symbols: GoalSymbols,
+
+    /// An auxiliary depth-first ordering (contradiction, shallow status, newest id),
+    /// maintained only for interleaving policies.
+    df_queue: Option<BTreeSet<(bool, ShallowStatus, usize)>>,
+
+    /// Pops made so far; interleaving policies take a depth-first pop every N pops.
+    pop_count: usize,
 }
 
 // Returns the specialization map when (left1, right1) can be mapped to
@@ -236,8 +246,18 @@ impl PassiveSet {
             contradiction: None,
             all_shallow: true,
             scorer: scoring_config.make_scorer().into(),
+            df_queue: scoring_policy
+                .df_interleave_period()
+                .map(|_| BTreeSet::new()),
             scoring_policy,
+            goal_symbols: GoalSymbols::default(),
+            pop_count: 0,
         }
+    }
+
+    /// The negated-goal symbol context accumulated from pushed steps.
+    pub fn goal_symbols(&self) -> &GoalSymbols {
+        &self.goal_symbols
     }
 
     // Adding many new steps at once.
@@ -251,7 +271,15 @@ impl PassiveSet {
         }
         let pushed_steps = steps.len();
         let scoring_start = Instant::now();
-        let features = steps.iter().map(Features::new).collect::<Vec<_>>();
+        for step in &steps {
+            if step.rule.is_underlying_negated_goal() {
+                self.goal_symbols.harvest(step);
+            }
+        }
+        let features = steps
+            .iter()
+            .map(|step| Features::new_with_goal(step, Some(&self.goal_symbols)))
+            .collect::<Vec<_>>();
         let scores = Score::batch(self.scoring_policy, self.scorer.as_ref(), &features);
         let scoring_time_secs = scoring_start.elapsed().as_secs_f64();
 
@@ -322,6 +350,9 @@ impl PassiveSet {
         }
         self.clauses.push(Some((step, score)));
         self.queue.insert((score, id));
+        if let Some(df_queue) = &mut self.df_queue {
+            df_queue.insert(Self::df_key(&score, id));
+        }
     }
 
     // Whether we can pop another proof step from the passive set and still use a resulting
@@ -341,6 +372,14 @@ impl PassiveSet {
             .copied()
     }
 
+    fn df_key(score: &Score, id: usize) -> (bool, ShallowStatus, usize) {
+        (
+            score.prioritizes_contradiction(),
+            score.ordered_shallow_status(),
+            id,
+        )
+    }
+
     fn take_entry(&mut self, id: usize) -> PassiveEntry {
         match self.clauses[id].take() {
             Some((step, score)) => PassiveEntry { id, step, score },
@@ -350,10 +389,37 @@ impl PassiveSet {
 
     // Returns the next step to activate, along with whether its score was still shallow.
     pub fn pop_entry_with_shallow(&mut self) -> Option<(PassiveEntry, bool)> {
+        self.pop_count += 1;
+        if let Some(period) = self.scoring_policy.df_interleave_period() {
+            if self.pop_count % period == 0 {
+                if let Some((entry, was_shallow)) = self.pop_df_entry() {
+                    return Some((entry, was_shallow));
+                }
+            }
+        }
         // Remove the largest entry from queue
         let (score, id) = self.queue.pop_last()?;
+        if let Some(df_queue) = &mut self.df_queue {
+            df_queue.remove(&Self::df_key(&score, id));
+        }
         let was_shallow = score.is_shallow();
         if !score.is_shallow() {
+            self.all_shallow = false;
+        }
+        Some((self.take_entry(id), was_shallow))
+    }
+
+    // Pops the newest step in the best (contradiction, shallow) tier, the way the
+    // depth-first policy would order it.
+    fn pop_df_entry(&mut self) -> Option<(PassiveEntry, bool)> {
+        let df_queue = self.df_queue.as_mut()?;
+        let key = *df_queue.iter().next_back()?;
+        df_queue.remove(&key);
+        let id = key.2;
+        let score = self.clauses[id].as_ref()?.1;
+        self.queue.remove(&(score, id));
+        let was_shallow = score.is_shallow();
+        if !was_shallow {
             self.all_shallow = false;
         }
         Some((self.take_entry(id), was_shallow))
@@ -367,6 +433,9 @@ impl PassiveSet {
     pub fn pop_shallow_entry(&mut self) -> Option<PassiveEntry> {
         let (score, id) = self.next_shallow_entry()?;
         self.queue.remove(&(score, id));
+        if let Some(df_queue) = &mut self.df_queue {
+            df_queue.remove(&Self::df_key(&score, id));
+        }
         Some(self.take_entry(id))
     }
 
@@ -440,6 +509,9 @@ impl PassiveSet {
             let passive_context = step.clause.get_local_context().clone();
             let (step, score) = self.clauses[clause_id].take().unwrap();
             self.queue.remove(&(score, clause_id));
+            if let Some(df_queue) = &mut self.df_queue {
+                df_queue.remove(&Self::df_key(&score, clause_id));
+            }
 
             if positive == literal_positive {
                 // The whole passive clause is implied by the activated clause.

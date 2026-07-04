@@ -25,6 +25,16 @@ pub enum ScoringPolicy {
     DepthFirst,
     Model,
     ModelNoShallow,
+    /// The embedded model, but every second queue pop takes the newest step in the
+    /// best (contradiction, shallow) tier instead - interleaving depth-first search
+    /// dynamics with the learned ordering.
+    ModelDfInterleave1,
+    /// As above, with every fourth pop depth-first.
+    ModelDfInterleave3,
+    /// The embedded model with a small deterministic per-clause jitter added to the
+    /// score. Meant for trace collection: it activates steps the greedy ordering
+    /// never would, providing off-policy training data.
+    ModelJitter,
 }
 
 impl Default for ScoringPolicy {
@@ -46,8 +56,23 @@ impl ScoringPolicy {
         matches!(self, Self::Model | Self::ModelNoShallow)
     }
 
+    /// For interleaving policies, take a depth-first pop every N pops.
+    pub fn df_interleave_period(self) -> Option<usize> {
+        match self {
+            Self::ModelDfInterleave1 => Some(2),
+            Self::ModelDfInterleave3 => Some(4),
+            _ => None,
+        }
+    }
+
+    /// Whether scores get a deterministic per-clause jitter.
+    pub fn uses_score_jitter(self) -> bool {
+        matches!(self, Self::ModelJitter)
+    }
+
     pub fn options() -> &'static str {
-        "model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow"
+        "model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow, \
+         model-df-1to1, model-df-3to1, model-jitter"
     }
 }
 
@@ -59,6 +84,9 @@ impl fmt::Display for ScoringPolicy {
             Self::DepthFirst => "depth-first",
             Self::Model => "model",
             Self::ModelNoShallow => "model-no-shallow",
+            Self::ModelDfInterleave1 => "model-df-1to1",
+            Self::ModelDfInterleave3 => "model-df-3to1",
+            Self::ModelJitter => "model-jitter",
         };
         f.write_str(name)
     }
@@ -74,6 +102,9 @@ impl FromStr for ScoringPolicy {
             "depth-first" => Ok(Self::DepthFirst),
             "model" => Ok(Self::Model),
             "model-no-shallow" => Ok(Self::ModelNoShallow),
+            "model-df-1to1" => Ok(Self::ModelDfInterleave1),
+            "model-df-3to1" => Ok(Self::ModelDfInterleave3),
+            "model-jitter" => Ok(Self::ModelJitter),
             _ => Err(format!(
                 "unknown policy '{}'. Expected one of: {}",
                 raw,
@@ -127,7 +158,10 @@ impl ScoringConfig {
 
     pub fn load_scorer(&self) -> Result<Box<dyn Scorer + Send + Sync>, Box<dyn Error>> {
         match self.policy {
-            ScoringPolicy::Model20260611E50H512L3 => {
+            ScoringPolicy::Model20260611E50H512L3
+            | ScoringPolicy::ModelDfInterleave1
+            | ScoringPolicy::ModelDfInterleave3
+            | ScoringPolicy::ModelJitter => {
                 Ok(Box::new(ScoringModel::load().map_err(|e| {
                     format!("failed to load embedded model: {}", e)
                 })?))

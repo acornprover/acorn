@@ -7,6 +7,39 @@ use crate::kernel::atom::{Atom, AtomId};
 use crate::kernel::proof_step::{ProofStep, Rule, ShallowStatus, Truthiness};
 use crate::kernel::symbol::Symbol;
 
+/// The constant symbols appearing in the negated-goal clauses of the current search.
+///
+/// Overlap with this set is a cheap proxy for whether a step can ever interact with
+/// the counterfactual clauses, which every refutation must ultimately touch. Steps
+/// scored before the goal is known (module facts in the shared processor snapshot)
+/// see an empty, unknown context and record `goal_symbols_known = false`.
+#[derive(Clone, Debug, Default)]
+pub struct GoalSymbols {
+    symbols: HashSet<Symbol>,
+    known: bool,
+}
+
+impl GoalSymbols {
+    /// Records the constant symbols of a negated-goal step.
+    pub fn harvest(&mut self, step: &ProofStep) {
+        self.known = true;
+        for atom in step.clause.iter_atoms() {
+            if let Atom::Symbol(symbol) = atom {
+                match symbol {
+                    Symbol::ScopedConstant(_) | Symbol::GlobalConstant(_, _) => {
+                        self.symbols.insert(*symbol);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn known(&self) -> bool {
+        self.known
+    }
+}
+
 // Features of a proof step that can be used to score it.
 // This is like a feature vector but in struct rather than vector form.
 // Try to only use bools, i32s, and f32s.
@@ -76,6 +109,11 @@ pub struct Features {
     // Features from the search process
     pub proof_size: i32,
     pub depth: i32,
+
+    // Features relating the step to the negated goal
+    pub goal_symbols_known: bool,
+    pub goal_symbol_overlap_count: i32,
+    pub goal_symbol_overlap_fraction: f32,
 }
 
 impl Default for Features {
@@ -138,11 +176,14 @@ impl Default for Features {
             source_depth: 0,
             proof_size: 0,
             depth: 0,
+            goal_symbols_known: false,
+            goal_symbol_overlap_count: 0,
+            goal_symbol_overlap_fraction: 0.0,
         }
     }
 }
 
-pub const FEATURE_CATALOG_NAMES: [&str; 60] = [
+pub const FEATURE_CATALOG_NAMES: [&str; 63] = [
     "is_contradiction",
     "atom_count",
     "is_counterfactual",
@@ -152,6 +193,9 @@ pub const FEATURE_CATALOG_NAMES: [&str; 60] = [
     "is_negated_goal",
     "proof_size",
     "depth",
+    "goal_symbols_known",
+    "goal_symbol_overlap_count",
+    "goal_symbol_overlap_fraction",
     "is_shallow",
     "shallow_status_deep",
     "shallow_status_spent",
@@ -305,6 +349,51 @@ impl SourceFeatures {
 
 impl Features {
     pub fn new(step: &ProofStep) -> Self {
+        Self::new_with_goal(step, None)
+    }
+
+    pub fn new_with_goal(step: &ProofStep, goal_symbols: Option<&GoalSymbols>) -> Self {
+        let (goal_symbols_known, goal_symbol_overlap_count, goal_symbol_overlap_fraction) =
+            match goal_symbols {
+                Some(goal) if goal.known() => {
+                    let mut clause_symbols = HashSet::new();
+                    for atom in step.clause.iter_atoms() {
+                        if let Atom::Symbol(symbol) = atom {
+                            match symbol {
+                                Symbol::ScopedConstant(_) | Symbol::GlobalConstant(_, _) => {
+                                    clause_symbols.insert(*symbol);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    let overlap = clause_symbols
+                        .iter()
+                        .filter(|symbol| goal.symbols.contains(*symbol))
+                        .count();
+                    let fraction = if clause_symbols.is_empty() {
+                        0.0
+                    } else {
+                        overlap as f32 / clause_symbols.len() as f32
+                    };
+                    (true, overlap as i32, fraction)
+                }
+                _ => (false, 0, 0.0),
+            };
+        Self::new_inner(
+            step,
+            goal_symbols_known,
+            goal_symbol_overlap_count,
+            goal_symbol_overlap_fraction,
+        )
+    }
+
+    fn new_inner(
+        step: &ProofStep,
+        goal_symbols_known: bool,
+        goal_symbol_overlap_count: i32,
+        goal_symbol_overlap_fraction: f32,
+    ) -> Self {
         let literal_count = step.clause.literals.len() as i32;
         let positive_literal_count = step
             .clause
@@ -400,6 +489,9 @@ impl Features {
             source_depth: source.depth,
             proof_size: step.proof_size as i32,
             depth: step.depth as i32,
+            goal_symbols_known,
+            goal_symbol_overlap_count,
+            goal_symbol_overlap_fraction,
         }
     }
 
@@ -471,6 +563,9 @@ impl Features {
             "source_is_block_goal" => bool_float(self.source_is_block_goal),
             "source_is_importable" => bool_float(self.source_is_importable),
             "source_depth" => self.source_depth as f32,
+            "goal_symbols_known" => bool_float(self.goal_symbols_known),
+            "goal_symbol_overlap_count" => self.goal_symbol_overlap_count as f32,
+            "goal_symbol_overlap_fraction" => self.goal_symbol_overlap_fraction,
             _ => return None,
         })
     }

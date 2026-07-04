@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use crate::kernel::proof_step::{ProofStep, ShallowStatus, Truthiness};
-use crate::prover::features::Features;
+use crate::prover::features::{Features, GoalSymbols};
 use crate::prover::score::Score;
 use crate::prover::Outcome;
 
@@ -40,8 +40,9 @@ impl TraceActivatedStep {
         active_id: Option<usize>,
         score: &Score,
         step: &ProofStep,
+        goal_symbols: &GoalSymbols,
     ) -> Self {
-        let features = Features::new(step);
+        let features = Features::new_with_goal(step, Some(goal_symbols));
         Self {
             activation_index,
             passive_id,
@@ -73,6 +74,7 @@ impl SearchTrace {
         active_id: Option<usize>,
         score: &Score,
         step: &ProofStep,
+        goal_symbols: &GoalSymbols,
     ) {
         self.activated_steps.push(TraceActivatedStep::new(
             self.activated_steps.len(),
@@ -80,6 +82,7 @@ impl SearchTrace {
             active_id,
             score,
             step,
+            goal_symbols,
         ));
     }
 

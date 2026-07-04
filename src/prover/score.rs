@@ -22,6 +22,23 @@ pub struct Score {
 }
 
 impl Score {
+    // A deterministic per-clause jitter in [-0.25, 0.25), derived from the feature
+    // vector, so jittered runs stay reproducible while activating steps the greedy
+    // ordering never would.
+    fn policy_jitter(policy: ScoringPolicy, features: &Features) -> f32 {
+        if !policy.uses_score_jitter() {
+            return 0.0;
+        }
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        for value in features.to_catalog_floats() {
+            value.to_bits().hash(&mut hasher);
+        }
+        let unit = (hasher.finish() % 10_000) as f32 / 10_000.0;
+        (unit - 0.5) * 0.5
+    }
+
     fn shallow_order(policy: ScoringPolicy, features: &Features) -> ShallowStatus {
         if policy.uses_shallow_ordering() {
             features.shallow_status
@@ -41,7 +58,7 @@ impl Score {
                 is_shallow: features.is_shallow,
             };
         }
-        let score = scorer.score(features).unwrap();
+        let score = scorer.score(features).unwrap() + Self::policy_jitter(policy, features);
         Score {
             key: ScoreKey {
                 contradiction: false,
@@ -62,7 +79,7 @@ impl Score {
                 key: ScoreKey {
                     contradiction: f.is_contradiction,
                     shallow_status: Self::shallow_order(policy, f),
-                    score: OrderedFloat(s),
+                    score: OrderedFloat(s + Self::policy_jitter(policy, f)),
                 },
                 is_shallow: f.is_shallow,
             })

@@ -196,9 +196,19 @@ mod tests {
 
     #[test]
     fn test_embedded_feature_contract_uses_catalog_features() {
+        // The catalog may grow beyond the embedded model's contract: the model
+        // selects its input columns by name, so every contract feature must
+        // exist in the catalog, but not vice versa.
         let feature_names =
             parse_feature_contract(EMBEDDED_MODEL_POLICY, MODEL_FEATURE_CONTRACT_JSON).unwrap();
-        assert_eq!(feature_names, Features::catalog_feature_names());
+        let catalog = Features::catalog_feature_names();
+        for name in &feature_names {
+            assert!(
+                catalog.contains(&name.as_str()),
+                "embedded contract feature '{}' is missing from the catalog",
+                name
+            );
+        }
     }
 
     #[test]
