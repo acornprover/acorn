@@ -108,6 +108,28 @@ pub struct InsertedClause {
     pub reason: StepReason,
 }
 
+/// A constructed justification for a clause via boolean-reduction reasoning.
+///
+/// This is the evidence behind `check_clause_via_boolean_reductions`: a clause holds
+/// because every member of one of its reduction sets holds, recursively, down to
+/// leaves the checker knows directly. Certificate writing serializes this tree into
+/// explicit trace steps, so replay can verify each node locally instead of
+/// re-running the search.
+#[derive(Debug, Clone)]
+pub(crate) enum BooleanReductionWitness {
+    /// The clause is directly known. When it matches an inserted clause, the id
+    /// lets the trace writer replay that clause's own derivation chain.
+    Direct {
+        clause: Clause,
+        inserted_id: Option<usize>,
+    },
+    /// The clause follows because every member of one of its reduction sets holds.
+    Reduced {
+        clause: Clause,
+        members: Vec<BooleanReductionWitness>,
+    },
+}
+
 /// The checker quickly checks if a clause can be proven in a single step from known clauses.
 ///
 /// The types of single-step we support are:
@@ -318,7 +340,7 @@ impl Checker {
             .collect()
     }
 
-    fn checker_boolean_reduction_sets(
+    pub(crate) fn checker_boolean_reduction_sets(
         &self,
         clause: &Clause,
         kernel_context: &KernelContext,
@@ -1067,6 +1089,67 @@ impl Checker {
     ) -> Option<StepReason> {
         let mut seen = HashSet::new();
         self.check_clause_via_boolean_reductions_inner(clause, kernel_context, &mut seen)
+    }
+
+    /// Like `check_clause_via_boolean_reductions`, but returns the derivation tree
+    /// instead of a bare verdict, so the certificate writer can serialize it.
+    /// The input clause should be subterm-normalized, as in `check_clause`.
+    pub(crate) fn boolean_reduction_witness(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+    ) -> Option<BooleanReductionWitness> {
+        let clause = normalize_clause_subterms(clause).normalized();
+        let mut seen = HashSet::new();
+        self.boolean_reduction_witness_inner(&clause, kernel_context, &mut seen)
+    }
+
+    fn boolean_reduction_witness_inner(
+        &mut self,
+        clause: &Clause,
+        kernel_context: &KernelContext,
+        seen: &mut HashSet<Clause>,
+    ) -> Option<BooleanReductionWitness> {
+        if clause.has_any_variable() || !seen.insert(clause.clone()) {
+            return None;
+        }
+
+        for reduction_set in self.checker_boolean_reduction_sets(clause, kernel_context) {
+            let mut set_seen = seen.clone();
+            let mut members = Vec::with_capacity(reduction_set.len());
+            let mut all_known = true;
+
+            for candidate in reduction_set {
+                let witness = if self
+                    .check_clause_direct(&candidate, kernel_context)
+                    .is_some()
+                {
+                    Some(BooleanReductionWitness::Direct {
+                        inserted_id: self.exact_clause_id(&candidate),
+                        clause: candidate,
+                    })
+                } else {
+                    self.boolean_reduction_witness_inner(&candidate, kernel_context, &mut set_seen)
+                };
+
+                match witness {
+                    Some(witness) => members.push(witness),
+                    None => {
+                        all_known = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_known {
+                return Some(BooleanReductionWitness::Reduced {
+                    clause: clause.clone(),
+                    members,
+                });
+            }
+        }
+
+        None
     }
 
     fn check_clause_via_boolean_reductions_inner(
