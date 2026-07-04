@@ -2410,3 +2410,176 @@ false\n\
         "generic claim should be accepted once inserted"
     );
 }
+
+// Regression test for the cert failure at number_theory/dirichlet.ac
+// cofactor_image_list_is_unique (2026-07-03, "failed to emit source while writing
+// boolean-reduction step"). Replays the certificate input sequence the prover
+// generated for that goal, in a miniature vocabulary: the proof unfolds a
+// higher-order predicate into a conditional with conjunct hypotheses, then peels
+// the hypotheses by unit resolution under the negated goal. Those counterfactual
+// intermediates are provable by boolean-reduction reasoning over the eagerly
+// saturated closure but are not exact closure members, so claim emission must
+// fall back to BrIntro steps; without that fallback the deferrals cascade until
+// a later boolean-reduction step hard-fails emitting its source.
+#[test]
+fn test_trace_writer_serializes_eager_reduction_claims() {
+    use crate::certificate_trace::{CertificateTraceInput, ProofTrace};
+
+    let code = r#"
+        type Num: axiom
+        type Lst: axiom
+        let zero: Num = axiom
+        let lt: (Num, Num) -> Bool = axiom
+        let dl: Num -> Lst = axiom
+        let uniq: Lst -> Bool = axiom
+        let mem: (Lst, Num) -> Bool = axiom
+        let divides: (Num, Num) -> Bool = axiom
+        let conc: Lst -> Bool = axiom
+
+        define pred(n: Num) -> (Lst -> Bool) {
+            function(l: Lst) {
+                uniq(l) and forall(d: Num) { mem(l, d) implies divides(d, n) } and lt(zero, n)
+                    implies conc(l)
+            }
+        }
+
+        axiom pred_thm(n: Num, l: Lst) { pred(n)(l) }
+        axiom dl_uniq(n: Num) { uniq(dl(n)) }
+        axiom dl_div(n: Num, d: Num) { mem(dl(n), d) implies divides(d, n) }
+
+        theorem goal(n: Num) { lt(zero, n) implies conc(dl(n)) }
+    "#;
+
+    let (processor, bindings, normalized_goal) = Processor::test_goal(code);
+    let project = Project::new_mock();
+    let mut bindings_cow = Cow::Borrowed(&bindings);
+    let mut kctx_cow = Cow::Owned(normalized_goal.kernel_context.clone());
+
+    // The definitional unfolding, used as the boolean-reduction source of step 1.
+    let unfold_line = "pred(n)(dl(n)) = (uniq(dl(n)) and forall(d: Num) { mem(dl(n), d) implies divides(d, n) } and lt(zero, n) implies conc(dl(n)))";
+    let unfold_step =
+        Certificate::parse_code_line(unfold_line, &project, &mut bindings_cow, &mut kctx_cow)
+            .expect("unfold line should parse");
+    let unfold_clause = expect_claim(unfold_step)
+        .normalized_specialized_clause(&kctx_cow)
+        .expect("unfold clause");
+
+    let lines = [
+        "not (uniq(dl(n)) and forall(x0: Num) { not mem(dl(n), x0) or divides(x0, n) } and lt(zero, n) and not conc(dl(n))) or not pred(n)(dl(n))",
+        "not (uniq(dl(n)) and forall(x1: Num) { not mem(dl(n), x1) or divides(x1, n) } and lt(zero, n)) or not pred(n)(dl(n))",
+        "not (uniq(dl(n)) and forall(x2: Num) { not mem(dl(n), x2) or divides(x2, n) }) or not pred(n)(dl(n))",
+        "not forall(x3: Num) { not mem(dl(n), x3) or divides(x3, n) } or not uniq(dl(n))",
+        "not uniq(dl(n)) or exists(k0: Num) { mem(dl(n), k0) and not divides(k0, n) }",
+        "exists(k1: Num) { mem(dl(n), k1) and not divides(k1, n) }",
+        "let w0: Num satisfy { mem(dl(n), w0) and not divides(w0, n) }",
+        "mem(dl(n), w0) and not divides(w0, n)",
+        "not divides(w0, n)",
+        "mem(dl(n), w0)",
+        "function(x0: Num) { not mem(dl(n), x0) or divides(x0, n) }(w0)",
+        "not mem(dl(n), w0)",
+    ];
+
+    let mut steps = Vec::new();
+    for line in &lines {
+        let step = Certificate::parse_code_line(line, &project, &mut bindings_cow, &mut kctx_cow)
+            .unwrap_or_else(|err| panic!("line should parse: {} ({})", line, err));
+        steps.push((step, line.to_string()));
+    }
+
+    let claim_clause = |index: usize, steps: &[(CertificateStep, String)]| {
+        let CertificateStep::Claim(claim) = &steps[index].0 else {
+            panic!("expected claim at index {}", index);
+        };
+        claim
+            .normalized_specialized_clause(&kctx_cow)
+            .expect("claim clause")
+    };
+
+    let source_s4 = claim_clause(3, &steps);
+    let source_s8 = claim_clause(7, &steps);
+
+    let mut inputs = Vec::new();
+    for (index, (step, line)) in steps.into_iter().enumerate() {
+        let source = match index {
+            0 => Some(unfold_clause.clone()),
+            4 => Some(source_s4.clone()),
+            8 | 9 => Some(source_s8.clone()),
+            _ => None,
+        };
+        inputs.push(CertificateTraceInput {
+            step,
+            code: line,
+            boolean_reduction_source: source,
+        });
+    }
+
+    let mut checker = processor.checker().clone();
+    checker
+        .insert_lowered_goal(&normalized_goal)
+        .expect("goal should insert");
+    // The by-block context facts, as the dirichlet proof had them: the unfold
+    // equation instance, the established hypotheses, and the applied predicate.
+    // The forall hypothesis is only available in opened clause form, the way the
+    // real by-block produced it: generic over d, never as a term-level equality.
+    let mut context_facts = Vec::new();
+    {
+        let step = Certificate::parse_code_line(
+            "function(x0: Num) { not mem(dl(n), x0) or divides(x0, n) }(zero)",
+            &project,
+            &mut bindings_cow,
+            &mut kctx_cow,
+        )
+        .expect("opened forall fact should parse");
+        context_facts.push(expect_claim(step).normalized_generic_clause());
+    }
+    for fact_line in [unfold_line, "uniq(dl(n))", "pred(n)(dl(n))"] {
+        let step =
+            Certificate::parse_code_line(fact_line, &project, &mut bindings_cow, &mut kctx_cow)
+                .unwrap_or_else(|err| panic!("fact should parse: {} ({})", fact_line, err));
+        let claim = expect_claim(step);
+        context_facts.push(claim.normalized_generic_clause());
+        context_facts.push(
+            claim
+                .normalized_specialized_clause(&kctx_cow)
+                .expect("fact clause"),
+        );
+    }
+    for fact in &context_facts {
+        checker.insert_clause(fact, crate::kernel::checker::StepReason::Testing, &kctx_cow);
+    }
+    // The writer re-parses satisfy lines itself, so it needs pristine contexts,
+    // not the ones the test used to pre-parse the inputs.
+    let result = ProofTrace::from_certificate_steps_checked(
+        &inputs,
+        checker,
+        &project,
+        Cow::Borrowed(&bindings),
+        Cow::Owned(normalized_goal.kernel_context.clone()),
+    );
+    let trace = match result {
+        Ok(trace) => trace,
+        Err(err) => panic!("trace write failed: {}", err),
+    };
+
+    // The written trace must also replay through the trace checker, with the same
+    // starting knowledge the writer had.
+    let mut replay_checker = processor.checker().clone();
+    replay_checker
+        .insert_lowered_goal(&normalized_goal)
+        .expect("goal should insert for replay");
+    for fact in &context_facts {
+        replay_checker.insert_clause(
+            fact,
+            crate::kernel::checker::StepReason::Testing,
+            &normalized_goal.kernel_context,
+        );
+    }
+    trace
+        .check_with_usage(
+            replay_checker,
+            &project,
+            Cow::Borrowed(&bindings),
+            Cow::Owned(normalized_goal.kernel_context.clone()),
+        )
+        .expect("written trace should replay");
+}

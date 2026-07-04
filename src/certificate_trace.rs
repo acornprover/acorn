@@ -8,7 +8,7 @@ use crate::code_generator::Error as CodeGenError;
 use crate::elaborator::binding_map::BindingMap;
 use crate::kernel::atom::Atom;
 use crate::kernel::certificate_step::CertificateStep;
-use crate::kernel::checker::{Checker, StepReason};
+use crate::kernel::checker::{BooleanReductionWitness, Checker, StepReason};
 use crate::kernel::clause::{BooleanReductionKind, Clause};
 use crate::kernel::kernel_context::KernelContext;
 use crate::kernel::literal::Literal;
@@ -250,6 +250,71 @@ impl ProofTrace {
     }
 }
 
+/// The parsed forms of a claim being emitted as trace steps.
+struct ClaimEmission {
+    code: String,
+    clause: Clause,
+    generic: Clause,
+}
+
+/// The strategies for justifying a certificate claim, in attempt order.
+///
+/// Each strategy pairs a judgment with its serialization; strategies whose
+/// serialization is speculative run inside a checkpoint through their helpers, so
+/// a failed attempt leaves no steps behind and the next strategy is tried. The
+/// reduction-witness strategies also back `emit_clause`, so boolean-reduction
+/// sources and dependency clauses flow through the same engine as claims: the
+/// writer never accepts a clause it cannot serialize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimStrategy {
+    /// The clause (or its generic form) is already carried by an emitted step.
+    Available,
+    /// Directly known to the replay-visible state: a plain Claim step.
+    DirectFact,
+    /// A boolean-reduction witness tree over the shadow state.
+    ReductionWitness,
+    /// A conjunction fact in the base state reduces to the claim.
+    BaseConjunction,
+    /// An eagerly derived chain from the saturated base closure, gated on a
+    /// replay check.
+    GatedEagerChain,
+    /// The same chain search without the gate.
+    EagerChain,
+    /// A recently inserted derivation clause boolean-reduces to the claim.
+    DerivedSourceBr,
+    /// The claim itself is an inserted derivation clause; emit its own chain.
+    DerivedSourceExact,
+    /// An emitted step boolean-reduces to the claim.
+    StepSourceBr,
+    /// An emitted step justifies the claim through the equality graph.
+    StepSourceEq,
+    /// An inserted derivation clause justifies the claim through the equality graph.
+    DerivedSourceEq,
+    /// As above, with relaxed matching over recent insertions only.
+    DerivedSourceEqRelaxed,
+    /// All emitted steps jointly justify the claim through the equality graph.
+    MultiPremiseEq,
+    /// A boolean-reduction witness tree over the eagerly saturated shadow state.
+    EagerReductionWitness,
+}
+
+const CLAIM_STRATEGIES: &[ClaimStrategy] = &[
+    ClaimStrategy::Available,
+    ClaimStrategy::DirectFact,
+    ClaimStrategy::ReductionWitness,
+    ClaimStrategy::BaseConjunction,
+    ClaimStrategy::GatedEagerChain,
+    ClaimStrategy::EagerChain,
+    ClaimStrategy::DerivedSourceBr,
+    ClaimStrategy::DerivedSourceExact,
+    ClaimStrategy::StepSourceBr,
+    ClaimStrategy::StepSourceEq,
+    ClaimStrategy::DerivedSourceEq,
+    ClaimStrategy::DerivedSourceEqRelaxed,
+    ClaimStrategy::MultiPremiseEq,
+    ClaimStrategy::EagerReductionWitness,
+];
+
 struct TraceWriter<'a> {
     base_checker: Checker,
     derivation_checker: Checker,
@@ -265,6 +330,10 @@ struct TraceWriter<'a> {
     emitting_local_inserted_ids: HashSet<usize>,
     deferred_claims: Vec<DeferredClaim>,
     variable_support_depth: usize,
+    /// When positive, `emit_clause` restricts itself to cheap strategies. This is
+    /// incremented around dependency and witness-member emission, so speculative
+    /// scans never trigger nested global searches.
+    cheap_emission_depth: usize,
 }
 
 struct DeferredClaim {
@@ -309,6 +378,7 @@ impl<'a> TraceWriter<'a> {
             emitting_local_inserted_ids: HashSet::new(),
             deferred_claims: vec![],
             variable_support_depth: 0,
+            cheap_emission_depth: 0,
         }
     }
 
@@ -719,6 +789,9 @@ impl<'a> TraceWriter<'a> {
         format!("; deferred unneeded claims: {}", claims)
     }
 
+    /// Emits one certificate claim as trace steps by walking CLAIM_STRATEGIES in
+    /// order. A claim that exhausts the table is reported to the caller, which
+    /// defers it; the writer never accepts a claim it could not serialize.
     fn emit_claim_step(
         &mut self,
         code: String,
@@ -728,290 +801,585 @@ impl<'a> TraceWriter<'a> {
         let clause = claim
             .normalized_specialized_clause(&self.kernel_context)
             .map_err(CodeGenError::GeneratedBadCode)?;
-        if let Some(index) = self.available.get(&clause) {
-            return Ok(*index);
-        }
-        if let Some(index) = self.available.get(&generic) {
-            if generic != clause {
-                let step_index = self.push_step(
-                    TraceRule::Inst,
-                    code.clone(),
-                    vec![*index],
-                    clause.clone(),
-                    false,
-                    vec![],
-                )?;
-                return Ok(step_index);
-            }
-            return Ok(*index);
-        }
-
-        let reason = self
-            .shadow_checker
-            .check_clause_direct_for_trace(&clause, &self.kernel_context)
-            .or_else(|| {
-                self.shadow_checker
-                    .check_clause_direct_for_trace(&generic, &self.kernel_context)
-            });
-        if reason.is_some() {
-            let result = self.push_step(
-                TraceRule::Claim,
-                code.clone(),
-                vec![],
-                clause.clone(),
-                false,
-                Self::claim_aliases_for_code(&code, generic, &clause),
-            );
-            return result;
-        }
-        if self
-            .shadow_checker
-            .boolean_reduction_proves_for_trace(&clause, &self.kernel_context)
-            || self
-                .shadow_checker
-                .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
-        {
-            let aliases = Self::claim_aliases_for_code(&code, generic, &clause);
-            return self.push_step(
-                TraceRule::BrIntro,
-                code,
-                vec![],
-                clause.clone(),
-                false,
-                aliases,
-            );
-        }
-        let code_is_forall_claim = is_serialized_generic_artifact(&code);
-
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            if let Some(index) = self.emit_component_from_base_conjunction(
-                code.clone(),
-                candidate.clone(),
-                candidate_generic,
-            )? {
-                if candidate_generic && candidate != clause {
-                    return self.push_step(
-                        TraceRule::Inst,
-                        code,
-                        vec![index],
-                        clause,
-                        false,
-                        vec![],
-                    );
-                }
+        let emission = ClaimEmission {
+            code,
+            clause,
+            generic,
+        };
+        for &strategy in CLAIM_STRATEGIES {
+            if let Some(index) = self.attempt_claim_strategy(strategy, &emission)? {
                 return Ok(index);
-            }
-        }
-
-        let try_clause_eager =
-            !code_is_forall_claim && !Self::is_single_positive_forall_clause(&clause);
-        if try_clause_eager && self.eager_boolean_reduction_intro_replays(&clause) {
-            if let Some(index) =
-                self.emit_eager_boolean_reduction_path(code.clone(), clause.clone(), false, &[])?
-            {
-                return Ok(index);
-            }
-        }
-        let try_generic_eager =
-            is_serialized_generic_artifact(&code) || is_synthetic_generic_wrapper(&code);
-        let try_generic_eager = try_generic_eager
-            && !code_is_forall_claim
-            && !Self::is_single_positive_forall_clause(&generic);
-        if try_generic_eager
-            && generic != clause
-            && self.eager_boolean_reduction_intro_replays(&generic)
-        {
-            if let Some(generic_index) =
-                self.emit_eager_boolean_reduction_path(code.clone(), generic.clone(), true, &[])?
-            {
-                return self.push_step(
-                    TraceRule::Inst,
-                    code,
-                    vec![generic_index],
-                    clause,
-                    false,
-                    vec![],
-                );
-            }
-        }
-        if try_clause_eager {
-            if let Some(index) =
-                self.emit_eager_boolean_reduction_path(code.clone(), clause.clone(), false, &[])?
-            {
-                return Ok(index);
-            }
-        }
-        if try_generic_eager && generic != clause {
-            if let Some(generic_index) =
-                self.emit_eager_boolean_reduction_path(code.clone(), generic.clone(), true, &[])?
-            {
-                return self.push_step(
-                    TraceRule::Inst,
-                    code,
-                    vec![generic_index],
-                    clause,
-                    false,
-                    vec![],
-                );
-            }
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            for inserted_id in (0..self.derivation_checker.inserted_len()).rev().take(256) {
-                let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id)
-                else {
-                    continue;
-                };
-                if source_inserted.clause == candidate {
-                    continue;
-                }
-                if self
-                    .shadow_checker
-                    .boolean_reduction_detail_for_trace(
-                        &source_inserted.clause,
-                        &candidate,
-                        &self.kernel_context,
-                    )
-                    .is_none()
-                {
-                    continue;
-                }
-                let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
-                    continue;
-                };
-                return self.push_candidate_step(
-                    TraceRule::Br,
-                    code,
-                    vec![source_index],
-                    candidate,
-                    candidate_generic,
-                    &clause,
-                );
-            }
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            let Some(inserted_id) = self.derivation_checker.exact_clause_id(&candidate) else {
-                continue;
-            };
-            let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
-                continue;
-            };
-            if candidate_generic && candidate != clause {
-                return self.push_step(
-                    TraceRule::Inst,
-                    code,
-                    vec![source_index],
-                    clause,
-                    false,
-                    vec![],
-                );
-            }
-            return Ok(source_index);
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            for source_index in (0..self.step_clauses.len()).rev() {
-                if self
-                    .boolean_reduction_detail_for_step(source_index, &candidate)
-                    .is_some()
-                {
-                    return self.push_candidate_step(
-                        TraceRule::Br,
-                        code,
-                        vec![source_index],
-                        candidate,
-                        candidate_generic,
-                        &clause,
-                    );
-                }
-            }
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            for source_index in (0..self.step_clauses.len()).rev() {
-                let premises = vec![source_index];
-                if self.eq_step_replays(&premises, &candidate) {
-                    return self.push_candidate_step(
-                        TraceRule::Eq,
-                        code,
-                        premises,
-                        candidate,
-                        candidate_generic,
-                        &clause,
-                    );
-                }
-            }
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            for inserted_id in (0..self.derivation_checker.inserted_len()).rev() {
-                let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id)
-                else {
-                    continue;
-                };
-                if source_inserted.clause == candidate {
-                    continue;
-                }
-                if !self.source_clause_eq_replays(&source_inserted.clause, &candidate, false) {
-                    continue;
-                }
-                let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
-                    continue;
-                };
-                let premises = vec![source_index];
-                return self.push_candidate_step(
-                    TraceRule::Eq,
-                    code,
-                    premises,
-                    candidate,
-                    candidate_generic,
-                    &clause,
-                );
-            }
-        }
-        for (candidate, candidate_generic) in [(clause.clone(), false), (generic.clone(), true)] {
-            for inserted_id in (0..self.derivation_checker.inserted_len()).rev().take(128) {
-                let Some(source_inserted) = self.derivation_checker.inserted_clause(inserted_id)
-                else {
-                    continue;
-                };
-                if source_inserted.clause == candidate {
-                    continue;
-                }
-                if !self.source_clause_eq_replays(&source_inserted.clause, &candidate, true) {
-                    continue;
-                }
-                let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
-                    continue;
-                };
-                let premises = vec![source_index];
-                return self.push_candidate_step(
-                    TraceRule::Eq,
-                    code,
-                    premises,
-                    candidate,
-                    candidate_generic,
-                    &clause,
-                );
-            }
-        }
-        if let Some(index) = self.emit_multi_premise_eq_step(code.clone(), clause.clone(), false)? {
-            return Ok(index);
-        }
-        if generic != clause {
-            if let Some(generic_index) =
-                self.emit_multi_premise_eq_step(code.clone(), generic.clone(), true)?
-            {
-                return self.push_step(
-                    TraceRule::Inst,
-                    code,
-                    vec![generic_index],
-                    clause,
-                    false,
-                    vec![],
-                );
             }
         }
         Err(CodeGenError::GeneratedBadCode(format!(
             "could not emit claim to certificate trace: {}",
-            code
+            emission.code
         )))
+    }
+
+    /// Tries a single justification strategy for a claim. Returns the trace step
+    /// index carrying the claim when the strategy both judges the claim justified
+    /// and serializes that judgment.
+    fn attempt_claim_strategy(
+        &mut self,
+        strategy: ClaimStrategy,
+        emission: &ClaimEmission,
+    ) -> Result<Option<usize>, CodeGenError> {
+        let ClaimEmission {
+            code,
+            clause,
+            generic,
+        } = emission;
+        match strategy {
+            ClaimStrategy::Available => {
+                if let Some(&index) = self.available.get(clause) {
+                    return Ok(Some(index));
+                }
+                if let Some(&index) = self.available.get(generic) {
+                    if generic != clause {
+                        return self
+                            .push_step(
+                                TraceRule::Inst,
+                                code.clone(),
+                                vec![index],
+                                clause.clone(),
+                                false,
+                                vec![],
+                            )
+                            .map(Some);
+                    }
+                    return Ok(Some(index));
+                }
+                Ok(None)
+            }
+            ClaimStrategy::DirectFact => {
+                let reason = self
+                    .shadow_checker
+                    .check_clause_direct_for_trace(clause, &self.kernel_context)
+                    .or_else(|| {
+                        self.shadow_checker
+                            .check_clause_direct_for_trace(generic, &self.kernel_context)
+                    });
+                if reason.is_none() {
+                    return Ok(None);
+                }
+                self.push_step(
+                    TraceRule::Claim,
+                    code.clone(),
+                    vec![],
+                    clause.clone(),
+                    false,
+                    Self::claim_aliases_for_code(code, generic.clone(), clause),
+                )
+                .map(Some)
+            }
+            ClaimStrategy::ReductionWitness => {
+                self.emit_claim_via_reduction_witness(clause, generic, code, false)
+            }
+            ClaimStrategy::EagerReductionWitness => {
+                self.emit_claim_via_reduction_witness(clause, generic, code, true)
+            }
+            ClaimStrategy::BaseConjunction => {
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    if let Some(index) = self.emit_component_from_base_conjunction(
+                        code.clone(),
+                        candidate.clone(),
+                        candidate_generic,
+                    )? {
+                        if candidate_generic && candidate != *clause {
+                            return self
+                                .push_step(
+                                    TraceRule::Inst,
+                                    code.clone(),
+                                    vec![index],
+                                    clause.clone(),
+                                    false,
+                                    vec![],
+                                )
+                                .map(Some);
+                        }
+                        return Ok(Some(index));
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::GatedEagerChain | ClaimStrategy::EagerChain => {
+                let gated = strategy == ClaimStrategy::GatedEagerChain;
+                let code_is_forall_claim = is_serialized_generic_artifact(code);
+                let try_clause_eager =
+                    !code_is_forall_claim && !Self::is_single_positive_forall_clause(clause);
+                if try_clause_eager
+                    && (!gated || self.eager_boolean_reduction_intro_replays(clause))
+                {
+                    if let Some(index) = self.emit_eager_boolean_reduction_path(
+                        code.clone(),
+                        clause.clone(),
+                        false,
+                        &[],
+                    )? {
+                        return Ok(Some(index));
+                    }
+                }
+                let try_generic_eager =
+                    is_serialized_generic_artifact(code) || is_synthetic_generic_wrapper(code);
+                let try_generic_eager = try_generic_eager
+                    && !code_is_forall_claim
+                    && !Self::is_single_positive_forall_clause(generic);
+                if try_generic_eager
+                    && generic != clause
+                    && (!gated || self.eager_boolean_reduction_intro_replays(generic))
+                {
+                    if let Some(generic_index) = self.emit_eager_boolean_reduction_path(
+                        code.clone(),
+                        generic.clone(),
+                        true,
+                        &[],
+                    )? {
+                        return self
+                            .push_step(
+                                TraceRule::Inst,
+                                code.clone(),
+                                vec![generic_index],
+                                clause.clone(),
+                                false,
+                                vec![],
+                            )
+                            .map(Some);
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::DerivedSourceBr => {
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    for inserted_id in (0..self.derivation_checker.inserted_len()).rev().take(256) {
+                        let Some(source_inserted) =
+                            self.derivation_checker.inserted_clause(inserted_id)
+                        else {
+                            continue;
+                        };
+                        if source_inserted.clause == candidate {
+                            continue;
+                        }
+                        if self
+                            .shadow_checker
+                            .boolean_reduction_detail_for_trace(
+                                &source_inserted.clause,
+                                &candidate,
+                                &self.kernel_context,
+                            )
+                            .is_none()
+                        {
+                            continue;
+                        }
+                        let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
+                            continue;
+                        };
+                        return self
+                            .push_candidate_step(
+                                TraceRule::Br,
+                                code.clone(),
+                                vec![source_index],
+                                candidate,
+                                candidate_generic,
+                                clause,
+                            )
+                            .map(Some);
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::DerivedSourceExact => {
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    let Some(inserted_id) = self.derivation_checker.exact_clause_id(&candidate)
+                    else {
+                        continue;
+                    };
+                    let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
+                        continue;
+                    };
+                    if candidate_generic && candidate != *clause {
+                        return self
+                            .push_step(
+                                TraceRule::Inst,
+                                code.clone(),
+                                vec![source_index],
+                                clause.clone(),
+                                false,
+                                vec![],
+                            )
+                            .map(Some);
+                    }
+                    return Ok(Some(source_index));
+                }
+                Ok(None)
+            }
+            ClaimStrategy::StepSourceBr => {
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    for source_index in (0..self.step_clauses.len()).rev() {
+                        if self
+                            .boolean_reduction_detail_for_step(source_index, &candidate)
+                            .is_some()
+                        {
+                            return self
+                                .push_candidate_step(
+                                    TraceRule::Br,
+                                    code.clone(),
+                                    vec![source_index],
+                                    candidate,
+                                    candidate_generic,
+                                    clause,
+                                )
+                                .map(Some);
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::StepSourceEq => {
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    for source_index in (0..self.step_clauses.len()).rev() {
+                        let premises = vec![source_index];
+                        if self.eq_step_replays(&premises, &candidate) {
+                            return self
+                                .push_candidate_step(
+                                    TraceRule::Eq,
+                                    code.clone(),
+                                    premises,
+                                    candidate,
+                                    candidate_generic,
+                                    clause,
+                                )
+                                .map(Some);
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::DerivedSourceEq | ClaimStrategy::DerivedSourceEqRelaxed => {
+                let relaxed = strategy == ClaimStrategy::DerivedSourceEqRelaxed;
+                let scan = if relaxed { 128 } else { usize::MAX };
+                for (candidate, candidate_generic) in
+                    [(clause.clone(), false), (generic.clone(), true)]
+                {
+                    for inserted_id in (0..self.derivation_checker.inserted_len()).rev().take(scan)
+                    {
+                        let Some(source_inserted) =
+                            self.derivation_checker.inserted_clause(inserted_id)
+                        else {
+                            continue;
+                        };
+                        if source_inserted.clause == candidate {
+                            continue;
+                        }
+                        if !self.source_clause_eq_replays(
+                            &source_inserted.clause,
+                            &candidate,
+                            relaxed,
+                        ) {
+                            continue;
+                        }
+                        let Ok(source_index) = self.emit_inserted_clause(inserted_id) else {
+                            continue;
+                        };
+                        let premises = vec![source_index];
+                        return self
+                            .push_candidate_step(
+                                TraceRule::Eq,
+                                code.clone(),
+                                premises,
+                                candidate,
+                                candidate_generic,
+                                clause,
+                            )
+                            .map(Some);
+                    }
+                }
+                Ok(None)
+            }
+            ClaimStrategy::MultiPremiseEq => {
+                if let Some(index) =
+                    self.emit_multi_premise_eq_step(code.clone(), clause.clone(), false)?
+                {
+                    return Ok(Some(index));
+                }
+                if generic != clause {
+                    if let Some(generic_index) =
+                        self.emit_multi_premise_eq_step(code.clone(), generic.clone(), true)?
+                    {
+                        return self
+                            .push_step(
+                                TraceRule::Inst,
+                                code.clone(),
+                                vec![generic_index],
+                                clause.clone(),
+                                false,
+                                vec![],
+                            )
+                            .map(Some);
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Tries to emit a claim by constructing a boolean-reduction witness for it and
+    /// serializing the witness tree into premise-bearing BrIntro steps.
+    ///
+    /// With `eager` false the witness is computed against the shadow checker as-is;
+    /// with `eager` true, against an eagerly saturated clone, which covers claims
+    /// whose justification runs through eagerly derived clauses. Either way the
+    /// serialized steps carry their premises, so replay verifies each node locally.
+    fn emit_claim_via_reduction_witness(
+        &mut self,
+        clause: &Clause,
+        generic: &Clause,
+        code: &str,
+        eager: bool,
+    ) -> Result<Option<usize>, CodeGenError> {
+        let mut local = self.shadow_checker.clone();
+        if eager {
+            local.enable_eager_boolean_reductions(&self.kernel_context);
+        }
+
+        for (target, target_is_generic) in [(clause, false), (generic, true)] {
+            if target_is_generic && generic == clause {
+                continue;
+            }
+            let Some(witness) = local.boolean_reduction_witness(target, &self.kernel_context)
+            else {
+                continue;
+            };
+            let BooleanReductionWitness::Reduced { members, .. } = witness else {
+                // A directly-known clause is handled by the earlier claim paths.
+                continue;
+            };
+            let Some(premises) = self.emit_witness_members(&local, &members)? else {
+                continue;
+            };
+            if target_is_generic {
+                let generic_index = self.push_step(
+                    TraceRule::BrIntro,
+                    code.to_string(),
+                    premises,
+                    generic.clone(),
+                    true,
+                    vec![],
+                )?;
+                return self
+                    .push_step(
+                        TraceRule::Inst,
+                        code.to_string(),
+                        vec![generic_index],
+                        clause.clone(),
+                        false,
+                        vec![],
+                    )
+                    .map(Some);
+            }
+            let aliases = Self::claim_aliases_for_code(code, generic.clone(), clause);
+            return self
+                .push_step(
+                    TraceRule::BrIntro,
+                    code.to_string(),
+                    premises,
+                    clause.clone(),
+                    false,
+                    aliases,
+                )
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    /// Serializes every member of a witness node, returning their trace step
+    /// indices. Member emission runs at raised cheap-emission depth so it never
+    /// triggers nested global searches.
+    fn emit_witness_members(
+        &mut self,
+        local: &Checker,
+        members: &[BooleanReductionWitness],
+    ) -> Result<Option<Vec<usize>>, CodeGenError> {
+        self.cheap_emission_depth += 1;
+        let result = (|| {
+            let mut premises = Vec::new();
+            for member in members {
+                match self.emit_reduction_witness(local, member)? {
+                    Some(index) => {
+                        if !premises.contains(&index) {
+                            premises.push(index);
+                        }
+                    }
+                    None => return Ok(None),
+                }
+            }
+            if premises.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(premises))
+        })();
+        self.cheap_emission_depth -= 1;
+        result
+    }
+
+    /// Tries to emit a bare clause via a boolean-reduction witness, first over the
+    /// shadow state and then over an eagerly saturated clone. This is the same
+    /// engine that backs claim emission, applied to boolean-reduction sources and
+    /// dependency clauses so that everything the writer accepts has a serialization.
+    fn emit_clause_via_reduction_witness(
+        &mut self,
+        clause: &Clause,
+    ) -> Result<Option<usize>, CodeGenError> {
+        if self.cheap_emission_depth > 0 {
+            return Ok(None);
+        }
+        for eager in [false, true] {
+            let mut local = self.shadow_checker.clone();
+            if eager {
+                local.enable_eager_boolean_reductions(&self.kernel_context);
+            }
+            let Some(witness) = local.boolean_reduction_witness(clause, &self.kernel_context)
+            else {
+                continue;
+            };
+            let BooleanReductionWitness::Reduced { members, .. } = witness else {
+                continue;
+            };
+            let Some(premises) = self.emit_witness_members(&local, &members)? else {
+                continue;
+            };
+            let (code, generic) = self.serialize_clause_step(clause)?;
+            return self
+                .push_step(
+                    TraceRule::BrIntro,
+                    code,
+                    premises,
+                    clause.clone(),
+                    generic,
+                    vec![],
+                )
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    /// Serializes one node of a boolean-reduction witness tree, returning the trace
+    /// step index carrying that node's clause. Direct leaves resolve through the
+    /// checker the witness was computed against, so their own derivation chains
+    /// (fact citations, eager reductions, simplifications) serialize too.
+    fn emit_reduction_witness(
+        &mut self,
+        local: &Checker,
+        witness: &BooleanReductionWitness,
+    ) -> Result<Option<usize>, CodeGenError> {
+        match witness {
+            BooleanReductionWitness::Direct {
+                clause,
+                inserted_id,
+            } => {
+                if let Some(&index) = self.available.get(clause) {
+                    return Ok(Some(index));
+                }
+                if let Some(id) = inserted_id {
+                    return self
+                        .emit_local_inserted_clause(local, *id, &mut HashSet::new())
+                        .map(Some);
+                }
+                // Known through the term graph only. Serialize as a factless Eq step
+                // when the replay-visible state can also justify it directly.
+                if self
+                    .shadow_checker
+                    .check_clause_direct_for_trace(clause, &self.kernel_context)
+                    .is_some()
+                {
+                    let (code, generic) = self.serialize_clause_step(clause)?;
+                    return self
+                        .push_step(TraceRule::Eq, code, vec![], clause.clone(), generic, vec![])
+                        .map(Some);
+                }
+                // Otherwise the graph knows the leaf by normalizing some inserted
+                // clause (for example, dropping literals that known facts refute).
+                // Find a grounding clause, emit its own chain, and serialize the
+                // leaf as an Eq step from it. The grounding may normalize to a
+                // strictly stronger clause than the leaf, so after the cheap exact
+                // check, candidates are tried transactionally: emit the chain, then
+                // ask the same direct judgment replay will use, and roll back when
+                // it declines. Recent insertions first: eager derivations land late.
+                for local_id in (0..local.inserted_len()).rev().take(1024) {
+                    let Some(inserted) = local.inserted_clause(local_id) else {
+                        continue;
+                    };
+                    if inserted.clause == *clause {
+                        continue;
+                    }
+                    let shares_literal = inserted
+                        .clause
+                        .literals
+                        .iter()
+                        .any(|literal| clause.literals.contains(literal));
+                    if !shares_literal {
+                        continue;
+                    }
+                    let exact = self.source_clause_eq_replays(&inserted.clause, clause, false);
+                    let checkpoint = self.checkpoint();
+                    let Ok(source_index) =
+                        self.emit_local_inserted_clause(local, local_id, &mut HashSet::new())
+                    else {
+                        self.restore(checkpoint);
+                        continue;
+                    };
+                    if !exact
+                        && self
+                            .shadow_checker
+                            .check_clause_direct_for_trace(clause, &self.kernel_context)
+                            .is_none()
+                    {
+                        self.restore(checkpoint);
+                        continue;
+                    }
+                    let (code, generic) = self.serialize_clause_step(clause)?;
+                    return self
+                        .push_step(
+                            TraceRule::Eq,
+                            code,
+                            vec![source_index],
+                            clause.clone(),
+                            generic,
+                            vec![],
+                        )
+                        .map(Some);
+                }
+                Ok(None)
+            }
+            BooleanReductionWitness::Reduced { clause, members } => {
+                if let Some(&index) = self.available.get(clause) {
+                    return Ok(Some(index));
+                }
+                let Some(premises) = self.emit_witness_members(local, members)? else {
+                    return Ok(None);
+                };
+                let (code, generic) = self.serialize_clause_step(clause)?;
+                self.push_step(
+                    TraceRule::BrIntro,
+                    code,
+                    premises,
+                    clause.clone(),
+                    generic,
+                    vec![],
+                )
+                .map(Some)
+            }
+        }
     }
 
     fn eager_boolean_reduction_intro_replays(&self, clause: &Clause) -> bool {
@@ -1039,7 +1407,7 @@ impl<'a> TraceWriter<'a> {
         let result = result
             .normalized_specialized_clause(&self.kernel_context)
             .map_err(CodeGenError::GeneratedBadCode)?;
-        let source_index = match self.emit_clause(source, StepReason::PreviousClaim) {
+        let source_index = match self.emit_clause(source.clone(), StepReason::PreviousClaim) {
             Ok(index) => index,
             Err(source_err) => {
                 let mut seen = HashSet::new();
@@ -1145,6 +1513,7 @@ impl<'a> TraceWriter<'a> {
                 inserted_id
             )));
         }
+        self.cheap_emission_depth += 1;
         let result = match self.derivation_checker.inserted_clause(inserted_id) {
             Some(inserted) => self.emit_clause(inserted.clause, inserted.reason),
             None => Err(CodeGenError::GeneratedBadCode(format!(
@@ -1152,6 +1521,7 @@ impl<'a> TraceWriter<'a> {
                 inserted_id
             ))),
         };
+        self.cheap_emission_depth -= 1;
         self.emitting_inserted_ids.remove(&inserted_id);
         if let Ok(index) = result {
             self.inserted_to_trace.insert(inserted_id, index);
@@ -1572,6 +1942,13 @@ impl<'a> TraceWriter<'a> {
         if let Some(index) =
             self.emit_variable_simplification_support(code.clone(), clause.clone(), generic)?
         {
+            return Ok(index);
+        }
+        // Last resort: the same reduction-witness engine that backs claim emission.
+        // Boolean-reduction sources and dependency clauses can need it for the same
+        // reason claims do: the clause is justified by reduction reasoning without
+        // being an exact member of anything emitted yet.
+        if let Some(index) = self.emit_clause_via_reduction_witness(&clause)? {
             return Ok(index);
         }
 
@@ -2522,6 +2899,7 @@ impl<'a> TraceWriter<'a> {
             return Err(Self::local_eager_cycle_error(local_id));
         }
 
+        self.cheap_emission_depth += 1;
         let result = (|| {
             if let Some(source_id) = inserted.reason.dependency() {
                 let source_index = self.emit_local_inserted_clause(local, source_id, seen)?;
@@ -2604,6 +2982,7 @@ impl<'a> TraceWriter<'a> {
 
             self.emit_clause(inserted.clause, StepReason::PreviousClaim)
         })();
+        self.cheap_emission_depth -= 1;
         self.emitting_local_inserted_ids.remove(&local_id);
         result
     }
@@ -3416,16 +3795,63 @@ impl<'a> TraceChecker<'a> {
                 } else {
                     specialized.clone()
                 };
-                if !self
-                    .checker
-                    .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
-                    && !self
-                        .checker
-                        .boolean_reduction_proves_for_trace(&result, &self.kernel_context)
-                    && !self
-                        .checker
-                        .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
-                {
+                let justified = if step.premises.is_empty() {
+                    // Legacy premise-less form: re-derive from known reductions.
+                    self.checker
+                        .boolean_reduction_proves_for_trace(&generic, &self.kernel_context)
+                        || self
+                            .checker
+                            .boolean_reduction_proves_for_trace(&result, &self.kernel_context)
+                        || self
+                            .checker
+                            .boolean_reduction_proves_for_trace(&specialized, &self.kernel_context)
+                } else {
+                    // Premise-bearing form: the premises must jointly form one of the
+                    // clause's reduction sets, so the check is local to this step.
+                    let mut premise_clauses = Vec::new();
+                    for &premise in &step.premises {
+                        let Some(step_clauses) = self.clauses.get(premise) else {
+                            return Err(CodeGenError::GeneratedBadCode(format!(
+                                "certificate trace br_intro step {} references missing premise {}",
+                                index + 1,
+                                premise
+                            )));
+                        };
+                        premise_clauses.extend(step_clauses.all().cloned());
+                    }
+                    let mut targets = vec![&result];
+                    if specialized != result {
+                        targets.push(&specialized);
+                    }
+                    if generic != result && generic != specialized {
+                        targets.push(&generic);
+                    }
+                    targets.iter().any(|target| {
+                        self.checker
+                            .checker_boolean_reduction_sets(target, &self.kernel_context)
+                            .iter()
+                            .any(|set| {
+                                set.iter().all(|member| {
+                                    premise_clauses.iter().any(|premise| {
+                                        premise == member
+                                            || self
+                                                .checker
+                                                .canonical_clause_for_trace(
+                                                    premise,
+                                                    &self.kernel_context,
+                                                )
+                                                .is_some_and(|canonical_premise| {
+                                                    self.checker.canonical_clause_for_trace(
+                                                        member,
+                                                        &self.kernel_context,
+                                                    ) == Some(canonical_premise)
+                                                })
+                                    })
+                                })
+                            })
+                    })
+                };
+                if !justified {
                     return Err(CodeGenError::GeneratedBadCode(format!(
                         "certificate trace br_intro step {} is not justified by known reductions: {}",
                         index + 1,

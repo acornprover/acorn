@@ -332,3 +332,52 @@ theorem goal(q: Nat -> Real, n: Nat, eps: Real) {
     }
 }
 ```
+
+## Boolean Reduction Source From A Deferred Unit Resolution
+
+Regression shape from number_theory/dirichlet.ac cofactor_image_list_is_unique:
+the proof unfolds a higher-order predicate defined as a conditional with conjunct
+hypotheses, then peels the hypotheses by unit resolution under the negated goal.
+The trace writer must be able to serialize the peeled intermediates, because a
+later boolean-reduction step uses one of them as its source.
+
+```acorn
+type Num: axiom
+type Lst: axiom
+let zero: Num = axiom
+let lt: (Num, Num) -> Bool = axiom
+let dl: Num -> Lst = axiom
+let uniq: Lst -> Bool = axiom
+let mem: (Lst, Num) -> Bool = axiom
+let divides: (Num, Num) -> Bool = axiom
+let conc: Lst -> Bool = axiom
+
+define pred(n: Num) -> (Lst -> Bool) {
+    function(l: Lst) {
+        uniq(l) and forall(d: Num) { mem(l, d) implies divides(d, n) } and lt(zero, n)
+            implies conc(l)
+    }
+}
+
+axiom pred_thm(n: Num, l: Lst) { pred(n)(l) }
+axiom dl_uniq(n: Num) { uniq(dl(n)) }
+axiom dl_div(n: Num, d: Num) { mem(dl(n), d) implies divides(d, n) }
+
+theorem goal(n: Num) { lt(zero, n) implies conc(dl(n)) } by {
+    if lt(zero, n) {
+        pred_thm(n, dl(n))
+        pred(n)(dl(n)) =
+            (uniq(dl(n)) and forall(d: Num) { mem(dl(n), d) implies divides(d, n) }
+                and lt(zero, n)
+                implies conc(dl(n)))
+        dl_uniq(n)
+        forall(d: Num) {
+            if mem(dl(n), d) {
+                dl_div(n, d)
+                divides(d, n)
+            }
+        }
+        conc(dl(n))
+    }
+}
+```
