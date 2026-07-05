@@ -685,8 +685,8 @@ enum Command {
         /// Activation queue policy to use for proof search
         #[clap(
             long,
-            default_value = "model-20260611-e50-h512-l3",
-            help = "Activation queue policy. Options: model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow, model-df-1to1, model-df-3to1, model-jitter.",
+            default_value = "model-20260705-consistent-h128-l3",
+            help = "Activation queue policy. Options: model-20260705-consistent-h128-l3, handcrafted, depth-first, model, model-no-shallow, model-df-1to1, model-df-3to1, model-jitter.",
             value_name = "POLICY"
         )]
         policy: String,
@@ -2227,8 +2227,8 @@ mod tests {
     #[test]
     fn test_parse_eval_policy() {
         assert_eq!(
-            parse_eval_policy("model-20260611-e50-h512-l3").unwrap(),
-            ScoringPolicy::Model20260611E50H512L3
+            parse_eval_policy("model-20260705-consistent-h128-l3").unwrap(),
+            ScoringPolicy::Model20260705ConsistentH128L3
         );
         assert_eq!(
             parse_eval_policy("handcrafted").unwrap(),

@@ -6,7 +6,7 @@
 #   ./scripts/eval-suite.sh
 #   ./scripts/eval-suite.sh --out tmp/my-eval --skip-build
 #   ./scripts/eval-suite.sh --fast --skip-build
-#   ./scripts/eval-suite.sh --policy model-20260611-e50-h512-l3 --policy depth-first
+#   ./scripts/eval-suite.sh --policy model-20260705-consistent-h128-l3 --policy depth-first
 #   ./scripts/eval-suite.sh --case candidate=model:tmp/models/scorer.onnx
 
 set -uo pipefail
@@ -101,7 +101,7 @@ add_case_spec() {
 }
 
 add_standard_cases() {
-    add_case "model-20260611-e50-h512-l3" "model-20260611-e50-h512-l3"
+    add_case "model-20260705-consistent-h128-l3" "model-20260705-consistent-h128-l3"
     add_case "depth-first" "depth-first"
     add_case "model-20260610a" "model" "$model_20260610a"
     add_case "model-20260610a-no-shallow" "model-no-shallow" "$model_20260610a"

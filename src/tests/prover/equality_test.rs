@@ -376,8 +376,7 @@ fn test_proving_with_theorem_arg() {
     assert_proof_lines(
         proof,
         &[
-            "function[T0: Thing](x0: T0, x1: T0) { x0 + x1 = x1 + x0 }[T](a, b + c)",
-            "a + (b + c) != a + b + c",
+            "function[T0: Thing](x0: T0, x1: T0) { x0 + x1 = x1 + x0 }[T](b + c, a)",
             "function[T0: Thing](x0: T0, x1: T0, x2: T0) { x0 + x1 + x2 = x0 + (x1 + x2) }[T](a, b, c)",
         ],
     );

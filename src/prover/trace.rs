@@ -388,7 +388,7 @@ mod tests {
                 goal_first_line: 1,
                 goal_last_line: 1,
                 skip: Some(0),
-                policy: "model-20260611-e50-h512-l3".to_string(),
+                policy: "model-20260705-consistent-h128-l3".to_string(),
             },
             outcome: "success".to_string(),
             activation_index: index,

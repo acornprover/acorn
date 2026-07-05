@@ -26,7 +26,7 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScoringPolicy {
-    Model20260611E50H512L3,
+    Model20260705ConsistentH128L3,
     Handcrafted,
     DepthFirst,
     Model,
@@ -45,7 +45,7 @@ pub enum ScoringPolicy {
 
 impl Default for ScoringPolicy {
     fn default() -> Self {
-        Self::Model20260611E50H512L3
+        Self::Model20260705ConsistentH128L3
     }
 }
 
@@ -77,7 +77,7 @@ impl ScoringPolicy {
     }
 
     pub fn options() -> &'static str {
-        "model-20260611-e50-h512-l3, handcrafted, depth-first, model, model-no-shallow, \
+        "model-20260705-consistent-h128-l3, handcrafted, depth-first, model, model-no-shallow, \
          model-df-1to1, model-df-3to1, model-jitter"
     }
 }
@@ -85,7 +85,7 @@ impl ScoringPolicy {
 impl fmt::Display for ScoringPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::Model20260611E50H512L3 => EMBEDDED_MODEL_POLICY,
+            Self::Model20260705ConsistentH128L3 => EMBEDDED_MODEL_POLICY,
             Self::Handcrafted => "handcrafted",
             Self::DepthFirst => "depth-first",
             Self::Model => "model",
@@ -103,7 +103,7 @@ impl FromStr for ScoringPolicy {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
-            "model-20260611-e50-h512-l3" => Ok(Self::Model20260611E50H512L3),
+            "model-20260705-consistent-h128-l3" => Ok(Self::Model20260705ConsistentH128L3),
             "handcrafted" => Ok(Self::Handcrafted),
             "depth-first" => Ok(Self::DepthFirst),
             "model" => Ok(Self::Model),
@@ -178,7 +178,7 @@ impl ScoringConfig {
 
     pub fn load_scorer(&self) -> Result<Box<dyn Scorer + Send + Sync>, Box<dyn Error>> {
         match self.policy {
-            ScoringPolicy::Model20260611E50H512L3
+            ScoringPolicy::Model20260705ConsistentH128L3
             | ScoringPolicy::ModelDfInterleave1
             | ScoringPolicy::ModelDfInterleave3
             | ScoringPolicy::ModelJitter => {

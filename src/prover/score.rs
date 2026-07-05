@@ -156,12 +156,12 @@ mod tests {
     fn shallow_status_orders_scores_by_default() {
         let scorer = ConstantScorer;
         let deep = Score::new(
-            ScoringPolicy::Model20260611E50H512L3,
+            ScoringPolicy::Model20260705ConsistentH128L3,
             &scorer,
             &features(ShallowStatus::Deep),
         );
         let shallow = Score::new(
-            ScoringPolicy::Model20260611E50H512L3,
+            ScoringPolicy::Model20260705ConsistentH128L3,
             &scorer,
             &features(ShallowStatus::Unspent),
         );

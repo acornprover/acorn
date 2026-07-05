@@ -343,10 +343,10 @@ fn test_proving_removes_duplicates() {
     assert_proof_lines(
         proof,
         &[
-            "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { Foo.foo = x0 }(Foo.foo)",
             "function(x0: Foo) { Foo.foo = x0 }(y)",
             "not g(Foo.foo)",
+            "function(x0: Foo) { f(x0) }(Foo.foo)",
             "function(x0: Foo) { not f(x0) or g(x0) }(Foo.foo)",
         ],
     );
@@ -558,6 +558,9 @@ fn test_proving_with_equality_factoring_basic() {
         proof,
         &[
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "h(y) != g(y) or g(y) = f(y)",
+            "g(y) = f(y)",
+            "h = g",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
         ],
     );
@@ -600,6 +603,9 @@ fn test_proving_with_equality_factoring_mixed_forwards() {
         proof,
         &[
             "function(x0: Foo) { h(x0) = g(x0) }(y)",
+            "h(y) != g(y) or g(y) = f(y)",
+            "g(y) = f(y)",
+            "h = g",
             "function(x0: Foo) { h(x0) != f(x0) }(y)",
         ],
     );

@@ -25,10 +25,11 @@ pub struct ScoringModel {
 static SCORING_SESSION: OnceLock<Arc<Session>> = OnceLock::new();
 static EXTERNAL_SCORING_SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<Session>>>> = OnceLock::new();
 
-pub const EMBEDDED_MODEL_POLICY: &str = "model-20260611-e50-h512-l3";
-const MODEL_BYTES: &[u8] = include_bytes!("../../files/models/model-20260611-e50-h512-l3.onnx");
+pub const EMBEDDED_MODEL_POLICY: &str = "model-20260705-consistent-h128-l3";
+const MODEL_BYTES: &[u8] =
+    include_bytes!("../../files/models/model-20260705-consistent-h128-l3.onnx");
 const MODEL_FEATURE_CONTRACT_JSON: &str =
-    include_str!("../../files/models/model-20260611-e50-h512-l3.features.json");
+    include_str!("../../files/models/model-20260705-consistent-h128-l3.features.json");
 const FEATURE_CONTRACT_SCHEMA: &str = "acorn-scorer-feature-contract-v1";
 
 #[derive(Deserialize)]

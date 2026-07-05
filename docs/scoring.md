@@ -26,8 +26,10 @@ The first configurability step has now landed: `acorn eval --policy` can run sev
 policies without code edits, and `--policy model --model PATH` can evaluate a trained ONNX scorer
 with its exported `*.features.json` contract. That immediately exposed two important facts:
 
-- the trained `model-20260611-e50-h512-l3` checkpoint narrowly beats `depth-first` on the full
-  eval, and is now the embedded default policy.
+- trained checkpoints beat `depth-first` on the full eval. The margin was narrow until the
+  goal-overlap features landed (2026-07-04): the goal-aware `model-20260705-consistent-h128-l3`
+  checkpoint, now the embedded default policy, solves 89.3% at 1s vs 81.7% for `depth-first`,
+  and depth-first's once-large pool of unique wins has nearly vanished.
 - alternate policies exercised proof and certificate paths the default policy rarely reached.
   The initially reduced certificate and stack-growth bugs have now been fixed.
 
@@ -56,8 +58,8 @@ The trace exporter is intentionally eval-shaped:
 - `--trace-out PATH` writes one `acorn-activated-step-trace-v2` JSON object per activated step
   from eval searches; paths must end in `.jsonl.zst`
 - a sidecar metadata file next to the trace, for example
-  `model-20260611-e50-h512-l3.meta.json` for
-  `model-20260611-e50-h512-l3.jsonl.zst`,
+  `model-20260705-consistent-h128-l3.meta.json` for
+  `model-20260705-consistent-h128-l3.jsonl.zst`,
   records the numeric feature-vector names once
 - each record includes module/goal/skip/policy/outcome metadata, stable `goal_bucket`, activation
   index, passive id, active id, queue score/order fields, rule, truthiness, the current numeric
@@ -89,7 +91,7 @@ buckets above.
 
 The current policy options are:
 
-- `model-20260611-e50-h512-l3`: the default embedded ONNX scorer, with shallow-first ordering
+- `model-20260705-consistent-h128-l3`: the default embedded ONNX scorer, with shallow-first ordering
 - `handcrafted`: the old hand-written scorer, with shallow-first ordering
 - `depth-first`: constant scorer, so queue ties fall back to insertion/order structure, with
   shallow-first ordering
@@ -101,7 +103,7 @@ The scoring config is threaded through `Builder`, `Processor`, `Prover`, and `Pa
 workers can carry both a policy and an optional external model path. `scripts/eval-suite.sh` runs
 the standard traced cases by default:
 
-- `model-20260611-e50-h512-l3`
+- `model-20260705-consistent-h128-l3`
 - `depth-first`
 - `model-20260610a`
 - `model-20260610a-no-shallow`
@@ -140,25 +142,25 @@ pub fn default_scorer() -> Box<dyn Scorer + Send + Sync> {
 `ScoringModel::load()` embeds one ONNX model and its feature contract:
 
 ```rust
-include_bytes!("../../files/models/model-20260611-e50-h512-l3.onnx")
-include_str!("../../files/models/model-20260611-e50-h512-l3.features.json")
+include_bytes!("../../files/models/model-20260705-consistent-h128-l3.onnx")
+include_str!("../../files/models/model-20260705-consistent-h128-l3.features.json")
 ```
 
 `ScoringPolicy` now exposes these choices:
 
-- `Model20260611E50H512L3`
+- `Model20260705ConsistentH128L3`
 - `Handcrafted`
 - `DepthFirst`
 - `Model`
 - `ModelNoShallow`
 
-The eval CLI exposes them as `model-20260611-e50-h512-l3`, `handcrafted`, `depth-first`, `model`,
+The eval CLI exposes them as `model-20260705-consistent-h128-l3`, `handcrafted`, `depth-first`, `model`,
 and `model-no-shallow`. The `model` policies require `--model PATH`; Rust loads the adjacent
 `PATH.with_extension("features.json")` contract and feeds the model exactly those feature columns.
 
 ## Policy Around The Model
 
-The model score is not the whole ordering. Under the default `model-20260611-e50-h512-l3` policy,
+The model score is not the whole ordering. Under the default `model-20260705-consistent-h128-l3` policy,
 `Score` orders proof steps lexicographically by:
 
 1. whether the step is a contradiction
@@ -204,7 +206,7 @@ refactor-resistant shape/count/category features:
 - source-category one-hots, source importability, and source depth for direct assumptions
 
 The current embedded ONNX model records its exact 60-feature input order in
-`files/models/model-20260611-e50-h512-l3.features.json`.
+`files/models/model-20260705-consistent-h128-l3.features.json`.
 
 `is_shallow` and `shallow_status` are still used outside the model by `Score` for policies that
 keep shallow-first ordering. They are now also present in the trace catalog so future models can
@@ -307,7 +309,7 @@ tensor shards from traces and train from either raw traces or shard directories.
 
 The Python loader reads trace feature names from the sidecar `*.meta.json` file. By default it
 uses all catalog features; repeated `--feature NAME` arguments can choose an explicit subset. The
-embedded production model in `src/prover/scoring_model.rs` is `model-20260611-e50-h512-l3`; new
+embedded production model in `src/prover/scoring_model.rs` is `model-20260705-consistent-h128-l3`; new
 ONNX files can still be evaluated without embedding them by running
 `acorn eval --policy model --model PATH`.
 
@@ -364,7 +366,7 @@ budget activations.
 For these reasons, the useful "scoring" work is really policy, training, and measurement work:
 keep policies configurable, make shallow ordering optional or learnable, train from eval traces,
 and evaluate with `acorn eval`. The immediate next step is to rerun the standard eval suite with
-the embedded `model-20260611-e50-h512-l3` checkpoint as the default baseline.
+the embedded `model-20260705-consistent-h128-l3` checkpoint as the default baseline.
 
 ## Recommended Next Work
 
@@ -449,8 +451,9 @@ useful under successful searches.
 
 ## Open Questions
 
-- Does the embedded `model-20260611-e50-h512-l3` checkpoint keep beating `depth-first` after the
-  next full eval rerun?
+- What closes the remaining ~10% of goals no current policy solves? Capacity, extra epochs, and
+  retraining on cleaner data all measured flat in 2026-07-04 evals, so the next levers are new
+  features or a ranking-style objective.
 - Does removing shallow-first ordering help or hurt the embedded checkpoint if we add a built-in
   no-shallow variant?
 - Can normal search drop shallow-first ordering and let the model rank shallow and deep candidates
