@@ -143,8 +143,23 @@ impl<'a> Unifier<'a> {
                 if args.len() != self.kernel_context.type_store.get_arity(ground_id) as usize {
                     return false;
                 }
-                args.iter()
-                    .all(|arg| self.is_proper_type_expr(arg.as_ref()))
+                let param_kinds = self.kernel_context.type_store.get_param_kinds(ground_id);
+                if param_kinds.len() != args.len() {
+                    // No recorded kinds: assume every parameter is a type.
+                    return args
+                        .iter()
+                        .all(|arg| self.is_proper_type_expr(arg.as_ref()));
+                }
+                args.iter().zip(param_kinds.iter()).all(|(arg, kind)| {
+                    if kind.as_ref().is_type0() || kind.as_ref().as_typeclass().is_some() {
+                        self.is_proper_type_expr(arg.as_ref())
+                    } else {
+                        // A value-kinded parameter (dependent type like Fin[n])
+                        // takes a term; requiring a type expression here would
+                        // wrongly reject legitimate dependent types.
+                        !arg.as_ref().is_type0()
+                    }
+                })
             }
             Decomposition::Pi(input, _) => !input.is_type_param_kind(),
             _ => false,
@@ -159,18 +174,20 @@ impl<'a> Unifier<'a> {
         var_scope: Scope,
         var_type: TermRef,
         term: &Term,
-        allow_typesort_term: bool,
     ) -> bool {
         if matches!(
             var_type.decompose(),
             Decomposition::Atom(Atom::Symbol(Symbol::Type0))
         ) {
             if term.as_ref().is_type0() {
-                return allow_typesort_term;
-            }
-            if !self.is_proper_type_expr(term.as_ref()) {
+                // Type parameters range over proper types, never TypeSort itself.
                 return false;
             }
+            // Properness fully decides compatibility for a type variable; a proper
+            // type expression always has kind TypeSort. Falling through to kind
+            // unification would bind type variables inside the term to TypeSort
+            // itself, and those bindings leak into clauses via apply().
+            return self.is_proper_type_expr(term.as_ref());
         }
 
         if let Some(typeclass_id) = var_type.as_typeclass() {
@@ -649,7 +666,11 @@ impl<'a> Unifier<'a> {
             }
 
             if let Some(var_type) = self.output_context.get_var_type(var_id as usize).cloned() {
-                if !self.binding_type_is_compatible(Scope::OUTPUT, var_type.as_ref(), term, true) {
+                // Without this check, a function variable f: x0 -> x1 can unify with a
+                // polymorphic constant (type Pi(TypeSort, ...)), binding x0 := TypeSort
+                // and producing clauses like compose[Type, Type, ...] that the
+                // elaborator rejects.
+                if !self.binding_type_is_compatible(Scope::OUTPUT, var_type.as_ref(), term) {
                     return false;
                 }
             }
@@ -673,7 +694,7 @@ impl<'a> Unifier<'a> {
             return false;
         }
 
-        if !self.binding_type_is_compatible(var_scope, var_type.as_ref(), term, false) {
+        if !self.binding_type_is_compatible(var_scope, var_type.as_ref(), term) {
             return false;
         }
 
@@ -2721,6 +2742,86 @@ mod tests {
         assert!(
             !result,
             "Variable with typeclass constraint should NOT unify with Pi type (Type -> Type)"
+        );
+    }
+
+    #[test]
+    fn test_function_variable_rejects_polymorphic_constant() {
+        // Regression: x2(x3) with x0, x1: Type, x2: x0 -> x1, x3: x0 must NOT
+        // unify with a polymorphic constant application c0(Foo). Binding x2 to
+        // c0 (type Pi(Type, ...)) forces x0 := TypeSort itself, producing
+        // clauses like compose[Type, Type, ...] that the elaborator rejects.
+        // Found by a validate-mode 30s eval, 2026-07-05.
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Foo");
+        kctx.parse_polymorphic_constant("c0", "T: Type", "Foo -> Bool");
+        kctx.parse_constant("g1", "Foo -> Foo -> Bool");
+        kctx.parse_constant("c1", "Foo");
+
+        let left_local = kctx.parse_local(&["Type", "Type", "x0 -> x1", "x0"]);
+        let right_local = kctx.parse_local(&[]);
+        let left = kctx.parse_term("x2(x3)");
+
+        let bad = kctx.parse_term("c0(Foo)");
+        let mut u = Unifier::new(3, &kctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_local.clone())));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_local.clone())));
+        assert!(
+            !u.unify(Scope::LEFT, &left, Scope::RIGHT, &bad),
+            "function variable must not unify with a polymorphic constant application"
+        );
+
+        // Positive control: an ordinary application unifies fine.
+        let good = kctx.parse_term("g1(c1)");
+        let mut u = Unifier::new(3, &kctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_local)));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_local)));
+        assert!(
+            u.unify(Scope::LEFT, &left, Scope::RIGHT, &good),
+            "ordinary application should still unify with a function variable"
+        );
+    }
+
+    #[test]
+    fn test_type_variable_accepts_dependent_type_with_kinds() {
+        // A type variable may bind to a dependent type like Fin[c0] when the
+        // constructor's parameter kinds mark the argument as a value. Without
+        // recorded kinds we conservatively require type arguments, so the same
+        // binding is rejected.
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Nat");
+        kctx.parse_dependent_type_constructor("Fin", &["Nat"]);
+        kctx.parse_type_constructor("Unkinded", 1);
+        kctx.parse_constant("c0", "Nat");
+
+        let left_local = kctx.parse_local(&["Type"]);
+        let right_local = kctx.parse_local(&[]);
+        let x0 = Term::atom(Atom::FreeVariable(0));
+
+        let fin_id = kctx.type_store.get_ground_id_by_name("Fin").unwrap();
+        let fin_c0 = Term::new(
+            Atom::Symbol(Symbol::Type(fin_id)),
+            vec![kctx.parse_term("c0")],
+        );
+        let mut u = Unifier::new(3, &kctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_local.clone())));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_local.clone())));
+        assert!(
+            u.unify(Scope::LEFT, &x0, Scope::RIGHT, &fin_c0),
+            "type variable should bind to dependent type Fin[c0]"
+        );
+
+        let unkinded_id = kctx.type_store.get_ground_id_by_name("Unkinded").unwrap();
+        let unkinded_c0 = Term::new(
+            Atom::Symbol(Symbol::Type(unkinded_id)),
+            vec![kctx.parse_term("c0")],
+        );
+        let mut u = Unifier::new(3, &kctx);
+        u.set_input_context(Scope::LEFT, Box::leak(Box::new(left_local)));
+        u.set_input_context(Scope::RIGHT, Box::leak(Box::new(right_local)));
+        assert!(
+            !u.unify(Scope::LEFT, &x0, Scope::RIGHT, &unkinded_c0),
+            "without recorded kinds, a value argument in type position is rejected"
         );
     }
 

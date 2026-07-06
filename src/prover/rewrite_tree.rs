@@ -297,8 +297,23 @@ fn is_proper_type_expr(
             if args.len() != kernel_context.type_store.get_arity(ground_id) as usize {
                 return false;
             }
-            args.iter()
-                .all(|arg| is_proper_type_expr(arg.as_ref(), query_context, kernel_context))
+            let param_kinds = kernel_context.type_store.get_param_kinds(ground_id);
+            if param_kinds.len() != args.len() {
+                // No recorded kinds: assume every parameter is a type.
+                return args
+                    .iter()
+                    .all(|arg| is_proper_type_expr(arg.as_ref(), query_context, kernel_context));
+            }
+            args.iter().zip(param_kinds.iter()).all(|(arg, kind)| {
+                if kind.as_ref().is_type0() || kind.as_ref().as_typeclass().is_some() {
+                    is_proper_type_expr(arg.as_ref(), query_context, kernel_context)
+                } else {
+                    // A value-kinded parameter (dependent type like Fin[n])
+                    // takes a term; requiring a type expression here would
+                    // wrongly reject legitimate dependent types.
+                    !arg.as_ref().is_type0()
+                }
+            })
         }
         Decomposition::Pi(input, _) => !input.is_type_param_kind(),
         _ => false,
@@ -947,6 +962,72 @@ mod tests {
                 rewrite.term,
                 rewrite.context.get_var_types()
             );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_tree_agrees_with_unifier_on_dependent_context() {
+        // Pattern g1(x0, x1) = g0(x0, x1) with x0: Type, x1: x0 (a dependent context). Every rewrite the tree returns must satisfy
+        // the same unifier recheck that activate_rewrite_target performs.
+        use crate::kernel::unifier::{Scope, Unifier};
+
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Foo");
+        kctx.parse_datatype("Bar");
+        kctx.parse_type_constructor("List", 1);
+        kctx.parse_polymorphic_constant("g0", "T: Type", "T -> Bool");
+        kctx.parse_polymorphic_constant("g1", "T: Type", "T -> Bool");
+        kctx.parse_constant("c1", "Bar");
+        kctx.parse_constant("c2", "List[Foo]");
+
+        let mut tree = RewriteTree::new();
+        let pattern_clause = kctx.parse_clause("g1(x0, x1) = g0(x0, x1)", &["Type", "x0"]);
+        tree.insert_literal(
+            0,
+            &pattern_clause.literals[0],
+            pattern_clause.get_local_context(),
+        );
+
+        let query_lctx = kctx.parse_local(&[]);
+        for (query_src, should_match) in [
+            ("g0(List(Foo), c2)", true),  // well-typed: x1's type equals x0's binding
+            ("g0(List(Foo), c1)", false), // ill-typed: c1: Bar but x0 = List(Foo)
+        ] {
+            let query_term = kctx.parse_term(query_src);
+            let rewrites = tree.get_rewrites(&query_term, 0, &query_lctx, &kctx);
+            for rewrite in &rewrites {
+                // Recheck exactly like activate_rewrite_target's validate block.
+                let (s, _t) = if rewrite.forwards {
+                    (
+                        &pattern_clause.literals[0].left,
+                        &pattern_clause.literals[0].right,
+                    )
+                } else {
+                    (
+                        &pattern_clause.literals[0].right,
+                        &pattern_clause.literals[0].left,
+                    )
+                };
+                let mut unifier = Unifier::new(3, &kctx);
+                unifier.set_input_context(Scope::LEFT, pattern_clause.get_local_context());
+                unifier.set_input_context(Scope::RIGHT, LocalContext::empty_ref());
+                assert!(
+                    unifier.unify(Scope::LEFT, s, Scope::RIGHT, &query_term),
+                    "tree returned a rewrite the unifier rejects: query {} rewrite {} (forwards {})",
+                    query_src,
+                    rewrite.term,
+                    rewrite.forwards
+                );
+            }
+            if !should_match {
+                assert!(
+                    rewrites.is_empty(),
+                    "ill-typed query {} produced {} rewrites, e.g. {}",
+                    query_src,
+                    rewrites.len(),
+                    rewrites[0].term
+                );
+            }
         }
     }
 

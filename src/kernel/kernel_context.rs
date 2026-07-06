@@ -723,6 +723,33 @@ impl KernelContext {
         self
     }
 
+    /// Add a dependent type constructor with explicit parameter kinds for testing.
+    /// Each kind is a type string: "Type" for a type parameter, or a concrete
+    /// type like "Nat" for a value parameter.
+    ///
+    /// Example: `ctx.parse_dependent_type_constructor("Fin", &["Nat"])`
+    #[cfg(test)]
+    pub fn parse_dependent_type_constructor(
+        &mut self,
+        name: &str,
+        param_kinds: &[&str],
+    ) -> &mut Self {
+        use crate::elaborator::acorn_type::{AcornType, Datatype};
+        use crate::module::ModuleId;
+
+        let datatype = Datatype {
+            module_id: ModuleId(0),
+            name: name.to_string(),
+        };
+        let acorn_type = AcornType::Data(datatype.clone(), vec![]);
+        self.type_store.add_type(&acorn_type);
+        self.type_store
+            .set_datatype_arity(&datatype, param_kinds.len() as u8);
+        let kinds = param_kinds.iter().map(|s| self.parse_type(s)).collect();
+        self.type_store.set_datatype_param_kinds(&datatype, kinds);
+        self
+    }
+
     /// Add multiple datatypes by name for testing.
     /// Returns self for chaining.
     ///

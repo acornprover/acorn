@@ -320,6 +320,21 @@ impl TypeStore {
         }
     }
 
+    /// Records the parameter kinds for a registered datatype, overwriting any
+    /// previously recorded kinds. Each entry is Type0 for a type parameter, or
+    /// a concrete type term for a value parameter of a dependent type like Fin[n].
+    pub fn set_datatype_param_kinds(&mut self, datatype: &Datatype, param_kinds: Vec<Term>) {
+        if let Some(ground_id) = self.datatype_to_ground_id.get(datatype) {
+            let local_idx = ground_id.local_id() as usize;
+            let mod_idx = ground_id.module_id().get() as usize;
+            if let Some(kinds) = self.ground_id_to_param_kinds.get_mut(mod_idx) {
+                if local_idx < kinds.len() {
+                    kinds[local_idx] = param_kinds;
+                }
+            }
+        }
+    }
+
     fn update_datatype_param_kinds(&mut self, datatype: &Datatype, param_kinds: Vec<Term>) {
         if let Some(ground_id) = self.datatype_to_ground_id.get(datatype) {
             let module_id = ground_id.module_id();

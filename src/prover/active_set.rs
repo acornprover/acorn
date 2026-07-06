@@ -1547,11 +1547,20 @@ impl ActiveSet {
             // Validate the unchanged step when the validate feature is enabled
             #[cfg(any(test, feature = "validate"))]
             if let Err(e) = self.validate_step(&step, kernel_context) {
+                let mut parents = String::new();
+                for id in step.active_dependencies(true) {
+                    let parent = self.get_step(id);
+                    parents.push_str(&format!(
+                        "\nparent {}: {} (rule {}, context {:?})",
+                        id,
+                        parent.clause,
+                        parent.rule.name(),
+                        parent.clause.get_local_context().get_var_types()
+                    ));
+                }
                 panic!(
-                    "Invalid proof step (unchanged): {}\nStep clause: {:?}\nStep rule: {}",
-                    e,
-                    step.clause,
-                    step.rule.name()
+                    "Invalid proof step (unchanged): {}\nStep clause: {:?}\nStep rule: {:?}{}",
+                    e, step.clause, step.rule, parents
                 );
             }
 
