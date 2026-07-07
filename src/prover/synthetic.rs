@@ -164,16 +164,42 @@ impl WitnessRegistry {
         clause: &Clause,
         reduction: &PositiveExistsReduction,
     ) -> WitnessOpening {
-        let ambient_context = clause.get_local_context();
+        let clause_context = clause.get_local_context();
+
+        // Witness signatures, polymorphic registration, and quoting all assume
+        // type parameters form a leading prefix, but clause contexts can
+        // interleave type and value variables. Hoist type params first; the
+        // witness's own indexing (its type, its stored body/return type, and
+        // its application argument order) uses the hoisted order, while the
+        // application's arguments still name the clause's original variables.
+        let mut hoisted_order: Vec<AtomId> = Vec::with_capacity(clause_context.len());
+        for var_id in 0..clause_context.len() {
+            let is_type_param = clause_context
+                .get_var_type(var_id)
+                .is_some_and(|var_type| var_type.as_ref().is_type_param_kind());
+            if is_type_param {
+                hoisted_order.push(var_id as AtomId);
+            }
+        }
+        for var_id in 0..clause_context.len() {
+            if !hoisted_order.contains(&(var_id as AtomId)) {
+                hoisted_order.push(var_id as AtomId);
+            }
+        }
+        let hoisted_context = clause_context.remap(&hoisted_order);
+        let hoisted_return_type = reduction.binder_type.renumber_variables(&hoisted_order);
+        let hoisted_body = reduction.body.renumber_variables(&hoisted_order);
+        let ambient_context = &hoisted_context;
+
         let name = self.next_name(kernel_context, module_id);
-        let symbol_type = witness_symbol_type(ambient_context, &reduction.binder_type);
+        let symbol_type = witness_symbol_type(ambient_context, &hoisted_return_type);
         let symbol = kernel_context.symbol_table.add_constant(
             name.clone(),
             NewConstantType::Local,
             symbol_type,
         );
         let (type_params, _arguments, generic_type) =
-            witness_signature(kernel_context, ambient_context, &reduction.binder_type);
+            witness_signature(kernel_context, ambient_context, &hoisted_return_type);
         kernel_context.type_store.add_type(&generic_type);
         for param in &type_params {
             if let Some(typeclass) = &param.typeclass {
@@ -189,7 +215,14 @@ impl WitnessRegistry {
             );
         }
 
-        let witness = witness_application(symbol, ambient_context);
+        // Apply the witness to the clause's variables in hoisted order, so the
+        // application matches the witness's type-params-first signature while
+        // still naming the clause's original variables.
+        let witness_args: Vec<Term> = hoisted_order
+            .iter()
+            .map(|&var_id| Term::new_variable(var_id))
+            .collect();
+        let witness = Term::atom(Atom::Symbol(symbol)).apply(&witness_args);
         let reduced = clause.instantiate_positive_exists_reduction(reduction, witness.clone());
 
         self.by_symbol.insert(
@@ -197,9 +230,9 @@ impl WitnessRegistry {
             WitnessEntry {
                 symbol,
                 name,
-                ambient_context: ambient_context.clone(),
-                return_type: reduction.binder_type.clone(),
-                body: reduction.body.clone(),
+                ambient_context: hoisted_context.clone(),
+                return_type: hoisted_return_type,
+                body: hoisted_body,
                 general_clause: clause.normalized(),
                 specialized_clause: reduced.clause.clone(),
             },
@@ -419,5 +452,65 @@ mod tests {
             generic_type.to_string(),
             "(Set[TopologicalSpace], Set[Subspace[TopologicalSpace, x0]]) -> Set[TopologicalSpace]"
         );
+    }
+}
+
+#[cfg(test)]
+mod interleaved_tests {
+    use super::*;
+    use crate::kernel::clause::Clause;
+    use crate::kernel::literal::Literal;
+    use crate::kernel::term::Term;
+    use crate::module::ModuleId;
+
+    #[test]
+    fn test_open_positive_exists_with_interleaved_type_params() {
+        // Deep searches produce clauses whose type variables are not a leading
+        // prefix of the local context (e.g. [x0: Type, x1: x0, x2: Type]).
+        // Opening a positive exists there must produce a witness application
+        // that survives roundtrip validation. A validate-mode 30s eval found
+        // witness terms like w43[T0*](x1, x0) coming out with mismatched
+        // signatures because witness_signature assumed leading type params.
+        let mut kctx = KernelContext::new();
+
+        // Single literal: exists(y: x0) { x1 = x1 and x3 = x3 and y = x1 }
+        // with x0, x2: Type, x1: x0, x3: x2. Occurrence order puts value var
+        // x1 before type var x2, so the normalized ambient context interleaves
+        // type and value variables.
+        let eq01 = Term::eq(
+            Term::new_variable(0),
+            Term::new_variable(1),
+            Term::new_variable(1),
+        );
+        let eq23 = Term::eq(
+            Term::new_variable(2),
+            Term::new_variable(3),
+            Term::new_variable(3),
+        );
+        let eq_bound = Term::eq(
+            Term::new_variable(0),
+            Term::atom(crate::kernel::atom::Atom::BoundVariable(0)),
+            Term::new_variable(1),
+        );
+        let body = Term::and(Term::and(eq01, eq23), eq_bound);
+        let exists_term = Term::exists(Term::new_variable(0), body);
+
+        let context = kctx.parse_local(&["Type", "x0", "Type", "x2"]);
+        let clause = Clause::new(vec![Literal::positive(exists_term)], &context);
+        eprintln!(
+            "clause: {} context {:?}",
+            clause,
+            clause.get_local_context().get_var_types()
+        );
+
+        let reduction = clause
+            .positive_exists_reduction(&kctx)
+            .expect("expected positive exists reduction");
+        let mut registry = WitnessRegistry::new();
+        let opening =
+            registry.open_positive_exists(&mut kctx, ModuleId::default(), &clause, &reduction);
+        eprintln!("reduced: {}", opening.reduction.clause);
+        kctx.validate_clause_roundtrip(&opening.reduction.clause)
+            .expect("reduced clause should roundtrip");
     }
 }
