@@ -211,6 +211,25 @@ impl<'a> TermBridge<'a> {
         type_var_id_to_name: Option<&HashMap<AtomId, String>>,
         instantiate_type_vars: bool,
     ) -> AcornValue {
+        // A variable's type can only reference variables declared before it,
+        // and its forall annotation is quoted in that restricted scope. Quote
+        // the occurrence's type the same way so the two stay structurally
+        // equal (matters when the type synthesizes inner binders, e.g. lambdas
+        // in dependent type value arguments).
+        let truncated_storage: Option<Vec<Option<u16>>> = match atom {
+            Atom::FreeVariable(i) => var_remapping.map(|mapping| {
+                mapping
+                    .iter()
+                    .enumerate()
+                    .map(|(j, mapped)| if (j as AtomId) < *i { *mapped } else { None })
+                    .collect()
+            }),
+            _ => None,
+        };
+        let type_remapping = match &truncated_storage {
+            Some(vec) => Some(vec.as_slice()),
+            None => var_remapping,
+        };
         let acorn_type = if atom_type.as_ref().is_atomic() {
             if let Atom::FreeVariable(var_id) = atom_type.as_ref().get_head_atom() {
                 if let Some(name) = type_var_id_to_name.and_then(|m| m.get(var_id)) {
@@ -238,7 +257,7 @@ impl<'a> TermBridge<'a> {
                 self.quote_type_with_context_remapped(
                     atom_type.clone(),
                     local_context,
-                    var_remapping,
+                    type_remapping,
                     Some(name_map),
                     instantiate_type_vars,
                 )
@@ -246,7 +265,7 @@ impl<'a> TermBridge<'a> {
                 self.quote_type_with_context_remapped(
                     atom_type.clone(),
                     local_context,
-                    var_remapping,
+                    type_remapping,
                     None,
                     instantiate_type_vars,
                 )
@@ -255,7 +274,7 @@ impl<'a> TermBridge<'a> {
             self.quote_type_with_context_remapped(
                 atom_type.clone(),
                 local_context,
-                var_remapping,
+                type_remapping,
                 Some(name_map),
                 instantiate_type_vars,
             )
@@ -263,7 +282,7 @@ impl<'a> TermBridge<'a> {
             self.quote_type_with_context_remapped(
                 atom_type.clone(),
                 local_context,
-                var_remapping,
+                type_remapping,
                 None,
                 instantiate_type_vars,
             )
@@ -739,15 +758,23 @@ impl<'a> TermBridge<'a> {
             _ => return (head, value_args),
         };
 
-        let Some(receiver) = value_args.first() else {
+        // The receiver is usually the first value argument, but the standalone
+        // form of a dependent-structure attribute takes the hidden value
+        // parameters (e.g. matrix dimensions) explicitly before the receiver,
+        // so also try the position after the still-unbound hidden parameters.
+        let hidden_offset = constant
+            .value_param_types
+            .len()
+            .saturating_sub(constant.bound_value_args.len());
+        let Some((receiver_index, family_args)) = [0, hidden_offset].iter().find_map(|&idx| {
+            let receiver = value_args.get(idx)?;
+            let AcornType::Family(receiver_datatype, family_args) = receiver.get_type() else {
+                return None;
+            };
+            (&receiver_datatype == datatype).then_some((idx, family_args))
+        }) else {
             return (head, value_args);
         };
-        let AcornType::Family(receiver_datatype, family_args) = receiver.get_type() else {
-            return (head, value_args);
-        };
-        if &receiver_datatype != datatype {
-            return (head, value_args);
-        }
 
         let hidden_value_args: Vec<_> = family_args
             .into_iter()
@@ -763,7 +790,9 @@ impl<'a> TermBridge<'a> {
         let bound_head = AcornValue::Constant(constant.clone())
             .bind_value_params(&hidden_value_args, &TermBridgeErrorContext)
             .expect("receiver family args should bind to datatype attribute");
-        (bound_head, value_args)
+        // Explicit hidden arguments preceding the receiver are baked into the
+        // bound head's signature; keep only the receiver and later arguments.
+        (bound_head, value_args[receiver_index..].to_vec())
     }
 
     fn quote_term(
@@ -1452,25 +1481,25 @@ impl<'a> TermBridge<'a> {
             .iter()
             .enumerate()
             .filter(|(i, _)| var_remapping.get(*i).copied().flatten().is_some())
-            .filter_map(|(_, type_term)| type_term.as_ref())
-            .map(|type_term| {
-                if let Some(name_map) = type_var_id_to_name {
-                    self.quote_type_with_context_remapped(
-                        type_term.clone(),
-                        local_context,
-                        var_remapping_ref,
-                        Some(name_map),
-                        instantiate_type_vars,
-                    )
-                } else {
-                    self.quote_type_with_context_remapped(
-                        type_term.clone(),
-                        local_context,
-                        var_remapping_ref,
-                        None,
-                        instantiate_type_vars,
-                    )
-                }
+            .filter_map(|(i, type_term)| type_term.as_ref().map(|t| (i, t)))
+            .map(|(i, type_term)| {
+                // A binder's type annotation can only reference earlier
+                // variables, and at lowering time only those are on the stack.
+                // Restrict visibility so binders synthesized inside the
+                // annotation (e.g. lambdas in dependent type value arguments)
+                // allocate variable indices the lowering stack can serve.
+                let truncated: Vec<Option<u16>> = var_remapping
+                    .iter()
+                    .enumerate()
+                    .map(|(j, mapped)| if j < i { *mapped } else { None })
+                    .collect();
+                self.quote_type_with_context_remapped(
+                    type_term.clone(),
+                    local_context,
+                    Some(truncated.as_slice()),
+                    type_var_id_to_name,
+                    instantiate_type_vars,
+                )
             })
             .collect();
 

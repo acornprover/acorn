@@ -739,7 +739,16 @@ impl KernelContext {
             .map_err(|e| format!("quoted clause should validate: {:?}\nQuoted: {}", e, quoted))?;
         let type_var_map = Self::quoted_clause_type_var_map(clause);
         let mut roundtrip_context = self.clone();
-        for atom in clause.iter_atoms() {
+        // Constants can appear inside the context's variable types (dependent
+        // type value arguments), not just in the literals; those need names
+        // registered too or re-lowering mints fresh locals for them.
+        let local_context = clause.get_local_context();
+        let type_atoms = local_context
+            .get_var_types()
+            .iter()
+            .flatten()
+            .flat_map(|term| term.iter_atoms());
+        for atom in clause.iter_atoms().chain(type_atoms) {
             match atom {
                 Atom::Symbol(crate::kernel::symbol::Symbol::ScopedConstant(atom_id)) => {
                     if roundtrip_context
@@ -950,6 +959,95 @@ mod tests {
     use super::*;
     use crate::elaborator::environment::Environment;
     use crate::elaborator::source::Source;
+
+    #[test]
+    fn test_roundtrip_dependent_type_with_variable_value_arg() {
+        // A clause variable whose type is a dependent family indexed by a
+        // computed value referencing an earlier clause variable, e.g.
+        // x1: Fam[g0(x0)]. Roundtrip validation must be able to re-lower the
+        // quoted form. A validate-mode 30s eval hit "variable out of range in
+        // value elaboration" on this shape (int.lattice neighborhood).
+        use crate::kernel::clause::Clause;
+        use crate::kernel::literal::Literal;
+        use crate::kernel::term::Term;
+
+        let mut kctx = KernelContext::new();
+        kctx.parse_datatype("Nat");
+        kctx.parse_dependent_type_constructor("Fam", &["Nat"]);
+        kctx.parse_constant("g0", "Nat -> Nat");
+
+        let fam_id = kctx.type_store.get_ground_id_by_name("Fam").unwrap();
+        let g0_x0 = kctx.parse_term("g0(x0)");
+        let fam_type = Term::new(
+            crate::kernel::atom::Atom::Symbol(crate::kernel::symbol::Symbol::Type(fam_id)),
+            vec![g0_x0],
+        );
+        let nat_type = kctx.parse_type("Nat");
+        let context = crate::kernel::local_context::LocalContext::from_types(vec![
+            nat_type,
+            fam_type.clone(),
+        ]);
+        // Literal: x1 = x1 (of type Fam[g0(x0)]), referencing both variables.
+        let literal = Literal::positive(Term::eq(
+            fam_type,
+            Term::new_variable(1),
+            Term::new_variable(1),
+        ));
+        let clause = Clause::new(vec![literal], &context);
+        kctx.validate_clause_roundtrip(&clause)
+            .expect("dependent type with variable value arg should roundtrip");
+
+        // Deeper shape: the third variable's type references both earlier
+        // variables through a computed value, exercising the lowering stack
+        // (the eval panic was "variable 1 out of range ... stack len 1").
+        kctx.parse_constant("g1", "(Nat, Nat) -> Nat");
+        let g1_x0_x1 = kctx.parse_term("g1(x0, x1)");
+        let fam2_type = Term::new(
+            crate::kernel::atom::Atom::Symbol(crate::kernel::symbol::Symbol::Type(fam_id)),
+            vec![g1_x0_x1],
+        );
+        let context3 = crate::kernel::local_context::LocalContext::from_types(vec![
+            kctx.parse_type("Nat"),
+            kctx.parse_type("Nat"),
+            fam2_type.clone(),
+        ]);
+        let literal3 = Literal::positive(Term::eq(
+            fam2_type,
+            Term::new_variable(2),
+            Term::new_variable(2),
+        ));
+        let clause3 = Clause::new(vec![literal3], &context3);
+        kctx.validate_clause_roundtrip(&clause3)
+            .expect("dependent type referencing two earlier variables should roundtrip");
+
+        // A lambda inside the dependent type's value argument, whose body
+        // references an outer clause variable. The eval panic was exactly this
+        // shape: "variable 1 (type Nat) out of range in value elaboration
+        // (stack len 1)" while lowering List.filter(..., function(x0) {...}).
+        kctx.parse_constant("g3", "(Nat -> Nat) -> Nat");
+        let g3_head = kctx.parse_term("g3");
+        let lambda_body = kctx
+            .parse_term("g1(x0, x1)")
+            .replace_variable(1, &Term::atom(crate::kernel::atom::Atom::BoundVariable(0)));
+        let lam = Term::lambda(kctx.parse_type("Nat"), lambda_body);
+        let g3_lam = g3_head.apply(&[lam]);
+        let fam_lam_type = Term::new(
+            crate::kernel::atom::Atom::Symbol(crate::kernel::symbol::Symbol::Type(fam_id)),
+            vec![g3_lam],
+        );
+        let context_l = crate::kernel::local_context::LocalContext::from_types(vec![
+            kctx.parse_type("Nat"),
+            fam_lam_type.clone(),
+        ]);
+        let literal_l = Literal::positive(Term::eq(
+            fam_lam_type,
+            Term::new_variable(1),
+            Term::new_variable(1),
+        ));
+        let clause_l = Clause::new(vec![literal_l], &context_l);
+        kctx.validate_clause_roundtrip(&clause_l)
+            .expect("lambda in dependent type value argument should roundtrip");
+    }
 
     #[test]
     fn test_lower_theorem_to_clauses_accepts_theorem_proposition() {
