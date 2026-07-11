@@ -2916,10 +2916,9 @@ mod tests {
             .lower_normalized_term_to_clause(&term, Some(type_var_map))
             .expect("lower hidden value param projection clause");
         let quoted = kernel_context.quote_clause(&clause, None, None, false);
-        // Hidden value parameters quote back in their bound (surface) form.
         assert_eq!(
             quoted.to_string(),
-            "forall(x0: Set[T0*], x1: (Subspace[T0*, x0], T1*) -> Subspace[T0*, x0], x2: Transport[T0*, T1*, x0, x1]) { ((Transport.point[T0*, T1*](x2) = Transport.point[T0*, T1*](x2)) and (Transport.key[T0*, T1*](x2) = Transport.key[T0*, T1*](x2))) }"
+            "forall(x0: Set[T0*], x1: (Subspace[T0*, x0], T1*) -> Subspace[T0*, x0], x2: Transport[T0*, T1*, x0, x1]) { ((Transport.point[T0*, T1*](x0, x1, x2) = Transport.point[T0*, T1*](x0, x1, x2)) and (Transport.key[T0*, T1*](x0, x1, x2) = Transport.key[T0*, T1*](x0, x1, x2))) }"
         );
     }
 }

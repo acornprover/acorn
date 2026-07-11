@@ -758,23 +758,15 @@ impl<'a> TermBridge<'a> {
             _ => return (head, value_args),
         };
 
-        // The receiver is usually the first value argument, but the standalone
-        // form of a dependent-structure attribute takes the hidden value
-        // parameters (e.g. matrix dimensions) explicitly before the receiver,
-        // so also try the position after the still-unbound hidden parameters.
-        let hidden_offset = constant
-            .value_param_types
-            .len()
-            .saturating_sub(constant.bound_value_args.len());
-        let Some((receiver_index, family_args)) = [0, hidden_offset].iter().find_map(|&idx| {
-            let receiver = value_args.get(idx)?;
-            let AcornType::Family(receiver_datatype, family_args) = receiver.get_type() else {
-                return None;
-            };
-            (&receiver_datatype == datatype).then_some((idx, family_args))
-        }) else {
+        let Some(receiver) = value_args.first() else {
             return (head, value_args);
         };
+        let AcornType::Family(receiver_datatype, family_args) = receiver.get_type() else {
+            return (head, value_args);
+        };
+        if &receiver_datatype != datatype {
+            return (head, value_args);
+        }
 
         let hidden_value_args: Vec<_> = family_args
             .into_iter()
@@ -801,9 +793,7 @@ impl<'a> TermBridge<'a> {
         let bound_head = AcornValue::Constant(constant.clone())
             .bind_value_params(&hidden_value_args, &TermBridgeErrorContext)
             .expect("receiver family args should bind to datatype attribute");
-        // Explicit hidden arguments preceding the receiver are baked into the
-        // bound head's signature; keep only the receiver and later arguments.
-        (bound_head, value_args[receiver_index..].to_vec())
+        (bound_head, value_args)
     }
 
     fn quote_term(
