@@ -786,6 +786,17 @@ impl<'a> TermBridge<'a> {
         if hidden_value_args.len() != constant.value_param_types.len() {
             return (head, value_args);
         }
+        // The receiver's computed family args can be wrong for nested
+        // dependent families (a known application-typing gap); only bind when
+        // the extracted values actually have the declared parameter types,
+        // otherwise keep the explicit-argument form.
+        let types_match = hidden_value_args
+            .iter()
+            .zip(constant.value_param_types.iter())
+            .all(|(value, param_type)| &value.get_type() == param_type);
+        if !types_match {
+            return (head, value_args);
+        }
 
         let bound_head = AcornValue::Constant(constant.clone())
             .bind_value_params(&hidden_value_args, &TermBridgeErrorContext)

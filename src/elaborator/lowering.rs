@@ -806,8 +806,8 @@ impl KernelContext {
             .map_err(|e| format!("{}\nQuoted: {}", e, quoted))?;
         if &lowered_again != clause {
             return Err(format!(
-                "quote/lower clause roundtrip mismatch: original {:?} lowered again to {:?}",
-                clause, lowered_again
+                "quote/lower clause roundtrip mismatch: original {:?} lowered again to {:?}\nQuoted: {}",
+                clause, lowered_again, quoted
             ));
         }
         Ok(())

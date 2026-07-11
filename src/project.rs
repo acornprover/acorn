@@ -250,6 +250,9 @@ impl ProjectView {
 
         for (index, module) in project.modules.iter().enumerate() {
             let module_id = ModuleId(index as u16);
+            if std::env::var("ACORN_DUMP_MODULE_IDS").is_ok() {
+                eprintln!("module {} = {:?}", index, module.descriptor);
+            }
             module_descriptors.insert(module_id, module.descriptor.clone());
             let state = match &module.state {
                 LoadState::None => continue,
