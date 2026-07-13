@@ -600,6 +600,21 @@ impl Prover {
             .get_proof(effective_kernel_context, false)
             .ok_or_else(|| Error::internal("No proof found"))?;
 
+        if let Ok(filter) = std::env::var("ACORN_DUMP_PROOF") {
+            if goal.name.contains(&filter) {
+                eprintln!("ACORN_DUMP_PROOF goal={}", goal.name);
+                for (i, (step_id, step)) in proof.steps.iter().enumerate() {
+                    eprintln!(
+                        "  step {} [{:?}] rule={} clause={}",
+                        i,
+                        step_id,
+                        step.rule.name(),
+                        step.clause
+                    );
+                }
+            }
+        }
+
         if print {
             self.print_proof(&proof, cert_bindings.as_ref(), effective_kernel_context);
         }

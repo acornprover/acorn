@@ -3573,7 +3573,11 @@ impl<'a> Builder<'a> {
                             self.record_validated_interface_module(lowered.module_id);
                         } else {
                             self.lowered_module_loaded(lowered);
-                            lowered_modules.push(lowered);
+                            // Keep the target paired with its lowered module. Zipping
+                            // the sorted target list against this vec is wrong: an
+                            // interface-role target is skipped here but stays in the
+                            // target list, shifting every later pairing by one.
+                            lowered_modules.push((target.clone(), lowered));
                         }
                     } else {
                         self.log_global(format!("error: module {} has no lowered work", target));
@@ -3609,11 +3613,10 @@ impl<'a> Builder<'a> {
         self.metrics.modules_total = lowered_modules.len() as i32;
 
         if self.can_build_modules_in_parallel(targets.len()) {
-            let modules = targets
+            let modules = lowered_modules
                 .into_iter()
-                .zip(lowered_modules)
                 .enumerate()
-                .map(|(index, (target, lowered))| (index, target.clone(), lowered))
+                .map(|(index, (target, lowered))| (index, target, lowered))
                 .collect();
             let verification_start = std::time::Instant::now();
             self.build_modules_parallel(modules);
@@ -3623,7 +3626,7 @@ impl<'a> Builder<'a> {
 
         // The second pass is the "proving phase".
         let verification_start = std::time::Instant::now();
-        for (target, lowered) in targets.iter().zip(lowered_modules) {
+        for (target, lowered) in &lowered_modules {
             let goal_count = lowered.goal_count() as i32;
 
             // Skip modules that don't match the goal filter
