@@ -2255,6 +2255,57 @@ mod tests {
     }
 
     #[test]
+    fn test_line_selection_works_with_interface_module_dependency() {
+        // Regression: interface-role modules are excluded from the lowered
+        // module list but stayed in the sorted target list, and the proving
+        // loop zipped the two lists together. Any interface dependency then
+        // shifted every pairing by one, so line-targeted verification silently
+        // verified nothing and reported success.
+        let (acornlib, src, _build) = setup();
+
+        src.child("pkg/interface.ac")
+            .write_str("define foo_id(b: Bool) -> Bool {\n    b\n}\n")
+            .unwrap();
+        src.child("pkg/member.ac")
+            .write_str(
+                r#"
+define foo_id(b: Bool) -> Bool {
+    b
+}
+
+theorem member_thm(b: Bool) {
+    foo_id(b) = b
+}
+"#,
+            )
+            .unwrap();
+
+        let mut verifier = Verifier::new(
+            acornlib.path().to_path_buf(),
+            ProjectConfig {
+                usage_mode: UsageMode::Verify,
+                use_filesystem: true,
+                read_cache: false,
+                write_cache: false,
+                update_version: false,
+            },
+            Some("pkg.member".to_string()),
+        )
+        .expect("verifier should construct");
+        verifier.builder.force_search = true;
+        verifier.builder.check_hashes = false;
+        verifier.line_selection = Some(LineSelection::Single(6));
+
+        let output = verifier.run().expect("verify should run");
+        assert_eq!(output.status, BuildStatus::Good);
+        assert!(
+            output.metrics.searches_total >= 1,
+            "line-targeted verification should search the selected goal, got {} searches",
+            output.metrics.searches_total
+        );
+    }
+
+    #[test]
     fn test_eval_line_selection_searches_only_selected_benchmark_goal() {
         let (acornlib, src, _build) = setup();
 
