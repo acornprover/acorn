@@ -1114,20 +1114,45 @@ impl Checker {
             return None;
         }
 
-        for reduction_set in self.checker_boolean_reduction_sets(clause, kernel_context) {
+        let debug = std::env::var("ACORN_DEBUG_WITNESS").is_ok();
+        let sets = self.checker_boolean_reduction_sets(clause, kernel_context);
+        if debug {
+            eprintln!("WB: clause={} sets={}", clause, sets.len());
+        }
+        for reduction_set in sets {
             let mut set_seen = seen.clone();
             let mut members = Vec::with_capacity(reduction_set.len());
             let mut all_known = true;
 
             for candidate in reduction_set {
+                if debug {
+                    eprintln!("WB:   member candidate={}", candidate);
+                }
                 let witness = if self
                     .check_clause_direct(&candidate, kernel_context)
                     .is_some()
                 {
-                    Some(BooleanReductionWitness::Direct {
-                        inserted_id: self.exact_clause_id(&candidate),
-                        clause: candidate,
-                    })
+                    let inserted_id = self.exact_clause_id(&candidate);
+                    if inserted_id.is_none() {
+                        // Known only through term-graph normalization, so there is
+                        // no insertion chain for the writer to serialize. Prefer a
+                        // deeper reduction tree whose leaves carry insertion ids,
+                        // keeping the id-less direct leaf as a fallback.
+                        self.boolean_reduction_witness_inner(
+                            &candidate,
+                            kernel_context,
+                            &mut set_seen,
+                        )
+                        .or(Some(BooleanReductionWitness::Direct {
+                            inserted_id: None,
+                            clause: candidate,
+                        }))
+                    } else {
+                        Some(BooleanReductionWitness::Direct {
+                            inserted_id,
+                            clause: candidate,
+                        })
+                    }
                 } else {
                     self.boolean_reduction_witness_inner(&candidate, kernel_context, &mut set_seen)
                 };
@@ -1135,6 +1160,9 @@ impl Checker {
                 match witness {
                     Some(witness) => members.push(witness),
                     None => {
+                        if debug {
+                            eprintln!("WB: member unprovable");
+                        }
                         all_known = false;
                         break;
                     }
@@ -1885,6 +1913,68 @@ mod tests {
         assert!(
             checker.check_clause(&query, &context).is_some(),
             "Bool is inhabited, so equality resolution may remove x != x"
+        );
+    }
+
+    #[test]
+    fn test_witness_expands_conjunction_known_only_to_term_graph() {
+        // Mirror of the int.lattice int_total cert failure at the checker
+        // level: an or-term equated to a constant that is known false makes
+        // the term graph know the conjunction of the negated disjuncts
+        // directly, without any exact insertion. The witness for a claim
+        // containing that conjunction must not stop at an id-less Direct
+        // member; it should expand into a Reduced tree so the certificate
+        // writer can serialize each piece.
+        let mut context = KernelContext::new();
+        context.parse_constants(&["c0", "c1", "c2", "c3"], "Bool");
+        let local_context = LocalContext::empty();
+        let clause_of =
+            |literal: crate::kernel::literal::Literal| Clause::new(vec![literal], &local_context);
+
+        let or_eq = clause_of(crate::kernel::literal::Literal::equals(
+            Term::or(Term::parse("c1"), Term::parse("c2")),
+            Term::parse("c0"),
+        ));
+        let not_c0 = clause_of(crate::kernel::literal::Literal::negative(Term::parse("c0")));
+        let c3 = clause_of(crate::kernel::literal::Literal::positive(Term::parse("c3")));
+
+        let mut checker = Checker::new();
+        checker.insert_clause(&or_eq, StepReason::Testing, &context);
+        checker.insert_clause(&not_c0, StepReason::Testing, &context);
+        checker.insert_clause(&c3, StepReason::Testing, &context);
+
+        let inner = Term::and(Term::not(Term::parse("c1")), Term::not(Term::parse("c2")));
+        let inner_clause = clause_of(crate::kernel::literal::Literal::positive(inner.clone()));
+        let claim = clause_of(crate::kernel::literal::Literal::positive(Term::and(
+            Term::parse("c3"),
+            inner,
+        )));
+
+        // The inner conjunction is provable but is not an exact insertion.
+        assert!(checker.exact_clause_id(&inner_clause).is_none());
+        assert!(
+            checker
+                .check_clause_direct_for_trace(&inner_clause, &context)
+                .is_some(),
+            "test setup: the graph should know the inner conjunction directly"
+        );
+
+        let witness = checker
+            .boolean_reduction_witness(&claim, &context)
+            .expect("claim should have a reduction witness");
+        let BooleanReductionWitness::Reduced { members, .. } = witness else {
+            panic!("top-level witness should be reduced");
+        };
+        let inner_member = members
+            .iter()
+            .find(|member| match member {
+                BooleanReductionWitness::Direct { clause, .. } => *clause == inner_clause,
+                BooleanReductionWitness::Reduced { clause, .. } => *clause == inner_clause,
+            })
+            .expect("witness should include the inner conjunction");
+        assert!(
+            matches!(inner_member, BooleanReductionWitness::Reduced { .. }),
+            "inner conjunction should expand into a reduced tree instead of an id-less direct leaf"
         );
     }
 

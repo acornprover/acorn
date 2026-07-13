@@ -327,6 +327,8 @@ struct TraceWriter<'a> {
     available: HashMap<Clause, usize>,
     inserted_to_trace: HashMap<usize, usize>,
     emitting_inserted_ids: HashSet<usize>,
+    /// Leaves currently being grounded via extra-literal refutation, to stop cycles.
+    grounding_leaves_in_flight: HashSet<Clause>,
     emitting_local_inserted_ids: HashSet<usize>,
     deferred_claims: Vec<DeferredClaim>,
     variable_support_depth: usize,
@@ -375,6 +377,7 @@ impl<'a> TraceWriter<'a> {
             available: HashMap::new(),
             inserted_to_trace: HashMap::new(),
             emitting_inserted_ids: HashSet::new(),
+            grounding_leaves_in_flight: HashSet::new(),
             emitting_local_inserted_ids: HashSet::new(),
             deferred_claims: vec![],
             variable_support_depth: 0,
@@ -1211,10 +1214,30 @@ impl<'a> TraceWriter<'a> {
         members: &[BooleanReductionWitness],
     ) -> Result<Option<Vec<usize>>, CodeGenError> {
         self.cheap_emission_depth += 1;
+        let debug = std::env::var("ACORN_DEBUG_CERT").is_ok();
         let result = (|| {
             let mut premises = Vec::new();
             for member in members {
-                match self.emit_reduction_witness(local, member)? {
+                let outcome = self.emit_reduction_witness(local, member)?;
+                if debug {
+                    let (kind, clause, id) = match member {
+                        BooleanReductionWitness::Direct {
+                            clause,
+                            inserted_id,
+                        } => ("direct", clause, *inserted_id),
+                        BooleanReductionWitness::Reduced { clause, .. } => {
+                            ("reduced", clause, None)
+                        }
+                    };
+                    eprintln!(
+                        "WITNESS-MEMBER kind={} id={:?} emitted={} clause={}",
+                        kind,
+                        id,
+                        outcome.is_some(),
+                        clause
+                    );
+                }
+                match outcome {
                     Some(index) => {
                         if !premises.contains(&index) {
                             premises.push(index);
@@ -1240,7 +1263,14 @@ impl<'a> TraceWriter<'a> {
         &mut self,
         clause: &Clause,
     ) -> Result<Option<usize>, CodeGenError> {
+        let debug = std::env::var("ACORN_DEBUG_CERT").is_ok();
         if self.cheap_emission_depth > 0 {
+            if debug {
+                eprintln!(
+                    "WITNESS: depth={} skipping for {}",
+                    self.cheap_emission_depth, clause
+                );
+            }
             return Ok(None);
         }
         for eager in [false, true] {
@@ -1248,8 +1278,21 @@ impl<'a> TraceWriter<'a> {
             if eager {
                 local.enable_eager_boolean_reductions(&self.kernel_context);
             }
-            let Some(witness) = local.boolean_reduction_witness(clause, &self.kernel_context)
-            else {
+            let witness_opt = local.boolean_reduction_witness(clause, &self.kernel_context);
+            if debug {
+                eprintln!(
+                    "WITNESS: eager={} clause={} witness={}",
+                    eager,
+                    clause,
+                    match &witness_opt {
+                        None => "none".to_string(),
+                        Some(BooleanReductionWitness::Reduced { members, .. }) =>
+                            format!("reduced({} members)", members.len()),
+                        Some(_) => "other".to_string(),
+                    }
+                );
+            }
+            let Some(witness) = witness_opt else {
                 continue;
             };
             let BooleanReductionWitness::Reduced { members, .. } = witness else {
@@ -1277,6 +1320,89 @@ impl<'a> TraceWriter<'a> {
     /// step index carrying that node's clause. Direct leaves resolve through the
     /// checker the witness was computed against, so their own derivation chains
     /// (fact citations, eager reductions, simplifications) serialize too.
+    /// The eager checker can know a leaf by normalizing a grounding clause whose
+    /// extra literals are refuted by other eager derivations. Replay only sees
+    /// emitted steps, so serialize those refutations too: emit a witness-backed
+    /// claim for the negation of each extra literal, then re-ask the same direct
+    /// judgment replay will use. Returns whether the leaf is now justified.
+    fn refute_grounding_extras(
+        &mut self,
+        local: &Checker,
+        leaf: &Clause,
+        grounding: &Clause,
+    ) -> Result<bool, CodeGenError> {
+        let debug = std::env::var("ACORN_DEBUG_CERT").is_ok();
+        if !self.grounding_leaves_in_flight.insert(leaf.clone()) {
+            if debug {
+                eprintln!("REFUTE: cycle on leaf {}", leaf);
+            }
+            return Ok(false);
+        }
+        if debug {
+            eprintln!("REFUTE: leaf={} grounding={}", leaf, grounding);
+        }
+        let result = (|this: &mut Self| {
+            for literal in &grounding.literals {
+                if leaf.literals.contains(literal) {
+                    continue;
+                }
+                let negated = Clause::new(vec![literal.negate()], grounding.get_local_context());
+                if this
+                    .shadow_checker
+                    .check_clause_direct_for_trace(&negated, &this.kernel_context)
+                    .is_some()
+                {
+                    continue;
+                }
+                // The negation may be directly known to the eager checker (for
+                // example by and-elimination of an inserted conjunction); emit
+                // its insertion chain. Otherwise fall back to a reduction tree.
+                let mut prover = local.clone();
+                let direct_id = prover
+                    .check_clause_direct_for_trace(&negated, &this.kernel_context)
+                    .and_then(|_| local.exact_clause_id(&negated));
+                if debug {
+                    eprintln!(
+                        "REFUTE: extra literal {} direct_id={:?}",
+                        literal, direct_id
+                    );
+                }
+                if let Some(id) = direct_id {
+                    if this
+                        .emit_local_inserted_clause(local, id, &mut HashSet::new())
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                }
+                let witness_opt = prover.boolean_reduction_witness(&negated, &this.kernel_context);
+                if debug {
+                    eprintln!(
+                        "REFUTE: extra literal {} negated-witness={}",
+                        literal,
+                        witness_opt.is_some()
+                    );
+                }
+                let Some(witness) = witness_opt else {
+                    return Ok(false);
+                };
+                let emitted = this.emit_reduction_witness(local, &witness)?;
+                if debug {
+                    eprintln!("REFUTE: emitted={}", emitted.is_some());
+                }
+                if emitted.is_none() {
+                    return Ok(false);
+                }
+            }
+            Ok(this
+                .shadow_checker
+                .check_clause_direct_for_trace(leaf, &this.kernel_context)
+                .is_some())
+        })(self);
+        self.grounding_leaves_in_flight.remove(leaf);
+        result
+    }
+
     fn emit_reduction_witness(
         &mut self,
         local: &Checker,
@@ -1315,7 +1441,27 @@ impl<'a> TraceWriter<'a> {
                 // check, candidates are tried transactionally: emit the chain, then
                 // ask the same direct judgment replay will use, and roll back when
                 // it declines. Recent insertions first: eager derivations land late.
-                for local_id in (0..local.inserted_len()).rev().take(1024) {
+                let grounding_debug = std::env::var("ACORN_DEBUG_CERT").is_ok();
+                if grounding_debug {
+                    eprintln!("GROUND: leaf={} local_len={}", clause, local.inserted_len());
+                    let needle = format!("{}", clause.literals[0].left);
+                    for id in 0..local.inserted_len() {
+                        if let Some(ins) = local.inserted_clause(id) {
+                            let s = format!("{}", ins.clause);
+                            if s.contains(&needle) {
+                                eprintln!("GROUND: contains-lhs id={} clause={}", id, s);
+                            }
+                        }
+                    }
+                }
+                // Scanning is cheap; transactional emission attempts are not.
+                // Scan every insertion (the eager closure can push the useful
+                // groundings far from the tail) but bound the attempts.
+                let mut attempts = 0;
+                for local_id in (0..local.inserted_len()).rev() {
+                    if attempts >= 32 {
+                        break;
+                    }
                     let Some(inserted) = local.inserted_clause(local_id) else {
                         continue;
                     };
@@ -1330,11 +1476,21 @@ impl<'a> TraceWriter<'a> {
                     if !shares_literal {
                         continue;
                     }
+                    attempts += 1;
+                    if grounding_debug {
+                        eprintln!(
+                            "GROUND: candidate id={} clause={} reason={:?}",
+                            local_id, inserted.clause, inserted.reason
+                        );
+                    }
                     let exact = self.source_clause_eq_replays(&inserted.clause, clause, false);
                     let checkpoint = self.checkpoint();
-                    let Ok(source_index) =
-                        self.emit_local_inserted_clause(local, local_id, &mut HashSet::new())
-                    else {
+                    let emit_result =
+                        self.emit_local_inserted_clause(local, local_id, &mut HashSet::new());
+                    if grounding_debug {
+                        eprintln!("GROUND: emit_local={:?}", emit_result.as_ref().map(|_| ()));
+                    }
+                    let Ok(source_index) = emit_result else {
                         self.restore(checkpoint);
                         continue;
                     };
@@ -1343,6 +1499,7 @@ impl<'a> TraceWriter<'a> {
                             .shadow_checker
                             .check_clause_direct_for_trace(clause, &self.kernel_context)
                             .is_none()
+                        && !self.refute_grounding_extras(local, clause, &inserted.clause)?
                     {
                         self.restore(checkpoint);
                         continue;
@@ -2005,6 +2162,15 @@ impl<'a> TraceWriter<'a> {
         } else {
             String::new()
         };
+        if std::env::var("ACORN_DEBUG_CERT").is_ok() {
+            eprintln!("EMIT-FAIL clause={} reason={:?}", clause, reason);
+            for (i, clauses) in self.step_clauses.iter().enumerate() {
+                eprintln!("  trace step {}: {}", i, clauses.primary);
+            }
+            for (avail, idx) in self.available.iter() {
+                eprintln!("  available[{}]: {}", idx, avail);
+            }
+        }
         Err(CodeGenError::GeneratedBadCode(format!(
             "could not emit inserted clause to certificate trace: {} ({:?}){}{}",
             clause, reason, dependency_context, equality_graph_context
