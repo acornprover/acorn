@@ -358,17 +358,14 @@ fn collect_candidates_in_items(
 
 fn collect_exported_claims(items: &[LoweredItem], exported_claims: &mut HashSet<LoweredFactId>) {
     for item in items {
-        if let LoweredItem::Block {
-            items,
-            external_fact: Some(_),
-            ..
-        } = item
-        {
+        if let LoweredItem::Block { items, .. } = item {
+            // A block's last claim can be externalized even when the block itself has no
+            // external fact: each non-final match arm contributes its last claim to the
+            // disjunction exported by the final arm's block. Masked reproving can't model
+            // that contribution, so treat every block's last claim as exported.
             if let Some(fact) = last_claim_fact(items) {
                 exported_claims.insert(fact);
             }
-        }
-        if let LoweredItem::Block { items, .. } = item {
             collect_exported_claims(items, exported_claims);
         }
     }
@@ -550,6 +547,58 @@ mod tests {
                 "} by {\n",
                 "}\n",
             )
+        );
+    }
+
+    #[test]
+    fn simplify_keeps_last_claim_of_non_final_match_arm() {
+        // The last claim of each match arm feeds the disjunction that the match
+        // statement exports, but in the lowered module only the final arm's block
+        // carries that external fact. Deleting an earlier arm's last claim would
+        // silently weaken the exported disjunction, which masked reproving cannot
+        // detect, so such claims must never be removal candidates.
+        let source = concat!(
+            "inductive Switch {\n",
+            "    on\n",
+            "    off\n",
+            "}\n",
+            "let f: Switch -> Bool = axiom\n",
+            "axiom f_on {\n",
+            "    f(Switch.on)\n",
+            "}\n",
+            "axiom f_off {\n",
+            "    f(Switch.off)\n",
+            "}\n",
+            "theorem f_all(s: Switch) {\n",
+            "    f(s)\n",
+            "} by {\n",
+            "    match s {\n",
+            "        Switch.on {\n",
+            "            f(s)\n",
+            "        }\n",
+            "        Switch.off {\n",
+            "            f(s)\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let (temp, path) = write_project(source);
+
+        let report = simplify_file(
+            temp.path(),
+            "src/main.ac",
+            SimplifyOptions {
+                timeout_secs: 0.1,
+                activation_limit: 2000,
+                dry_run: false,
+            },
+        )
+        .expect("simplify should run");
+
+        assert_eq!(report.removed_count(), 0);
+        assert_eq!(
+            fs::read_to_string(&path).expect("source should be readable"),
+            source
         );
     }
 
