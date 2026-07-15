@@ -93,7 +93,7 @@ pub fn simplify_file(
     let mut working_source: Option<String> = None;
 
     let target_path = loop {
-        let loaded = load_target(start_path, target, working_source.as_deref(), false)?;
+        let loaded = load_target(start_path, target, working_source.as_deref(), false, false)?;
         let current_target_path = loaded.target_path.clone();
         let candidates = collect_candidates(&loaded.lowered, cursor_line);
         let Some(candidate) = candidates.first().copied() else {
@@ -114,15 +114,17 @@ pub fn simplify_file(
                         )
                     })?;
 
-            let edited_loaded =
-                load_target(start_path, target, Some(&edited), true).map_err(|e| {
-                    simplify_bug_message(
-                        candidate,
-                        "candidate passed masked reproving but edited source does not load",
-                        &e,
-                    )
-                })?;
-            verify_edited_target(&edited_loaded).map_err(|e| {
+            let mut edited_loaded =
+                load_target(start_path, target, Some(&edited), true, !options.dry_run).map_err(
+                    |e| {
+                        simplify_bug_message(
+                            candidate,
+                            "candidate passed masked reproving but edited source does not load",
+                            &e,
+                        )
+                    },
+                )?;
+            verify_edited_target(&mut edited_loaded).map_err(|e| {
                 simplify_bug_message(
                     candidate,
                     "candidate passed masked reproving but edited source does not verify",
@@ -162,12 +164,13 @@ fn load_target(
     target: &str,
     source_override: Option<&str>,
     read_cache: bool,
+    write_cache: bool,
 ) -> Result<LoadedTarget, String> {
     let config = ProjectConfig {
         usage_mode: UsageMode::Verify,
         use_filesystem: true,
         read_cache,
-        write_cache: false,
+        write_cache,
         update_version: false,
     };
     let mut project = Project::new_local(start_path, config).map_err(|e| e.cli_message())?;
@@ -226,9 +229,9 @@ fn simplify_bug_message(candidate: Candidate, reason: &str, detail: &str) -> Str
     )
 }
 
-fn verify_edited_target(loaded: &LoadedTarget) -> Result<(), String> {
+fn verify_edited_target(loaded: &mut LoadedTarget) -> Result<(), String> {
     let mut events = Vec::new();
-    let (status, result) = {
+    let (status, result, build_cache) = {
         let mut builder = Builder::new(&loaded.project, CancellationToken::new(), |event| {
             if let Some(message) = event.log_message {
                 events.push(message);
@@ -242,7 +245,8 @@ fn verify_edited_target(loaded: &LoadedTarget) -> Result<(), String> {
             .verify_lowered_module(&loaded.descriptor, &loaded.lowered)
             .map_err(|e| e.message);
         builder.finish_module_work_build();
-        (builder.status, result)
+        let build_cache = builder.take_build_cache();
+        (builder.status, result, build_cache)
     };
 
     if let Err(error) = result {
@@ -250,6 +254,12 @@ fn verify_edited_target(loaded: &LoadedTarget) -> Result<(), String> {
         return Err(events.join("\n"));
     }
     if status.is_good() {
+        // Persist the certificates found during this verification so the cert cache stays
+        // in sync with the edited source and later iterations don't redo the same searches.
+        // The project config's write_cache gates whether anything reaches disk.
+        if let Some(build_cache) = build_cache {
+            loaded.project.update_build_cache(build_cache, true);
+        }
         return Ok(());
     }
 
@@ -548,6 +558,10 @@ mod tests {
                 "}\n",
             )
         );
+        assert!(
+            temp.path().join("src/certs/main.jsonl").exists(),
+            "simplify should write updated certificates for the edited module"
+        );
     }
 
     #[test]
@@ -635,6 +649,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("source should be readable"),
             source
+        );
+        assert!(
+            !temp.path().join("src/certs").exists(),
+            "dry run should not write certificates"
         );
     }
 }
